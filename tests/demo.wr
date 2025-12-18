@@ -1,0 +1,12 @@
+addr SCREEN = 0x0400;
+
+#[org(0x8000)]
+fn main() {
+    zp u8 x = 42;
+    zp u8 y = 37;
+    SCREEN = sum(x, y);
+}
+
+fn sum(x: u8, y: u8) -> u8 {
+    return x + y;
+}

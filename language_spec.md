@@ -59,11 +59,11 @@ Zero page ($00-$FF) provides faster access (3 cycles vs 4 cycles) and enables sp
 ### Function Declaration
 
 ```
-fn function_name(u8 arg1, u16 arg2) -> u8 {
+fn function_name(arg1: u8, arg2: u16) -> u8 {
     return arg1;
 }
 
-fn no_return(u8 x) {
+fn no_return(x: u8) {
     // No return statement needed
 }
 ```
@@ -71,7 +71,7 @@ fn no_return(u8 x) {
 ### Function Attributes
 
 ```
-inline fn fast_function(u8 x) -> u8 {
+inline fn fast_function(x: u8) -> u8 {
     return x * 2;
 }
 
@@ -99,7 +99,7 @@ fn irq_handler() {
 **Example:**
 
 ```
-fn add(u8 a, u8 b) -> u8 {
+fn add(a: u8, b: u8) -> u8 {
     return a + b;
 }
 
@@ -107,6 +107,37 @@ fn add(u8 a, u8 b) -> u8 {
 // Args: a=$02, b=$03
 // Return: $10
 // Caller loads $02, $03, JSR add, reads $10
+```
+
+## Memory Mapped I/O
+
+Wraith provides a dedicated syntax for declaring memory-mapped I/O addresses. These declarations define a named address that can be read from or written to like a variable.
+
+### Declaration
+
+```
+// Read-write address (default)
+addr SCREEN = 0x0400;
+
+// Read-only address (compiler error on write)
+addr read RASTER = 0xD012;
+
+// Write-only address (compiler error on read)
+addr write BORDER = 0xD020;
+```
+
+### Usage
+
+```
+fn update_screen() {
+    // Write to address
+    SCREEN = 0;
+
+    // Read from address
+    if RASTER > 100 {
+        BORDER = 1;
+    }
+}
 ```
 
 ## Structs

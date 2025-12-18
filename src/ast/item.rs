@@ -99,6 +99,25 @@ pub struct Enum {
     pub variants: Vec<EnumVariant>,
 }
 
+/// Access mode for memory-mapped I/O addresses
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMode {
+    /// Read-only address
+    Read,
+    /// Write-only address
+    Write,
+    /// Read-write address (default)
+    ReadWrite,
+}
+
+/// Memory-mapped I/O address declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct AddressDecl {
+    pub name: Spanned<String>,
+    pub address: Spanned<super::expr::Expr>,
+    pub access: AccessMode,
+}
+
 /// Static/const variable declaration (top-level)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Static {
@@ -116,6 +135,7 @@ pub enum Item {
     Struct(Struct),
     Enum(Enum),
     Static(Static),
+    Address(AddressDecl),
 }
 
 /// A complete source file / compilation unit

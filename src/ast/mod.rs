@@ -12,8 +12,8 @@ mod types;
 // Re-export all public types
 pub use expr::{BinaryOp, Expr, FieldInit, Literal, UnaryOp, VariantData};
 pub use item::{
-    Enum, EnumVariant, FnAttribute, FnParam, Function, Item, SourceFile, Static, Struct,
-    StructAttribute, StructField,
+    AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Item, SourceFile,
+    Static, Struct, StructAttribute, StructField,
 };
 pub use span::{Span, Spanned};
 pub use stmt::{AsmLine, MatchArm, Pattern, PatternBinding, Range, Stmt};
