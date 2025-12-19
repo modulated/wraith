@@ -4,8 +4,15 @@
 
 pub struct Emitter {
     output: String,
+    #[allow(dead_code)]
     indent: usize,
     label_counter: usize,
+}
+
+impl Default for Emitter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Emitter {
@@ -43,8 +50,39 @@ impl Emitter {
         self.output.push('\n');
     }
 
+    pub fn emit_raw(&mut self, line: &str) {
+        self.output.push_str(line);
+        self.output.push('\n');
+    }
+
     pub fn emit_org(&mut self, address: u16) {
         self.output.push_str(&format!("    * = ${:04X}\n", address));
+    }
+
+    pub fn emit_byte(&mut self, value: u8) {
+        self.output.push_str(&format!("    .byte ${:02X}\n", value));
+    }
+
+    pub fn emit_bytes(&mut self, values: &[u8]) {
+        if values.is_empty() {
+            return;
+        }
+
+        self.output.push_str("    .byte ");
+        for (i, byte) in values.iter().enumerate() {
+            if i > 0 {
+                self.output.push_str(", ");
+            }
+            self.output.push_str(&format!("${:02X}", byte));
+        }
+        self.output.push('\n');
+    }
+
+    pub fn emit_word(&mut self, value: u16) {
+        // Emit 16-bit value in little-endian format
+        let low = (value & 0xFF) as u8;
+        let high = ((value >> 8) & 0xFF) as u8;
+        self.output.push_str(&format!("    .byte ${:02X}, ${:02X}\n", low, high));
     }
 
     pub fn finish(self) -> String {

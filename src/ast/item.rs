@@ -128,6 +128,13 @@ pub struct Static {
     pub zero_page: bool,
 }
 
+/// Import declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct Import {
+    pub symbols: Vec<Spanned<String>>,
+    pub path: Spanned<String>,
+}
+
 /// A top-level item in a source file
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
@@ -136,6 +143,7 @@ pub enum Item {
     Enum(Enum),
     Static(Static),
     Address(AddressDecl),
+    Import(Import),
 }
 
 /// A complete source file / compilation unit

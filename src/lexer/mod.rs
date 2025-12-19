@@ -41,6 +41,10 @@ pub enum Token {
     As,
     #[token("in")]
     In,
+    #[token("import")]
+    Import,
+    #[token("from")]
+    From,
     #[token("asm")]
     Asm,
     #[token("inline")]

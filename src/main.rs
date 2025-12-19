@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use wraith::{Parser, codegen, lex};
 
@@ -14,7 +15,8 @@ fn main() {
 
     let tokens = lex(&source).expect("Lexer Error");
     let ast = Parser::parse(&tokens).expect("Parser Error");
-    let program_info = wraith::sema::analyze(&ast).expect("Semantic Analysis Error");
+    let file_path = PathBuf::from(file);
+    let program_info = wraith::sema::analyze_with_path(&ast, file_path).expect("Semantic Analysis Error");
     let code = codegen::generate(&ast, &program_info).expect("Codegen Error");
     let out_file = file.replace(".wr", ".asm");
     fs::write(&out_file, code).expect("Failed to write file");

@@ -11,6 +11,8 @@ use item::generate_item;
 #[derive(Debug, Clone)]
 pub enum CodegenError {
     Unknown,
+    UnsupportedOperation(String),
+    SymbolNotFound(String),
 }
 
 pub fn generate(ast: &SourceFile, program: &ProgramInfo) -> Result<String, CodegenError> {

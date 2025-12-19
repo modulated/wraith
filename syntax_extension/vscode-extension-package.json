@@ -1,0 +1,57 @@
+{
+  "name": "wraith-language",
+  "displayName": "Wraith Language Support",
+  "description": "Syntax highlighting and language support for the Wraith programming language",
+  "version": "0.1.0",
+  "publisher": "your-name",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/wraith"
+  },
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "wraith",
+    "6502",
+    "assembly",
+    "embedded",
+    "retro"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "wraith",
+        "aliases": [
+          "Wraith",
+          "wraith"
+        ],
+        "extensions": [
+          ".wr"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icon.png",
+          "dark": "./icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "wraith",
+        "scopeName": "source.wraith",
+        "path": "./wraith.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^2.19.0"
+  }
+}

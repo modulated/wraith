@@ -1,0 +1,12 @@
+// Test file to verify importing constants
+
+import {MAX_VALUE, MIN_VALUE, LED} from "addresses.wr";
+
+#[org(0x8000)]
+fn test() {
+    u8 max = MAX_VALUE;
+    u8 min = MIN_VALUE;
+
+    LED = max;
+    LED = min;
+}

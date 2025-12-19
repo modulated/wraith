@@ -1,15 +1,15 @@
 //! Item parsing for the Wraith parser
 
 use crate::ast::{
-    AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Item, SourceFile,
-    Spanned, Static, Struct, StructAttribute, StructField,
+    AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Import, Item,
+    SourceFile, Spanned, Static, Struct, StructAttribute, StructField,
 };
 use crate::lexer::Token;
 
 use super::Parser;
 use super::error::{ParseError, ParseResult};
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     /// Parse a complete source file
     pub fn parse_source_file(&mut self) -> ParseResult<SourceFile> {
         let mut items = Vec::new();
@@ -32,6 +32,12 @@ impl<'a> Parser<'a> {
         }
 
         match self.peek().cloned() {
+            Some(Token::Import) => {
+                let import = self.parse_import()?;
+                let span = start.merge(self.previous_span());
+                Ok(Spanned::new(Item::Import(import), span))
+            }
+
             Some(Token::Fn) | Some(Token::Inline) => {
                 let func = self.parse_function(attributes)?;
                 let span = start.merge(self.previous_span());
@@ -101,6 +107,34 @@ impl<'a> Parser<'a> {
             address,
             access,
         })
+    }
+
+    /// Parse import statement: import {sym1, sym2} from 'path.wr';
+    fn parse_import(&mut self) -> ParseResult<Import> {
+        self.expect(&Token::Import)?;
+        self.expect(&Token::LBrace)?;
+
+        // Parse comma-separated list of symbols
+        let mut symbols = Vec::new();
+        loop {
+            let sym = self.expect_ident()?;
+            symbols.push(sym);
+
+            if !self.check(&Token::Comma) {
+                break;
+            }
+            self.advance(); // consume comma
+        }
+
+        self.expect(&Token::RBrace)?;
+        self.expect(&Token::From)?;
+
+        // Parse path as string literal
+        let path = self.expect_string()?;
+
+        self.expect(&Token::Semi)?;
+
+        Ok(Import { symbols, path })
     }
 
     /// Parse an attribute: #[name] or #[name(value)]

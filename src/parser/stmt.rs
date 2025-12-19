@@ -6,7 +6,7 @@ use crate::lexer::Token;
 use super::Parser;
 use super::error::{ParseError, ParseResult};
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     /// Parse a statement
     pub fn parse_stmt(&mut self) -> ParseResult<Spanned<Stmt>> {
         let start = self.current_span();

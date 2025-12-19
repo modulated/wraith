@@ -75,6 +75,17 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn expect_string(&mut self) -> ParseResult<Spanned<String>> {
+        let span = self.current_span();
+        match self.peek().cloned() {
+            Some(Token::String(s)) => {
+                self.advance();
+                Ok(Spanned::new(s, span))
+            }
+            tok => Err(ParseError::unexpected_token(span, "string literal", tok)),
+        }
+    }
+
     /// Get the span of the current token
     fn current_span(&self) -> Span {
         self.tokens

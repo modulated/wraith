@@ -1,0 +1,22 @@
+// Test file to verify import functionality
+
+import {BUTTON, LED, RW_REG} from "addresses.wr";
+
+#[org(0x8000)]
+fn main() {
+    // Read from BUTTON address
+    u8 button_state = BUTTON;
+
+    // Write to LED address
+    LED = 1;
+
+    // Read/Write to RW_REG
+    RW_REG = button_state;
+
+    // Check button state and toggle LED
+    if button_state == 1 {
+        LED = 90;
+    } else {
+        LED = 125;
+    }
+}

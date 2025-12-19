@@ -6,7 +6,7 @@ use crate::lexer::Token;
 use super::Parser;
 use super::error::{ParseError, ParseResult};
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     /// Parse an expression
     pub fn parse_expr(&mut self) -> ParseResult<Spanned<Expr>> {
         self.parse_expr_bp(0)
@@ -170,6 +170,10 @@ impl<'a> Parser<'a> {
             Some(Token::False) => {
                 self.advance();
                 Ok(Spanned::new(Expr::bool(false), start))
+            }
+            Some(Token::String(s)) => {
+                self.advance();
+                Ok(Spanned::new(Expr::Literal(Literal::String(s)), start))
             }
 
             // Identifier (variable, function call, struct init, enum variant)

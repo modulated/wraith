@@ -1,0 +1,25 @@
+addr LED = 0xD020;
+addr BORDER = 0xD021;
+
+#[org(0x8000)]
+fn main() {
+    zp u8 x = 10;
+
+    // Test equality
+    if x == 10 {
+        {
+            LED = 1;
+        }
+    }
+
+    // Test if-else
+    if x > 20 {
+        {
+            LED = 2;
+        }
+    } else {
+        {
+            BORDER = 3;
+        }
+    }
+}
