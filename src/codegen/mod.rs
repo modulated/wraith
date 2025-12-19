@@ -1,16 +1,24 @@
-//! Code Generation module
-//!
-//! Responsible for converting analyzed AST into 6502 assembly.
+pub mod emitter;
+pub mod expr;
+pub mod item;
+pub mod stmt;
 
+use crate::ast::SourceFile;
 use crate::sema::ProgramInfo;
+use emitter::Emitter;
+use item::generate_item;
 
 #[derive(Debug, Clone)]
 pub enum CodegenError {
-    // Placeholder
     Unknown,
 }
 
-pub fn generate(_program: &ProgramInfo) -> Result<String, CodegenError> {
-    // TODO: Implement code generation
-    Ok(String::new())
+pub fn generate(ast: &SourceFile, program: &ProgramInfo) -> Result<String, CodegenError> {
+    let mut emitter = Emitter::new();
+
+    for item in &ast.items {
+        generate_item(item, &mut emitter, program)?;
+    }
+
+    Ok(emitter.finish())
 }

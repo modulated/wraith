@@ -33,7 +33,7 @@ impl Type {
 
     pub fn size(&self) -> usize {
         match self {
-            Type::Primitive(_) => 1, // All primitives are 1 byte for now (u16 is 2 bytes, need to check PrimitiveType)
+            Type::Primitive(prim) => prim.size_bytes(),
             Type::Pointer(_, _) => 2, // Pointers are 16-bit
             Type::Array(ty, len) => ty.size() * len,
             Type::Function(_, _) => 2, // Function pointer is 16-bit address

@@ -1,7 +1,7 @@
 //! Source span tracking for error messages
 
 /// A span in the source code
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Span {
     /// Start byte offset
     pub start: usize,

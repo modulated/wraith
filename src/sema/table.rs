@@ -4,20 +4,34 @@
 
 use std::collections::HashMap;
 
+use super::types::Type;
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum SymbolType {
+pub enum SymbolKind {
     Variable,
     Function,
+    Type, // Struct or Enum name
     Constant,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SymbolLocation {
+    ZeroPage(u8),
+    Stack(i8),
+    Absolute(u16),
+    None, // For types or compile-time constants
 }
 
 #[derive(Debug, Clone)]
 pub struct SymbolInfo {
     pub name: String,
-    pub kind: SymbolType,
-    // TODO: Add type info, memory location, etc.
+    pub kind: SymbolKind,
+    pub ty: Type,
+    pub location: SymbolLocation,
+    pub mutable: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct SymbolTable {
     scopes: Vec<HashMap<String, SymbolInfo>>,
 }
@@ -52,5 +66,20 @@ impl SymbolTable {
             }
         }
         None
+    }
+
+    /// Check if a symbol exists in the current (innermost) scope
+    pub fn defined_in_current_scope(&self, name: &str) -> bool {
+        if let Some(scope) = self.scopes.last() {
+            scope.contains_key(name)
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for SymbolTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
