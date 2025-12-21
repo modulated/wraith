@@ -174,26 +174,26 @@ pub fn generate_stmt(
         } => {
             // For loop: initialize counter, loop with condition, increment
             // Use fixed zero page location for loop counter (simplified approach)
-            const LOOP_COUNTER: u8 = 0x10;
-            const LOOP_END_TEMP: u8 = 0x21;
+            let loop_counter = emitter.memory_layout.loop_counter();
+            let loop_end_temp = emitter.memory_layout.loop_end_temp();
 
             let loop_label = emitter.next_label("for_loop");
             let end_label = emitter.next_label("for_end");
 
             // Initialize loop variable with range start
             generate_expr(&range.start, emitter, info)?;
-            emitter.emit_inst("STA", &format!("${:02X}", LOOP_COUNTER));
+            emitter.emit_inst("STA", &format!("${:02X}", loop_counter));
 
             // Generate end value and store in temp location
             generate_expr(&range.end, emitter, info)?;
-            emitter.emit_inst("STA", &format!("${:02X}", LOOP_END_TEMP));
+            emitter.emit_inst("STA", &format!("${:02X}", loop_end_temp));
 
             // Loop start
             emitter.emit_label(&loop_label);
 
             // Check condition: load counter and compare with end
-            emitter.emit_inst("LDA", &format!("${:02X}", LOOP_COUNTER));
-            emitter.emit_inst("CMP", &format!("${:02X}", LOOP_END_TEMP));
+            emitter.emit_inst("LDA", &format!("${:02X}", loop_counter));
+            emitter.emit_inst("CMP", &format!("${:02X}", loop_end_temp));
 
             if range.inclusive {
                 // If counter > end, exit
@@ -210,7 +210,7 @@ pub fn generate_stmt(
             generate_stmt(body, emitter, info)?;
 
             // Increment counter
-            emitter.emit_inst("INC", &format!("${:02X}", LOOP_COUNTER));
+            emitter.emit_inst("INC", &format!("${:02X}", loop_counter));
 
             emitter.emit_inst("JMP", &loop_label);
             emitter.emit_label(&end_label);
@@ -263,12 +263,7 @@ fn generate_match(
 ) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
 
-    static mut MATCH_COUNTER: u32 = 0;
-    let match_id = unsafe {
-        let id = MATCH_COUNTER;
-        MATCH_COUNTER += 1;
-        id
-    };
+    let match_id = emitter.next_match_id();
 
     emitter.emit_comment("Match statement");
 
@@ -416,7 +411,9 @@ fn substitute_asm_vars(instruction: &str, info: &ProgramInfo) -> Result<String, 
                     // Stack variables are relative to a base address
                     // For 6502, we typically use zero page for stack frame pointer
                     // For now, use absolute addressing
-                    format!("${:02X}", (0x50_i16 + offset as i16) as u8)
+                    let layout = crate::codegen::memory_layout::MemoryLayout::new();
+                    let param_base = layout.param_base;
+                    format!("${:02X}", (param_base as i16 + offset as i16) as u8)
                 }
                 crate::sema::table::SymbolLocation::None => {
                     return Err(CodegenError::SymbolNotFound(format!(

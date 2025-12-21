@@ -3,6 +3,7 @@
 //! Traverses the AST to populate the symbol table and perform type checking.
 
 use crate::ast::{Expr, Function, Item, SourceFile, Spanned, Stmt, TypeExpr};
+use crate::codegen::memory_layout::MemoryLayout;
 use crate::sema::const_eval::{eval_const_expr, eval_const_expr_with_env, ConstEnv, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
 use crate::sema::type_defs::TypeRegistry;
@@ -39,13 +40,10 @@ struct ZeroPageAllocator {
 
 impl ZeroPageAllocator {
     fn new() -> Self {
+        let layout = MemoryLayout::new();
         Self {
-            next_addr: 0x40, // Start after commonly used system locations
-            reserved: vec![
-                (0x00, 0x1F), // System reserved
-                (0x20, 0x2F), // Temporary storage for codegen
-                (0x30, 0x3F), // Pointer operations
-            ],
+            next_addr: layout.variable_alloc_start,
+            reserved: layout.get_reserved_regions(),
         }
     }
 
@@ -98,7 +96,8 @@ impl ZeroPageAllocator {
     /// Reset allocator (for new scope/function)
     #[allow(dead_code)]
     fn reset(&mut self) {
-        self.next_addr = 0x40;
+        let layout = MemoryLayout::new();
+        self.next_addr = layout.variable_alloc_start;
     }
 }
 

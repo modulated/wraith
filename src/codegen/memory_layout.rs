@@ -51,14 +51,14 @@ impl MemoryLayout {
         self.temp_storage_start
     }
 
-    /// Get the loop counter address (second byte of temp storage)
+    /// Get the loop counter address
     pub fn loop_counter(&self) -> u8 {
-        self.temp_storage_start + 0x01
+        self.temp_storage_start + 0x10
     }
 
     /// Get the loop end temp address
     pub fn loop_end_temp(&self) -> u8 {
-        self.temp_storage_start + 0x10
+        self.temp_storage_start + 0x01
     }
 
     /// Get reserved regions for zero page allocator

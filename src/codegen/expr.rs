@@ -8,8 +8,6 @@ use crate::codegen::{CodegenError, Emitter};
 use crate::sema::ProgramInfo;
 use crate::sema::table::SymbolLocation;
 
-const TEMP_REG: u8 = 0x20;
-
 pub fn generate_expr(
     expr: &Spanned<Expr>,
     emitter: &mut Emitter,
@@ -63,16 +61,16 @@ fn generate_call(
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // 6502 calling convention: Arguments are passed in zero page locations
-    // Parameters are allocated starting at $50 (matching PARAM_COUNTER in sema)
+    // Parameters are allocated starting at param_base (from memory layout)
     // This avoids using the hardware stack which is limited and slow to access
 
-    const PARAM_BASE: u8 = 0x50;
+    let param_base = emitter.memory_layout.param_base;
 
     emitter.emit_comment(&format!("Call {} with {} args", function.node, args.len()));
 
     // Store each argument to its corresponding parameter location
     for (i, arg) in args.iter().enumerate() {
-        let param_addr = PARAM_BASE + i as u8;
+        let param_addr = param_base + i as u8;
 
         // Generate argument expression (result in A)
         generate_expr(arg, emitter, info)?;
@@ -215,7 +213,7 @@ fn generate_binary(
     generate_expr(right, emitter, info)?;
 
     // 4. Store right operand in TEMP
-    emitter.emit_inst("STA", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
 
     // 5. Restore left operand -> A
     emitter.emit_inst("PLA", "");
@@ -224,20 +222,20 @@ fn generate_binary(
     match op {
         crate::ast::BinaryOp::Add => {
             emitter.emit_inst("CLC", "");
-            emitter.emit_inst("ADC", &format!("${:02X}", TEMP_REG));
+            emitter.emit_inst("ADC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
         }
         crate::ast::BinaryOp::Sub => {
             emitter.emit_inst("SEC", "");
-            emitter.emit_inst("SBC", &format!("${:02X}", TEMP_REG));
+            emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
         }
         crate::ast::BinaryOp::BitAnd => {
-            emitter.emit_inst("AND", &format!("${:02X}", TEMP_REG));
+            emitter.emit_inst("AND", &format!("${:02X}", emitter.memory_layout.temp_reg()));
         }
         crate::ast::BinaryOp::BitOr => {
-            emitter.emit_inst("ORA", &format!("${:02X}", TEMP_REG));
+            emitter.emit_inst("ORA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
         }
         crate::ast::BinaryOp::BitXor => {
-            emitter.emit_inst("EOR", &format!("${:02X}", TEMP_REG));
+            emitter.emit_inst("EOR", &format!("${:02X}", emitter.memory_layout.temp_reg()));
         }
         crate::ast::BinaryOp::Shl => {
             generate_shift_left(emitter)?;
@@ -448,7 +446,7 @@ fn generate_variable(
 }
 
 // Comparison helper functions
-// All assume: A contains left operand, TEMP_REG contains right operand
+// All assume: A contains left operand, emitter.memory_layout.temp_reg() contains right operand
 // Result is left in A as 0 (false) or 1 (true)
 
 fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenError> {
@@ -456,7 +454,7 @@ fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let true_label = emitter.next_label("eq_true");
     let end_label = emitter.next_label("eq_end");
 
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BEQ", &true_label);
 
     // False case
@@ -476,7 +474,7 @@ fn generate_compare_ne(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let true_label = emitter.next_label("ne_true");
     let end_label = emitter.next_label("ne_end");
 
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BNE", &true_label);
 
     // False case
@@ -496,7 +494,7 @@ fn generate_compare_lt(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let true_label = emitter.next_label("lt_true");
     let end_label = emitter.next_label("lt_end");
 
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCC", &true_label); // Branch if carry clear (A < TEMP)
 
     // False case
@@ -516,7 +514,7 @@ fn generate_compare_ge(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let true_label = emitter.next_label("ge_true");
     let end_label = emitter.next_label("ge_end");
 
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCS", &true_label); // Branch if carry set (A >= TEMP)
 
     // False case
@@ -542,7 +540,7 @@ fn generate_compare_gt(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let true_label = emitter.next_label("gt_true");
     let end_label = emitter.next_label("gt_end");
 
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BEQ", &end_label); // If equal, result is 0 (false)
     emitter.emit_inst("BCS", &true_label); // If carry set and not equal, A > TEMP
 
@@ -566,7 +564,7 @@ fn generate_compare_le(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let false_label = emitter.next_label("le_false");
     let end_label = emitter.next_label("le_end");
 
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BEQ", &end_label); // If equal, keep A as is, set to 1 after
     emitter.emit_inst("BCS", &false_label); // If A >= TEMP and not equal, A > TEMP (false)
 
@@ -583,17 +581,17 @@ fn generate_compare_le(emitter: &mut Emitter) -> Result<(), CodegenError> {
 }
 
 // Shift helper functions
-// A contains value to shift, TEMP_REG contains shift amount
+// A contains value to shift, emitter.memory_layout.temp_reg() contains shift amount
 
 fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Shift A left by TEMP_REG bits
+    // Shift A left by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
 
     let loop_label = emitter.next_label("shl_loop");
     let end_label = emitter.next_label("shl_end");
 
     // Load shift count into X
-    emitter.emit_inst("LDX", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
 
     // Check if count is zero
     emitter.emit_inst("CPX", "#$00");
@@ -610,14 +608,14 @@ fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
 }
 
 fn generate_shift_right(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Shift A right by TEMP_REG bits
+    // Shift A right by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
 
     let loop_label = emitter.next_label("shr_loop");
     let end_label = emitter.next_label("shr_end");
 
     // Load shift count into X
-    emitter.emit_inst("LDX", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
 
     // Check if count is zero
     emitter.emit_inst("CPX", "#$00");
@@ -729,7 +727,7 @@ fn generate_multiply(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("STA", &format!("${:02X}", RESULT_REG));
 
     // Check if multiplier is zero
-    emitter.emit_inst("LDA", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("LDA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("CMP", "#$00");
     emitter.emit_inst("BEQ", &end_label);
 
@@ -762,7 +760,7 @@ fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let end_label = emitter.next_label("div_end");
 
     // Check for division by zero
-    emitter.emit_inst("LDX", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("CPX", "#$00");
     emitter.emit_inst("BEQ", &end_label); // Result undefined, leave A as-is
 
@@ -776,12 +774,12 @@ fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Loop: subtract divisor from dividend until dividend < divisor
     emitter.emit_label(&loop_label);
     emitter.emit_inst("LDA", &format!("${:02X}", DIVIDEND_REG));
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCC", &end_label); // If dividend < divisor, done
 
     // Subtract divisor
     emitter.emit_inst("SEC", "");
-    emitter.emit_inst("SBC", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("STA", &format!("${:02X}", DIVIDEND_REG));
 
     // Increment quotient
@@ -803,7 +801,7 @@ fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let end_label = emitter.next_label("mod_end");
 
     // Check for division by zero
-    emitter.emit_inst("LDX", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("CPX", "#$00");
     emitter.emit_inst("BEQ", &end_label); // Result undefined, leave A as-is
 
@@ -813,12 +811,12 @@ fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Loop: subtract divisor from dividend until dividend < divisor
     emitter.emit_label(&loop_label);
     emitter.emit_inst("LDA", &format!("${:02X}", DIVIDEND_REG));
-    emitter.emit_inst("CMP", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCC", &end_label); // If dividend < divisor, done (A has remainder)
 
     // Subtract divisor
     emitter.emit_inst("SEC", "");
-    emitter.emit_inst("SBC", &format!("${:02X}", TEMP_REG));
+    emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("STA", &format!("${:02X}", DIVIDEND_REG));
     emitter.emit_inst("JMP", &loop_label);
 
