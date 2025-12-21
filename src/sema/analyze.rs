@@ -698,7 +698,37 @@ impl SemanticAnalyzer {
                 crate::ast::Literal::String(_) => {
                     Ok(Type::String)
                 }
-                _ => Ok(Type::Void),
+                crate::ast::Literal::Array(elements) => {
+                    if elements.is_empty() {
+                        // Empty array - need type context to determine element type
+                        // For now, default to [u8; 0]
+                        return Ok(Type::Array(
+                            Box::new(Type::Primitive(crate::ast::PrimitiveType::U8)),
+                            0,
+                        ));
+                    }
+
+                    // Infer element type from first element
+                    let element_ty = self.check_expr(&elements[0])?;
+
+                    // Check that all elements have the same type
+                    for elem in &elements[1..] {
+                        let elem_ty = self.check_expr(elem)?;
+                        if elem_ty != element_ty {
+                            return Err(SemaError::TypeMismatch {
+                                expected: element_ty.display_name(),
+                                found: elem_ty.display_name(),
+                                span: elem.span,
+                            });
+                        }
+                    }
+
+                    Ok(Type::Array(Box::new(element_ty), elements.len()))
+                }
+                crate::ast::Literal::ArrayFill { value, count } => {
+                    let element_ty = self.check_expr(value)?;
+                    Ok(Type::Array(Box::new(element_ty), *count))
+                }
             },
             Expr::Variable(name) => {
                 let info = if let Some(info) = self.table.lookup(name) {
@@ -998,8 +1028,20 @@ impl SemanticAnalyzer {
                     Ok(Type::Named(name.clone()))
                 }
             }
-            // TODO: Handle other types
-            _ => Ok(Type::Void),
+            TypeExpr::Pointer { pointee, mutable } => {
+                let pointee_type = self.resolve_type(&pointee.node)?;
+                Ok(Type::Pointer(Box::new(pointee_type), *mutable))
+            }
+            TypeExpr::Array { element, size } => {
+                let element_type = self.resolve_type(&element.node)?;
+                Ok(Type::Array(Box::new(element_type), *size))
+            }
+            TypeExpr::Slice { element, mutable: _ } => {
+                // For now, treat slices as pointers to their element type
+                // Full slice support would require length tracking
+                let element_type = self.resolve_type(&element.node)?;
+                Ok(Type::Pointer(Box::new(element_type), false))
+            }
         }
     }
 
