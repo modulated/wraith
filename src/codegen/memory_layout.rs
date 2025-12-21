@@ -1,7 +1,7 @@
-///! Memory Layout Configuration
-///!
-///! Defines the memory layout for the 6502 architecture, including
-///! zero page allocations and reserved regions.
+//! Memory Layout Configuration
+//!
+//! Defines the memory layout for the 6502 architecture, including
+//! zero page allocations and reserved regions.
 
 /// Memory layout configuration for 6502 code generation
 #[derive(Debug, Clone)]
