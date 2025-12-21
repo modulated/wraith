@@ -148,6 +148,30 @@ impl SemanticAnalyzer {
             .unwrap_or_else(|_| PathBuf::from("std"))
     }
 
+    /// Compute the size of a type, looking up named types in the registry
+    fn type_size(&self, ty: &Type) -> usize {
+        match ty {
+            Type::Primitive(prim) => prim.size_bytes(),
+            Type::Pointer(_, _) => 2, // Pointers are 16-bit
+            Type::Array(element_ty, len) => self.type_size(element_ty) * len,
+            Type::String => 2, // String is represented as a pointer
+            Type::Function(_, _) => 2, // Function pointer is 16-bit
+            Type::Void => 0,
+            Type::Named(name) => {
+                // Look up in struct registry
+                if let Some(struct_def) = self.type_registry.structs.get(name) {
+                    return struct_def.total_size;
+                }
+                // Look up in enum registry
+                if let Some(enum_def) = self.type_registry.enums.get(name) {
+                    return enum_def.total_size;
+                }
+                // Unknown type - return 0 as fallback
+                0
+            }
+        }
+    }
+
     pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
         // First pass: Register all global items (functions, statics, structs)
         for item in &source.items {
@@ -359,7 +383,7 @@ impl SemanticAnalyzer {
         // Calculate field offsets
         for field in &struct_def.fields {
             let field_type = self.resolve_type(&field.ty.node)?;
-            let size = field_type.size();
+            let size = self.type_size(&field_type);
 
             fields.push(FieldInfo {
                 name: field.name.node.clone(),
@@ -430,7 +454,7 @@ impl SemanticAnalyzer {
 
                     for field in fields {
                         let field_type = self.resolve_type(&field.ty.node)?;
-                        let size = field_type.size();
+                        let size = self.type_size(&field_type);
 
                         variant_fields.push(FieldInfo {
                             name: field.name.node.clone(),
@@ -454,7 +478,21 @@ impl SemanticAnalyzer {
             });
         }
 
-        let total_size = EnumDef::calculate_size(&variants);
+        // Calculate enum size: 1 byte tag + max variant data size
+        let max_data_size = variants
+            .iter()
+            .map(|v| match &v.data {
+                VariantData::Unit => 0,
+                VariantData::Tuple(types) => types.iter().map(|t| self.type_size(t)).sum(),
+                VariantData::Struct(fields) => {
+                    // Use the last field's offset + size, or 0 if no fields
+                    fields.last().map(|f| f.offset + self.type_size(&f.ty)).unwrap_or(0)
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        let total_size = 1 + max_data_size;
 
         let enum_info = EnumDef {
             name: name.clone(),
