@@ -727,9 +727,30 @@ impl SemanticAnalyzer {
 
         match &expr.node {
             Expr::Literal(lit) => match lit {
-                crate::ast::Literal::Integer(_) => {
-                    Ok(Type::Primitive(crate::ast::PrimitiveType::U8))
-                } // Default to u8, need better inference
+                crate::ast::Literal::Integer(val) => {
+                    // Infer type based on value range
+                    if *val < 0 {
+                        // Negative values
+                        if *val >= -128 {
+                            Ok(Type::Primitive(crate::ast::PrimitiveType::I8))
+                        } else {
+                            Ok(Type::Primitive(crate::ast::PrimitiveType::I16))
+                        }
+                    } else {
+                        // Positive values
+                        if *val <= 255 {
+                            Ok(Type::Primitive(crate::ast::PrimitiveType::U8))
+                        } else if *val <= 65535 {
+                            Ok(Type::Primitive(crate::ast::PrimitiveType::U16))
+                        } else {
+                            // Value too large for any type
+                            return Err(SemaError::Custom {
+                                message: format!("integer literal {} is too large (max 65535 for u16)", val),
+                                span: expr.span,
+                            });
+                        }
+                    }
+                }
                 crate::ast::Literal::Bool(_) => {
                     Ok(Type::Primitive(crate::ast::PrimitiveType::Bool))
                 }
