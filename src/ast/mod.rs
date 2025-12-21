@@ -15,6 +15,6 @@ pub use item::{
     AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Import, Item,
     SourceFile, Static, Struct, StructAttribute, StructField,
 };
-pub use span::{Span, Spanned};
+pub use span::{LineCol, Span, Spanned};
 pub use stmt::{AsmLine, MatchArm, Pattern, PatternBinding, Range, Stmt};
 pub use types::{PrimitiveType, TypeExpr};

@@ -5,6 +5,7 @@
 use crate::ast::{Expr, Function, Item, SourceFile, Spanned, Stmt, TypeExpr};
 use crate::sema::const_eval::{eval_const_expr, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
+use crate::sema::type_defs::TypeRegistry;
 use crate::sema::types::Type;
 use crate::sema::{FunctionMetadata, ProgramInfo, SemaError};
 
@@ -19,6 +20,7 @@ pub struct SemanticAnalyzer {
     resolved_symbols: HashMap<Span, SymbolInfo>,
     function_metadata: HashMap<String, FunctionMetadata>,
     folded_constants: HashMap<Span, ConstValue>,
+    type_registry: TypeRegistry,
     base_path: Option<PathBuf>,
     imported_files: HashSet<PathBuf>,
     zp_allocator: ZeroPageAllocator,
@@ -114,6 +116,7 @@ impl SemanticAnalyzer {
             resolved_symbols: HashMap::new(),
             function_metadata: HashMap::new(),
             folded_constants: HashMap::new(),
+            type_registry: TypeRegistry::new(),
             base_path: None,
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
@@ -128,6 +131,7 @@ impl SemanticAnalyzer {
             resolved_symbols: HashMap::new(),
             function_metadata: HashMap::new(),
             folded_constants: HashMap::new(),
+            type_registry: TypeRegistry::new(),
             base_path: Some(base_path),
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
@@ -154,6 +158,7 @@ impl SemanticAnalyzer {
             resolved_symbols: self.resolved_symbols.clone(),
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
+            type_registry: self.type_registry.clone(),
         })
     }
 
@@ -219,7 +224,12 @@ impl SemanticAnalyzer {
             Item::Import(import) => {
                 self.process_import(import)?;
             }
-            _ => {}
+            Item::Struct(struct_def) => {
+                self.register_struct(struct_def)?;
+            }
+            Item::Enum(enum_def) => {
+                self.register_enum(enum_def)?;
+            }
         }
         Ok(())
     }
@@ -285,6 +295,136 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
+    fn register_struct(&mut self, struct_def: &crate::ast::Struct) -> Result<(), SemaError> {
+        use crate::sema::type_defs::{FieldInfo, StructDef};
+
+        let name = struct_def.name.node.clone();
+        let mut fields = Vec::new();
+        let mut offset = 0;
+
+        // Calculate field offsets
+        for field in &struct_def.fields {
+            let field_type = self.resolve_type(&field.ty.node)?;
+            let size = field_type.size();
+
+            fields.push(FieldInfo {
+                name: field.name.node.clone(),
+                ty: field_type,
+                offset,
+            });
+
+            offset += size;
+        }
+
+        // Check if struct should be in zero page
+        let zero_page = struct_def.attributes.iter().any(|attr| {
+            matches!(attr, crate::ast::StructAttribute::ZpSection)
+        });
+
+        let struct_info = StructDef {
+            name: name.clone(),
+            fields,
+            total_size: offset,
+            zero_page,
+        };
+
+        self.type_registry.add_struct(struct_info);
+
+        // Add the struct type to the symbol table as a type name
+        self.table.insert(
+            name.clone(),
+            SymbolInfo {
+                name: name.clone(),
+                kind: SymbolKind::Type,
+                ty: Type::Named(name),
+                location: SymbolLocation::None,
+                mutable: false,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn register_enum(&mut self, enum_def: &crate::ast::Enum) -> Result<(), SemaError> {
+        use crate::sema::type_defs::{EnumDef, FieldInfo, VariantData, VariantInfo};
+        use crate::ast::EnumVariant;
+
+        let name = enum_def.name.node.clone();
+        let mut variants = Vec::new();
+        let mut next_tag: u8 = 0;
+
+        // Process each variant
+        for variant in &enum_def.variants {
+            let (variant_name, variant_data, tag) = match variant {
+                EnumVariant::Unit { name: var_name, value } => {
+                    let tag = value.map(|v| v as u8).unwrap_or(next_tag);
+                    next_tag = tag + 1;
+                    (var_name.node.clone(), VariantData::Unit, tag)
+                }
+                EnumVariant::Tuple { name: var_name, fields: field_types } => {
+                    let types: Result<Vec<Type>, SemaError> = field_types
+                        .iter()
+                        .map(|ty| self.resolve_type(&ty.node))
+                        .collect();
+                    let tag = next_tag;
+                    next_tag += 1;
+                    (var_name.node.clone(), VariantData::Tuple(types?), tag)
+                }
+                EnumVariant::Struct { name: var_name, fields } => {
+                    let mut variant_fields = Vec::new();
+                    let mut offset = 0;
+
+                    for field in fields {
+                        let field_type = self.resolve_type(&field.ty.node)?;
+                        let size = field_type.size();
+
+                        variant_fields.push(FieldInfo {
+                            name: field.name.node.clone(),
+                            ty: field_type,
+                            offset,
+                        });
+
+                        offset += size;
+                    }
+
+                    let tag = next_tag;
+                    next_tag += 1;
+                    (var_name.node.clone(), VariantData::Struct(variant_fields), tag)
+                }
+            };
+
+            variants.push(VariantInfo {
+                name: variant_name,
+                tag,
+                data: variant_data,
+            });
+        }
+
+        let total_size = EnumDef::calculate_size(&variants);
+
+        let enum_info = EnumDef {
+            name: name.clone(),
+            variants,
+            total_size,
+        };
+
+        self.type_registry.add_enum(enum_info);
+
+        // Add the enum type to the symbol table as a type name
+        self.table.insert(
+            name.clone(),
+            SymbolInfo {
+                name: name.clone(),
+                kind: SymbolKind::Type,
+                ty: Type::Named(name),
+                location: SymbolLocation::None,
+                mutable: false,
+            },
+        );
+
+        Ok(())
+    }
+
     fn analyze_item(&mut self, item: &Spanned<Item>) -> Result<(), SemaError> {
         if let Item::Function(func) = &item.node {
             self.table.enter_scope();
@@ -310,7 +450,9 @@ impl SemanticAnalyzer {
                     location,
                     mutable: false,
                 };
-                self.table.insert(name, info);
+                self.table.insert(name, info.clone());
+                // Add to resolved_symbols so codegen (especially inline asm) can find it
+                self.resolved_symbols.insert(param.name.span, info);
             }
 
             // Analyze body
@@ -623,6 +765,143 @@ impl SemanticAnalyzer {
                 // Return the target type
                 self.resolve_type(&target_type.node)
             }
+            Expr::StructInit { name, fields } => {
+                // Look up the struct definition
+                if !self.type_registry.structs.contains_key(&name.node) {
+                    return Err(SemaError::UndefinedSymbol {
+                        name: name.node.clone(),
+                        span: name.span,
+                    });
+                }
+
+                // Type check each field value
+                // For now, just verify the struct exists and return its type
+                for field in fields {
+                    self.check_expr(&field.value)?;
+                }
+
+                Ok(Type::Named(name.node.clone()))
+            }
+            Expr::EnumVariant { enum_name, variant, data } => {
+                // Look up the enum definition
+                let enum_def = self.type_registry.get_enum(&enum_name.node)
+                    .ok_or_else(|| SemaError::UndefinedSymbol {
+                        name: enum_name.node.clone(),
+                        span: enum_name.span,
+                    })?;
+
+                // Verify the variant exists
+                let variant_info = enum_def.get_variant(&variant.node)
+                    .ok_or_else(|| SemaError::Custom {
+                        message: format!("variant '{}' not found in enum '{}'", variant.node, enum_name.node),
+                        span: variant.span,
+                    })?;
+
+                // Type check the variant data
+                use crate::ast::VariantData;
+                use crate::sema::type_defs::VariantData as TypeDefVariantData;
+
+                match (&variant_info.data, data) {
+                    (TypeDefVariantData::Unit, VariantData::Unit) => {
+                        // Unit variant - ok
+                    }
+                    (TypeDefVariantData::Tuple(field_types), VariantData::Tuple(values)) => {
+                        // Type check each tuple field
+                        if values.len() != field_types.len() {
+                            return Err(SemaError::Custom {
+                                message: format!(
+                                    "variant '{}' expects {} fields, got {}",
+                                    variant.node,
+                                    field_types.len(),
+                                    values.len()
+                                ),
+                                span: expr.span,
+                            });
+                        }
+
+                        // Clone field types to avoid borrowing issues
+                        let expected_types = field_types.clone();
+                        for (value_expr, expected_ty) in values.iter().zip(expected_types.iter()) {
+                            let value_ty = self.check_expr(value_expr)?;
+                            if &value_ty != expected_ty {
+                                return Err(SemaError::TypeMismatch {
+                                    expected: expected_ty.display_name(),
+                                    found: value_ty.display_name(),
+                                    span: value_expr.span,
+                                });
+                            }
+                        }
+                    }
+                    (TypeDefVariantData::Struct(field_infos), VariantData::Struct(field_inits)) => {
+                        // Clone field infos to avoid borrowing issues
+                        let field_info_vec = field_infos.clone();
+
+                        // Type check struct variant fields
+                        for field_init in field_inits {
+                            let value_ty = self.check_expr(&field_init.value)?;
+
+                            // Find the expected type for this field
+                            let field_info = field_info_vec.iter()
+                                .find(|f| f.name == field_init.name.node)
+                                .ok_or_else(|| SemaError::FieldNotFound {
+                                    struct_name: enum_name.node.clone(),
+                                    field_name: field_init.name.node.clone(),
+                                    span: field_init.name.span,
+                                })?;
+
+                            if value_ty != field_info.ty {
+                                return Err(SemaError::TypeMismatch {
+                                    expected: field_info.ty.display_name(),
+                                    found: value_ty.display_name(),
+                                    span: field_init.value.span,
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(SemaError::Custom {
+                            message: format!("variant data mismatch for '{}'", variant.node),
+                            span: expr.span,
+                        });
+                    }
+                }
+
+                // Return the enum type
+                Ok(Type::Named(enum_name.node.clone()))
+            }
+            Expr::Field { object, field } => {
+                // Get the type of the object
+                let object_ty = self.check_expr(object)?;
+
+                // Extract struct name from the type
+                let struct_name = match &object_ty {
+                    Type::Named(name) => name,
+                    _ => {
+                        return Err(SemaError::TypeMismatch {
+                            expected: "struct".to_string(),
+                            found: object_ty.display_name(),
+                            span: object.span,
+                        });
+                    }
+                };
+
+                // Look up the struct definition
+                let struct_def = self.type_registry.get_struct(struct_name)
+                    .ok_or_else(|| SemaError::Custom {
+                        message: format!("struct '{}' not found", struct_name),
+                        span: object.span,
+                    })?;
+
+                // Find the field and return its type
+                let field_info = struct_def.get_field(&field.node)
+                    .ok_or_else(|| SemaError::FieldNotFound {
+                        struct_name: struct_name.clone(),
+                        field_name: field.node.clone(),
+                        span: field.span,
+                    })?;
+
+                Ok(field_info.ty.clone())
+            }
             _ => Ok(Type::Void), // TODO: Handle other expressions
         }
     }
@@ -630,6 +909,16 @@ impl SemanticAnalyzer {
     fn resolve_type(&self, ty: &TypeExpr) -> Result<Type, SemaError> {
         match ty {
             TypeExpr::Primitive(p) => Ok(Type::Primitive(*p)),
+            TypeExpr::Named(name) => {
+                // Check if it's a known type (struct or enum)
+                if self.type_registry.structs.contains_key(name) || self.type_registry.enums.contains_key(name) {
+                    Ok(Type::Named(name.clone()))
+                } else {
+                    // For now, allow unknown named types
+                    // They'll be caught later if they're actually used
+                    Ok(Type::Named(name.clone()))
+                }
+            }
             // TODO: Handle other types
             _ => Ok(Type::Void),
         }

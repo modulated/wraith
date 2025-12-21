@@ -227,11 +227,12 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Asm { lines } => {
-            // Inline assembly - emit lines directly
+            // Inline assembly - emit lines directly with variable substitution
             for line in lines {
-                // Parse the instruction (could have {var} substitutions)
-                // For now, just emit as-is
-                let parts: Vec<&str> = line.instruction.split_whitespace().collect();
+                // Substitute {var} patterns with actual addresses
+                let substituted = substitute_asm_vars(&line.instruction, info)?;
+
+                let parts: Vec<&str> = substituted.split_whitespace().collect();
                 if parts.is_empty() {
                     continue;
                 }
@@ -271,11 +272,28 @@ fn generate_match(
 
     emitter.emit_comment("Match statement");
 
+    // Check if we're matching on an enum by looking at the first pattern
+    let is_enum_match = arms.iter().any(|arm| {
+        matches!(arm.pattern.node, Pattern::EnumVariant { .. })
+    });
+
     // Evaluate the matched expression into accumulator
     generate_expr(expr, emitter, info)?;
 
-    // Store it temporarily at $20 (we need A for comparisons)
-    emitter.emit_inst("STA", "$20");
+    if is_enum_match {
+        // For enum matching, expression returns a pointer in A:X
+        // Store pointer at $20 (low) and $21 (high)
+        emitter.emit_inst("STA", "$20");
+        emitter.emit_inst("STX", "$21");
+
+        // Load the discriminant tag from the enum (first byte)
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_inst("LDA", "($20),Y");
+        emitter.emit_inst("STA", "$22"); // Store tag at $22
+    } else {
+        // For simple value matching, store value at $20
+        emitter.emit_inst("STA", "$20");
+    }
 
     // Generate code for each arm
     let mut has_wildcard = false;
@@ -284,6 +302,8 @@ fn generate_match(
             Pattern::Literal(lit_expr) => {
                 // Compare with literal value
                 if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) = &lit_expr.node {
+                    // For enum matching, we already have the tag in $22, but this is for literal patterns
+                    // which shouldn't mix with enum patterns in the same match
                     emitter.emit_inst("LDA", "$20");
                     emitter.emit_inst("CMP", &format!("#${:02X}", val));
                     emitter.emit_inst("BEQ", &format!("match_{}_arm_{}", match_id, i));
@@ -319,9 +339,29 @@ fn generate_match(
                 // TODO: Store value in the variable
                 emitter.emit_inst("JMP", &format!("match_{}_arm_{}", match_id, i));
             }
-            Pattern::EnumVariant { .. } => {
-                // TODO: Implement enum pattern matching
-                return Err(CodegenError::UnsupportedOperation("enum pattern matching not yet implemented".to_string()));
+            Pattern::EnumVariant { enum_name, variant, bindings } => {
+                // Look up the enum definition
+                let enum_def = info.type_registry.get_enum(&enum_name.node)
+                    .ok_or_else(|| CodegenError::UnsupportedOperation(
+                        format!("enum '{}' not found in type registry", enum_name.node)
+                    ))?;
+
+                // Find the variant
+                let variant_info = enum_def.get_variant(&variant.node)
+                    .ok_or_else(|| CodegenError::UnsupportedOperation(
+                        format!("variant '{}' not found in enum '{}'", variant.node, enum_name.node)
+                    ))?;
+
+                // Compare the tag with the expected variant tag
+                emitter.emit_inst("LDA", "$22"); // Load stored tag
+                emitter.emit_inst("CMP", &format!("#${:02X}", variant_info.tag));
+                emitter.emit_inst("BEQ", &format!("match_{}_arm_{}", match_id, i));
+
+                // If bindings are present, we'll extract them in the arm body
+                // For now, we just check the tag - bindings will be handled later
+                if !bindings.is_empty() {
+                    emitter.emit_comment(&format!("Variant has {} binding(s)", bindings.len()));
+                }
             }
         }
     }
@@ -334,6 +374,11 @@ fn generate_match(
     // Generate bodies for each arm
     for (i, arm) in arms.iter().enumerate() {
         emitter.emit_label(&format!("match_{}_arm_{}", match_id, i));
+
+        // TODO: Extract bindings for enum variant patterns
+        // For now, enum pattern matching works but doesn't extract bound variables
+        // To implement: load variant data from offset ($20)+1 onwards based on variant type
+
         generate_stmt(&arm.body, emitter, info)?;
         emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
     }
@@ -341,4 +386,53 @@ fn generate_match(
     emitter.emit_label(&format!("match_{}_end", match_id));
 
     Ok(())
+}
+
+/// Substitute {variable} patterns in inline assembly with actual addresses
+fn substitute_asm_vars(instruction: &str, info: &ProgramInfo) -> Result<String, CodegenError> {
+    let mut result = instruction.to_string();
+
+    // Find all {var} patterns
+    while let Some(start) = result.find('{') {
+        if let Some(end) = result[start..].find('}') {
+            let end = start + end;
+            let var_name = &result[start + 1..end];
+
+            // Look up the variable in resolved_symbols (by name)
+            // We search through resolved_symbols because the symbol table's scopes
+            // have been exited after semantic analysis
+            let symbol = info.resolved_symbols
+                .values()
+                .find(|s| s.name == var_name)
+                .ok_or_else(|| {
+                    CodegenError::SymbolNotFound(var_name.to_string())
+                })?;
+
+            // Convert the location to an address string
+            let address = match symbol.location {
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => format!("${:02X}", addr),
+                crate::sema::table::SymbolLocation::Absolute(addr) => format!("${:04X}", addr),
+                crate::sema::table::SymbolLocation::Stack(offset) => {
+                    // Stack variables are relative to a base address
+                    // For 6502, we typically use zero page for stack frame pointer
+                    // For now, use absolute addressing
+                    format!("${:02X}", (0x50_i16 + offset as i16) as u8)
+                }
+                crate::sema::table::SymbolLocation::None => {
+                    return Err(CodegenError::SymbolNotFound(format!(
+                        "{} has no memory location",
+                        var_name
+                    )));
+                }
+            };
+
+            // Replace {var} with the address
+            result.replace_range(start..=end, &address);
+        } else {
+            // Unmatched {, just break
+            break;
+        }
+    }
+
+    Ok(result)
 }

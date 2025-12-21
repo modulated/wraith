@@ -9,6 +9,7 @@
 pub mod analyze;
 pub mod const_eval;
 pub mod table;
+pub mod type_defs;
 pub mod types;
 
 use crate::ast::SourceFile;
@@ -112,6 +113,119 @@ pub enum SemaError {
         message: String,
         span: Span,
     },
+}
+
+impl SemaError {
+    /// Format error with source code context (line:col instead of byte offsets)
+    pub fn format_with_source(&self, source: &str) -> String {
+        match self {
+            SemaError::UndefinedSymbol { name, span } => {
+                format!("undefined symbol '{}' at {}", name, span.format_position(source))
+            }
+            SemaError::TypeMismatch { expected, found, span } => {
+                format!(
+                    "type mismatch at {}: expected {}, found {}",
+                    span.format_position(source),
+                    expected,
+                    found
+                )
+            }
+            SemaError::InvalidBinaryOp { op, left_ty, right_ty, span } => {
+                format!(
+                    "invalid binary operation '{}' at {}: cannot apply to types {} and {}",
+                    op,
+                    span.format_position(source),
+                    left_ty,
+                    right_ty
+                )
+            }
+            SemaError::InvalidUnaryOp { op, operand_ty, span } => {
+                format!(
+                    "invalid unary operation '{}' at {}: cannot apply to type {}",
+                    op,
+                    span.format_position(source),
+                    operand_ty
+                )
+            }
+            SemaError::ArityMismatch { expected, found, span } => {
+                format!(
+                    "function call at {}: expected {} argument(s), found {}",
+                    span.format_position(source),
+                    expected,
+                    found
+                )
+            }
+            SemaError::ImmutableAssignment { symbol, span } => {
+                format!(
+                    "cannot assign to immutable variable '{}' at {}",
+                    symbol,
+                    span.format_position(source)
+                )
+            }
+            SemaError::CircularImport { path, chain } => {
+                format!(
+                    "circular import detected: {} -> {}",
+                    chain.join(" -> "),
+                    path
+                )
+            }
+            SemaError::ReturnTypeMismatch { expected, found, span } => {
+                format!(
+                    "return type mismatch at {}: expected {}, found {}",
+                    span.format_position(source),
+                    expected,
+                    found
+                )
+            }
+            SemaError::ReturnOutsideFunction { span } => {
+                format!("return statement outside function at {}", span.format_position(source))
+            }
+            SemaError::BreakOutsideLoop { span } => {
+                format!("break/continue outside loop at {}", span.format_position(source))
+            }
+            SemaError::DuplicateSymbol { name, span, previous_span } => {
+                if let Some(prev) = previous_span {
+                    format!(
+                        "duplicate symbol '{}' at {} (previously defined at {})",
+                        name,
+                        span.format_position(source),
+                        prev.format_position(source)
+                    )
+                } else {
+                    format!(
+                        "duplicate symbol '{}' at {}",
+                        name,
+                        span.format_position(source)
+                    )
+                }
+            }
+            SemaError::FieldNotFound { struct_name, field_name, span } => {
+                format!(
+                    "field '{}' not found in struct '{}' at {}",
+                    field_name,
+                    struct_name,
+                    span.format_position(source)
+                )
+            }
+            SemaError::ImportError { path, reason, span } => {
+                format!(
+                    "import error at {}: failed to import '{}': {}",
+                    span.format_position(source),
+                    path,
+                    reason
+                )
+            }
+            SemaError::OutOfZeroPage { span } => {
+                format!(
+                    "out of zero page memory at {}: no more zero page addresses available",
+                    span.format_position(source)
+                )
+            }
+            SemaError::Custom { message, span } => {
+                format!("{} at {}", message, span.format_position(source))
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for SemaError {
@@ -237,6 +351,8 @@ pub struct ProgramInfo {
     pub function_metadata: HashMap<String, FunctionMetadata>,
     /// Map of expression spans to their constant-folded values
     pub folded_constants: HashMap<Span, const_eval::ConstValue>,
+    /// Registry of struct and enum type definitions
+    pub type_registry: type_defs::TypeRegistry,
 }
 
 pub fn analyze(ast: &SourceFile) -> Result<ProgramInfo, SemaError> {

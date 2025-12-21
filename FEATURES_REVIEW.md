@@ -1,32 +1,16 @@
 # Wraith Language - Features Review & Roadmap
 
-Generated: 2025-12-19
+Updated: 2025-12-20
 
-This document lists potential features, improvements, and missing implementations for the Wraith programming language. Review and remove items that are not desired for the language's design goals.
+This document lists remaining features and improvements for the Wraith programming language.
 
 ---
 
 ## 1. CRITICAL: Unimplemented AST Features
 
-These features are already parsed by the compiler but have no code generation. They likely exist from initial design but were never completed.
+These features are already parsed by the compiler but have no code generation.
 
-### 1.1 Match Statements ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/codegen/stmt.rs:250-344`
-**Description:** Pattern matching with literals, ranges, wildcards, and enum variants
-**Use Case:** State machines, input handling, protocol parsing
-**Priority:** HIGH
-
-```wraith
-match input {
-    0..=9 => handle_digit(),
-    'a'..='z' => handle_letter(),
-    _ => handle_other(),
-}
-```
-
-### 1.2 ForEach Loops
+### 1.1 ForEach Loops
 
 **Status:** AST complete, codegen missing
 **Location:** `src/ast/stmt.rs:112-117`
@@ -40,77 +24,7 @@ for u8 byte in buffer {
 }
 ```
 
-### 1.3 Struct Operations 🔶
-
-**Status:** 🔶 PARTIAL (field access done, initialization needs type info)
-**Location:** `src/codegen/expr.rs:718-789`
-**Description:** Struct initialization and field access
-**Use Case:** Organizing related data, hardware register access
-**Priority:** HIGH
-
-```wraith
-struct Point { u8 x, u8 y }
-Point p = Point { x: 10, y: 20 };
-u8 px = p.x;
-```
-
-### 1.4 Enum Operations ⬜
-
-**Status:** ⬜ NOT IMPLEMENTED (needs type infrastructure)
-**Location:** `src/ast/expr.rs:142-147`
-**Description:** Enum variant construction and matching
-**Use Case:** Type-safe state machines, error handling
-**Priority:** HIGH
-
-```wraith
-enum State {
-    Idle,
-    Running { u8 speed },
-    Error { u8 code },
-}
-State s = State::Running { speed: 5 };
-```
-
-### 1.5 Pointer Operations ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/codegen/expr.rs:76-127`
-**Description:** Dereference (`*ptr`) and address-of (`&var`, `&mut var`)
-**Use Case:** Indirect addressing, pointer manipulation, dynamic data structures
-**Priority:** HIGH
-
-```wraith
-*mut u8 ptr = &mut data;
-*ptr = 42;
-```
-
-### 1.6 Array Literals ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/codegen/expr.rs:310-377`
-**Description:** Array initialization syntax: `[1, 2, 3]` and `[0; 10]`
-**Use Case:** Lookup tables, sine tables, tile maps
-**Priority:** HIGH
-
-```wraith
-[u8; 8] lookup = [0, 1, 4, 9, 16, 25, 36, 49];
-[u8; 256] buffer = [0; 256];
-```
-
-### 1.7 Type Casts ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/codegen/expr.rs:912-998`
-**Description:** Explicit type conversions between primitives
-**Use Case:** u8↔u16 conversions, pointer casts
-**Priority:** HIGH
-
-```wraith
-u16 addr = 0xC000;
-u8 high = (addr >> 8) as u8;
-```
-
-### 1.8 Slice Type Support
+### 1.2 Slice Type Support
 
 **Status:** AST complete, minimal codegen
 **Location:** `src/ast/types.rs:51-55`
@@ -134,7 +48,7 @@ fn process(slice: &[u8]) {
 
 **Status:** AST exists, not used in semantic analysis
 **Location:** `src/ast/types.rs:45-49`
-**Description:** Support `[T; N]` array types
+**Description:** Support `[T; N]` array types in full semantic analysis
 **Use Case:** Buffers, lookup tables, stack arrays
 **Priority:** HIGH
 
@@ -154,10 +68,10 @@ fn process(slice: &[u8]) {
 *(ptr + 5) = 42;  // Write to 0xC005
 ```
 
-### 2.3 Named Type Resolution
+### 2.3 Complete Named Type Resolution
 
-**Status:** Incomplete
-**Description:** Full support for struct/enum types in semantic analysis
+**Status:** Incomplete (enums and structs work, but needs more comprehensive type checking)
+**Description:** Full support for struct/enum types throughout semantic analysis
 **Use Case:** Type checking, method resolution
 **Priority:** HIGH
 
@@ -165,37 +79,7 @@ fn process(slice: &[u8]) {
 
 ## 3. Error Handling & Diagnostics
 
-### 3.1 Better Error Messages ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/sema/mod.rs:16-220`, `src/sema/types.rs:50-79`, `src/sema/analyze.rs`
-**Description:** Add detailed error types with context
-**Priority:** HIGH
-
-**Implemented error types:**
-
--   ✅ `UndefinedSymbol { name, span }`
--   ✅ `TypeMismatch { expected, found, span }`
--   ✅ `InvalidBinaryOp { op, left_ty, right_ty, span }`
--   ✅ `InvalidUnaryOp { op, operand_ty, span }`
--   ✅ `ArityMismatch { expected, found, span }`
--   ✅ `ImmutableAssignment { symbol, span }`
--   ✅ `CircularImport { path, chain }`
--   ✅ `ReturnTypeMismatch { expected, found, span }`
--   ✅ `ReturnOutsideFunction { span }`
--   ✅ `BreakOutsideLoop { span }`
--   ✅ `DuplicateSymbol { name, span, previous_span }`
--   ✅ `FieldNotFound { struct_name, field_name, span }`
--   ✅ `ImportError { path, reason, span }`
--   ✅ `OutOfZeroPage { span }`
--   ✅ `Custom { message, span }`
-
-**Additional improvements:**
--   Added `Type::display_name()` method for user-friendly type formatting
--   Error messages now show types as "u8", "bool", etc. instead of "Primitive(U8)"
--   All error creation sites updated to use detailed error types with proper context
-
-### 3.2 Warning System
+### 3.1 Warning System
 
 **Status:** Not implemented
 **Description:** Non-fatal diagnostics for code quality
@@ -209,13 +93,13 @@ fn process(slice: &[u8]) {
 -   Unnecessary zero page allocations
 -   Non-exhaustive match patterns
 
-### 3.3 Error Recovery
+### 3.2 Error Recovery
 
 **Status:** Parser stops at first error
 **Description:** Continue parsing to find multiple errors
 **Priority:** MEDIUM
 
-### 3.4 Source Context in Errors
+### 3.3 Source Context in Errors
 
 **Status:** Only span positions shown
 **Description:** Show source lines with error markers
@@ -244,7 +128,7 @@ if carry { /* handle overflow */ }
 if zero { /* value is zero */ }
 ```
 
-### 4.7 NMI/IRQ/Reset Vectors
+### 4.2 NMI/IRQ/Reset Vectors
 
 **Status:** `#[interrupt]` exists, no vector generation
 **Description:** Automatic interrupt vector table
@@ -265,17 +149,17 @@ fn start() { }
 
 ## 5. Language Features
 
-### 5.1 Constant Expressions ⬜
+### 5.1 Constant Expressions
 
-**Status:** ⬜ NOT IMPLEMENTED (only integer literals)
+**Status:** Constant folding exists, but full const evaluation for addr calculations is incomplete
 **Location:** `src/sema/analyze.rs:102-107`
-**Description:** Compile-time expression evaluation
+**Description:** Compile-time expression evaluation for address declarations
 **Priority:** HIGH
 
 ```wraith
 const BASE = 0xC000;
 const SIZE = 256;
-addr SCREEN = BASE + SIZE;
+addr SCREEN = BASE + SIZE;  // Currently not supported
 ```
 
 ### 5.2 Bitfield Access
@@ -292,7 +176,7 @@ if value.bit(7) { }
 u8 nibble = value.bits[7:4];
 ```
 
-### 5.7 Module System
+### 5.3 Module System
 
 **Status:** Only file imports exist
 **Description:** Proper module hierarchy and visibility
@@ -308,7 +192,7 @@ mod graphics;
 graphics::draw_sprite();
 ```
 
-### 5.8 Public/Private Visibility
+### 5.4 Public/Private Visibility
 
 **Status:** Not implemented
 **Description:** Control symbol visibility
@@ -319,7 +203,7 @@ pub fn public_api() { }
 fn private_impl() { }
 ```
 
-### 5.9 Compound Assignment Operators
+### 5.5 Compound Assignment Operators
 
 **Status:** Tokens exist, not parsed
 **Location:** `src/lexer/mod.rs:128-147`
@@ -334,20 +218,7 @@ x += 5;   // Instead of: x = x + 5;
 
 ## 6. Memory Management
 
-### 6.1 Zero Page Allocation Tracking ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/sema/analyze.rs:25-94` (ZeroPageAllocator)
-**Description:** Track and manage zero page usage
-**Priority:** HIGH
-
-**Issues:**
-
--   No conflict detection
--   Manual address assignment
--   No usage reporting
-
-### 6.2 Memory Section Control
+### 6.1 Memory Section Control
 
 **Status:** Only `#[org]` exists
 **Description:** Control memory layout
@@ -377,9 +248,9 @@ static mut scratch: u8;
 -   `LDA #0; CMP #0` → remove LDA, keep CMP
 -   `LDA x; PHA; PLA` → remove if A not used
 
-### 7.2 Register Allocation ⬜
+### 7.2 Register Allocation
 
-**Status:** ⬜ NOT IMPLEMENTED (everything goes to memory)
+**Status:** Not implemented (everything goes to memory)
 **Description:** Keep hot variables in registers
 **Priority:** HIGH
 
@@ -392,28 +263,7 @@ static mut scratch: u8;
 **Description:** Remove unreachable/unused code
 **Priority:** MEDIUM
 
-### 7.4 Constant Folding ✅
-
-**Status:** ✅ IMPLEMENTED
-**Location:** `src/sema/const_eval.rs`, `src/sema/analyze.rs:489-492`, `src/codegen/expr.rs:18-36`
-**Description:** Evaluate constant expressions at compile time
-**Priority:** HIGH
-
-**Implemented features:**
-- Evaluates arithmetic operations: `+`, `-`, `*`, `/`, `%`
-- Evaluates bitwise operations: `&`, `|`, `^`, `<<`, `>>`
-- Evaluates comparison operations: `==`, `!=`, `<`, `<=`, `>`, `>=`
-- Evaluates logical operations: `&&`, `||`
-- Evaluates unary operations: `-`, `~`, `!`
-- Handles nested expressions
-- Integration with codegen for optimized output
-
-```wraith
-u8 x = 2 + 3;  // Generates: LDA #5 (folded at compile time)
-u16 addr = 0xC000 + 256;  // Generates: LDA #$00; LDX #$C1 (folded)
-```
-
-### 7.5 Strength Reduction
+### 7.4 Strength Reduction
 
 **Status:** Not implemented
 **Description:** Replace expensive ops with cheaper equivalents
@@ -425,7 +275,7 @@ u16 addr = 0xC000 + 256;  // Generates: LDA #$00; LDX #$C1 (folded)
 -   `x / 256` → use high byte
 -   `x % 256` → use low byte
 
-### 7.6 Branch Optimization
+### 7.5 Branch Optimization
 
 **Status:** Not implemented
 **Description:** Use optimal branching strategies
@@ -437,7 +287,7 @@ u16 addr = 0xC000 + 256;  // Generates: LDA #$00; LDX #$C1 (folded)
 -   Reorder conditions for fewer branches
 -   Convert `if !x` to optimal flag check
 
-### 7.7 Inline Expansion
+### 7.6 Inline Expansion
 
 **Status:** `#[inline]` exists but not enforced
 **Location:** `src/ast/item.rs:18`
@@ -450,8 +300,8 @@ u16 addr = 0xC000 + 256;  // Generates: LDA #$00; LDX #$C1 (folded)
 
 ### 8.1 Comprehensive Test Suite
 
-**Status:** Only 3 small tests
-**Location:** `tests/*.wr`
+**Status:** Partial - 51 tests exist but need more coverage
+**Location:** `tests/*.rs`
 **Description:** Full test coverage of language features
 **Priority:** HIGH
 
@@ -554,7 +404,7 @@ u8 random_range(min, max);
 
 ## 11. Testing & Quality
 
-### 11.3 Integration Tests
+### 11.1 Integration Tests
 
 **Status:** Minimal
 **Description:** Full programs that compile and run
@@ -602,35 +452,44 @@ u8 random_range(min, max);
 **Description:** Swallowing detailed error information
 **Priority:** MEDIUM
 
+### 12.5 Parser Issues
+
+**Status:** Known issues
+**Description:**
+-   Enum patterns in match statements don't parse (expects single colon instead of double colon)
+-   Named type variable declarations require lookahead disambiguation
+
+**Priority:** MEDIUM
+
 ---
 
 ## Priority Matrix
 
 ### HIGH Priority (Implement Soon)
 
-1. ✅ Match statements - critical for state machines
-2. 🔶 Struct/enum codegen - language feels incomplete (struct field access done, init/enums partial)
-3. ✅ Better error messages - detailed error types with user-friendly formatting
-4. ✅ Pointer operations - essential for 6502
-5. ✅ Array literals - lookup tables everywhere
-6. ⬜ Constant expressions - needed for addr calculations
-7. ✅ Type casts - u8↔u16 conversions common
-8. ✅ Zero page allocation tracking - prevent conflicts
-9. ⬜ Register allocation - performance critical
-10. ✅ Constant folding - compile-time expression evaluation
+1. ⬜ Constant expressions - needed for addr calculations
+2. ⬜ Register allocation - performance critical
+3. ⬜ Fixed-size array types - complete semantic support
+4. ⬜ Complete named type resolution
+5. ⬜ Source context in error messages
+6. ⬜ Memory functions (memcpy, etc.)
+7. ⬜ Comprehensive test suite
+8. ⬜ Language reference documentation
+9. ⬜ Fix code quality issues (static mut, magic numbers)
 
 ### MEDIUM Priority (Nice to Have)
 
-11. ⬜ ForEach loops
-12. ⬜ Module system with visibility
-13. ⬜ Volatile memory access
-14. ⬜ Compound assignment operators
-15. ⬜ Peephole optimization
-16. ⬜ Warning system
-17. ⬜ Memory section control
-18. ⬜ Standard library (memcpy, etc.)
-19. ⬜ NMI/IRQ vector generation
-20. ⬜ Build system
+10. ⬜ ForEach loops
+11. ⬜ Module system with visibility
+12. ⬜ Compound assignment operators
+13. ⬜ Peephole optimization
+14. ⬜ Warning system
+15. ⬜ Memory section control
+16. ⬜ NMI/IRQ vector generation
+17. ⬜ Parser improvements (enum patterns, lookahead)
+18. ⬜ Slice type support
+19. ⬜ Pointer arithmetic
+20. ⬜ CPU flags access
 
 ### LOW Priority (Future)
 
@@ -642,13 +501,25 @@ u8 random_range(min, max);
 
 ---
 
+## Recently Completed (2025-12-20)
+
+✅ **Match Statements** - Pattern matching with literals, ranges, wildcards, and enum variants
+✅ **Struct Operations** - Complete with initialization, field access, and memory layout
+✅ **Enum Operations** - Type definitions, variant construction, and match statement codegen
+✅ **Pointer Operations** - Dereference and address-of operators
+✅ **Array Literals** - Array initialization with `[1, 2, 3]` and `[0; 10]` syntax
+✅ **Type Casts** - Explicit conversions between primitive types
+✅ **Better Error Messages** - Detailed error types with user-friendly formatting
+✅ **Zero Page Allocation Tracking** - Conflict detection and management
+✅ **Constant Folding** - Compile-time expression evaluation and optimization
+
+---
+
 ## Notes
 
--   The language has a solid foundation with lexer, parser, AST, semantic analysis, and basic codegen
--   Many features are "80% done" - they parse but don't generate code
--   Focus on completing existing AST features before adding new ones
--   Error messages need significant improvement for good developer experience
--   6502-specific optimizations are critical for performance
+-   The language has a solid foundation with lexer, parser, AST, semantic analysis, and codegen
+-   Core features are now complete: structs, enums, match statements, constant folding
+-   Focus should shift to optimization (register allocation), developer experience (error messages), and standard library
 -   Consider which features align with the target use cases (games, embedded systems, retro computing)
 
 ---
