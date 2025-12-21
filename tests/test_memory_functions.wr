@@ -1,0 +1,60 @@
+// Test program for standard library memory functions
+// This demonstrates memcpy, memset, and memcmp functionality
+
+// Memory-mapped test regions
+addr TEST_SRC = 0xC000;   // Source buffer for memcpy test
+addr TEST_DEST = 0xC100;  // Destination buffer for memcpy test
+addr TEST_BUF = 0xC200;   // Buffer for memset test
+
+// Import memory functions from std library
+import {memcpy, memset, memcmp} from "std.wr";
+
+fn test_memset() {
+    // Fill 10 bytes with value 0x42
+    u16 buf_addr = 49664 as u16;  // 0xC200
+    memset(buf_addr, 0x42, 10);
+
+    // Verify first byte
+    if TEST_BUF == 0x42 {
+        // Success marker
+        TEST_DEST = 0xFF;
+    }
+}
+
+fn test_memcpy() {
+    // Set up source data (just first byte for simplicity)
+    TEST_SRC = 0x11;
+
+    // Copy 1 byte
+    u16 src_addr = 49152 as u16;   // 0xC000
+    u16 dest_addr = 49408 as u16;  // 0xC100
+    memcpy(dest_addr, src_addr, 1);
+
+    // Verify first byte was copied
+    if TEST_DEST == 0x11 {
+        // Success marker
+        TEST_BUF = 0xAA;
+    }
+}
+
+fn test_memcmp() {
+    // Set up two identical regions
+    TEST_SRC = 0x55;
+    TEST_DEST = 0x55;
+
+    // Compare 1 byte - should be equal
+    u16 src_addr = 49152 as u16;   // 0xC000
+    u16 dest_addr = 49408 as u16;  // 0xC100
+    u8 result = memcmp(src_addr, dest_addr, 1);
+
+    if result == 1 {
+        // Success marker - they matched
+        TEST_BUF = 0xBB;
+    }
+}
+
+fn main() {
+    test_memset();
+    test_memcpy();
+    test_memcmp();
+}

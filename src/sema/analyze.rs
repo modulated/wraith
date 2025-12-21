@@ -140,6 +140,14 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// Get the standard library path
+    /// Checks WRAITH_STD_PATH environment variable, falls back to ./std
+    fn get_std_lib_path() -> PathBuf {
+        std::env::var("WRAITH_STD_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("std"))
+    }
+
     pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
         // First pass: Register all global items (functions, statics, structs)
         for item in &source.items {
@@ -264,11 +272,28 @@ impl SemanticAnalyzer {
     }
 
     fn process_import(&mut self, import: &crate::ast::Import) -> Result<(), SemaError> {
-        // Resolve the import path relative to the base path
-        let import_path = if let Some(base) = &self.base_path {
-            base.parent().unwrap_or(base).join(&import.path.node)
+        // Resolve the import path
+        let import_str = &import.path.node;
+        let import_path = if import_str.starts_with("./") || import_str.starts_with("../") {
+            // Relative import - resolve relative to the current file's directory
+            if let Some(base) = &self.base_path {
+                base.parent().unwrap_or(base).join(import_str)
+            } else {
+                PathBuf::from(import_str)
+            }
         } else {
-            PathBuf::from(&import.path.node)
+            // Non-relative import - search in standard library directory first
+            let std_path = Self::get_std_lib_path().join(import_str);
+            if std_path.exists() {
+                std_path
+            } else {
+                // Fall back to current directory or relative to base path
+                if let Some(base) = &self.base_path {
+                    base.parent().unwrap_or(base).join(import_str)
+                } else {
+                    PathBuf::from(import_str)
+                }
+            }
         };
 
         // Check if we've already imported this file to avoid circular imports
@@ -281,7 +306,7 @@ impl SemanticAnalyzer {
         let source = std::fs::read_to_string(&import_path)
             .map_err(|e| SemaError::ImportError {
                 path: import.path.node.clone(),
-                reason: format!("failed to read file: {}", e),
+                reason: format!("failed to import '{}': {}", import.path.node, e),
                 span: import.path.span,
             })?;
 
