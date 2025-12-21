@@ -142,39 +142,54 @@ impl Parser<'_> {
         self.expect(&Token::Hash)?;
         self.expect(&Token::LBracket)?;
 
-        let name = self.expect_ident()?;
-
-        let attr = match name.node.as_str() {
-            "inline" => FnAttribute::Inline,
-            "noreturn" => FnAttribute::NoReturn,
-            "interrupt" => FnAttribute::Interrupt,
-            "org" => {
-                self.expect(&Token::LParen)?;
-                let addr = match self.peek().cloned() {
-                    Some(Token::Integer(n)) => {
-                        self.advance();
-                        n as u16
+        // Handle both identifiers and keywords as attribute names
+        let attr = match self.peek().cloned() {
+            Some(Token::Inline) => {
+                self.advance();
+                FnAttribute::Inline
+            }
+            Some(Token::Ident(name)) => {
+                let name_span = self.current_span();
+                self.advance();
+                match name.as_str() {
+                    "noreturn" => FnAttribute::NoReturn,
+                    "interrupt" => FnAttribute::Interrupt,
+                    "org" => {
+                        self.expect(&Token::LParen)?;
+                        let addr = match self.peek().cloned() {
+                            Some(Token::Integer(n)) => {
+                                self.advance();
+                                n as u16
+                            }
+                            tok => {
+                                return Err(ParseError::unexpected_token(
+                                    self.current_span(),
+                                    "address",
+                                    tok,
+                                ));
+                            }
+                        };
+                        self.expect(&Token::RParen)?;
+                        FnAttribute::Org(addr)
                     }
-                    tok => {
-                        return Err(ParseError::unexpected_token(
-                            self.current_span(),
-                            "address",
-                            tok,
+                    "zp_section" => {
+                        // This is a struct attribute, but we return it as NoReturn for now
+                        // In a real impl, we'd have separate attribute types
+                        FnAttribute::NoReturn
+                    }
+                    other => {
+                        return Err(ParseError::custom(
+                            name_span,
+                            format!("unknown attribute: {}", other),
                         ));
                     }
-                };
-                self.expect(&Token::RParen)?;
-                FnAttribute::Org(addr)
+                }
             }
-            "zp_section" => {
-                // This is a struct attribute, but we return it as NoReturn for now
-                // In a real impl, we'd have separate attribute types
-                FnAttribute::NoReturn
-            }
-            other => {
-                return Err(ParseError::custom(
-                    name.span,
-                    format!("unknown attribute: {}", other),
+            tok => {
+                return Err(ParseError::unexpected_token(
+                    self.current_span(),
+                    "attribute name",
+                    tok,
                 ));
             }
         };

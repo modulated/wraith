@@ -1,0 +1,59 @@
+// Wraith Standard Library
+// Memory manipulation functions optimized for 6502
+
+/// Copy memory from source to destination
+/// - dest: Destination pointer address
+/// - src: Source pointer address
+/// - len: Number of bytes to copy
+///
+/// Note: Uses indexed addressing with dest/src as base addresses
+fn memcpy(dest: u16, src: u16, len: u8) {
+    // For simplicity in this demo, we use inline assembly
+    asm {
+        "LDY #$00"
+        "loop_memcpy:"
+        "LDA {src},Y"
+        "STA {dest},Y"
+        "INY"
+        "CPY {len}"
+        "BNE loop_memcpy"
+    }
+}
+
+/// Fill memory with a constant byte value
+/// - dest: Destination address
+/// - value: Byte value to fill with
+/// - len: Number of bytes to fill
+fn memset(dest: u16, value: u8, len: u8) {
+    asm {
+        "LDA {value}"
+        "LDY #$00"
+        "loop_memset:"
+        "STA {dest},Y"
+        "INY"
+        "CPY {len}"
+        "BNE loop_memset"
+    }
+}
+
+/// Compare two memory regions for equality
+/// - a: First memory region address
+/// - b: Second memory region address
+/// - len: Number of bytes to compare
+/// Returns: 1 if equal, 0 if not equal (as u8 for simplicity)
+fn memcmp(a: u16, b: u16, len: u8) -> u8 {
+    asm {
+        "LDY #$00"
+        "loop_memcmp:"
+        "LDA {a},Y"
+        "CMP {b},Y"
+        "BNE not_equal"
+        "INY"
+        "CPY {len}"
+        "BNE loop_memcmp"
+        "LDA #$01"
+        "RTS"
+        "not_equal:"
+        "LDA #$00"
+    }
+}

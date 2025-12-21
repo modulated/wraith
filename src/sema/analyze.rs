@@ -692,6 +692,32 @@ impl SemanticAnalyzer {
                 let left_ty = self.check_expr(left)?;
                 let right_ty = self.check_expr(right)?;
 
+                use crate::ast::BinaryOp;
+
+                // Special handling for pointer arithmetic
+                match (&left_ty, op, &right_ty) {
+                    // Pointer + Integer or Integer + Pointer
+                    (Type::Pointer(..), BinaryOp::Add, Type::Primitive(_))
+                    | (Type::Primitive(_), BinaryOp::Add, Type::Pointer(..)) => {
+                        // Return the pointer type
+                        if matches!(left_ty, Type::Pointer(..)) {
+                            return Ok(left_ty);
+                        } else {
+                            return Ok(right_ty);
+                        }
+                    }
+                    // Pointer - Integer
+                    (Type::Pointer(..), BinaryOp::Sub, Type::Primitive(_)) => {
+                        return Ok(left_ty);
+                    }
+                    // Pointer - Pointer (returns offset as integer)
+                    (Type::Pointer(..), BinaryOp::Sub, Type::Pointer(..)) => {
+                        return Ok(Type::Primitive(crate::ast::PrimitiveType::U16));
+                    }
+                    _ => {}
+                }
+
+                // Standard case: both operands must have the same type
                 if left_ty != right_ty {
                     return Err(SemaError::InvalidBinaryOp {
                         op: format!("{:?}", op),
@@ -702,7 +728,6 @@ impl SemanticAnalyzer {
                 }
 
                 // Comparison and logical operators return Bool
-                use crate::ast::BinaryOp;
                 match op {
                     BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le
                     | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or => {
