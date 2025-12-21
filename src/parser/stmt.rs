@@ -12,17 +12,8 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Variable declaration: type name = expr; or mut type name = expr;
+            // Variable declaration with modifiers: mut name: type = expr; or zp name: type = expr;
             Some(Token::Mut) | Some(Token::Zp) => self.parse_var_decl(),
-
-            // Type-prefixed variable declaration: u8 x = 42;
-            Some(Token::U8)
-            | Some(Token::I8)
-            | Some(Token::U16)
-            | Some(Token::I16)
-            | Some(Token::Bool)
-            | Some(Token::LBracket)
-            | Some(Token::Star) => self.parse_var_decl(),
 
             // Control flow
             Some(Token::If) => self.parse_if_stmt(),
@@ -53,12 +44,22 @@ impl Parser<'_> {
             // Block
             Some(Token::LBrace) => self.parse_block(),
 
+            // Identifier - could be variable declaration (name: type = ...) or expression/assignment
+            Some(Token::Ident(_)) => {
+                // Lookahead to check if this is a variable declaration
+                if self.peek_ahead(1) == Some(&Token::Colon) {
+                    self.parse_var_decl()
+                } else {
+                    self.parse_expr_or_assign_stmt()
+                }
+            }
+
             // Expression statement or assignment
             _ => self.parse_expr_or_assign_stmt(),
         }
     }
 
-    /// Parse variable declaration
+    /// Parse variable declaration: name: type = expr; or mut name: type = expr;
     fn parse_var_decl(&mut self) -> ParseResult<Spanned<Stmt>> {
         let start = self.current_span();
 
@@ -73,11 +74,14 @@ impl Parser<'_> {
             self.advance();
         }
 
-        // Parse type
-        let ty = self.parse_type()?;
-
         // Parse name
         let name = self.expect_ident()?;
+
+        // Expect colon
+        self.expect(&Token::Colon)?;
+
+        // Parse type
+        let ty = self.parse_type()?;
 
         // Parse initializer
         self.expect(&Token::Eq)?;

@@ -37,6 +37,11 @@ impl<'a> Parser<'a> {
         self.tokens.get(self.pos).map(|t| &t.token)
     }
 
+    /// Peek ahead at a future token (n=1 is next token, n=2 is token after that, etc.)
+    fn peek_ahead(&self, n: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + n).map(|t| &t.token)
+    }
+
     /// Advance to the next token
     fn advance(&mut self) {
         if self.pos < self.tokens.len() {

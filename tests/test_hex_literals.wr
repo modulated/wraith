@@ -4,17 +4,17 @@ addr TEST_OUTPUT = 0xC000;
 
 fn main() {
     // Hex literals for u8
-    u8 a = 0x40;
-    u8 b = 0xFF;
-    u8 c = 0x00;
+    a: u8 = 0x40;
+    b: u8 = 0xFF;
+    c: u8 = 0x00;
 
     // Hex literals for u16
-    u16 x = 0xFA00;
-    u16 y = 0x1234;
-    u16 z = 0xABCD;
+    x: u16 = 0xFA00;
+    y: u16 = 0x1234;
+    z: u16 = 0xABCD;
 
     // Binary literals
-    u8 flags = 0b11010010;
+    flags: u8 = 0b11010010;
 
     // Mixed usage
     if a == 0x40 {

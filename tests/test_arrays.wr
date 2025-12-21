@@ -5,10 +5,10 @@ addr TEST_OUTPUT = 0xC000;
 
 fn main() {
     // Fixed-size array variable with zero initializer
-    [u8; 5] buffer = [0; 5];
+    buffer: [u8; 5] = [0; 5];
 
     // Alternative: explicit array literal
-    [u8; 3] values = [1, 2, 3];
+    values: [u8; 3] = [1, 2, 3];
 
     // Test that the declaration was accepted
     TEST_OUTPUT = 0xAA;

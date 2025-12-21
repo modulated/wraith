@@ -1,0 +1,17 @@
+// Test new variable declaration syntax: name: type = value
+
+addr TEST_OUTPUT = 0xC000;
+
+fn main() {
+    // New consistent syntax
+    x: u8 = 10;
+    y: u16 = 0xFA00;
+
+    // Arrays
+    buffer: [u8; 4] = [1, 2, 3, 4];
+
+    // Test it works
+    if x == 10 {
+        TEST_OUTPUT = 0xFF;
+    }
+}

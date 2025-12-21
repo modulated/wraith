@@ -11,7 +11,7 @@ import {memcpy, memset, memcmp} from "std.wr";
 
 fn test_memset() {
     // Fill 10 bytes with value 0x42
-    u16 buf_addr = 49664 as u16;  // 0xC200
+    buf_addr: u16 = 49664 as u16;  // 0xC200
     memset(buf_addr, 0x42, 10);
 
     // Verify first byte
@@ -26,8 +26,8 @@ fn test_memcpy() {
     TEST_SRC = 0x11;
 
     // Copy 1 byte
-    u16 src_addr = 49152 as u16;   // 0xC000
-    u16 dest_addr = 49408 as u16;  // 0xC100
+    src_addr: u16 = 49152 as u16;   // 0xC000
+    dest_addr: u16 = 49408 as u16;  // 0xC100
     memcpy(dest_addr, src_addr, 1);
 
     // Verify first byte was copied
@@ -43,9 +43,9 @@ fn test_memcmp() {
     TEST_DEST = 0x55;
 
     // Compare 1 byte - should be equal
-    u16 src_addr = 49152 as u16;   // 0xC000
-    u16 dest_addr = 49408 as u16;  // 0xC100
-    u8 result = memcmp(src_addr, dest_addr, 1);
+    src_addr: u16 = 49152 as u16;   // 0xC000
+    dest_addr: u16 = 49408 as u16;  // 0xC100
+    result: u8 = memcmp(src_addr, dest_addr, 1);
 
     if result == 1 {
         // Success marker - they matched
