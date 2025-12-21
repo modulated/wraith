@@ -57,6 +57,76 @@ impl Span {
             format!("{}:{}..{}:{}", start.line, start.col, end.line, end.col)
         }
     }
+
+    /// Format error with source context showing the actual line and error marker
+    ///
+    /// Example output:
+    /// ```text
+    ///   --> test.wr:10:5
+    ///    |
+    /// 10 |     LED = "hello";
+    ///    |           ^^^^^^^ expected u8, found string
+    /// ```
+    pub fn format_error_context(&self, source: &str, filename: Option<&str>, message: &str) -> String {
+        let pos = self.to_line_col(source);
+        let end_pos = offset_to_line_col(source, self.end.saturating_sub(1).max(self.start));
+
+        // Get the line containing the error
+        let line_text = get_line(source, pos.line);
+
+        // Calculate width for line numbers (for alignment)
+        let line_num_width = pos.line.to_string().len().max(3);
+
+        // Create the header (filename:line:col)
+        let header = if let Some(fname) = filename {
+            format!("  --> {}:{}:{}", fname, pos.line, pos.col)
+        } else {
+            format!("  --> {}:{}", pos.line, pos.col)
+        };
+
+        // Create the gutter separator
+        let gutter = format!("{:>width$} |", "", width = line_num_width);
+
+        // Create the line with line number
+        let source_line = format!("{:>width$} | {}", pos.line, line_text, width = line_num_width);
+
+        // Create the error marker (^^^ underline)
+        let marker = if pos.line == end_pos.line {
+            // Single line error - draw underline
+            let start_col = pos.col;
+            let end_col = end_pos.col;
+            let underline_len = (end_col - start_col + 1).max(1);
+
+            // Calculate padding (accounting for line number and separator)
+            let padding = start_col - 1;
+            let marker_line = format!("{} {}{} {}",
+                gutter,
+                " ".repeat(padding),
+                "^".repeat(underline_len),
+                message
+            );
+            marker_line
+        } else {
+            // Multi-line error - just mark the start
+            let padding = pos.col - 1;
+            let marker_line = format!("{} {}^ {}",
+                gutter,
+                " ".repeat(padding),
+                message
+            );
+            marker_line
+        };
+
+        format!("{}\n{}\n{}\n{}", header, gutter, source_line, marker)
+    }
+}
+
+/// Get a specific line from source code (1-indexed)
+fn get_line(source: &str, line_num: usize) -> &str {
+    source
+        .lines()
+        .nth(line_num.saturating_sub(1))
+        .unwrap_or("")
 }
 
 /// Convert byte offset to line and column (1-indexed)

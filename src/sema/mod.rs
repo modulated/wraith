@@ -116,113 +116,83 @@ pub enum SemaError {
 }
 
 impl SemaError {
-    /// Format error with source code context (line:col instead of byte offsets)
+    /// Format error with source code context showing the actual line and error marker
     pub fn format_with_source(&self, source: &str) -> String {
+        self.format_with_source_and_file(source, None)
+    }
+
+    /// Format error with source code context and filename
+    pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
         match self {
             SemaError::UndefinedSymbol { name, span } => {
-                format!("undefined symbol '{}' at {}", name, span.format_position(source))
+                let msg = format!("undefined symbol '{}'", name);
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
             SemaError::TypeMismatch { expected, found, span } => {
-                format!(
-                    "type mismatch at {}: expected {}, found {}",
-                    span.format_position(source),
-                    expected,
-                    found
-                )
+                let msg = format!("expected {}, found {}", expected, found);
+                format!("error: type mismatch\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::InvalidBinaryOp { op, left_ty, right_ty, span } => {
-                format!(
-                    "invalid binary operation '{}' at {}: cannot apply to types {} and {}",
-                    op,
-                    span.format_position(source),
-                    left_ty,
-                    right_ty
-                )
+                let msg = format!("cannot apply '{}' to types {} and {}", op, left_ty, right_ty);
+                format!("error: invalid binary operation\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::InvalidUnaryOp { op, operand_ty, span } => {
-                format!(
-                    "invalid unary operation '{}' at {}: cannot apply to type {}",
-                    op,
-                    span.format_position(source),
-                    operand_ty
-                )
+                let msg = format!("cannot apply '{}' to type {}", op, operand_ty);
+                format!("error: invalid unary operation\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::ArityMismatch { expected, found, span } => {
-                format!(
-                    "function call at {}: expected {} argument(s), found {}",
-                    span.format_position(source),
-                    expected,
-                    found
-                )
+                let msg = format!("expected {} argument(s), found {}", expected, found);
+                format!("error: function call\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::ImmutableAssignment { symbol, span } => {
-                format!(
-                    "cannot assign to immutable variable '{}' at {}",
-                    symbol,
-                    span.format_position(source)
-                )
+                let msg = format!("cannot assign to immutable variable '{}'", symbol);
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
             SemaError::CircularImport { path, chain } => {
                 format!(
-                    "circular import detected: {} -> {}",
+                    "error: circular import detected: {} -> {}",
                     chain.join(" -> "),
                     path
                 )
             }
             SemaError::ReturnTypeMismatch { expected, found, span } => {
-                format!(
-                    "return type mismatch at {}: expected {}, found {}",
-                    span.format_position(source),
-                    expected,
-                    found
-                )
+                let msg = format!("expected {}, found {}", expected, found);
+                format!("error: return type mismatch\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::ReturnOutsideFunction { span } => {
-                format!("return statement outside function at {}", span.format_position(source))
+                let msg = "return statement outside function".to_string();
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
             SemaError::BreakOutsideLoop { span } => {
-                format!("break/continue outside loop at {}", span.format_position(source))
+                let msg = "break/continue outside loop".to_string();
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
             SemaError::DuplicateSymbol { name, span, previous_span } => {
-                if let Some(prev) = previous_span {
+                let msg = if let Some(prev) = previous_span {
                     format!(
-                        "duplicate symbol '{}' at {} (previously defined at {})",
+                        "duplicate symbol '{}' (previously defined at {})",
                         name,
-                        span.format_position(source),
                         prev.format_position(source)
                     )
                 } else {
-                    format!(
-                        "duplicate symbol '{}' at {}",
-                        name,
-                        span.format_position(source)
-                    )
-                }
+                    format!("duplicate symbol '{}'", name)
+                };
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
             SemaError::FieldNotFound { struct_name, field_name, span } => {
-                format!(
-                    "field '{}' not found in struct '{}' at {}",
-                    field_name,
-                    struct_name,
-                    span.format_position(source)
-                )
+                let msg = format!("field '{}' not found in struct '{}'", field_name, struct_name);
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
             SemaError::ImportError { path, reason, span } => {
-                format!(
-                    "import error at {}: failed to import '{}': {}",
-                    span.format_position(source),
-                    path,
-                    reason
-                )
+                let msg = format!("failed to import '{}': {}", path, reason);
+                format!("error: import error\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::OutOfZeroPage { span } => {
-                format!(
-                    "out of zero page memory at {}: no more zero page addresses available",
-                    span.format_position(source)
-                )
+                let msg = "no more zero page addresses available".to_string();
+                format!("error: out of zero page memory\n{}", span.format_error_context(source, filename, &msg))
             }
             SemaError::Custom { message, span } => {
-                format!("{} at {}", message, span.format_position(source))
+                format!("error: {}\n{}", message, span.format_error_context(source, filename, message))
             }
         }
     }

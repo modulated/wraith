@@ -55,34 +55,40 @@ impl ParseError {
         }
     }
 
-    /// Format error with source code context (line:col instead of byte offsets)
+    /// Format error with source code context showing the actual line and error marker
     pub fn format_with_source(&self, source: &str) -> String {
-        match &self.kind {
+        self.format_with_source_and_file(source, None)
+    }
+
+    /// Format error with source code context and filename
+    pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
+        let (error_type, message) = match &self.kind {
             ParseErrorKind::UnexpectedToken { expected, found } => {
                 let found_str = match found {
                     Some(tok) => format_token(tok),
                     None => "end of file".to_string(),
                 };
-                format!(
-                    "expected {}, found {} at {}",
-                    expected,
-                    found_str,
-                    self.span.format_position(source)
-                )
+                ("error", format!("expected {}, found {}", expected, found_str))
             }
             ParseErrorKind::UnexpectedEof { expected } => {
-                format!("unexpected end of file, expected {}", expected)
+                ("error", format!("unexpected end of file, expected {}", expected))
             }
             ParseErrorKind::InvalidInteger(s) => {
-                format!("invalid integer: {} at {}", s, self.span.format_position(source))
+                ("error", format!("invalid integer: {}", s))
             }
             ParseErrorKind::InvalidType(s) => {
-                format!("invalid type: {} at {}", s, self.span.format_position(source))
+                ("error", format!("invalid type: {}", s))
             }
             ParseErrorKind::Custom(msg) => {
-                format!("{} at {}", msg, self.span.format_position(source))
+                ("error", msg.clone())
             }
-        }
+        };
+
+        format!("{}: {}\n{}",
+            error_type,
+            message,
+            self.span.format_error_context(source, filename, &message)
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 pub mod emitter;
 pub mod expr;
 pub mod item;
+pub mod memory_layout;
 pub mod stmt;
 
 use crate::ast::SourceFile;

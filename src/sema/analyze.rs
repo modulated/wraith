@@ -3,7 +3,7 @@
 //! Traverses the AST to populate the symbol table and perform type checking.
 
 use crate::ast::{Expr, Function, Item, SourceFile, Spanned, Stmt, TypeExpr};
-use crate::sema::const_eval::{eval_const_expr, ConstValue};
+use crate::sema::const_eval::{eval_const_expr, eval_const_expr_with_env, ConstEnv, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
 use crate::sema::type_defs::TypeRegistry;
 use crate::sema::types::Type;
@@ -24,6 +24,7 @@ pub struct SemanticAnalyzer {
     base_path: Option<PathBuf>,
     imported_files: HashSet<PathBuf>,
     zp_allocator: ZeroPageAllocator,
+    const_env: ConstEnv,
 }
 
 /// Zero page memory allocator
@@ -120,6 +121,7 @@ impl SemanticAnalyzer {
             base_path: None,
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
+            const_env: ConstEnv::new(),
         }
     }
 
@@ -135,6 +137,7 @@ impl SemanticAnalyzer {
             base_path: Some(base_path),
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
+            const_env: ConstEnv::new(),
         }
     }
 
@@ -191,6 +194,19 @@ impl SemanticAnalyzer {
             }
             Item::Static(stat) => {
                 let name = stat.name.node.clone();
+
+                // If it's a non-mutable static (const), evaluate it and add to const_env
+                if !stat.mutable {
+                    match eval_const_expr_with_env(&stat.init, &self.const_env) {
+                        Ok(val) => {
+                            self.const_env.insert(name.clone(), val);
+                        }
+                        Err(_) => {
+                            // If it's not a constant expression, that's okay - just don't add to const_env
+                        }
+                    }
+                }
+
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Constant,
@@ -203,14 +219,28 @@ impl SemanticAnalyzer {
             Item::Address(addr) => {
                 let name = addr.name.node.clone();
 
-                // Evaluate the address expression to get the actual address
-                let address = if let Expr::Literal(crate::ast::Literal::Integer(val)) = &addr.address.node {
-                    *val as u16
-                } else {
-                    // For now, default to 0 for non-literal addresses
-                    // TODO: Support constant expressions
-                    0
+                // Evaluate the address expression as a constant, using the const environment
+                let address = match eval_const_expr_with_env(&addr.address, &self.const_env) {
+                    Ok(ConstValue::Integer(val)) => {
+                        if !(0..=0xFFFF).contains(&val) {
+                            return Err(SemaError::Custom {
+                                message: format!("address value {} out of range (must be 0-65535)", val),
+                                span: addr.address.span,
+                            });
+                        }
+                        val as u16
+                    }
+                    Ok(_) => {
+                        return Err(SemaError::Custom {
+                            message: "address must evaluate to an integer".to_string(),
+                            span: addr.address.span,
+                        });
+                    }
+                    Err(e) => return Err(e),
                 };
+
+                // Add the resolved address value to const_env for future references
+                self.const_env.insert(name.clone(), ConstValue::Integer(address as i64));
 
                 let info = SymbolInfo {
                     name: name.clone(),

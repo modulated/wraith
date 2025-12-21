@@ -4,10 +4,10 @@ A C-like systems programming language designed specifically for the 6502 process
 
 ## Design Philosophy
 
-- **Simple and Explicit**: No type inference, explicit mutability, clear syntax
-- **6502-Optimized**: Zero page hints, efficient calling convention, minimal overhead
-- **Memory-Conscious**: Direct control over memory layout and access patterns
-- **No Runtime Overhead**: Compile-time features only, no garbage collection
+-   **Simple and Explicit**: No type inference, explicit mutability, clear syntax
+-   **6502-Optimized**: Zero page hints, efficient calling convention, minimal overhead
+-   **Memory-Conscious**: Direct control over memory layout and access patterns
+-   **No Runtime Overhead**: Compile-time features only, no garbage collection
 
 ## Basic Types
 
@@ -23,21 +23,21 @@ bool    // Boolean (actually u8: 0 or 1)
 
 ### Type Characteristics
 
-- All types must be explicitly declared
-- No type inference
-- No implicit conversions (must use `as` keyword)
+-   All types must be explicitly declared
+-   No type inference
+-   No implicit conversions (must use `as` keyword)
 
 ## Variables
 
 ### Declaration Syntax
 
 ```
-u8 x = 42;
-i16 delta = -500;
-bool flag = true;
+x: u8 = 42;
+delta: i16 = -500;
+flag: bool = true;
 ```
 
-### Mutability
+### Mutability (Unstable - may need to fix syntax)
 
 ```
 u8 immutable = 10;           // Cannot be changed
@@ -90,11 +90,11 @@ fn irq_handler() {
 
 **Zero Page Convention:**
 
-- `$02-$0F`: Function arguments (14 bytes)
-- `$10-$1F`: Return values (16 bytes)
-- `$20-$3F`: Caller-saved temporaries (32 bytes)
-- `$40-$7F`: Callee-saved locals (64 bytes)
-- Hardware stack (`$0100-$01FF`): Only JSR/RTS return addresses
+-   `$02-$0F`: Function arguments (14 bytes)
+-   `$10-$1F`: Return values (16 bytes)
+-   `$20-$3F`: Caller-saved temporaries (32 bytes)
+-   `$40-$7F`: Callee-saved locals (64 bytes)
+-   Hardware stack (`$0100-$01FF`): Only JSR/RTS return addresses
 
 **Example:**
 
@@ -117,13 +117,13 @@ Wraith provides a dedicated syntax for declaring memory-mapped I/O addresses. Th
 
 ```
 // Read-write address (default)
-addr SCREEN = 0x0400;
+SCREEN: addr = 0x0400;
 
 // Read-only address (compiler error on write)
-addr read RASTER = 0xD012;
+RASTER: addr read = 0xD012;
 
 // Write-only address (compiler error on read)
-addr write BORDER = 0xD020;
+BORDER: addr write = 0xD020;
 ```
 
 ### Usage
@@ -146,14 +146,14 @@ fn update_screen() {
 
 ```
 struct Point {
-    u8 x,
-    u8 y,
+    x: u8,
+    y: u8,
 }
 
 struct Entity {
-    Point position,
-    u8 health,
-    u16 score,
+    position: Point,
+    health: u8,
+    score: u16,
 }
 ```
 
@@ -161,10 +161,10 @@ struct Entity {
 
 ```
 Point p = Point { x: 10, y: 20 };
-mut Point p2 = Point { x: 5, y: 5 };
+p2: Point = Point { x: 5, y: 5 };
 p2.x = 15;
 
-u8 x_coord = p.x;
+x_coord: u8 = p.x;
 ```
 
 ### Attributes
@@ -172,8 +172,8 @@ u8 x_coord = p.x;
 ```
 #[zp_section]
 struct FastData {
-    u8 counter,
-    u8 temp,
+    counter: u8,
+    temp: u8,
 }
 ```
 
@@ -207,31 +207,31 @@ Message msg = Message::Move { x: 10, y: 20 };
 
 **Memory Layout:**
 
-- First byte: tag (which variant)
-- Following bytes: variant data
-- Total size: 1 + max(variant sizes)
+-   First byte: tag (which variant)
+-   Following bytes: variant data
+-   Total size: 1 + max(variant sizes)
 
 ## Arrays and Slices
 
 ### Fixed Arrays
 
 ```
-[u8; 10] buffer = [0; 10];           // 10 bytes, all zeros
-[u16; 5] data = [100, 200, 300, 400, 500];
+buffer: [u8; 10] = [0; 10];           // 10 bytes, all zeros
+data: [u16; 5] = [100, 200, 300, 400, 500];
 
 buffer[5] = 42;
-u16 value = data[2];
+value: u16 = data[2];
 ```
 
 ### Slices (Fat Pointers)
 
 ```
-&[u8] slice;              // Read-only slice (3 bytes: ptr_lo, ptr_hi, len)
-&[mut u8] mut_slice;      // Mutable slice
+slice: &[u8];              // Read-only slice (3 bytes: ptr_lo, ptr_hi, len)
+mut_slice: &[mut u8];      // (UNSTABLE - may not require mut in language)
 
 // Arrays automatically coerce to slices in function calls
 fn process_data(&[u8] data) {
-    for u8 i in 0..data.len {
+    for i in 0..data.len {
         // use data[i]
     }
 }
@@ -253,17 +253,17 @@ Byte 2: Length
 ### Pointer Types
 
 ```
-*u8 ptr;              // Pointer to u8
-*mut u8 mut_ptr;      // Mutable pointer to u8
-*Point struct_ptr;    // Pointer to struct
+ptr: *u8;              // Pointer to u8
+mut_ptr: *mut u8;      // Mutable pointer to u8 - UNSTABLE
+struct_ptr: *Point;    // Pointer to struct
 ```
 
 ### Pointer Operations
 
 ```
-u8 x = 42;
-*u8 ptr = &x;              // Take address
-u8 value = *ptr;           // Dereference
+x: u8  = 42;
+ptr: *u8  = &x;              // Take address
+value: u8 = *ptr;           // Dereference
 
 mut u8 y = 10;
 *mut u8 mut_ptr = &y;
@@ -457,22 +457,22 @@ struct TightLayout {
 
 ### Zero Page ($00-$FF)
 
-- Fastest access (3 vs 4 cycles)
-- Required for some addressing modes
-- Limited to 256 bytes
-- Suggested with `zp` keyword
+-   Fastest access (3 vs 4 cycles)
+-   Required for some addressing modes
+-   Limited to 256 bytes
+-   Suggested with `zp` keyword
 
 ### Stack ($0100-$01FF)
 
-- Hardware stack, 256 bytes
-- Used only for JSR/RTS (function return addresses)
-- Not used for argument passing or locals
+-   Hardware stack, 256 bytes
+-   Used only for JSR/RTS (function return addresses)
+-   Not used for argument passing or locals
 
 ### General Memory ($0200+)
 
-- Regular variables and data
-- Slower access than zero page
-- Unlimited (up to 64KB total address space)
+-   Regular variables and data
+-   Slower access than zero page
+-   Unlimited (up to 64KB total address space)
 
 ## Complete Example
 
@@ -722,12 +722,12 @@ as        true      false
 
 Features not yet specified but may be added:
 
-- Module system for code organization
-- Basic preprocessor or build system integration
-- Expanded standard library (if any)
-- More sophisticated optimization hints
-- Debugging annotations
-- Macro system (currently excluded for simplicity)
+-   Module system for code organization
+-   Basic preprocessor or build system integration
+-   Expanded standard library (if any)
+-   More sophisticated optimization hints
+-   Debugging annotations
+-   Macro system (currently excluded for simplicity)
 
 ## Design Rationale
 

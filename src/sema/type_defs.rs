@@ -115,10 +115,6 @@ impl TypeRegistry {
     pub fn get_type_size(&self, name: &str) -> Option<usize> {
         if let Some(struct_def) = self.get_struct(name) {
             Some(struct_def.total_size)
-        } else if let Some(enum_def) = self.get_enum(name) {
-            Some(enum_def.total_size)
-        } else {
-            None
-        }
+        } else { self.get_enum(name).map(|enum_def| enum_def.total_size) }
     }
 }

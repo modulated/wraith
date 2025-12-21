@@ -4,6 +4,7 @@
 
 use crate::ast::{BinaryOp, Expr, Literal, Spanned, UnaryOp};
 use crate::sema::SemaError;
+use std::collections::HashMap;
 
 /// Result of constant evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -12,6 +13,9 @@ pub enum ConstValue {
     Bool(bool),
     String(String),
 }
+
+/// Environment for constant evaluation (maps names to constant values)
+pub type ConstEnv = HashMap<String, ConstValue>;
 
 impl ConstValue {
     pub fn as_integer(&self) -> Option<i64> {
@@ -41,15 +45,26 @@ impl ConstValue {
 
 /// Evaluates a constant expression at compile time
 pub fn eval_const_expr(expr: &Spanned<Expr>) -> Result<ConstValue, SemaError> {
+    eval_const_expr_with_env(expr, &ConstEnv::new())
+}
+
+/// Evaluates a constant expression with an environment of named constants
+pub fn eval_const_expr_with_env(expr: &Spanned<Expr>, env: &ConstEnv) -> Result<ConstValue, SemaError> {
     match &expr.node {
         Expr::Literal(lit) => eval_literal(lit),
-        Expr::Binary { left, op, right } => eval_binary(left, *op, right, expr.span),
-        Expr::Unary { op, operand } => eval_unary(*op, operand, expr.span),
-        Expr::Paren(inner) => eval_const_expr(inner),
+        Expr::Variable(name) => {
+            env.get(name).cloned().ok_or_else(|| SemaError::Custom {
+                message: format!("constant '{}' not found in this scope", name),
+                span: expr.span,
+            })
+        }
+        Expr::Binary { left, op, right } => eval_binary_with_env(left, *op, right, expr.span, env),
+        Expr::Unary { op, operand } => eval_unary_with_env(*op, operand, expr.span, env),
+        Expr::Paren(inner) => eval_const_expr_with_env(inner, env),
         Expr::Cast { expr: inner, .. } => {
             // For now, just evaluate the inner expression
             // TODO: Handle actual type conversions
-            eval_const_expr(inner)
+            eval_const_expr_with_env(inner, env)
         }
         _ => Err(SemaError::Custom {
             message: "expression is not constant".to_string(),
@@ -70,14 +85,15 @@ fn eval_literal(lit: &Literal) -> Result<ConstValue, SemaError> {
     }
 }
 
-fn eval_binary(
+fn eval_binary_with_env(
     left: &Spanned<Expr>,
     op: BinaryOp,
     right: &Spanned<Expr>,
     span: crate::ast::Span,
+    env: &ConstEnv,
 ) -> Result<ConstValue, SemaError> {
-    let left_val = eval_const_expr(left)?;
-    let right_val = eval_const_expr(right)?;
+    let left_val = eval_const_expr_with_env(left, env)?;
+    let right_val = eval_const_expr_with_env(right, env)?;
 
     // Try integer operations first
     if let (Some(l), Some(r)) = (left_val.as_integer(), right_val.as_integer()) {
@@ -179,12 +195,13 @@ fn eval_logical_binary(
     Ok(ConstValue::Bool(result))
 }
 
-fn eval_unary(
+fn eval_unary_with_env(
     op: UnaryOp,
     operand: &Spanned<Expr>,
     span: crate::ast::Span,
+    env: &ConstEnv,
 ) -> Result<ConstValue, SemaError> {
-    let val = eval_const_expr(operand)?;
+    let val = eval_const_expr_with_env(operand, env)?;
 
     match op {
         UnaryOp::Neg => {

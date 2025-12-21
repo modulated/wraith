@@ -1,9 +1,0 @@
-// Memory-mapped I/O addresses for testing
-
-addr read BUTTON = 0xC000;
-addr write LED = 0xC001;
-addr RW_REG = 0xC002;
-
-// Some constants
-u8 MAX_VALUE = 255;
-u8 MIN_VALUE = 0;

@@ -27,7 +27,7 @@ fn main() {
     let ast = match Parser::parse(&tokens) {
         Ok(ast) => ast,
         Err(e) => {
-            eprintln!("Parse error: {}", e.format_with_source(&source));
+            eprintln!("Parse error: {}", e.format_with_source_and_file(&source, Some(file)));
             std::process::exit(1);
         }
     };
@@ -36,7 +36,7 @@ fn main() {
     let program_info = match wraith::sema::analyze_with_path(&ast, file_path) {
         Ok(info) => info,
         Err(e) => {
-            eprintln!("Semantic error: {}", e.format_with_source(&source));
+            eprintln!("Semantic error: {}", e.format_with_source_and_file(&source, Some(file)));
             std::process::exit(1);
         }
     };
