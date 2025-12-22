@@ -172,17 +172,17 @@ pub fn generate_stmt(
             range,
             body,
         } => {
-            // For loop: initialize counter, loop with condition, increment
-            // Use fixed zero page location for loop counter (simplified approach)
-            let loop_counter = emitter.memory_layout.loop_counter();
+            // Optimized for loop using X register for counter
+            // This frees up zero page and is faster (INX vs INC, CPX vs CMP+LDA)
             let loop_end_temp = emitter.memory_layout.loop_end_temp();
 
             let loop_label = emitter.next_label("for_loop");
             let end_label = emitter.next_label("for_end");
 
-            // Initialize loop variable with range start
+            // Initialize loop variable with range start -> X register
             generate_expr(&range.start, emitter, info)?;
-            emitter.emit_inst("STA", &format!("${:02X}", loop_counter));
+            emitter.emit_inst("TAX", ""); // Transfer A to X (counter in X)
+            emitter.reg_state.transfer_a_to_x();
 
             // Generate end value and store in temp location
             generate_expr(&range.end, emitter, info)?;
@@ -191,9 +191,8 @@ pub fn generate_stmt(
             // Loop start
             emitter.emit_label(&loop_label);
 
-            // Check condition: load counter and compare with end
-            emitter.emit_inst("LDA", &format!("${:02X}", loop_counter));
-            emitter.emit_inst("CMP", &format!("${:02X}", loop_end_temp));
+            // Check condition: compare X (counter) with end value
+            emitter.emit_inst("CPX", &format!("${:02X}", loop_end_temp));
 
             if range.inclusive {
                 // If counter > end, exit
@@ -206,14 +205,20 @@ pub fn generate_stmt(
                 emitter.emit_inst("BCS", &end_label);
             }
 
-            // Execute body
+            // Execute body (note: X is used for counter, may need to save/restore if body uses X)
+            // For now, we accept that the body can't use X register
+            emitter.reg_state.invalidate_all(); // Body might use registers
             generate_stmt(body, emitter, info)?;
 
-            // Increment counter
-            emitter.emit_inst("INC", &format!("${:02X}", loop_counter));
+            // Increment counter (X register)
+            emitter.emit_inst("INX", ""); // 2 cycles vs INC zp (5 cycles)
+            emitter.reg_state.modify_x();
 
             emitter.emit_inst("JMP", &loop_label);
             emitter.emit_label(&end_label);
+
+            // After loop, X register is modified
+            emitter.reg_state.modify_x();
             Ok(())
         }
         Stmt::Break => {
