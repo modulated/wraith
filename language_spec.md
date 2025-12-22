@@ -37,19 +37,20 @@ delta: i16 = -500;
 flag: bool = true;
 ```
 
-### Mutability (Unstable - may need to fix syntax)
+### Mutability
+
+All variables are mutable by default for simplicity. This is a low-level systems language - trust the programmer.
 
 ```
-u8 immutable = 10;           // Cannot be changed
-mut u8 mutable = 20;         // Can be changed
-mutable = 30;                // OK
+x: u8 = 10;
+x = 20;                      // OK - all variables are mutable
 ```
 
 ### Zero Page Hint
 
 ```
-zp u8 fast_var = 0;          // Suggest compiler use zero page
-zp mut u16 counter = 0;      // Mutable zero page variable
+zp fast_var: u8 = 0;         // Suggest compiler use zero page
+zp counter: u16 = 0;         // Zero page variable
 ```
 
 Zero page ($00-$FF) provides faster access (3 cycles vs 4 cycles) and enables special addressing modes.
@@ -160,7 +161,7 @@ struct Entity {
 ### Usage
 
 ```
-Point p = Point { x: 10, y: 20 };
+p: Point = Point { x: 10, y: 20 };
 p2: Point = Point { x: 5, y: 5 };
 p2.x = 15;
 
@@ -189,7 +190,7 @@ enum Direction {
     West = 3,
 }
 
-Direction dir = Direction::North;
+dir: Direction = Direction::North;
 ```
 
 ### Enums with Data (Tagged Unions)
@@ -202,7 +203,7 @@ enum Message {
     ChangeColor(u8, u8),           // tag + 2 bytes
 }
 
-Message msg = Message::Move { x: 10, y: 20 };
+msg: Message = Message::Move { x: 10, y: 20 };
 ```
 
 **Memory Layout:**
@@ -226,8 +227,7 @@ value: u16 = data[2];
 ### Slices (Fat Pointers)
 
 ```
-slice: &[u8];              // Read-only slice (3 bytes: ptr_lo, ptr_hi, len)
-mut_slice: &[mut u8];      // (UNSTABLE - may not require mut in language)
+slice: &[u8];              // Slice (3 bytes: ptr_lo, ptr_hi, len)
 
 // Arrays automatically coerce to slices in function calls
 fn process_data(&[u8] data) {
@@ -236,7 +236,7 @@ fn process_data(&[u8] data) {
     }
 }
 
-[u8; 10] array = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+array: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 process_data(array);      // Automatic coercion
 ```
 
@@ -254,7 +254,6 @@ Byte 2: Length
 
 ```
 ptr: *u8;              // Pointer to u8
-mut_ptr: *mut u8;      // Mutable pointer to u8 - UNSTABLE
 struct_ptr: *Point;    // Pointer to struct
 ```
 
@@ -265,21 +264,21 @@ x: u8  = 42;
 ptr: *u8  = &x;              // Take address
 value: u8 = *ptr;           // Dereference
 
-mut u8 y = 10;
-*mut u8 mut_ptr = &y;
-*mut_ptr = 20;             // Modify through pointer
+y: u8  = 10;
+ptr2: *u8  = &y;
+*ptr2 = 20;                 // Modify through pointer
 
 // Pointer arithmetic
-*u8 screen = 0x0400 as *u8;
+screen: *u8 = 0x0400 as *u8;
 *(screen + 10) = 65;       // Write 'A' at offset 10
 ```
 
 ### Memory-Mapped I/O
 
 ```
-*mut u8 VIC_BORDER = 0xD020 as *mut u8;
-*mut u8 VIC_BACKGROUND = 0xD021 as *mut u8;
-*u8 VIC_RASTER = 0xD012 as *u8;
+VIC_BORDER: *u8 = 0xD020 as *u8;
+VIC_BACKGROUND: *u8 = 0xD021 as *u8;
+VIC_RASTER: *u8 = 0xD012 as *u8;
 
 fn set_colors() {
     *VIC_BORDER = 0;
@@ -327,17 +326,17 @@ loop {
 
 ```
 // Range-based
-for u8 i in 0..10 {      // 0 to 9
+for i in 0..10 {      // 0 to 9
     // ...
 }
 
-for u8 i in 0..=10 {     // 0 to 10 (inclusive)
+for i in 0..=10 {     // 0 to 10 (inclusive)
     // ...
 }
 
 // Over slices
 fn process(&[u8] data) {
-    for u8 item in data {
+    for item in data {
         // use item
     }
 }
@@ -378,14 +377,14 @@ match msg {
 ### Explicit Casting
 
 ```
-u8 small = 100;
-u16 large = small as u16;
+small: u8 = 100;
+large: u16 = small as u16;
 
-i8 signed = -10;
-u8 unsigned = signed as u8;
+signed: i8 = -10;
+unsigned: u8 = signed as u8;
 
-u16 addr = 0x1000;
-*u8 ptr = addr as *u8;
+addr: u16 = 0x1000;
+ptr: *u8 = addr as *u8;
 ```
 
 No implicit conversions - all casts must be explicit.
@@ -406,8 +405,8 @@ fn wait_for_vblank() {
 ### Assembly with Variable Substitution
 
 ```
-fn add_with_carry(u8 a, u8 b) -> u8 {
-    u8 result;
+fn add_with_carry(a: u8, b: u8) -> u8 {
+    result: u8;
     asm {
         "clc"
         "lda {a}"
@@ -478,37 +477,37 @@ struct TightLayout {
 
 ```
 struct Sprite {
-    u8 x,
-    u8 y,
-    u8 color,
+    x: u8,
+    y: u8,
+    color: u8,
 }
 
-[Sprite; 8] sprites;
+sprites: [Sprite; 8];
 
 fn init_sprites() {
-    for u8 i in 0..8 {
+    for i in 0..8 {
         sprites[i] = Sprite { x: 0, y: 0, color: 1 };
     }
 }
 
-fn update_sprite(u8 index, i8 dx, i8 dy) {
+fn update_sprite(index: u8, dx: i8, dy: i8) {
     if index >= 8 {
         return;
     }
 
-    mut *Sprite sprite = &sprites[index];
+    sprite: *Sprite = &sprites[index];
     sprite.x = ((sprite.x as i16) + (dx as i16)) as u8;
     sprite.y = ((sprite.y as i16) + (dy as i16)) as u8;
 }
 
-fn clear_memory(&[mut u8] buffer) {
-    for u8 i in 0..buffer.len {
+fn clear_memory(buffer: &[u8]) {
+    for i in 0..buffer.len {
         buffer[i] = 0;
     }
 }
 
-*mut u8 SCREEN = 0x0400 as *mut u8;
-*mut u8 BORDER = 0xD020 as *mut u8;
+SCREEN: *u8 = 0x0400 as *u8;
+BORDER: *u8 = 0xD020 as *u8;
 
 fn main() -> u8 {
     // Initialize display
@@ -519,7 +518,7 @@ fn main() -> u8 {
     update_sprite(0, 5, -3);
 
     // Clear screen buffer
-    mut [u8; 256] buffer = [0; 256];
+    buffer: [u8; 256] = [0; 256];
     clear_memory(buffer);
 
     return 0;
@@ -531,7 +530,7 @@ fn main() -> u8 {
 ### Variable Access
 
 ```
-u8 x = 42;
+x: u8 = 42;
 
 // Compiles to:
 LDA #42
@@ -541,7 +540,7 @@ STA $0200    // x at $0200
 ### Zero Page Variable
 
 ```
-zp u8 x = 42;
+zp x: u8 = 42;
 
 // Compiles to:
 LDA #42
@@ -551,9 +550,9 @@ STA $80      // x at $80 (zero page)
 ### 16-bit Addition
 
 ```
-u16 a = 100;
-u16 b = 200;
-u16 c = a + b;
+a: u16 = 100;
+b: u16 = 200;
+c: u16 = a + b;
 
 // Compiles to:
 CLC
@@ -568,10 +567,10 @@ STA $0205    // c high
 ### Function Call
 
 ```
-fn add(u8 a, u8 b) -> u8 {
+fn add(a: u8, b: u8) -> u8 {
     return a + b;
 }
-u8 result = add(5, 10);
+result: u8 = add(5, 10);
 
 // Compiles to:
 LDA #5
@@ -593,8 +592,8 @@ add:
 ### Struct Access
 
 ```
-Point p = Point { x: 10, y: 20 };
-u8 a = p.x;
+p: Point = Point { x: 10, y: 20 };
+a: u8 = p.x;
 
 // Compiles to:
 LDA #10
@@ -609,8 +608,8 @@ STA $0202    // store to a
 ### Array Indexing
 
 ```
-[u8; 5] arr = [1, 2, 3, 4, 5];
-u8 x = arr[2];
+arr: [u8; 5] = [1, 2, 3, 4, 5];
+x: u8 = arr[2];
 
 // Compiles to:
 LDX #2
@@ -621,9 +620,9 @@ STA x
 ### Pointer Dereference
 
 ```
-u8 value = 42;
-*u8 ptr = &value;
-u8 x = *ptr;
+value: u8 = 42;
+ptr: *u8 = &value;
+x: u8 = *ptr;
 
 // Compiles to:
 LDA #42
@@ -669,9 +668,11 @@ jump_table:
 ```
 asm       bool      break     else      enum      fn        for
 i8        i16       if        in        inline    loop      match
-mut       return    struct    u8        u16       while     zp
-as        true      false
+return    struct    u8        u16       while     zp        as
+true      false
 ```
+
+Note: `mut` is reserved for future use but not currently active in the language.
 
 ## Operators
 
@@ -734,10 +735,6 @@ Features not yet specified but may be added:
 ### Why No Type Inference?
 
 Keeps compilation simple and code explicit. On a resource-constrained system, clarity is paramount.
-
-### Why Explicit Mutability?
-
-Makes data flow clear and helps prevent bugs. The compiler can optimize immutable data.
 
 ### Why Zero Page Hints?
 
