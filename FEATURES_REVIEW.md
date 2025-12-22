@@ -1,6 +1,6 @@
 # Wraith Language - Features Review & Roadmap
 
-Updated: 2025-12-20
+Updated: 2025-12-22
 
 This document lists remaining features and improvements for the Wraith programming language.
 
@@ -44,36 +44,16 @@ fn process(slice: &[u8]) {
 
 ## 2. Type System Improvements
 
-### 2.1 Fixed-Size Array Types
-
-**Status:** AST exists, not used in semantic analysis
-**Location:** `src/ast/types.rs:45-49`
-**Description:** Support `[T; N]` array types in full semantic analysis
-**Use Case:** Buffers, lookup tables, stack arrays
-**Priority:** HIGH
-
-```wraith
-[u8; 256] screen_buffer;
-```
-
-### 2.2 Pointer Arithmetic
+### 2.1 Type Inference
 
 **Status:** Not implemented
-**Description:** Add/subtract offsets from pointers
-**Use Case:** Indirect indexed addressing, dynamic structures
-**Priority:** MEDIUM
+**Description:** Infer types from context where possible
+**Use Case:** Less verbose code
+**Priority:** LOW
 
 ```wraith
-*u8 ptr = 0xC000 as *u8;
-*(ptr + 5) = 42;  // Write to 0xC005
+x := 10;  // Infer u8 from literal
 ```
-
-### 2.3 Complete Named Type Resolution
-
-**Status:** Incomplete (enums and structs work, but needs more comprehensive type checking)
-**Description:** Full support for struct/enum types throughout semantic analysis
-**Use Case:** Type checking, method resolution
-**Priority:** HIGH
 
 ---
 
@@ -99,19 +79,6 @@ fn process(slice: &[u8]) {
 **Description:** Continue parsing to find multiple errors
 **Priority:** MEDIUM
 
-### 3.3 Source Context in Errors
-
-**Status:** Only span positions shown
-**Description:** Show source lines with error markers
-**Priority:** HIGH
-
-```
-error: type mismatch
-  --> test.wr:10:5
-   |
-10 |     LED = "hello";
-   |           ^^^^^^^ expected u8, found string
-```
 
 ---
 
@@ -149,18 +116,6 @@ fn start() { }
 
 ## 5. Language Features
 
-### 5.1 Constant Expressions
-
-**Status:** Constant folding exists, but full const evaluation for addr calculations is incomplete
-**Location:** `src/sema/analyze.rs:102-107`
-**Description:** Compile-time expression evaluation for address declarations
-**Priority:** HIGH
-
-```wraith
-const BASE = 0xC000;
-const SIZE = 256;
-addr SCREEN = BASE + SIZE;  // Currently not supported
-```
 
 ### 5.2 Bitfield Access
 
@@ -248,14 +203,14 @@ static mut scratch: u8;
 -   `LDA #0; CMP #0` → remove LDA, keep CMP
 -   `LDA x; PHA; PLA` → remove if A not used
 
-### 7.2 Register Allocation
+### 7.2 Advanced Register Allocation
 
-**Status:** Not implemented (everything goes to memory)
-**Description:** Keep hot variables in registers
-**Priority:** HIGH
+**Status:** Basic implementation complete (X for loops, Y for temps, register state tracking)
+**Description:** Full register allocation with liveness analysis
+**Priority:** MEDIUM
 
-**Current:** All variables in zero page/absolute memory
-**Desired:** Frequently-used values stay in A/X/Y
+**Current:** X used for loop counters, Y for nested expression temps
+**Desired:** Allocate frequently-used variables to registers based on liveness
 
 ### 7.3 Dead Code Elimination
 
@@ -298,12 +253,12 @@ static mut scratch: u8;
 
 ## 8. Developer Experience
 
-### 8.1 Comprehensive Test Suite
+### 8.1 Expanded Test Coverage
 
-**Status:** Partial - 51 tests exist but need more coverage
+**Status:** Good - 96 tests passing covering core features
 **Location:** `tests/*.rs`
-**Description:** Full test coverage of language features
-**Priority:** HIGH
+**Description:** Add more edge case and integration tests
+**Priority:** MEDIUM
 
 ### 8.2 Disassembly Output
 
@@ -321,17 +276,6 @@ $8002   STA $40     ; [2 cycles]
 
 ## 9. Standard Library / Prelude
 
-### 9.1 Memory Functions
-
-**Status:** Not implemented
-**Description:** Common memory operations
-**Priority:** HIGH
-
-```wraith
-memcpy(dest, src, len);
-memset(dest, value, len);
-memcmp(a, b, len) -> bool;
-```
 
 ### 9.2 Math Functions
 
@@ -414,45 +358,7 @@ u8 random_range(min, max);
 
 ## 12. Code Quality Issues
 
-### 12.1 Unsafe Static Mutables
-
-**Status:** Existing code smell
-**Location:** `src/sema/analyze.rs:139` - `static mut PARAM_COUNTER`
-**Description:** Using static mut for allocation counter
-**Priority:** HIGH
-
-**Fix:** Use proper allocator struct passed through context
-
-### 12.2 TODO Comments
-
-**Status:** Several in codebase
-**Locations:**
-
--   `src/sema/mod.rs:21` - "Add specific errors"
--   `src/sema/analyze.rs:106` - "Support constant expressions"
--   `src/sema/analyze.rs:137` - "Implement proper calling convention"
-
-**Priority:** Review and resolve each TODO
-
-### 12.3 Magic Numbers
-
-**Status:** Hardcoded addresses throughout
-**Examples:**
-
--   `0x50` - Parameter base address
--   `0x10` - Loop counter address
--   `0x40` - Temporary variable base
-
-**Priority:** HIGH - Use named constants
-**Fix:** Have a config somewhere that allows setting these
-
-### 12.4 Error Handling
-
-**Status:** Many `.map_err(|_| SemaError::SymbolNotFound)`
-**Description:** Swallowing detailed error information
-**Priority:** MEDIUM
-
-### 12.5 Parser Issues
+### 12.1 Parser Issues
 
 **Status:** Known issues
 **Description:**
@@ -467,15 +373,10 @@ u8 random_range(min, max);
 
 ### HIGH Priority (Implement Soon)
 
-1. ⬜ Constant expressions - needed for addr calculations
-2. ⬜ Register allocation - performance critical
-3. ⬜ Fixed-size array types - complete semantic support
-4. ⬜ Complete named type resolution
-5. ⬜ Source context in error messages
-6. ⬜ Memory functions (memcpy, etc.)
-7. ⬜ Comprehensive test suite
-8. ⬜ Language reference documentation
-9. ⬜ Fix code quality issues (static mut, magic numbers)
+1. ⬜ Language reference documentation
+2. ⬜ Inline function expansion (#[inline] attribute)
+3. ⬜ Break/continue implementation with proper loop context tracking
+4. ⬜ Semantic validation (duplicate functions, undefined variables at sema phase)
 
 ### MEDIUM Priority (Nice to Have)
 
@@ -501,8 +402,9 @@ u8 random_range(min, max);
 
 ---
 
-## Recently Completed (2025-12-20)
+## Recently Completed
 
+### 2025-12-20
 ✅ **Match Statements** - Pattern matching with literals, ranges, wildcards, and enum variants
 ✅ **Struct Operations** - Complete with initialization, field access, and memory layout
 ✅ **Enum Operations** - Type definitions, variant construction, and match statement codegen
@@ -512,6 +414,20 @@ u8 random_range(min, max);
 ✅ **Better Error Messages** - Detailed error types with user-friendly formatting
 ✅ **Zero Page Allocation Tracking** - Conflict detection and management
 ✅ **Constant Folding** - Compile-time expression evaluation and optimization
+
+### 2025-12-22
+✅ **Source Context in Errors** - Error messages now show source code with --> and | markers
+✅ **Constant Expressions for addr** - Full compile-time evaluation for address calculations
+✅ **Code Quality Fixes** - Removed static mut, added memory layout abstraction, no magic numbers
+✅ **Pointer Arithmetic** - Full support for pointer offset calculations
+✅ **Memory Functions** - memcpy, memset, memcmp in standard library
+✅ **Std Library Path** - Proper search path and portable imports
+✅ **Fixed-Size Array Types** - Complete semantic analysis support for [T; N]
+✅ **Named Type Resolution** - Full support for struct/enum types throughout compiler
+✅ **Comprehensive Test Suite** - 96 tests covering all major features
+✅ **Basic Register Allocation** - X for loop counters, Y for temps, register state tracking
+✅ **Register Optimizations** - Store-load elimination, smart evaluation order, optimized loads
+✅ **Variable Scoping Fixes** - Proper span-based symbol resolution for local variables
 
 ---
 
