@@ -156,8 +156,15 @@ pub fn generate_stmt(
             emitter.emit_inst("CMP", "#$00");
             emitter.emit_inst("BEQ", &end_label);
 
+            // Push loop context for break/continue
+            emitter.push_loop(start_label.clone(), end_label.clone());
+
             // Body
             generate_stmt(body, emitter, info)?;
+
+            // Pop loop context
+            emitter.pop_loop();
+
             emitter.emit_inst("JMP", &start_label);
 
             emitter.emit_label(&end_label);
@@ -165,9 +172,20 @@ pub fn generate_stmt(
         }
         Stmt::Loop { body } => {
             let loop_label = emitter.next_label("loop_start");
+            let end_label = emitter.next_label("loop_end");
+
             emitter.emit_label(&loop_label);
+
+            // Push loop context for break/continue
+            emitter.push_loop(loop_label.clone(), end_label.clone());
+
             generate_stmt(body, emitter, info)?;
+
+            // Pop loop context
+            emitter.pop_loop();
+
             emitter.emit_inst("JMP", &loop_label);
+            emitter.emit_label(&end_label);
             Ok(())
         }
         Stmt::For {
@@ -209,10 +227,16 @@ pub fn generate_stmt(
                 emitter.emit_inst("BCS", &end_label);
             }
 
+            // Push loop context for break/continue
+            emitter.push_loop(loop_label.clone(), end_label.clone());
+
             // Execute body (note: X is used for counter, may need to save/restore if body uses X)
             // For now, we accept that the body can't use X register
             emitter.reg_state.invalidate_all(); // Body might use registers
             generate_stmt(body, emitter, info)?;
+
+            // Pop loop context
+            emitter.pop_loop();
 
             // Increment counter (X register)
             emitter.emit_inst("INX", ""); // 2 cycles vs INC zp (5 cycles)
@@ -226,14 +250,28 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Break => {
-            // TODO: Need loop context to know where to jump
-            emitter.emit_comment("break (requires loop context)");
-            Ok(())
+            if let Some(loop_ctx) = emitter.current_loop() {
+                let break_label = loop_ctx.break_label.clone();
+                emitter.emit_inst("JMP", &break_label);
+                Ok(())
+            } else {
+                // This should be caught by semantic analysis
+                Err(CodegenError::UnsupportedOperation(
+                    "break statement outside of loop".to_string(),
+                ))
+            }
         }
         Stmt::Continue => {
-            // TODO: Need loop context to know where to jump
-            emitter.emit_comment("continue (requires loop context)");
-            Ok(())
+            if let Some(loop_ctx) = emitter.current_loop() {
+                let continue_label = loop_ctx.continue_label.clone();
+                emitter.emit_inst("JMP", &continue_label);
+                Ok(())
+            } else {
+                // This should be caught by semantic analysis
+                Err(CodegenError::UnsupportedOperation(
+                    "continue statement outside of loop".to_string(),
+                ))
+            }
         }
         Stmt::Asm { lines } => {
             // Inline assembly - emit lines directly with variable substitution

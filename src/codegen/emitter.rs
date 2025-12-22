@@ -5,6 +5,15 @@
 use super::memory_layout::MemoryLayout;
 use super::regstate::{RegisterState, RegisterValue};
 
+/// Loop context for break/continue statements
+#[derive(Debug, Clone)]
+pub struct LoopContext {
+    /// Label to jump to for continue (loop start)
+    pub continue_label: String,
+    /// Label to jump to for break (loop end)
+    pub break_label: String,
+}
+
 pub struct Emitter {
     output: String,
     #[allow(dead_code)]
@@ -14,6 +23,8 @@ pub struct Emitter {
     pub memory_layout: MemoryLayout,
     /// Register state tracking for optimization
     pub reg_state: RegisterState,
+    /// Stack of loop contexts for break/continue
+    loop_stack: Vec<LoopContext>,
 }
 
 impl Default for Emitter {
@@ -31,6 +42,7 @@ impl Emitter {
             match_counter: 0,
             memory_layout: MemoryLayout::new(),
             reg_state: RegisterState::new(),
+            loop_stack: Vec::new(),
         }
     }
 
@@ -172,5 +184,27 @@ impl Emitter {
     /// Mark that A register contains an unknown value (after arithmetic, etc.)
     pub fn mark_a_unknown(&mut self) {
         self.reg_state.modify_a();
+    }
+
+    // ========================================================================
+    // LOOP CONTEXT MANAGEMENT (for break/continue)
+    // ========================================================================
+
+    /// Push a new loop context onto the stack
+    pub fn push_loop(&mut self, continue_label: String, break_label: String) {
+        self.loop_stack.push(LoopContext {
+            continue_label,
+            break_label,
+        });
+    }
+
+    /// Pop the current loop context from the stack
+    pub fn pop_loop(&mut self) {
+        self.loop_stack.pop();
+    }
+
+    /// Get the current loop context (for break/continue)
+    pub fn current_loop(&self) -> Option<&LoopContext> {
+        self.loop_stack.last()
     }
 }

@@ -179,7 +179,6 @@ fn test_semantic_error_duplicate_function() {
 }
 
 #[test]
-#[ignore] // Break/continue validation not yet implemented in semantic analysis
 fn test_semantic_error_break_outside_loop() {
     assert_error_contains(
         r#"
@@ -192,7 +191,6 @@ fn test_semantic_error_break_outside_loop() {
 }
 
 #[test]
-#[ignore] // Break/continue validation not yet implemented in semantic analysis
 fn test_semantic_error_continue_outside_loop() {
     assert_error_contains(
         r#"

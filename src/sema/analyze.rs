@@ -26,6 +26,7 @@ pub struct SemanticAnalyzer {
     imported_files: HashSet<PathBuf>,
     zp_allocator: ZeroPageAllocator,
     const_env: ConstEnv,
+    loop_depth: usize,
 }
 
 /// Zero page memory allocator
@@ -121,6 +122,7 @@ impl SemanticAnalyzer {
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
             const_env: ConstEnv::new(),
+            loop_depth: 0,
         }
     }
 
@@ -137,6 +139,7 @@ impl SemanticAnalyzer {
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
             const_env: ConstEnv::new(),
+            loop_depth: 0,
         }
     }
 
@@ -676,7 +679,9 @@ impl SemanticAnalyzer {
                         span: condition.span,
                     });
                 }
+                self.loop_depth += 1;
                 self.analyze_stmt(body)?;
+                self.loop_depth -= 1;
             }
             Stmt::For {
                 var_name,
@@ -724,15 +729,29 @@ impl SemanticAnalyzer {
                 }
 
                 // Analyze body
+                self.loop_depth += 1;
                 self.analyze_stmt(body)?;
+                self.loop_depth -= 1;
 
                 self.table.exit_scope();
             }
             Stmt::Loop { body } => {
+                self.loop_depth += 1;
                 self.analyze_stmt(body)?;
+                self.loop_depth -= 1;
             }
             Stmt::Expr(expr) => {
                 self.check_expr(expr)?;
+            }
+            Stmt::Break => {
+                if self.loop_depth == 0 {
+                    return Err(SemaError::BreakOutsideLoop { span: stmt.span });
+                }
+            }
+            Stmt::Continue => {
+                if self.loop_depth == 0 {
+                    return Err(SemaError::BreakOutsideLoop { span: stmt.span });
+                }
             }
             _ => {}
         }
