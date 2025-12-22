@@ -167,9 +167,8 @@ mod tests {
     fn test_parse_variable_decl() {
         let source = r#"
             fn main() {
-                u8 x = 42;
-                mut u8 y = 10;
-                zp u8 fast = 0;
+                x: u8 = 42;
+                zp fast: u8 = 0;
             }
         "#;
         let file = parse(source).expect("parse error");
@@ -208,7 +207,7 @@ mod tests {
     fn test_parse_binary_expr() {
         let source = r#"
             fn test() {
-                u8 x = 1 + 2 * 3;
+                x: u8 = 1 + 2 * 3;
             }
         "#;
         let file = parse(source).expect("parse error");
@@ -218,7 +217,7 @@ mod tests {
     #[test]
     fn test_parse_static() {
         let source = r#"
-            *mut u8 SCREEN = 0x0400 as *mut u8;
+            addr SCREEN = 0x0400;
         "#;
         let file = parse(source).expect("parse error");
         assert_eq!(file.items.len(), 1);
