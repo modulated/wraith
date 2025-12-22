@@ -213,6 +213,16 @@ impl SemanticAnalyzer {
                     });
                 }
 
+
+                // Check for duplicate function definition
+                if self.table.defined_in_current_scope(&name) {
+                    return Err(SemaError::DuplicateSymbol {
+                        name: name.clone(),
+                        span: func.name.span,
+                        previous_span: None, // Could track this if we store spans
+                    });
+                }
+
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Function,
@@ -222,6 +232,7 @@ impl SemanticAnalyzer {
                 };
                 self.table.insert(name.clone(), info);
 
+                // Extract org and section attributes if present
                 // Extract org and section attributes if present
                 let org_address = func.attributes.iter().find_map(|attr| {
                     if let crate::ast::FnAttribute::Org(addr) = attr {
@@ -274,6 +285,15 @@ impl SemanticAnalyzer {
                     });
                 }
 
+                // Check for duplicate static definition
+                if self.table.defined_in_current_scope(&name) {
+                    return Err(SemaError::DuplicateSymbol {
+                        name: name.clone(),
+                        span: stat.name.span,
+                        previous_span: None,
+                    });
+                }
+
                 // If it's a non-mutable static (const), evaluate it and add to const_env
                 if !stat.mutable {
                     match eval_const_expr_with_env(&stat.init, &self.const_env) {
@@ -297,6 +317,15 @@ impl SemanticAnalyzer {
             }
             Item::Address(addr) => {
                 let name = addr.name.node.clone();
+
+                // Check for duplicate address definition
+                if self.table.defined_in_current_scope(&name) {
+                    return Err(SemaError::DuplicateSymbol {
+                        name: name.clone(),
+                        span: addr.name.span,
+                        previous_span: None,
+                    });
+                }
 
                 // Check for duplicate address definition
                 if self.table.defined_in_current_scope(&name) {
@@ -600,6 +629,16 @@ impl SemanticAnalyzer {
                     });
                 }
 
+
+                // Check for duplicate parameter names
+                if self.table.defined_in_current_scope(&name) {
+                    return Err(SemaError::DuplicateSymbol {
+                        name: name.clone(),
+                        span: param.name.span,
+                        previous_span: None,
+                    });
+                }
+
                 let addr = self.zp_allocator.allocate()?;
                 let location = SymbolLocation::ZeroPage(addr);
                 let info = SymbolInfo {
@@ -652,6 +691,15 @@ impl SemanticAnalyzer {
                         expected: declared_ty.display_name(),
                         found: init_ty.display_name(),
                         span: init.span,
+                    });
+                }
+
+                // Check for duplicate variable in current scope
+                if self.table.defined_in_current_scope(&name.node) {
+                    return Err(SemaError::DuplicateSymbol {
+                        name: name.node.clone(),
+                        span: name.span,
+                        previous_span: None,
                     });
                 }
 
@@ -784,6 +832,15 @@ impl SemanticAnalyzer {
                         _ => Type::Primitive(PrimitiveType::U8) // Default to u8
                     }
                 };
+
+                // Check for duplicate loop variable (shouldn't happen in new scope, but check anyway)
+                if self.table.defined_in_current_scope(&var_name.node) {
+                    return Err(SemaError::DuplicateSymbol {
+                        name: var_name.node.clone(),
+                        span: var_name.span,
+                        previous_span: None,
+                    });
+                }
 
                 // Check for duplicate loop variable (shouldn't happen in new scope, but check anyway)
                 if self.table.defined_in_current_scope(&var_name.node) {
