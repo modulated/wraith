@@ -234,8 +234,8 @@ fn test_for_range_loop() {
         r#"
         addr OUT = 0x400;
         fn main() {
-            mut sum: u8 = 0;
-            for i: u8 in 0..10 {
+            sum: u8 = 0;
+            for i in 0..10 {
                 sum = sum + i;
             }
             OUT = sum;

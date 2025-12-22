@@ -194,7 +194,7 @@ mod tests {
     fn test_parse_for_loop() {
         let source = r#"
             fn test() {
-                for u8 i in 0..10 {
+                for i in 0..10 {
                     x = i;
                 }
             }

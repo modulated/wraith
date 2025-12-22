@@ -100,18 +100,18 @@ pub enum Stmt {
     /// Infinite loop
     Loop { body: Box<Spanned<Stmt>> },
 
-    /// For loop: for u8 i in 0..10 { }
+    /// For loop: for i in 0..10 { } or for i: u8 in 0..10 { }
     For {
         var_name: Spanned<String>,
-        var_type: Spanned<TypeExpr>,
+        var_type: Option<Spanned<TypeExpr>>,
         range: Range,
         body: Box<Spanned<Stmt>>,
     },
 
-    /// For-each over slice: for u8 item in data { }
+    /// For-each over slice: for item in data { } or for item: u8 in data { }
     ForEach {
         var_name: Spanned<String>,
-        var_type: Spanned<TypeExpr>,
+        var_type: Option<Spanned<TypeExpr>>,
         iterable: Spanned<Expr>,
         body: Box<Spanned<Stmt>>,
     },

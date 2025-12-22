@@ -327,18 +327,27 @@ loop {
 ### For Loop
 
 ```
-// Range-based
-for i in 0..10 {      // 0 to 9
+// Range-based (type inferred from range bounds)
+for i in 0..10 {      // 0 to 9, i is inferred as u8
     // ...
 }
 
-for i in 0..=10 {     // 0 to 10 (inclusive)
+for i in 0..=255 {     // 0 to 255 (inclusive), i is u8
     // ...
 }
 
-// Over slices
+for i in 0..1000 {     // Larger range, i is inferred as u16
+    // ...
+}
+
+// Explicit type annotation
+for i: u8 in 0..10 {
+    // ...
+}
+
+// Over slices (type inferred from slice element type)
 fn process(&[u8] data) {
-    for item in data {
+    for item in data {   // item is inferred as u8
         // use item
     }
 }

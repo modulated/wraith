@@ -2,7 +2,7 @@
 //!
 //! Traverses the AST to populate the symbol table and perform type checking.
 
-use crate::ast::{Expr, Function, Item, SourceFile, Spanned, Stmt, TypeExpr};
+use crate::ast::{Expr, Function, Item, PrimitiveType, SourceFile, Spanned, Stmt, TypeExpr};
 use crate::codegen::memory_layout::MemoryLayout;
 use crate::sema::const_eval::{eval_const_expr, eval_const_expr_with_env, ConstEnv, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
@@ -687,8 +687,26 @@ impl SemanticAnalyzer {
                 // Create a new scope for the loop variable
                 self.table.enter_scope();
 
-                // Register the loop variable
-                let var_ty = self.resolve_type(&var_type.node)?;
+                // Determine loop variable type (explicit or inferred)
+                let var_ty = if let Some(ty) = var_type {
+                    self.resolve_type(&ty.node)?
+                } else {
+                    // Infer type from range bounds
+                    let start_ty = self.check_expr(&range.start)?;
+                    let end_ty = self.check_expr(&range.end)?;
+
+                    // Use the larger of the two types
+                    match (start_ty, end_ty) {
+                        (Type::Primitive(PrimitiveType::U16), _) | (_, Type::Primitive(PrimitiveType::U16)) => {
+                            Type::Primitive(PrimitiveType::U16)
+                        }
+                        (Type::Primitive(PrimitiveType::I16), _) | (_, Type::Primitive(PrimitiveType::I16)) => {
+                            Type::Primitive(PrimitiveType::I16)
+                        }
+                        _ => Type::Primitive(PrimitiveType::U8) // Default to u8
+                    }
+                };
+
                 let addr = self.zp_allocator.allocate()?;
                 let info = SymbolInfo {
                     name: var_name.node.clone(),
@@ -699,9 +717,11 @@ impl SemanticAnalyzer {
                 };
                 self.table.insert(var_name.node.clone(), info);
 
-                // Check range bounds
-                self.check_expr(&range.start)?;
-                self.check_expr(&range.end)?;
+                // Check range bounds if not already checked
+                if var_type.is_some() {
+                    self.check_expr(&range.start)?;
+                    self.check_expr(&range.end)?;
+                }
 
                 // Analyze body
                 self.analyze_stmt(body)?;

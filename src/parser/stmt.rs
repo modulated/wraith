@@ -63,16 +63,14 @@ impl Parser<'_> {
     fn parse_var_decl(&mut self) -> ParseResult<Spanned<Stmt>> {
         let start = self.current_span();
 
-        // Parse optional modifiers
+        // Parse optional zero page modifier
         let zero_page = self.check(&Token::Zp);
         if zero_page {
             self.advance();
         }
 
-        let mutable = self.check(&Token::Mut);
-        if mutable {
-            self.advance();
-        }
+        // All variables are mutable by default
+        let mutable = true;
 
         // Parse name
         let name = self.expect_ident()?;
@@ -156,9 +154,16 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::For)?;
 
-        // Parse loop variable type and name
-        let var_type = self.parse_type()?;
+        // Parse loop variable name
         let var_name = self.expect_ident()?;
+
+        // Check for optional type annotation: for i: u8 in ...
+        let var_type = if self.check(&Token::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
 
         self.expect(&Token::In)?;
 
