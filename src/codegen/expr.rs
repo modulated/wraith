@@ -8,6 +8,13 @@ use crate::codegen::{CodegenError, Emitter};
 use crate::sema::ProgramInfo;
 use crate::sema::table::SymbolLocation;
 
+/// Check if an expression is "simple" - can be re-evaluated cheaply without side effects
+/// Simple expressions: literals, variables
+/// Complex expressions: function calls, binary ops, array indexing, etc.
+fn is_simple_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(_) | Expr::Variable(_))
+}
+
 pub fn generate_expr(
     expr: &Spanned<Expr>,
     emitter: &mut Emitter,
@@ -203,20 +210,38 @@ fn generate_binary(
         _ => {}
     }
 
-    // 1. Generate left operand -> A
-    generate_expr(left, emitter, info)?;
+    // Optimization: Avoid stack if left operand is simple (variable or literal)
+    let use_stack = !is_simple_expr(&left.node);
 
-    // 2. Push A to stack to save it
-    emitter.emit_inst("PHA", "");
+    if use_stack {
+        // Complex left expression: use stack
+        // 1. Generate left operand -> A
+        generate_expr(left, emitter, info)?;
 
-    // 3. Generate right operand -> A
-    generate_expr(right, emitter, info)?;
+        // 2. Push A to stack to save it
+        emitter.emit_inst("PHA", "");
 
-    // 4. Store right operand in TEMP
-    emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+        // 3. Generate right operand -> A
+        generate_expr(right, emitter, info)?;
 
-    // 5. Restore left operand -> A
-    emitter.emit_inst("PLA", "");
+        // 4. Store right operand in TEMP
+        emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+
+        // 5. Restore left operand -> A
+        emitter.emit_inst("PLA", "");
+    } else {
+        // Simple left expression: evaluate right first, store in temp, then eval left
+        // This saves PHA/PLA instructions (4 cycles)
+
+        // 1. Generate right operand -> A
+        generate_expr(right, emitter, info)?;
+
+        // 2. Store right operand in TEMP
+        emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+
+        // 3. Generate left operand -> A (simple, no side effects)
+        generate_expr(left, emitter, info)?;
+    }
 
     // 6. Perform operation
     match op {
