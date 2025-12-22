@@ -80,7 +80,7 @@ fn test_mutable_variable() {
         r#"
         addr OUT = 0x400;
         fn main() {
-            mut x: u8 = 10;
+            x: u8 = 10;
             x = 20;
             OUT = x;
         }
@@ -216,7 +216,7 @@ fn test_while_loop() {
         r#"
         addr OUT = 0x400;
         fn main() {
-            mut i: u8 = 0;
+            i: u8 = 0;
             while i < 10 {
                 i = i + 1;
             }
@@ -224,7 +224,7 @@ fn test_while_loop() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "loop_");
+    assert_asm_contains(&asm, "while_");
     assert_asm_contains(&asm, "JMP");
 }
 

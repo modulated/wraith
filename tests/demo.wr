@@ -1,0 +1,26 @@
+// Demo file for testing parsing
+addr SCREEN = 0x0400;
+
+fn main() {
+    // Variables
+    x: u8 = 10;
+    y: u8 = 20;
+
+    // Arithmetic
+    sum: u8 = x + y;
+    SCREEN = sum;
+
+    // Control flow
+    if sum > 15 {
+        SCREEN = 1;
+    }
+
+    // Loops
+    for i in 0..10 {
+        SCREEN = i;
+    }
+}
+
+fn add(a: u8, b: u8) -> u8 {
+    return a + b;
+}

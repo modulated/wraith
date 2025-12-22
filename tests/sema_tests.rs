@@ -7,9 +7,9 @@ use wraith::sema::table::SymbolKind;
 fn test_analyze_simple_program() {
     let source = r#"
         addr SCREEN = 0x0400;
-        
+
         fn main() {
-            u8 x = 42;
+            x: u8 = 42;
         }
     "#;
 

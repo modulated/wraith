@@ -32,13 +32,13 @@ pub fn compile(source: &str) -> CompileResult {
     // Parse
     let ast = match Parser::parse(&tokens) {
         Ok(ast) => ast,
-        Err(e) => return CompileResult::ParseError(format!("{}", e)),
+        Err(e) => return CompileResult::ParseError(e.format_with_source_and_file(source, None)),
     };
 
     // Semantic analysis
     let program = match analyze(&ast) {
         Ok(program) => program,
-        Err(e) => return CompileResult::SemaError(format!("{}", e)),
+        Err(e) => return CompileResult::SemaError(e.format_with_source_and_file(source, None)),
     };
 
     // Code generation
