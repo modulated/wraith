@@ -141,16 +141,27 @@ impl Emitter {
     pub fn emit_sta_zp(&mut self, addr: u8) {
         self.emit_inst("STA", &format!("${:02X}", addr));
         // After STA, the memory location now contains what's in A
-        // But we also need to invalidate if any register was tracking this location
+        // IMPORTANT: A still contains the same value!
+        // So we can optimize subsequent LDA of the same address
+
+        // Invalidate if any OTHER register was tracking this location
         self.reg_state.invalidate_zero_page(addr);
-        // Note: We don't update the register state to track what's at this address
-        // because A still contains the value that was stored
+
+        // Now update A to also indicate it matches this memory location
+        // This allows LDA from this address to be optimized away
+        self.reg_state.set_a(RegisterValue::ZeroPage(addr));
+
+        // Alternative: we could keep the original value if it was an immediate
+        // For now, tracking the memory location allows the optimization to work
     }
 
     /// Store A to absolute address and update register tracking
     pub fn emit_sta_abs(&mut self, addr: u16) {
         self.emit_inst("STA", &format!("${:04X}", addr));
+
+        // Same logic as emit_sta_zp
         self.reg_state.invalidate_memory(addr);
+        self.reg_state.set_a(RegisterValue::Variable(addr));
     }
 
     /// Invalidate all register tracking (call on branches, function calls, etc.)

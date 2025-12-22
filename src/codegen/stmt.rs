@@ -34,10 +34,10 @@ pub fn generate_stmt(
             if let Some(sym) = info.resolved_symbols.get(&name.span) {
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
-                        emitter.emit_inst("STA", &format!("${:04X}", addr));
+                        emitter.emit_sta_abs(addr);
                     }
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                        emitter.emit_inst("STA", &format!("${:02X}", addr));
+                        emitter.emit_sta_zp(addr);
                     }
                     crate::sema::table::SymbolLocation::Stack(offset) => {
                         // TODO: Implement stack frame management
@@ -79,10 +79,10 @@ pub fn generate_stmt(
                     if let Some(sym) = info.table.lookup(name) {
                         match sym.location {
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
-                                emitter.emit_inst("STA", &format!("${:04X}", addr));
+                                emitter.emit_sta_abs(addr);
                             }
                             crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                                emitter.emit_inst("STA", &format!("${:02X}", addr));
+                                emitter.emit_sta_zp(addr);
                             }
                             crate::sema::table::SymbolLocation::Stack(offset) => {
                                 // Placeholder for stack store
