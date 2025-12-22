@@ -48,12 +48,14 @@ x = 20;                      // OK - all variables are mutable
 
 ### Zero Page Hint
 
+The `zp` keyword suggests the compiler allocate a variable to zero page for faster access. This is a **hint**, not a requirement - the compiler may ignore it if zero page space is exhausted.
+
 ```
-zp fast_var: u8 = 0;         // Suggest compiler use zero page
-zp counter: u16 = 0;         // Zero page variable
+zp fast_var: u8 = 0;         // Compiler will try to use zero page
+zp counter: u16 = 0;         // Zero page hint
 ```
 
-Zero page ($00-$FF) provides faster access (3 cycles vs 4 cycles) and enables special addressing modes.
+Zero page ($00-$FF) provides faster access (3 cycles vs 4 cycles) and enables special addressing modes. When register allocation optimization is enabled, the compiler may also promote frequently-used variables to zero page automatically, even without the `zp` hint.
 
 ## Functions
 
@@ -459,7 +461,7 @@ struct TightLayout {
 -   Fastest access (3 vs 4 cycles)
 -   Required for some addressing modes
 -   Limited to 256 bytes
--   Suggested with `zp` keyword
+-   Requested with `zp` keyword hint (compiler will try to honor)
 
 ### Stack ($0100-$01FF)
 
