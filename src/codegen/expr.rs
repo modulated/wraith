@@ -311,12 +311,13 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
     match lit {
         crate::ast::Literal::Integer(val) => {
             // TODO: Handle values > 255
-            emitter.emit_inst("LDA", &format!("#${:02X}", val));
+            // Use optimized load that skips if value already in A
+            emitter.emit_lda_immediate(*val);
             Ok(())
         }
         crate::ast::Literal::Bool(val) => {
             let v = if *val { 1 } else { 0 };
-            emitter.emit_inst("LDA", &format!("#${:02X}", v));
+            emitter.emit_lda_immediate(v);
             Ok(())
         }
         crate::ast::Literal::String(s) => {
@@ -432,11 +433,13 @@ fn generate_variable(
     if let Some(sym) = info.resolved_symbols.get(&span) {
         match sym.location {
             SymbolLocation::Absolute(addr) => {
-                emitter.emit_inst("LDA", &format!("${:04X}", addr));
+                // Use optimized load that skips if value already in A
+                emitter.emit_lda_abs(addr);
                 Ok(())
             }
             SymbolLocation::ZeroPage(addr) => {
-                emitter.emit_inst("LDA", &format!("${:02X}", addr));
+                // Use optimized load that skips if value already in A
+                emitter.emit_lda_zp(addr);
                 Ok(())
             }
             SymbolLocation::Stack(offset) => {

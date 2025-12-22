@@ -3,6 +3,7 @@
 //! Helper for generating formatted 6502 assembly code.
 
 use super::memory_layout::MemoryLayout;
+use super::regstate::{RegisterState, RegisterValue};
 
 pub struct Emitter {
     output: String,
@@ -11,6 +12,8 @@ pub struct Emitter {
     label_counter: usize,
     match_counter: u32,
     pub memory_layout: MemoryLayout,
+    /// Register state tracking for optimization
+    pub reg_state: RegisterState,
 }
 
 impl Default for Emitter {
@@ -27,6 +30,7 @@ impl Emitter {
             label_counter: 0,
             match_counter: 0,
             memory_layout: MemoryLayout::new(),
+            reg_state: RegisterState::new(),
         }
     }
 
@@ -99,5 +103,63 @@ impl Emitter {
 
     pub fn finish(self) -> String {
         self.output
+    }
+
+    // ========================================================================
+    // OPTIMIZED LOAD METHODS (with register state tracking)
+    // ========================================================================
+
+    /// Load immediate value into A, skipping if already loaded
+    pub fn emit_lda_immediate(&mut self, value: i64) {
+        let reg_val = RegisterValue::Immediate(value);
+        if !self.reg_state.a_contains(&reg_val) {
+            self.emit_inst("LDA", &format!("#${:02X}", value as u8));
+            self.reg_state.set_a(reg_val);
+        }
+        // If already in A, skip the load (optimization!)
+    }
+
+    /// Load from zero page into A, skipping if already loaded
+    pub fn emit_lda_zp(&mut self, addr: u8) {
+        let reg_val = RegisterValue::ZeroPage(addr);
+        if !self.reg_state.a_contains(&reg_val) {
+            self.emit_inst("LDA", &format!("${:02X}", addr));
+            self.reg_state.set_a(reg_val);
+        }
+    }
+
+    /// Load from absolute address into A, skipping if already loaded
+    pub fn emit_lda_abs(&mut self, addr: u16) {
+        let reg_val = RegisterValue::Variable(addr);
+        if !self.reg_state.a_contains(&reg_val) {
+            self.emit_inst("LDA", &format!("${:04X}", addr));
+            self.reg_state.set_a(reg_val);
+        }
+    }
+
+    /// Store A to zero page and update register tracking
+    pub fn emit_sta_zp(&mut self, addr: u8) {
+        self.emit_inst("STA", &format!("${:02X}", addr));
+        // After STA, the memory location now contains what's in A
+        // But we also need to invalidate if any register was tracking this location
+        self.reg_state.invalidate_zero_page(addr);
+        // Note: We don't update the register state to track what's at this address
+        // because A still contains the value that was stored
+    }
+
+    /// Store A to absolute address and update register tracking
+    pub fn emit_sta_abs(&mut self, addr: u16) {
+        self.emit_inst("STA", &format!("${:04X}", addr));
+        self.reg_state.invalidate_memory(addr);
+    }
+
+    /// Invalidate all register tracking (call on branches, function calls, etc.)
+    pub fn invalidate_registers(&mut self) {
+        self.reg_state.invalidate_all();
+    }
+
+    /// Mark that A register contains an unknown value (after arithmetic, etc.)
+    pub fn mark_a_unknown(&mut self) {
+        self.reg_state.modify_a();
     }
 }
