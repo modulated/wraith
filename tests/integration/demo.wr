@@ -1,12 +1,26 @@
+// Demo file for testing parsing
 addr SCREEN = 0x0400;
+addr LED = 0x0401;
 
-#[org(0x8000)]
+#[section("CODE")]
 fn main() {
-    zp u8 x = 42;
-    zp u8 y = 37;
-    SCREEN = sum(x, y);
+    // Variables
+    x: u8 = 10;
+    y: u8 = 20;
+
+    // Arithmetic
+    sum: u8 = add(x, y);
+    SCREEN = sum;
+
+    // Control flow
+    if sum > 15 {
+        SCREEN = 1;
+        LED = 2;
+    } else {
+        LED = 4;
+    }
 }
 
-fn sum(x: u8, y: u8) -> u8 {
-    return x + y;
+fn add(a: u8, b: u8) -> u8 {
+    return a + b;
 }

@@ -172,6 +172,24 @@ impl Parser<'_> {
                         self.expect(&Token::RParen)?;
                         FnAttribute::Org(addr)
                     }
+                    "section" => {
+                        self.expect(&Token::LParen)?;
+                        let section_name = match self.peek().cloned() {
+                            Some(Token::String(s)) => {
+                                self.advance();
+                                s
+                            }
+                            tok => {
+                                return Err(ParseError::unexpected_token(
+                                    self.current_span(),
+                                    "section name (string)",
+                                    tok,
+                                ));
+                            }
+                        };
+                        self.expect(&Token::RParen)?;
+                        FnAttribute::Section(section_name)
+                    }
                     "zp_section" => {
                         // This is a struct attribute, but we return it as NoReturn for now
                         // In a real impl, we'd have separate attribute types

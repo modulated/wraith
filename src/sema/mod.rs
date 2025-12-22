@@ -312,6 +312,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct FunctionMetadata {
     pub org_address: Option<u16>,
+    pub section: Option<String>,
 }
 
 pub struct ProgramInfo {
