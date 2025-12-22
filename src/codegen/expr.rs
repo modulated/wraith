@@ -214,12 +214,14 @@ fn generate_binary(
     let use_stack = !is_simple_expr(&left.node);
 
     if use_stack {
-        // Complex left expression: use stack
+        // Complex left expression: use Y register for temporary storage
+        // This is faster than PHA/PLA (2+3=5 cycles vs 3+4=7 cycles)
         // 1. Generate left operand -> A
         generate_expr(left, emitter, info)?;
 
-        // 2. Push A to stack to save it
-        emitter.emit_inst("PHA", "");
+        // 2. Save A to Y register
+        emitter.emit_inst("TAY", "");
+        emitter.reg_state.transfer_a_to_y();
 
         // 3. Generate right operand -> A
         generate_expr(right, emitter, info)?;
@@ -227,8 +229,9 @@ fn generate_binary(
         // 4. Store right operand in TEMP
         emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
 
-        // 5. Restore left operand -> A
-        emitter.emit_inst("PLA", "");
+        // 5. Restore left operand from Y -> A
+        emitter.emit_inst("TYA", "");
+        emitter.reg_state.transfer_y_to_a();
     } else {
         // Simple left expression: evaluate right first, store in temp, then eval left
         // This saves PHA/PLA instructions (4 cycles)
