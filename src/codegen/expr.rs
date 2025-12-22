@@ -125,7 +125,11 @@ fn generate_unary(
             // Address-of: &var or &mut var - Get the address of a variable
             // Don't evaluate the operand, just get its address
             if let Expr::Variable(name) = &operand.node {
-                if let Some(sym) = info.table.lookup(name) {
+                // Try resolved_symbols first, fallback to global table
+                let sym = info.resolved_symbols.get(&operand.span)
+                    .or_else(|| info.table.lookup(name));
+
+                if let Some(sym) = sym {
                     let addr = match sym.location {
                         crate::sema::table::SymbolLocation::ZeroPage(zp) => zp as u16,
                         crate::sema::table::SymbolLocation::Absolute(abs) => abs,
@@ -982,8 +986,11 @@ fn generate_field_access(
 
     // Get the base object (must be a variable for now)
     if let Expr::Variable(var_name) = &object.node {
-        // Look up the variable in the symbol table
-        if let Some(sym) = info.table.lookup(var_name) {
+        // Look up the variable using span from resolved_symbols, fallback to global table
+        let sym = info.resolved_symbols.get(&object.span)
+            .or_else(|| info.table.lookup(var_name));
+
+        if let Some(sym) = sym {
             // Get the base address of the struct
             let base_addr = match sym.location {
                 crate::sema::table::SymbolLocation::ZeroPage(addr) => addr as u16,

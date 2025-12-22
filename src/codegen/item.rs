@@ -104,8 +104,12 @@ fn generate_address(
         crate::ast::AccessMode::ReadWrite => "read-write",
     };
 
-    // Get the actual address value from the symbol table
-    if let Some(sym) = info.table.lookup(name) {
+    // Get the actual address value from resolved_symbols (using span for correct lookup)
+    // Fallback to global table for top-level addresses
+    let sym = info.resolved_symbols.get(&addr.name.span)
+        .or_else(|| info.table.lookup(name));
+
+    if let Some(sym) = sym {
         if let crate::sema::table::SymbolLocation::Absolute(addr_value) = sym.location {
             // Emit assembler equate: NAME = $ADDRESS
             emitter.emit_raw(&format!("{} = ${:04X}", name, addr_value));

@@ -76,7 +76,11 @@ pub fn generate_stmt(
             // We need a helper to generate store instructions based on target
             match &target.node {
                 crate::ast::Expr::Variable(name) => {
-                    if let Some(sym) = info.table.lookup(name) {
+                    // Look up by span in resolved_symbols first (for local vars)
+                    let sym = info.resolved_symbols.get(&target.span)
+                        .or_else(|| info.table.lookup(name)); // Fallback to global table
+
+                    if let Some(sym) = sym {
                         match sym.location {
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
                                 emitter.emit_sta_abs(addr);
