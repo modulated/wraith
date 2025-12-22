@@ -648,3 +648,49 @@ fn test_codegen_enum_multiple_variants() {
     assert!(asm.contains(".byte $01"), "Should emit tag byte 1 for second variant");
     assert!(asm.contains(".byte $2A"), "Should emit 42 (0x2A) for data");
 }
+
+#[test]
+fn test_codegen_inline_function() {
+    let source = r#"
+        inline fn add(a: u8, b: u8) -> u8 {
+            return a + b;
+        }
+
+        fn regular_fn(x: u8) -> u8 {
+            return x;
+        }
+
+        fn main() {
+            result: u8 = add(5, 3);
+            other: u8 = regular_fn(result);
+        }
+    "#;
+
+    let tokens = lex(source).unwrap();
+    let ast = Parser::parse(&tokens).unwrap();
+    let program = analyze(&ast).unwrap();
+    let asm = generate(&ast, &program).unwrap();
+
+    // Inline function should have a definition (for potential non-inline calls)
+    assert!(asm.contains("add:"), "Should have add label");
+
+    // Main function should inline the add call (no JSR to add)
+    let main_start = asm.find("main:").unwrap();
+    let main_section = &asm[main_start..];
+
+    // Should have comment indicating inline expansion
+    assert!(main_section.contains("; Inline add"), "Should have inline comment");
+
+    // Should NOT have JSR to add in main
+    assert!(!main_section.contains("JSR add"), "Should not have JSR to add (inlined)");
+
+    // Should have JSR to regular_fn (not inlined)
+    assert!(main_section.contains("JSR regular_fn"), "Should have JSR to regular_fn");
+
+    // Verify the inline expansion actually happened:
+    // The add function loads params from $40, $41 and does ADC
+    // The inlined version should do the same without JSR/RTS
+    assert!(main_section.contains("LDA #$05"), "Should load immediate 5");
+    assert!(main_section.contains("LDA #$03"), "Should load immediate 3");
+    assert!(main_section.contains("ADC"), "Should have ADC instruction from inlined add");
+}

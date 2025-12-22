@@ -25,6 +25,8 @@ pub struct Emitter {
     pub reg_state: RegisterState,
     /// Stack of loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
+    /// Inline depth tracking (>0 means we're generating inline code)
+    inline_depth: u32,
 }
 
 impl Default for Emitter {
@@ -43,6 +45,7 @@ impl Emitter {
             memory_layout: MemoryLayout::new(),
             reg_state: RegisterState::new(),
             loop_stack: Vec::new(),
+            inline_depth: 0,
         }
     }
 
@@ -206,5 +209,26 @@ impl Emitter {
     /// Get the current loop context (for break/continue)
     pub fn current_loop(&self) -> Option<&LoopContext> {
         self.loop_stack.last()
+    }
+
+    // ========================================================================
+    // INLINE CONTEXT MANAGEMENT (for inline function expansion)
+    // ========================================================================
+
+    /// Push an inline context (increment depth)
+    pub fn push_inline(&mut self) {
+        self.inline_depth += 1;
+    }
+
+    /// Pop an inline context (decrement depth)
+    pub fn pop_inline(&mut self) {
+        if self.inline_depth > 0 {
+            self.inline_depth -= 1;
+        }
+    }
+
+    /// Check if we're currently generating inline code
+    pub fn is_inlining(&self) -> bool {
+        self.inline_depth > 0
     }
 }

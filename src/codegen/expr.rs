@@ -67,6 +67,14 @@ fn generate_call(
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
+    // Check if function should be inlined
+    if let Some(metadata) = info.function_metadata.get(&function.node) {
+        if metadata.is_inline {
+            // Inline the function call
+            return generate_inline_call(function, args, emitter, info, metadata);
+        }
+    }
+
     // 6502 calling convention: Arguments are passed in zero page locations
     // Parameters are allocated starting at param_base (from memory layout)
     // This avoids using the hardware stack which is limited and slow to access
@@ -92,6 +100,61 @@ fn generate_call(
     // Result is returned in A register (no cleanup needed)
 
     Ok(())
+}
+
+fn generate_inline_call(
+    function: &Spanned<String>,
+    args: &[Spanned<Expr>],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    metadata: &crate::sema::FunctionMetadata,
+) -> Result<(), CodegenError> {
+    emitter.emit_comment(&format!("Inline {}", function.node));
+
+    // Get inline function body and parameters
+    let body = metadata.inline_body.as_ref()
+        .ok_or_else(|| CodegenError::UnsupportedOperation(
+            format!("Inline function {} missing body", function.node)
+        ))?;
+
+    let params = metadata.inline_params.as_ref()
+        .ok_or_else(|| CodegenError::UnsupportedOperation(
+            format!("Inline function {} missing parameters", function.node)
+        ))?;
+
+    // Verify argument count matches parameter count
+    if args.len() != params.len() {
+        return Err(CodegenError::UnsupportedOperation(
+            format!("Inline function {} expects {} args, got {}",
+                function.node, params.len(), args.len())
+        ));
+    }
+
+    // Simple inline strategy for V1:
+    // Store arguments in the same parameter locations we would use for a normal call
+    // Then generate the function body inline (without JSR/RTS)
+    // This works because the body will reference the parameter locations
+
+    let param_base = emitter.memory_layout.param_base;
+
+    // Store arguments to parameter locations (same as normal call)
+    for (i, arg) in args.iter().enumerate() {
+        generate_expr(arg, emitter, info)?;
+        let param_addr = param_base + i as u8;
+        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
+    }
+
+    // Generate the function body inline
+    // Push inline context so return statements won't emit RTS
+    emitter.push_inline();
+
+    use crate::codegen::stmt::generate_stmt;
+    let result = generate_stmt(body, emitter, info);
+
+    // Pop inline context
+    emitter.pop_inline();
+
+    result
 }
 
 fn generate_unary(

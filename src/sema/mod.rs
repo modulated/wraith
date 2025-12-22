@@ -305,13 +305,18 @@ impl std::fmt::Display for SemaError {
 
 impl std::error::Error for SemaError {}
 
-use crate::ast::Span;
+use crate::ast::{FnParam, Span, Spanned, Stmt};
 use crate::sema::table::SymbolInfo;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct FunctionMetadata {
     pub org_address: Option<u16>,
+    pub section: Option<String>,
+    pub is_inline: bool,
+    /// For inline functions, store the body and parameters for expansion
+    pub inline_body: Option<Spanned<Stmt>>,
+    pub inline_params: Option<Vec<FnParam>>,
 }
 
 pub struct ProgramInfo {

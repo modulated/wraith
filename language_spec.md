@@ -446,7 +446,61 @@ fn irq() { }
 
 #[org(0x8000)]         // Place at specific address
 fn main() -> u8 { }
+
+#[section("STDLIB")]   // Place in named memory section
+fn imported_fn() { }
 ```
+
+#### Inline Functions
+
+The `#[inline]` attribute or `inline fn` syntax causes the compiler to expand function calls inline rather than using JSR/RTS instructions. This eliminates function call overhead but increases code size.
+
+**Usage:**
+
+```wraith
+// Using inline keyword
+inline fn add(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+// Using attribute
+#[inline]
+fn double(x: u8) -> u8 {
+    return x + x;
+}
+
+fn main() {
+    result: u8 = add(5, 3);  // Expanded inline, no JSR
+}
+```
+
+**How it works:**
+
+- Function body is stored during semantic analysis
+- At call sites, the body is expanded directly into the caller
+- Parameters are stored in the same zero-page locations as normal calls
+- Return statements in inline functions don't emit RTS
+- Result is left in the A register
+
+**Benefits:**
+
+- Eliminates JSR/RTS overhead (12 cycles saved per call)
+- Enables additional optimizations (constant propagation, dead code elimination)
+- Ideal for small, frequently-called functions
+
+**Limitations:**
+
+- Increases code size (body duplicated at each call site)
+- Currently uses simple parameter location reuse (no true parameter substitution)
+- Recursive inline functions are not supported
+- Function still has a separate definition for potential non-inline calls
+
+**Best practices:**
+
+- Use for small functions (< 10 instructions)
+- Use for functions called frequently in hot loops
+- Avoid for large functions or functions called infrequently
+- Consider code size vs performance tradeoffs
 
 ### Type Attributes
 

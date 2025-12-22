@@ -22,6 +22,8 @@ pub enum FnAttribute {
     Interrupt,
     /// Place at specific address
     Org(u16),
+    /// Place in specific memory section
+    Section(String),
 }
 
 /// A struct field definition

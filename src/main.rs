@@ -12,7 +12,7 @@ fn main() {
     if args.len() == 2 {
         match args[1].as_str() {
             "--version" | "-v" => {
-                println!("wraith {}", VERSION);
+                println!("Wraith Compiler {} - modulated", VERSION);
                 return;
             }
             "--help" | "-h" => {

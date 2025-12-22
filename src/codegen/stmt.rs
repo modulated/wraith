@@ -62,10 +62,11 @@ pub fn generate_stmt(
             if let Some(e) = expr {
                 generate_expr(e, emitter, info)?;
             }
-            // RTS is handled by function epilogue, but we might need a jump to end
-            // For now, assuming return is last statement or we just emit RTS here
-            // Note: Multiple returns require jumping to epilogue
-            emitter.emit_inst("RTS", "");
+            // Only emit RTS if we're not in an inline context
+            // When inlining, the return value is already in A and we just continue
+            if !emitter.is_inlining() {
+                emitter.emit_inst("RTS", "");
+            }
             Ok(())
         }
         Stmt::Assign { target, value } => {

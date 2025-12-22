@@ -3,6 +3,7 @@
 //! Handles generation of functions and other items.
 
 use crate::ast::{Function, Item, Spanned};
+use crate::codegen::section_allocator::SectionAllocator;
 use crate::codegen::stmt::generate_stmt;
 use crate::codegen::{CodegenError, Emitter};
 use crate::sema::ProgramInfo;
@@ -11,9 +12,10 @@ pub fn generate_item(
     item: &Spanned<Item>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    section_alloc: &mut SectionAllocator,
 ) -> Result<(), CodegenError> {
     match &item.node {
-        Item::Function(func) => generate_function(func, emitter, info),
+        Item::Function(func) => generate_function(func, emitter, info, section_alloc),
         Item::Static(stat) => generate_static(stat, emitter, info),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
@@ -24,14 +26,37 @@ fn generate_function(
     func: &Function,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    section_alloc: &mut SectionAllocator,
 ) -> Result<(), CodegenError> {
     let name = &func.name.node;
 
-    // Emit org directive if function has one
+    // Determine function address
+    // Priority: explicit org > section attribute > default section
     if let Some(metadata) = info.function_metadata.get(name) {
         if let Some(org_addr) = metadata.org_address {
+            // Explicit org address takes precedence
             emitter.emit_org(org_addr);
+        } else if let Some(section_name) = &metadata.section {
+            // Allocate in specified section
+            // Estimate function size (for now, use a conservative 256 bytes)
+            // TODO: Calculate actual function size
+            let addr = section_alloc
+                .allocate(section_name, 256)
+                .map_err(CodegenError::SectionError)?;
+            emitter.emit_org(addr);
+        } else {
+            // Use default section (CODE)
+            let addr = section_alloc
+                .allocate_default(256)
+                .map_err(CodegenError::SectionError)?;
+            emitter.emit_org(addr);
         }
+    } else {
+        // No metadata - use default section
+        let addr = section_alloc
+            .allocate_default(256)
+            .map_err(CodegenError::SectionError)?;
+        emitter.emit_org(addr);
     }
 
     emitter.emit_label(name);

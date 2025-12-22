@@ -109,7 +109,6 @@ fn test_type_error_function_arity() {
 }
 
 #[test]
-#[ignore] // Currently compiles and fails at codegen instead of sema
 fn test_type_error_undefined_variable() {
     assert_error_contains(
         r#"
@@ -117,12 +116,11 @@ fn test_type_error_undefined_variable() {
             x: u8 = undefined_var;
         }
         "#,
-        "not found",
+        "undefined",
     );
 }
 
 #[test]
-#[ignore] // Function call validation not fully implemented
 fn test_type_error_undefined_function() {
     assert_error_contains(
         r#"
@@ -130,7 +128,7 @@ fn test_type_error_undefined_function() {
             undefined_func();
         }
         "#,
-        "not found",
+        "undefined",
     );
 }
 
@@ -166,7 +164,6 @@ fn test_type_error_immutable_assignment() {
 // ============================================================================
 
 #[test]
-#[ignore] // Duplicate function detection not yet implemented
 fn test_semantic_error_duplicate_function() {
     assert_error_contains(
         r#"
