@@ -115,24 +115,28 @@ fn test_codegen_binary_op() {
     let program = analyze(&ast).unwrap();
     let asm = generate(&ast, &program).unwrap();
 
-    // Verify proper binary operation sequence with variables:
-    // 1. Load left operand (from X = 0x0401)
-    // 2. Push to stack (PHA)
-    // 3. Load right operand (from Y = 0x0402)
-    // 4. Store right in TEMP
-    // 5. Restore left (PLA)
-    // 6. Add with carry (ADC)
-    // 7. Store result to SCREEN
-    assert!(asm.contains("LDA $0401"), "Should load left operand from X");
-    assert!(asm.contains("LDA $0402"), "Should load right operand from Y");
-    assert!(asm.contains("PHA"), "Should push left to stack");
-    assert!(asm.contains("PLA"), "Should restore left from stack");
-    assert!(asm.contains("STA $20"), "Should store right to TEMP");
+    // Verify optimized binary operation sequence:
+    // For X + Y where both are addr variables:
+    // 1. Assignments to X and Y happen first
+    // 2. For the addition, right operand (Y) is evaluated first (already in A from assignment)
+    // 3. Store to TEMP (store-load optimization: no LDA $0402 needed, value already in A)
+    // 4. Load left operand (X)
+    // 5. Add with carry (ADC)
+    // 6. Store result to SCREEN
+
+    // Check that assignments happen
+    assert!(asm.contains("STA $0401"), "Should store to X");
+    assert!(asm.contains("STA $0402"), "Should store to Y");
+
+    // Check the addition operations
+    assert!(asm.contains("LDA $0401"), "Should load from X");
+    assert!(asm.contains("STA $20"), "Should use TEMP for binary op");
     assert!(asm.contains("CLC"), "Should clear carry");
     assert!(asm.contains("ADC $20"), "Should add from TEMP");
+    assert!(asm.contains("STA $0400"), "Should store result to SCREEN");
 
-    // Verify ordering
-    assert!(appears_before(&asm, "PHA", "PLA"), "PHA before PLA");
+    // Verify ordering of the addition
+    assert!(appears_before(&asm, "STA $20", "LDA $0401"), "Store temp before load X");
     assert!(appears_before(&asm, "CLC", "ADC"), "CLC before ADC");
     assert!(appears_before(&asm, "ADC", "STA $0400"), "ADC before final STA");
 }
@@ -179,11 +183,17 @@ fn test_codegen_function_call() {
     let program = analyze(&ast).unwrap();
     let asm = generate(&ast, &program).unwrap();
 
-    assert!(asm.contains("JSR add"));
-    // Arguments pushed
-    assert!(asm.contains("PHA"));
-    // Stack cleanup
-    assert!(asm.contains("PLA"));
+    // Function call should:
+    // 1. Store arguments to zero page argument area (not using hardware stack)
+    // 2. JSR to function
+    // 3. Function accesses args from parameter locations
+    assert!(asm.contains("JSR add"), "Should call function with JSR");
+
+    // Our calling convention uses zero page, not hardware stack (PHA/PLA)
+    // Arguments are stored to zero page locations before JSR
+    assert!(asm.contains("STA $"), "Should store arguments to zero page");
+    assert!(asm.contains("LDA #$0A"), "Should load first argument (10)");
+    assert!(asm.contains("LDA #$14"), "Should load second argument (20)");
 }
 
 // ============================================================================
@@ -380,7 +390,7 @@ fn test_codegen_shift_operations() {
 fn test_codegen_for_loop() {
     let source = r#"
         fn main() {
-            for u8 i in 0..10 {
+            for i in 0..10 {
                 // body
             }
         }
@@ -391,21 +401,23 @@ fn test_codegen_for_loop() {
     let program = analyze(&ast).unwrap();
     let asm = generate(&ast, &program).unwrap();
 
-    // For loop should:
-    // 1. Initialize counter
-    // 2. Store end value
-    // 3. Loop: check condition, execute body, increment
+    // Optimized for loop using X register:
+    // 1. Initialize counter in X register (TAX)
+    // 2. Store end value in temp location
+    // 3. Loop: check condition with CPX, execute body, increment with INX
+    assert!(asm.contains("TAX"), "Should transfer counter to X");
     assert!(asm.contains("for_loop_"), "Should have loop label");
     assert!(asm.contains("for_end_"), "Should have end label");
-    assert!(asm.contains("CMP $21"), "Should compare with end value");
+    assert!(asm.contains("CPX $21"), "Should compare X with end value");
     assert!(asm.contains("BCS for_end_"), "Should exit if counter >= end");
-    assert!(asm.contains("INC"), "Should increment counter");
+    assert!(asm.contains("INX"), "Should increment X register");
     assert!(asm.contains("JMP for_loop_"), "Should jump back to start");
 
     // Verify ordering
+    assert!(appears_before(&asm, "TAX", "for_loop_"), "Transfer to X before loop");
     assert!(appears_before(&asm, "STA $21", "for_loop_"), "Store end before loop");
-    assert!(appears_before(&asm, "for_loop_", "CMP"), "Loop label before check");
-    assert!(appears_before(&asm, "INC", "JMP for_loop_"), "Increment before jump");
+    assert!(appears_before(&asm, "for_loop_", "CPX"), "Loop label before check");
+    assert!(appears_before(&asm, "INX", "JMP for_loop_"), "Increment before jump");
 }
 
 #[test]
