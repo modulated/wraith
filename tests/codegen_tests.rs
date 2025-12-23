@@ -65,12 +65,13 @@ fn test_codegen_simple_assignment() {
     let program = analyze(&ast).unwrap();
     let asm = generate(&ast, &program).unwrap();
 
-    // Should load 42 into A, then store to SCREEN
+    // Should load 42 into A, then store to SCREEN (using symbolic name)
+    assert!(asm.contains("SCREEN = $0400"), "Should have address label");
     assert!(asm.contains("LDA #$2A"), "Should load immediate value 42 (0x2A)");
-    assert!(asm.contains("STA $0400"), "Should store to address 0x0400");
+    assert!(asm.contains("STA SCREEN"), "Should store to SCREEN using symbolic name");
 
     // Verify ordering: LDA must come before STA
-    assert!(appears_before(&asm, "LDA #$2A", "STA $0400"),
+    assert!(appears_before(&asm, "LDA #$2A", "STA SCREEN"),
             "LDA should appear before STA");
 }
 
@@ -89,8 +90,9 @@ fn test_codegen_constant_folding() {
     let asm = generate(&ast, &program).unwrap();
 
     // Should generate constant folded result
+    assert!(asm.contains("RESULT = $0400"), "Should have address label");
     assert!(asm.contains("LDA #$1E"), "Should load folded constant 30 (0x1E)");
-    assert!(asm.contains("STA $0400"), "Should store to RESULT");
+    assert!(asm.contains("STA RESULT"), "Should store to RESULT using symbolic name");
 
     // Should NOT have addition instructions
     assert!(!asm.contains("ADC"), "Should not have ADC instruction");
@@ -119,26 +121,31 @@ fn test_codegen_binary_op() {
     // For X + Y where both are addr variables:
     // 1. Assignments to X and Y happen first
     // 2. For the addition, right operand (Y) is evaluated first (already in A from assignment)
-    // 3. Store to TEMP (store-load optimization: no LDA $0402 needed, value already in A)
+    // 3. Store to TEMP (store-load optimization: no LDA Y needed, value already in A)
     // 4. Load left operand (X)
     // 5. Add with carry (ADC)
     // 6. Store result to SCREEN
 
-    // Check that assignments happen
-    assert!(asm.contains("STA $0401"), "Should store to X");
-    assert!(asm.contains("STA $0402"), "Should store to Y");
+    // Check address labels
+    assert!(asm.contains("X = $0401"), "Should have X address label");
+    assert!(asm.contains("Y = $0402"), "Should have Y address label");
+    assert!(asm.contains("SCREEN = $0400"), "Should have SCREEN address label");
 
-    // Check the addition operations
-    assert!(asm.contains("LDA $0401"), "Should load from X");
+    // Check that assignments happen (using symbolic names)
+    assert!(asm.contains("STA X"), "Should store to X");
+    assert!(asm.contains("STA Y"), "Should store to Y");
+
+    // Check the addition operations (using symbolic names)
+    assert!(asm.contains("LDA X"), "Should load from X");
     assert!(asm.contains("STA $20"), "Should use TEMP for binary op");
     assert!(asm.contains("CLC"), "Should clear carry");
     assert!(asm.contains("ADC $20"), "Should add from TEMP");
-    assert!(asm.contains("STA $0400"), "Should store result to SCREEN");
+    assert!(asm.contains("STA SCREEN"), "Should store result to SCREEN");
 
     // Verify ordering of the addition
-    assert!(appears_before(&asm, "STA $20", "LDA $0401"), "Store temp before load X");
+    assert!(appears_before(&asm, "STA $20", "LDA X"), "Store temp before load X");
     assert!(appears_before(&asm, "CLC", "ADC"), "CLC before ADC");
-    assert!(appears_before(&asm, "ADC", "STA $0400"), "ADC before final STA");
+    assert!(appears_before(&asm, "ADC", "STA SCREEN"), "ADC before final STA");
 }
 
 #[test]
@@ -279,11 +286,15 @@ fn test_codegen_logical_and_short_circuit() {
     let program = analyze(&ast).unwrap();
     let asm = generate(&ast, &program).unwrap();
 
+    // Check address labels
+    assert!(asm.contains("X = $0401"), "Should have X address label");
+    assert!(asm.contains("Y = $0402"), "Should have Y address label");
+
     // Short-circuit AND:
     // 1. Evaluate left (from X)
     // 2. If false (0), skip right and jump to end
     // 3. Otherwise evaluate right
-    assert!(asm.contains("LDA $0401"), "Should load left operand from X");
+    assert!(asm.contains("LDA X"), "Should load left operand from X");
     assert!(asm.contains("CMP #$00"), "Should check if false");
     assert!(asm.contains("BEQ and_end_"), "Should short-circuit if false");
 
@@ -679,7 +690,7 @@ fn test_codegen_inline_function() {
     let main_section = &asm[main_start..];
 
     // Should have comment indicating inline expansion
-    assert!(main_section.contains("; Inline add"), "Should have inline comment");
+    assert!(main_section.contains("; Inline: add"), "Should have inline comment");
 
     // Should NOT have JSR to add in main
     assert!(!main_section.contains("JSR add"), "Should not have JSR to add (inlined)");

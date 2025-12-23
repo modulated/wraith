@@ -2,11 +2,42 @@
 //!
 //! Handles generation of functions and other items.
 
-use crate::ast::{Function, Item, Spanned};
+use crate::ast::{Function, Item, PrimitiveType, Spanned, TypeExpr};
 use crate::codegen::section_allocator::SectionAllocator;
 use crate::codegen::stmt::generate_stmt;
 use crate::codegen::{CodegenError, Emitter};
 use crate::sema::ProgramInfo;
+
+/// Format a type for display in comments
+fn format_type(ty: &Spanned<TypeExpr>) -> String {
+    match &ty.node {
+        TypeExpr::Primitive(prim) => match prim {
+            PrimitiveType::U8 => "u8".to_string(),
+            PrimitiveType::U16 => "u16".to_string(),
+            PrimitiveType::I8 => "i8".to_string(),
+            PrimitiveType::I16 => "i16".to_string(),
+            PrimitiveType::Bool => "bool".to_string(),
+        },
+        TypeExpr::Pointer { pointee, mutable } => {
+            if *mutable {
+                format!("*mut {}", format_type(pointee))
+            } else {
+                format!("*{}", format_type(pointee))
+            }
+        }
+        TypeExpr::Array { element, size } => {
+            format!("[{}; {}]", format_type(element), size)
+        }
+        TypeExpr::Slice { element, mutable } => {
+            if *mutable {
+                format!("&mut [{}]", format_type(element))
+            } else {
+                format!("&[{}]", format_type(element))
+            }
+        }
+        TypeExpr::Named(name) => name.clone(),
+    }
+}
 
 pub fn generate_item(
     item: &Spanned<Item>,
@@ -32,10 +63,11 @@ fn generate_function(
 
     // Determine function address
     // Priority: explicit org > section attribute > default section
-    if let Some(metadata) = info.function_metadata.get(name) {
+    let function_addr = if let Some(metadata) = info.function_metadata.get(name) {
         if let Some(org_addr) = metadata.org_address {
             // Explicit org address takes precedence
             emitter.emit_org(org_addr);
+            org_addr
         } else if let Some(section_name) = &metadata.section {
             // Allocate in specified section
             // Estimate function size (for now, use a conservative 256 bytes)
@@ -44,12 +76,14 @@ fn generate_function(
                 .allocate(section_name, 256)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
+            addr
         } else {
             // Use default section (CODE)
             let addr = section_alloc
                 .allocate_default(256)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
+            addr
         }
     } else {
         // No metadata - use default section
@@ -57,6 +91,44 @@ fn generate_function(
             .allocate_default(256)
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(addr);
+        addr
+    };
+
+    // Emit function header comment with signature and location
+    emitter.emit_comment(&format!("Function: {}", name));
+
+    // Parameters
+    if !func.params.is_empty() {
+        let params_str: Vec<String> = func.params.iter()
+            .map(|p| format!("{}: {}", p.name.node, format_type(&p.ty)))
+            .collect();
+        emitter.emit_comment(&format!("  Params: {}", params_str.join(", ")));
+    } else {
+        emitter.emit_comment("  Params: none");
+    }
+
+    // Return type
+    if let Some(ref ret_ty) = func.return_type {
+        emitter.emit_comment(&format!("  Returns: {}", format_type(ret_ty)));
+    } else {
+        emitter.emit_comment("  Returns: void");
+    }
+
+    // Location
+    emitter.emit_comment(&format!("  Location: ${:04X}", function_addr));
+
+    // Attributes
+    if let Some(metadata) = info.function_metadata.get(name) {
+        let mut attrs = Vec::new();
+        if metadata.is_inline {
+            attrs.push("inline");
+        }
+        if let Some(ref section) = metadata.section {
+            attrs.push(section.as_str());
+        }
+        if !attrs.is_empty() {
+            emitter.emit_comment(&format!("  Attributes: {}", attrs.join(", ")));
+        }
     }
 
     emitter.emit_label(name);
@@ -85,8 +157,13 @@ fn generate_static(
     emitter: &mut Emitter,
     _info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
-    // Generate static variable data
-    // Look up the location from the symbol table
+    // Skip code generation for const (non-mutable statics)
+    // They are compile-time constants that get folded into the code
+    if !stat.mutable {
+        return Ok(());
+    }
+
+    // Generate storage for mutable statics only
     let name = &stat.name.node;
 
     // Emit label for the static variable
@@ -121,13 +198,7 @@ fn generate_address(
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // Address declarations are memory-mapped I/O locations
-    // Look up the actual address value from the symbol table
     let name = &addr.name.node;
-    let access = match addr.access {
-        crate::ast::AccessMode::Read => "read-only",
-        crate::ast::AccessMode::Write => "write-only",
-        crate::ast::AccessMode::ReadWrite => "read-write",
-    };
 
     // Get the actual address value from resolved_symbols (using span for correct lookup)
     // Fallback to global table for top-level addresses
@@ -138,9 +209,6 @@ fn generate_address(
         if let crate::sema::table::SymbolLocation::Absolute(addr_value) = sym.location {
             // Emit assembler equate: NAME = $ADDRESS
             emitter.emit_raw(&format!("{} = ${:04X}", name, addr_value));
-            emitter.emit_comment(&format!("Memory-mapped {} ({})", name, access));
-        } else {
-            emitter.emit_comment(&format!("address {} ({}) - location type not absolute", name, access));
         }
     } else {
         return Err(CodegenError::SymbolNotFound(name.clone()));

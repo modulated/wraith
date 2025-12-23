@@ -179,6 +179,20 @@ impl Emitter {
         self.reg_state.set_a(RegisterValue::Variable(addr));
     }
 
+    /// Load from symbolic address into A (for addr declarations)
+    pub fn emit_lda_symbol(&mut self, symbol: &str) {
+        self.emit_inst("LDA", symbol);
+        // Can't track symbolic addresses precisely, so mark A as unknown
+        self.reg_state.modify_a();
+    }
+
+    /// Store A to symbolic address (for addr declarations)
+    pub fn emit_sta_symbol(&mut self, symbol: &str) {
+        self.emit_inst("STA", symbol);
+        // Can't track symbolic addresses precisely, so invalidate
+        self.reg_state.modify_a();
+    }
+
     /// Invalidate all register tracking (call on branches, function calls, etc.)
     pub fn invalidate_registers(&mut self) {
         self.reg_state.invalidate_all();

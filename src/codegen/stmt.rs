@@ -32,9 +32,16 @@ pub fn generate_stmt(
             // Store in variable location
             // Look up by span in resolved_symbols since local vars aren't in global table
             if let Some(sym) = info.resolved_symbols.get(&name.span) {
+                use crate::sema::table::SymbolKind;
+
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
-                        emitter.emit_sta_abs(addr);
+                        // Check if this is an address declaration - use symbolic name
+                        if sym.kind == SymbolKind::Address {
+                            emitter.emit_sta_symbol(&name.node);
+                        } else {
+                            emitter.emit_sta_abs(addr);
+                        }
                     }
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                         emitter.emit_sta_zp(addr);
@@ -82,9 +89,16 @@ pub fn generate_stmt(
                         .or_else(|| info.table.lookup(name)); // Fallback to global table
 
                     if let Some(sym) = sym {
+                        use crate::sema::table::SymbolKind;
+
                         match sym.location {
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
-                                emitter.emit_sta_abs(addr);
+                                // Check if this is an address declaration - use symbolic name
+                                if sym.kind == SymbolKind::Address {
+                                    emitter.emit_sta_symbol(name);
+                                } else {
+                                    emitter.emit_sta_abs(addr);
+                                }
                             }
                             crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                                 emitter.emit_sta_zp(addr);

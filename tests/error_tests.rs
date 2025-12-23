@@ -266,3 +266,47 @@ fn test_error_contains_helpful_message() {
         other => panic!("Expected SemaError but got: {:?}", other),
     }
 }
+// ============================================================================
+// CONST IMMUTABILITY TESTS
+// ============================================================================
+
+#[test]
+#[ignore] // TODO: Implement immutability checking
+fn test_const_cannot_be_reassigned() {
+    assert_error_contains(
+        r#"
+        const MAX: u8 = 100;
+        fn main() {
+            MAX = 50;  // Should error: cannot assign to const
+        }
+        "#,
+        "cannot assign",
+    );
+}
+
+#[test]
+#[ignore] // TODO: Implement immutability checking
+fn test_const_cannot_be_modified() {
+    assert_error_contains(
+        r#"
+        const VALUE: u8 = 10;
+        fn main() {
+            VALUE = VALUE + 1;  // Should error: cannot assign to const
+        }
+        "#,
+        "cannot assign",
+    );
+}
+
+#[test]
+fn test_regular_variable_can_be_reassigned() {
+    // Regular variables (without const) should be mutable
+    let _asm = assert_compiles(
+        r#"
+        fn main() {
+            counter: u8 = 0;
+            counter = counter + 1;  // Should work fine - variables are mutable by default
+        }
+        "#,
+    );
+}

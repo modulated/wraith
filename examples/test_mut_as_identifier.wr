@@ -1,0 +1,9 @@
+// Test that 'mut' is just a regular identifier now
+
+addr LED = 0x6000;
+
+fn main() {
+    // 'mut' is a valid variable name
+    mut: u8 = 42;
+    LED = mut;
+}

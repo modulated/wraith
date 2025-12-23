@@ -1,0 +1,3 @@
+addr LED = 0x1000;
+addr BUTTON = 0x1001;
+addr RW_REG = 0x1002;

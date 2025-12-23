@@ -1,0 +1,23 @@
+// Test improved assembly comments
+
+addr SCREEN = 0x0400;
+
+inline fn add(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+fn multiply(x: u8, y: u8) -> u8 {
+    return x * y;
+}
+
+#[section("CODE")]
+fn process(data: *u8, count: u16) -> bool {
+    result: u8 = add(5, 3);
+    product: u8 = multiply(result, 2);
+    SCREEN = product;
+    return true;
+}
+
+fn main() {
+    val: u8 = process(0 as *u8, 10 as u16);
+}

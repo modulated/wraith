@@ -63,7 +63,7 @@ impl Parser<'_> {
             }
 
             // Static/const: type name = value;
-            Some(Token::Mut)
+            Some(Token::Const)
             | Some(Token::Zp)
             | Some(Token::U8)
             | Some(Token::I8)
@@ -411,19 +411,28 @@ impl Parser<'_> {
     }
 
     /// Parse a static/const declaration
+    /// Syntax: const NAME: type = value;  (immutable, compile-time constant)
+    ///         NAME: type = value;         (mutable, runtime storage)
+    ///         zp NAME: type = value;      (mutable, zero-page storage)
     fn parse_static(&mut self) -> ParseResult<Static> {
         let zero_page = self.check(&Token::Zp);
         if zero_page {
             self.advance();
         }
 
-        let mutable = self.check(&Token::Mut);
-        if mutable {
+        // Check for const keyword (makes it immutable, compile-time constant)
+        let is_const = self.check(&Token::Const);
+        if is_const {
             self.advance();
         }
 
-        let ty = self.parse_type()?;
+        // Mutable by default, unless const is specified
+        let mutable = !is_const;
+
+        // Rust-like syntax: NAME: type = value
         let name = self.expect_ident()?;
+        self.expect(&Token::Colon)?;
+        let ty = self.parse_type()?;
 
         self.expect(&Token::Eq)?;
         let init = self.parse_expr()?;

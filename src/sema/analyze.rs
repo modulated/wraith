@@ -4,7 +4,7 @@
 
 use crate::ast::{Expr, Function, Item, PrimitiveType, SourceFile, Spanned, Stmt, TypeExpr};
 use crate::codegen::memory_layout::MemoryLayout;
-use crate::sema::const_eval::{eval_const_expr, eval_const_expr_with_env, ConstEnv, ConstValue};
+use crate::sema::const_eval::{eval_const_expr_with_env, ConstEnv, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
 use crate::sema::type_defs::TypeRegistry;
 use crate::sema::types::Type;
@@ -356,12 +356,13 @@ impl SemanticAnalyzer {
                     Err(e) => return Err(e),
                 };
 
-                // Add the resolved address value to const_env for future references
+                // Add address to const_env so it can be used in other addr declarations
+                // (e.g., addr SCREEN = BASE + 0x100)
                 self.const_env.insert(name.clone(), ConstValue::Integer(address as i64));
 
                 let info = SymbolInfo {
                     name: name.clone(),
-                    kind: SymbolKind::Variable,
+                    kind: SymbolKind::Address,
                     ty: Type::Primitive(crate::ast::PrimitiveType::U8),
                     location: SymbolLocation::Absolute(address),
                     mutable: true,
@@ -897,10 +898,35 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
+    /// Check if an expression contains any references to addr symbols (runtime values)
+    fn contains_addr_reference(&self, expr: &Spanned<Expr>) -> bool {
+        match &expr.node {
+            Expr::Variable(name) => {
+                // Check if this variable is an addr
+                if let Some(sym) = self.table.lookup(name) {
+                    sym.kind == SymbolKind::Address
+                } else {
+                    false
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                self.contains_addr_reference(left) || self.contains_addr_reference(right)
+            }
+            Expr::Unary { operand, .. } => self.contains_addr_reference(operand),
+            Expr::Paren(inner) => self.contains_addr_reference(inner),
+            _ => false,
+        }
+    }
+
     fn check_expr(&mut self, expr: &Spanned<Expr>) -> Result<Type, SemaError> {
         // Try to fold the expression if it's constant
-        if let Ok(const_val) = eval_const_expr(expr) {
-            self.folded_constants.insert(expr.span, const_val);
+        // Use const_env so we can fold references to const variables
+        // BUT: don't fold if the expression contains references to addr (runtime values)
+        let contains_addr_ref = self.contains_addr_reference(expr);
+        if !contains_addr_ref {
+            if let Ok(const_val) = eval_const_expr_with_env(expr, &self.const_env) {
+                self.folded_constants.insert(expr.span, const_val);
+            }
         }
 
         match &expr.node {

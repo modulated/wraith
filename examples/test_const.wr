@@ -1,0 +1,20 @@
+// Test const keyword
+
+// Hardware address (proper use of addr)
+addr LED = 0x6000;
+
+// Constants using const keyword
+const u8 MAX_COUNT = 100;
+const u8 BAUD_RATE = 12;
+const u16 BUFFER_SIZE = 256;
+
+// Mutable static
+mut u8 counter = 0;
+
+fn main() {
+    // Use the constants
+    LED = MAX_COUNT;
+
+    counter = BAUD_RATE;
+    LED = counter;
+}

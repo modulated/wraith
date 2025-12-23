@@ -33,8 +33,8 @@ pub enum Token {
     Break,
     #[token("continue")]
     Continue,
-    #[token("mut")]
-    Mut,
+    #[token("const")]
+    Const,
     #[token("zp")]
     Zp,
     #[token("as")]

@@ -1,0 +1,187 @@
+// TL16C550B UART Example - Idiomatic Wraith
+// Proper use of 'addr' for hardware vs 'const' for configuration
+
+// ============================================================================
+// HARDWARE ADDRESSES - Memory-mapped I/O (use 'addr')
+// ============================================================================
+
+addr UART_BASE = 0x9000;
+
+addr UART_RBR = UART_BASE + 0;  // Receiver Buffer (read, DLAB=0)
+addr UART_THR = UART_BASE + 0;  // Transmitter Holding (write, DLAB=0)
+addr UART_DLL = UART_BASE + 0;  // Divisor Latch Low (DLAB=1)
+addr UART_DLM = UART_BASE + 1;  // Divisor Latch High (DLAB=1)
+addr UART_IER = UART_BASE + 1;  // Interrupt Enable (DLAB=0)
+addr UART_FCR = UART_BASE + 2;  // FIFO Control (write)
+addr UART_LCR = UART_BASE + 3;  // Line Control
+addr UART_MCR = UART_BASE + 4;  // Modem Control
+addr UART_LSR = UART_BASE + 5;  // Line Status
+
+// ============================================================================
+// CONFIGURATION CONSTANTS - Values and bit masks (use 'const')
+// ============================================================================
+
+// LCR register bit values
+const u8 LCR_DLAB = 0x80;    // Divisor Latch Access Bit
+const u8 LCR_8N1  = 0x03;    // 8 data bits, no parity, 1 stop bit
+
+// FCR register bits
+const u8 FCR_ENABLE  = 0x01; // Enable FIFOs
+const u8 FCR_RX_RST  = 0x02; // Reset RX FIFO
+const u8 FCR_TX_RST  = 0x04; // Reset TX FIFO
+const u8 FCR_TRIGGER = 0xC0; // 14-byte trigger level
+
+// LSR register bits
+const u8 LSR_DATA_RDY  = 0x01; // Data ready
+const u8 LSR_THR_EMPTY = 0x20; // Transmitter holding register empty
+
+// MCR register bits
+const u8 MCR_DTR = 0x01;     // Data Terminal Ready
+const u8 MCR_RTS = 0x02;     // Request to Send
+
+// Baud rate divisors (for 1.8432 MHz crystal)
+const u8 BAUD_9600   = 12;
+const u8 BAUD_19200  = 6;
+const u8 BAUD_38400  = 3;
+const u8 BAUD_115200 = 1;
+
+// ASCII character constants
+const u8 CHAR_CR = 13;
+const u8 CHAR_LF = 10;
+const u8 CHAR_ESC = 27;
+
+// ============================================================================
+// UART FUNCTIONS
+// ============================================================================
+
+/// Initialize the UART to 9600 baud, 8N1
+fn uart_init() {
+    // Set DLAB=1 to access divisor latches
+    UART_LCR = LCR_DLAB;
+
+    // Set baud rate to 9600
+    UART_DLL = BAUD_9600;
+    UART_DLM = 0;
+
+    // Set DLAB=0 and configure 8N1 format
+    UART_LCR = LCR_8N1;
+
+    // Enable and reset FIFOs
+    UART_FCR = FCR_ENABLE | FCR_RX_RST | FCR_TX_RST | FCR_TRIGGER;
+
+    // Set DTR and RTS
+    UART_MCR = MCR_DTR | MCR_RTS;
+
+    // Disable all interrupts
+    UART_IER = 0;
+}
+
+/// Wait for transmitter to be ready
+fn uart_wait_tx() {
+    status: u8 = 0;
+
+    // Poll LSR until THR is empty
+    while (status & LSR_THR_EMPTY) == 0 {
+        status = UART_LSR;
+    }
+}
+
+/// Send a single character
+fn uart_putc(ch: u8) {
+    uart_wait_tx();
+    UART_THR = ch;
+}
+
+/// Send a newline (CR+LF)
+fn uart_newline() {
+    uart_putc(13);
+    uart_putc(10);
+}
+
+/// Check if data is available to read
+fn uart_data_ready() -> u8 {
+    status: u8 = UART_LSR;
+    return status & LSR_DATA_RDY;
+}
+
+/// Receive a single character (blocking)
+fn uart_getc() -> u8 {
+    // Wait for data to be ready
+    while uart_data_ready() == 0 {
+        // Spin wait
+    }
+
+    return UART_RBR;
+}
+
+/// Print a byte as two hex digits
+fn uart_print_hex(value: u8) {
+    high: u8 = value >> 4;
+    low: u8 = value & 0x0F;
+
+    // Print high nibble
+    if high < 10 {
+        uart_putc(48 + high);  // '0' + digit
+    } else {
+        uart_putc(55 + high);  // 'A' + (digit - 10)
+    }
+
+    // Print low nibble
+    if low < 10 {
+        uart_putc(48 + low);
+    } else {
+        uart_putc(55 + low);
+    }
+}
+
+/// Echo demo - echoes back received characters
+fn echo_loop() {
+    received: u8 = 0;
+
+    // Send prompt
+    uart_putc(62);   // '>'
+    uart_putc(32);   // ' '
+
+    // Echo loop
+    while 1 == 1 {
+        received = uart_getc();
+
+        // Echo the character
+        uart_putc(received);
+
+        // If Enter was pressed, send newline and new prompt
+        if received == 13 {
+            uart_newline();
+            uart_putc(62);  // '>'
+            uart_putc(32);  // ' '
+        }
+
+        // Break on ESC key
+        if received == 27 {
+            break;
+        }
+    }
+}
+
+#[org(0x8000)]
+fn main() {
+    // Initialize UART
+    uart_init();
+
+    // Send welcome message
+    uart_putc(82);   // 'R'
+    uart_putc(101);  // 'e'
+    uart_putc(97);   // 'a'
+    uart_putc(100);  // 'd'
+    uart_putc(121);  // 'y'
+    uart_newline();
+
+    // Run echo loop
+    echo_loop();
+
+    // Done
+    uart_putc(66);   // 'B'
+    uart_putc(121);  // 'y'
+    uart_putc(101);  // 'e'
+    uart_newline();
+}

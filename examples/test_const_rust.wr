@@ -1,0 +1,19 @@
+// Test Rust-like const syntax
+
+// Hardware address (addr uses old syntax: addr NAME = address)
+addr LED = 0x6000;
+
+// Constants with Rust-like syntax
+const MAX_COUNT: u8 = 100;
+const BAUD_RATE: u8 = 12;
+const BUFFER_SIZE: u16 = 256;
+
+// Mutable static
+mut counter: u8 = 0;
+
+fn main() {
+    LED = MAX_COUNT;
+
+    counter = BAUD_RATE;
+    LED = counter;
+}

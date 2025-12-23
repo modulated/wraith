@@ -1,0 +1,114 @@
+// TL16C550B UART Example - Using Enums for Constants
+// Shows using enums to group related configuration values
+
+// ============================================================================
+// HARDWARE ADDRESSES (proper use of 'addr')
+// ============================================================================
+
+addr UART_BASE = 0x9000;
+
+addr UART_RBR = UART_BASE + 0;
+addr UART_THR = UART_BASE + 0;
+addr UART_DLL = UART_BASE + 0;
+addr UART_DLM = UART_BASE + 1;
+addr UART_LCR = UART_BASE + 3;
+addr UART_FCR = UART_BASE + 2;
+addr UART_MCR = UART_BASE + 4;
+addr UART_LSR = UART_BASE + 5;
+
+// ============================================================================
+// CONFIGURATION CONSTANTS (using enums)
+// ============================================================================
+
+// LCR (Line Control Register) values
+enum LCR {
+    DLAB = 0x80,     // Divisor Latch Access Bit
+    Bits8N1 = 0x03,  // 8 data bits, no parity, 1 stop
+}
+
+// FCR (FIFO Control Register) bits
+enum FCR {
+    Enable = 0x01,
+    ResetRX = 0x02,
+    ResetTX = 0x04,
+    Trigger14 = 0xC0,
+}
+
+// LSR (Line Status Register) bits
+enum LSR {
+    DataReady = 0x01,
+    ThrEmpty = 0x20,
+}
+
+// MCR (Modem Control Register) bits
+enum MCR {
+    DTR = 0x01,
+    RTS = 0x02,
+}
+
+// Baud rate divisors for 1.8432 MHz crystal
+enum BaudRate {
+    Baud9600 = 12,
+    Baud19200 = 6,
+    Baud38400 = 3,
+    Baud115200 = 1,
+}
+
+// ============================================================================
+// UART FUNCTIONS
+// ============================================================================
+
+fn uart_init() {
+    // Set DLAB to access divisor
+    UART_LCR = LCR::DLAB;
+
+    // Set baud rate
+    UART_DLL = BaudRate::Baud9600;
+    UART_DLM = 0;
+
+    // Configure line: 8N1, DLAB=0
+    UART_LCR = LCR::Bits8N1;
+
+    // Enable and reset FIFOs
+    UART_FCR = FCR::Enable | FCR::ResetRX | FCR::ResetTX | FCR::Trigger14;
+
+    // Set modem control
+    UART_MCR = MCR::DTR | MCR::RTS;
+}
+
+fn uart_tx_ready() -> u8 {
+    status: u8 = UART_LSR;
+    return status & LSR::ThrEmpty;
+}
+
+fn uart_send(ch: u8) {
+    // Wait for transmitter ready
+    while uart_tx_ready() == 0 {
+        // Spin
+    }
+    UART_THR = ch;
+}
+
+fn uart_rx_ready() -> u8 {
+    status: u8 = UART_LSR;
+    return status & LSR::DataReady;
+}
+
+fn uart_recv() -> u8 {
+    // Wait for data
+    while uart_rx_ready() == 0 {
+        // Spin
+    }
+    return UART_RBR;
+}
+
+#[org(0x8000)]
+fn main() {
+    uart_init();
+
+    // Send test message
+    uart_send(82);  // 'R'
+    uart_send(68);  // 'D'
+    uart_send(89);  // 'Y'
+    uart_send(10);  // LF
+}

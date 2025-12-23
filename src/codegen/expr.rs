@@ -81,7 +81,13 @@ fn generate_call(
 
     let param_base = emitter.memory_layout.param_base;
 
-    emitter.emit_comment(&format!("Call {} with {} args", function.node, args.len()));
+    // Emit descriptive call comment
+    if args.is_empty() {
+        emitter.emit_comment(&format!("Call: {}()", function.node));
+    } else {
+        emitter.emit_comment(&format!("Call: {}(...) [{} arg{}]",
+            function.node, args.len(), if args.len() == 1 { "" } else { "s" }));
+    }
 
     // Store each argument to its corresponding parameter location
     for (i, arg) in args.iter().enumerate() {
@@ -109,7 +115,13 @@ fn generate_inline_call(
     info: &ProgramInfo,
     metadata: &crate::sema::FunctionMetadata,
 ) -> Result<(), CodegenError> {
-    emitter.emit_comment(&format!("Inline {}", function.node));
+    // Emit inline expansion comment
+    if args.is_empty() {
+        emitter.emit_comment(&format!("Inline: {}()", function.node));
+    } else {
+        emitter.emit_comment(&format!("Inline: {}(...) [{} arg{}]",
+            function.node, args.len(), if args.len() == 1 { "" } else { "s" }));
+    }
 
     // Get inline function body and parameters
     let body = metadata.inline_body.as_ref()
@@ -500,11 +512,18 @@ fn generate_variable(
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
+    use crate::sema::table::SymbolKind;
+
     if let Some(sym) = info.resolved_symbols.get(&span) {
         match sym.location {
-            SymbolLocation::Absolute(addr) => {
-                // Use optimized load that skips if value already in A
-                emitter.emit_lda_abs(addr);
+            SymbolLocation::Absolute(_addr) => {
+                // Check if this is an address declaration - use symbolic name
+                if sym.kind == SymbolKind::Address {
+                    emitter.emit_lda_symbol(name);
+                } else {
+                    // Regular variable at absolute address - use numeric
+                    emitter.emit_lda_abs(_addr);
+                }
                 Ok(())
             }
             SymbolLocation::ZeroPage(addr) => {

@@ -132,18 +132,10 @@ impl Parser<'_> {
             }
             Some(Token::Amp) => {
                 self.advance();
-                let mutable = self.check(&Token::Mut);
-                if mutable {
-                    self.advance();
-                }
+                // All references are mutable (no mut keyword in language)
                 let operand = self.parse_prefix_expr()?;
                 let span = start.merge(operand.span);
-                let op = if mutable {
-                    UnaryOp::AddrOfMut
-                } else {
-                    UnaryOp::AddrOf
-                };
-                Ok(Spanned::new(Expr::unary(op, operand), span))
+                Ok(Spanned::new(Expr::unary(UnaryOp::AddrOfMut, operand), span))
             }
 
             // Parenthesized expression
@@ -401,30 +393,24 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Pointer type: *T or *mut T
+            // Pointer type: *T (all pointers are mutable)
             Some(Token::Star) => {
                 self.advance();
-                let mutable = self.check(&Token::Mut);
-                if mutable {
-                    self.advance();
-                }
                 let pointee = self.parse_type()?;
                 let span = start.merge(pointee.span);
-                Ok(Spanned::new(TypeExpr::pointer(pointee, mutable), span))
+                // All pointers are mutable (no mut keyword in language)
+                Ok(Spanned::new(TypeExpr::pointer(pointee, true), span))
             }
 
-            // Slice type: &[T] or &[mut T]
+            // Slice type: &[T] (all slices are mutable)
             Some(Token::Amp) => {
                 self.advance();
                 self.expect(&Token::LBracket)?;
-                let mutable = self.check(&Token::Mut);
-                if mutable {
-                    self.advance();
-                }
                 let element = self.parse_type()?;
                 self.expect(&Token::RBracket)?;
                 let span = start.merge(self.previous_span());
-                Ok(Spanned::new(TypeExpr::slice(element, mutable), span))
+                // All slices are mutable (no mut keyword in language)
+                Ok(Spanned::new(TypeExpr::slice(element, true), span))
             }
 
             // Array type: [T; N]

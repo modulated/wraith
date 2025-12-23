@@ -12,6 +12,7 @@ pub enum SymbolKind {
     Function,
     Type, // Struct or Enum name
     Constant,
+    Address, // Memory-mapped address declaration (addr keyword)
 }
 
 #[derive(Debug, Clone, PartialEq)]

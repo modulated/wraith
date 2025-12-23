@@ -12,8 +12,8 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Variable declaration with modifiers: mut name: type = expr; or zp name: type = expr;
-            Some(Token::Mut) | Some(Token::Zp) => self.parse_var_decl(),
+            // Variable declaration with zp modifier: zp name: type = expr;
+            Some(Token::Zp) => self.parse_var_decl(),
 
             // Control flow
             Some(Token::If) => self.parse_if_stmt(),

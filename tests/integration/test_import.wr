@@ -5,7 +5,7 @@ import {BUTTON, LED, RW_REG} from "addresses.wr";
 #[org(0x8000)]
 fn main() {
     // Read from BUTTON address
-    u8 button_state = BUTTON;
+    button_state: u8 = BUTTON;
 
     // Write to LED address
     LED = 1;
