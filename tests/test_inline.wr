@@ -1,0 +1,28 @@
+// Test inline function expansion
+
+// Simple inline function with implicit return
+inline fn add(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+// Inline function with explicit return
+#[inline]
+fn double(x: u8) -> u8 {
+    return x + x;
+}
+
+// Regular function for comparison
+fn regular_add(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+fn main() {
+    // Call inline function - should expand body directly
+    result: u8 = add(5, 3);
+
+    // Call another inline function
+    doubled: u8 = double(result);
+
+    // Call regular function - should use JSR
+    sum: u8 = regular_add(doubled, 10);
+}
