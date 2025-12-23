@@ -246,8 +246,22 @@ impl Parser<'_> {
         }
 
         // Check for struct init or function call
+        // Only parse as struct init if { is followed by ident: or }
+        // This avoids incorrectly parsing `match x {` as struct init
         if self.check(&Token::LBrace) {
-            return self.parse_struct_init(name, start);
+            // Lookahead to see if this is really a struct init
+            let is_struct_init = match self.peek_ahead(1) {
+                Some(Token::RBrace) => true, // Empty struct: x {}
+                Some(Token::Ident(_)) => {
+                    // Check if ident is followed by colon: x { field: ... }
+                    matches!(self.peek_ahead(2), Some(Token::Colon))
+                }
+                _ => false,
+            };
+
+            if is_struct_init {
+                return self.parse_struct_init(name, start);
+            }
         }
 
         if self.check(&Token::LParen) {
@@ -338,7 +352,21 @@ impl Parser<'_> {
 
         let data = if self.check(&Token::LBrace) {
             // Struct variant: Enum::Variant { x: 1, y: 2 }
-            self.expect(&Token::LBrace)?;
+            // Use lookahead to ensure this is actually a struct variant
+            // and not something like `match Status::On { ... }`
+            let is_struct_variant = match self.peek_ahead(1) {
+                Some(Token::RBrace) => true, // Empty struct variant
+                Some(Token::Ident(_)) => {
+                    matches!(self.peek_ahead(2), Some(Token::Colon))
+                }
+                _ => false,
+            };
+
+            if !is_struct_variant {
+                // Not a struct variant, just a plain enum variant
+                VariantData::Unit
+            } else {
+                self.expect(&Token::LBrace)?;
             let mut fields = Vec::new();
 
             while !self.check(&Token::RBrace) {
@@ -357,6 +385,7 @@ impl Parser<'_> {
             self.expect(&Token::RBrace)?;
 
             VariantData::Struct(fields)
+            }
         } else if self.check(&Token::LParen) {
             // Tuple variant: Enum::Variant(a, b)
             self.expect(&Token::LParen)?;

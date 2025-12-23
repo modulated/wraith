@@ -945,34 +945,79 @@ fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 // Array indexing helper
 fn generate_index(
-    _object: &Spanned<Expr>,
+    object: &Spanned<Expr>,
     index: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // For array indexing: array[index]
-    // We need to calculate the address and load from it
-    // This is a simplified implementation that assumes:
-    // - Array base address is known
-    // - Index fits in a single byte
+    // Strategy:
+    // 1. Get the base address of the array
+    // 2. Generate index into Y register
+    // 3. Use absolute indexed addressing: LDA base,Y
 
-    // Generate index expression -> A
-    generate_expr(index, emitter, info)?;
+    // Currently only supporting variable arrays
+    // For local arrays, we need to get the address where they're stored
+    match &object.node {
+        Expr::Variable(name) => {
+            // Look up the array variable to get its location
+            let sym = info.resolved_symbols.get(&object.span)
+                .or_else(|| info.table.lookup(name))
+                .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
-    // Save index in X register
-    emitter.emit_inst("TAX", "");
+            match sym.location {
+                crate::sema::table::SymbolLocation::Absolute(addr) => {
+                    // Array variables store a pointer to the array data
+                    // Need to use indirect indexed addressing: LDA (ptr),Y
+                    // But indirect indexed requires zero-page pointer
+                    // So we need to copy the pointer to zero page first (if not already there)
 
-    // For now, emit a comment about array access
-    // Full implementation would need:
-    // 1. Get base address of array
-    // 2. Add index (with proper scaling for element size)
-    // 3. Load from calculated address
-    emitter.emit_comment("Array index access (TODO: implement proper addressing)");
+                    // For now, assume array pointers are in zero page (address < 256)
+                    if addr >= 256 {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "array variables must be in zero page for indexing".to_string()
+                        ));
+                    }
 
-    // Placeholder: just load zero for now
-    emitter.emit_inst("LDA", "#$00");
+                    // Generate index expression -> A, then transfer to Y
+                    generate_expr(index, emitter, info)?;
+                    emitter.emit_inst("TAY", "Transfer index to Y");
 
-    Ok(())
+                    // Use indirect indexed addressing: LDA (ptr),Y
+                    // The array variable holds a 2-byte pointer in zero page
+                    emitter.emit_inst("LDA", &format!("(${:02X}),Y", addr));
+                    emitter.reg_state.modify_a();
+                    Ok(())
+                }
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                    // Array in zero page - use indirect indexed addressing
+                    generate_expr(index, emitter, info)?;
+                    emitter.emit_inst("TAY", "Transfer index to Y");
+                    emitter.emit_inst("LDA", &format!("(${:02X}),Y", addr));
+                    emitter.reg_state.modify_a();
+                    Ok(())
+                }
+                crate::sema::table::SymbolLocation::Stack(_) => {
+                    // Stack-based arrays not yet supported
+                    Err(CodegenError::UnsupportedOperation(
+                        "stack-based array indexing not yet implemented".to_string()
+                    ))
+                }
+                crate::sema::table::SymbolLocation::None => {
+                    // Compile-time constants don't have runtime storage
+                    Err(CodegenError::UnsupportedOperation(
+                        "cannot index compile-time constant".to_string()
+                    ))
+                }
+            }
+        }
+        _ => {
+            // Complex array expressions not yet supported
+            Err(CodegenError::UnsupportedOperation(
+                "only variable array indexing is currently supported".to_string()
+            ))
+        }
+    }
 }
 
 fn generate_struct_init(

@@ -574,10 +574,7 @@ fn test_codegen_enum_struct_variant() {
     assert!(asm.contains(".byte $14"), "Should emit 20 (0x14) for y field");
 }
 
-// TODO: Enable this test when parser supports enum patterns in match statements
-// Currently the parser has an issue parsing Status::Off patterns (expects single colon)
 #[test]
-#[ignore]
 fn test_codegen_enum_pattern_matching() {
     let source = r#"
         enum Status {

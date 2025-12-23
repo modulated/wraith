@@ -271,7 +271,6 @@ fn test_error_contains_helpful_message() {
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Implement immutability checking
 fn test_const_cannot_be_reassigned() {
     assert_error_contains(
         r#"
@@ -285,7 +284,6 @@ fn test_const_cannot_be_reassigned() {
 }
 
 #[test]
-#[ignore] // TODO: Implement immutability checking
 fn test_const_cannot_be_modified() {
     assert_error_contains(
         r#"

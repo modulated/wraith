@@ -714,7 +714,12 @@ impl SemanticAnalyzer {
                 }
 
                 // Allocate in zero page using allocator
-                let addr = self.zp_allocator.allocate()?;
+                // Arrays need 2 bytes for the pointer
+                let addr = if matches!(declared_ty, Type::Array(_, _)) {
+                    self.zp_allocator.allocate_range(2)?
+                } else {
+                    self.zp_allocator.allocate()?
+                };
                 let location = SymbolLocation::ZeroPage(addr);
 
                 let info = SymbolInfo {
@@ -867,6 +872,66 @@ impl SemanticAnalyzer {
                     self.check_expr(&range.start)?;
                     self.check_expr(&range.end)?;
                 }
+
+                // Analyze body
+                self.loop_depth += 1;
+                self.analyze_stmt(body)?;
+                self.loop_depth -= 1;
+
+                self.table.exit_scope();
+            }
+            Stmt::ForEach {
+                var_name,
+                var_type,
+                iterable,
+                body,
+            } => {
+                // Create a new scope for the loop variable
+                self.table.enter_scope();
+
+                // Check the iterable expression (should be an array)
+                let iterable_ty = self.check_expr(iterable)?;
+
+                // Extract element type from array type
+                let element_ty = match &iterable_ty {
+                    Type::Array(elem_ty, _size) => (**elem_ty).clone(),
+                    _ => {
+                        return Err(SemaError::TypeMismatch {
+                            expected: "array".to_string(),
+                            found: iterable_ty.display_name(),
+                            span: iterable.span,
+                        });
+                    }
+                };
+
+                // Determine loop variable type (explicit or inferred from array element type)
+                let var_ty = if let Some(ty) = var_type {
+                    let declared_ty = self.resolve_type(&ty.node)?;
+                    // Check that declared type matches element type
+                    if declared_ty != element_ty {
+                        return Err(SemaError::TypeMismatch {
+                            expected: element_ty.display_name(),
+                            found: declared_ty.display_name(),
+                            span: ty.span,
+                        });
+                    }
+                    declared_ty
+                } else {
+                    element_ty
+                };
+
+                // Allocate storage for loop variable
+                let addr = self.zp_allocator.allocate()?;
+                let info = SymbolInfo {
+                    name: var_name.node.clone(),
+                    kind: SymbolKind::Variable,
+                    ty: var_ty,
+                    location: SymbolLocation::ZeroPage(addr),
+                    mutable: true,
+                };
+                self.table.insert(var_name.node.clone(), info.clone());
+                // Add to resolved_symbols so codegen can find it
+                self.resolved_symbols.insert(var_name.span, info);
 
                 // Analyze body
                 self.loop_depth += 1;
@@ -1273,6 +1338,35 @@ impl SemanticAnalyzer {
                     })?;
 
                 Ok(field_info.ty.clone())
+            }
+            Expr::Index { object, index } => {
+                // Type check the index expression (should be integer)
+                let index_ty = self.check_expr(index)?;
+                if !matches!(index_ty, Type::Primitive(crate::ast::PrimitiveType::U8 | crate::ast::PrimitiveType::I8)) {
+                    return Err(SemaError::TypeMismatch {
+                        expected: "u8 or i8".to_string(),
+                        found: index_ty.display_name(),
+                        span: index.span,
+                    });
+                }
+
+                // Type check the object being indexed
+                let object_ty = self.check_expr(object)?;
+
+                // Extract element type from array type
+                match &object_ty {
+                    Type::Array(element_ty, _size) => {
+                        // Return the element type
+                        Ok((**element_ty).clone())
+                    }
+                    _ => {
+                        Err(SemaError::TypeMismatch {
+                            expected: "array".to_string(),
+                            found: object_ty.display_name(),
+                            span: object.span,
+                        })
+                    }
+                }
             }
             _ => Ok(Type::Void), // TODO: Handle other expressions
         }

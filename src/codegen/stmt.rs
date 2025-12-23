@@ -33,6 +33,10 @@ pub fn generate_stmt(
             // Look up by span in resolved_symbols since local vars aren't in global table
             if let Some(sym) = info.resolved_symbols.get(&name.span) {
                 use crate::sema::table::SymbolKind;
+                use crate::sema::types::Type;
+
+                // Check if this is an array type (arrays need 2 bytes for pointer)
+                let is_array = matches!(sym.ty, Type::Array(_, _));
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
@@ -41,10 +45,18 @@ pub fn generate_stmt(
                             emitter.emit_sta_symbol(&name.node);
                         } else {
                             emitter.emit_sta_abs(addr);
+                            // For arrays, also store high byte (in X)
+                            if is_array {
+                                emitter.emit_inst("STX", &format!("${:04X}", addr + 1));
+                            }
                         }
                     }
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                         emitter.emit_sta_zp(addr);
+                        // For arrays, also store high byte (in X)
+                        if is_array {
+                            emitter.emit_inst("STX", &format!("${:02X}", addr + 1));
+                        }
                     }
                     crate::sema::table::SymbolLocation::Stack(offset) => {
                         // TODO: Implement stack frame management
@@ -262,6 +274,122 @@ pub fn generate_stmt(
 
             // After loop, X register is modified
             emitter.reg_state.modify_x();
+            Ok(())
+        }
+        Stmt::ForEach {
+            var_name,
+            var_type: _,
+            iterable,
+            body,
+        } => {
+            // ForEach loop: for item in array { ... }
+            // Strategy:
+            // 1. Evaluate iterable expression to get array pointer
+            // 2. Use X register as loop counter (0..array_length)
+            // 3. Load array[X] into the loop variable
+            // 4. Execute body
+            // 5. Increment X and loop
+
+            emitter.emit_comment("ForEach loop");
+
+            // Generate the iterable expression (should be an array)
+            // For now, only support array variables
+            let (array_base, array_size) = match &iterable.node {
+                crate::ast::Expr::Variable(name) => {
+                    // Look up the array to get its pointer location and size
+                    let sym = info.resolved_symbols.get(&iterable.span)
+                        .or_else(|| info.table.lookup(name))
+                        .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
+
+                    // Get array size from type
+                    let size = match &sym.ty {
+                        crate::sema::types::Type::Array(_, sz) => *sz,
+                        _ => {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "ForEach requires array type".to_string()
+                            ))
+                        }
+                    };
+
+                    // Get the location where the array pointer is stored
+                    let ptr_loc = match sym.location {
+                        crate::sema::table::SymbolLocation::ZeroPage(addr) => addr,
+                        crate::sema::table::SymbolLocation::Absolute(addr) if addr < 256 => addr as u8,
+                        _ => {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "ForEach requires array pointer in zero page".to_string()
+                            ))
+                        }
+                    };
+
+                    (ptr_loc, size)
+                }
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "ForEach only supports array variables currently".to_string()
+                    ))
+                }
+            };
+
+            let loop_label = emitter.next_label("foreach_loop");
+            let end_label = emitter.next_label("foreach_end");
+
+            // Initialize counter to 0 in X register
+            emitter.emit_inst("LDX", "#$00");
+            emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(0));
+
+            // Loop start
+            emitter.emit_label(&loop_label);
+
+            // Check if counter (X) >= array_size
+            emitter.emit_inst("CPX", &format!("#${:02X}", array_size));
+            emitter.emit_inst("BCS", &end_label); // Branch if X >= size
+
+            // Push loop context for break/continue
+            emitter.push_loop(loop_label.clone(), end_label.clone());
+
+            // Load array[X] into A using indirect indexed: LDA (ptr),Y
+            // Transfer X to Y for indexing
+            emitter.emit_inst("TXA", "Save counter");
+            emitter.emit_inst("TAY", "Use as index");
+            emitter.emit_inst("LDA", &format!("(${:02X}),Y", array_base));
+
+            // Store the element in the loop variable
+            // Look up the loop variable (it should be in the current scope)
+            if let Some(loop_var) = info.resolved_symbols.get(&var_name.span) {
+                match loop_var.location {
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                        emitter.emit_sta_zp(addr);
+                    }
+                    crate::sema::table::SymbolLocation::Absolute(addr) => {
+                        emitter.emit_sta_abs(addr);
+                    }
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "ForEach loop variable must have concrete location".to_string()
+                        ))
+                    }
+                }
+            } else {
+                return Err(CodegenError::SymbolNotFound(var_name.node.clone()));
+            }
+
+            // Restore counter from stack (it's still in X, so no need)
+            emitter.reg_state.invalidate_all();
+
+            // Execute loop body
+            generate_stmt(body, emitter, info)?;
+
+            // Pop loop context
+            emitter.pop_loop();
+
+            // Increment counter
+            emitter.emit_inst("INX", "Next element");
+            emitter.reg_state.modify_x();
+
+            emitter.emit_inst("JMP", &loop_label);
+            emitter.emit_label(&end_label);
+
             Ok(())
         }
         Stmt::Break => {
