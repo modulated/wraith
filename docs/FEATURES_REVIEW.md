@@ -1,6 +1,6 @@
 # Wraith Language - Features Review & Roadmap
 
-Updated: 2025-12-22
+Updated: 2025-12-25
 
 This document lists remaining features and improvements for the Wraith programming language.
 
@@ -97,8 +97,8 @@ if zero { /* value is zero */ }
 
 ### 4.2 NMI/IRQ/Reset Vectors
 
-**Status:** `#[interrupt]` exists, no vector generation
-**Description:** Automatic interrupt vector table
+**Status:** ✅ COMPLETE (2025-12-25)
+**Description:** Automatic interrupt vector table generation
 **Priority:** MEDIUM
 
 ```wraith
@@ -111,6 +111,8 @@ fn timer_handler() { }
 #[reset]
 fn start() { }
 ```
+
+Generated vector table is automatically emitted at $FFFA-$FFFF.
 
 ---
 
@@ -160,14 +162,17 @@ fn private_impl() { }
 
 ### 5.5 Compound Assignment Operators
 
-**Status:** Tokens exist, not parsed
-**Location:** `src/lexer/mod.rs:128-147`
-**Description:** `+=`, `-=`, `*=`, etc.
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `src/parser/stmt.rs:395-450`
+**Description:** `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`
 **Priority:** MEDIUM
 
 ```wraith
-x += 5;   // Instead of: x = x + 5;
+x += 5;   // Expands to: x = x + 5;
+counter += 1;  // Optimized to INC when applicable
 ```
+
+Parser expands compound assignments to binary operations, enabling optimization passes.
 
 ---
 
@@ -244,10 +249,26 @@ static mut scratch: u8;
 
 ### 7.6 Inline Expansion
 
-**Status:** `#[inline]` exists but not enforced
-**Location:** `src/ast/item.rs:18`
-**Description:** Actually inline functions marked `#[inline]`
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `src/codegen/expr.rs:70-170`
+**Description:** Full inline function expansion for `inline fn` functions
 **Priority:** MEDIUM
+
+Functions marked with `inline fn` are fully expanded at call sites with zero overhead. The function body is emitted inline instead of generating JSR/RTS. Used extensively in the CPU intrinsics library.
+
+### 7.7 INC/DEC Optimization
+
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `src/codegen/stmt.rs:91-142`
+**Description:** Pattern-based optimization for increment/decrement
+**Priority:** MEDIUM
+
+Automatically detects `x = x + 1`, `x += 1`, `x = x - 1`, and `x -= 1` patterns and generates optimized INC/DEC instructions instead of LDA/ADC/STA or LDA/SBC/STA sequences. Provides ~40-50% cycle reduction (5-6 cycles vs 8-11 cycles).
+
+```wraith
+counter += 1;  // Generates: INC $40
+value = value - 1;  // Generates: DEC $41
+```
 
 ---
 
@@ -276,6 +297,28 @@ $8002   STA $40     ; [2 cycles]
 
 ## 9. Standard Library / Prelude
 
+### 9.1 CPU Intrinsics
+
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `std/intrinsics.wr`
+**Description:** Zero-overhead wrappers for 6502 CPU control instructions
+**Priority:** MEDIUM
+
+All functions are marked `inline` for zero overhead - they expand to single instructions at the call site.
+
+```wraith
+import { enable_interrupts, disable_interrupts } from "intrinsics.wr";
+
+disable_interrupts();  // Inlined to: SEI
+// Critical section
+enable_interrupts();   // Inlined to: CLI
+```
+
+**Available intrinsics:**
+- Interrupt control: `enable_interrupts()` (CLI), `disable_interrupts()` (SEI)
+- Carry flag: `clear_carry()` (CLC), `set_carry()` (SEC)
+- Decimal mode: `clear_decimal()` (CLD), `set_decimal()` (SED)
+- Other: `clear_overflow()` (CLV), `nop()` (NOP), `brk()` (BRK), `wait_for_interrupt()`
 
 ### 9.2 Math Functions
 
@@ -374,23 +417,20 @@ u8 random_range(min, max);
 ### HIGH Priority (Implement Soon)
 
 1. ⬜ Language reference documentation
-2. ⬜ Inline function expansion (#[inline] attribute)
-3. ⬜ Break/continue implementation with proper loop context tracking
-4. ⬜ Semantic validation (duplicate functions, undefined variables at sema phase)
+2. ⬜ Break/continue implementation with proper loop context tracking
+3. ⬜ Semantic validation (duplicate functions, undefined variables at sema phase)
 
 ### MEDIUM Priority (Nice to Have)
 
 10. ⬜ ForEach loops
 11. ⬜ Module system with visibility
-12. ⬜ Compound assignment operators
-13. ⬜ Peephole optimization
-14. ⬜ Warning system
-15. ⬜ Memory section control
-16. ⬜ NMI/IRQ vector generation
-17. ⬜ Parser improvements (enum patterns, lookahead)
-18. ⬜ Slice type support
-19. ⬜ Pointer arithmetic
-20. ⬜ CPU flags access
+12. ⬜ Peephole optimization
+13. ⬜ Warning system
+14. ⬜ Memory section control
+15. ⬜ Parser improvements (enum patterns, lookahead)
+16. ⬜ Slice type support
+17. ⬜ CPU flags access
+18. ⬜ Bitfield access helpers
 
 ### LOW Priority (Future)
 
@@ -428,6 +468,16 @@ u8 random_range(min, max);
 ✅ **Basic Register Allocation** - X for loop counters, Y for temps, register state tracking
 ✅ **Register Optimizations** - Store-load elimination, smart evaluation order, optimized loads
 ✅ **Variable Scoping Fixes** - Proper span-based symbol resolution for local variables
+
+### 2025-12-25
+✅ **CPU Intrinsics Library** - Zero-overhead inline wrappers for 6502 control instructions (CLI, SEI, CLC, SEC, CLD, SED, CLV, NOP, BRK)
+✅ **Inline Function Expansion** - Full implementation of `inline fn` with zero overhead, body expanded at call sites
+✅ **Compound Assignment Operators** - Support for +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
+✅ **INC/DEC Optimization** - Pattern-based optimization detecting x += 1 and x -= 1, generating INC/DEC (~40-50% cycle reduction)
+✅ **Interrupt Vector Generation** - Automatic generation of 6502 vector table at $FFFA-$FFFF for #[nmi], #[irq], #[reset]
+✅ **Import Function Metadata Fix** - Inline functions from imported modules now work correctly
+✅ **Compiler Output Improvements** - Cargo-style colored output with timing information
+✅ **Register State Tracking Fix** - Fixed binary operation bug that caused incorrect optimization
 
 ---
 
