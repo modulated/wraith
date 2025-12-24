@@ -89,6 +89,58 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Assign { target, value } => {
+            // Optimization: detect x = x + 1 and x = x - 1 patterns
+            // Use INC/DEC instead of LDA/ADC/STA or LDA/SBC/STA
+            if let crate::ast::Expr::Variable(target_name) = &target.node {
+                if let crate::ast::Expr::Binary { left, op, right } = &value.node {
+                    // Check if left side is the same variable as target
+                    if let crate::ast::Expr::Variable(left_name) = &left.node {
+                        if left_name == target_name {
+                            // Check if right side is literal 1
+                            if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &right.node {
+                                if *n == 1 {
+                                    // Look up variable location
+                                    let sym = info.resolved_symbols.get(&target.span)
+                                        .or_else(|| info.table.lookup(target_name));
+
+                                    if let Some(sym) = sym {
+                                        match (op, &sym.location) {
+                                            (crate::ast::BinaryOp::Add, crate::sema::table::SymbolLocation::ZeroPage(addr)) => {
+                                                // x = x + 1 -> INC $addr
+                                                emitter.emit_inst("INC", &format!("${:02X}", *addr));
+                                                emitter.reg_state.invalidate_zero_page(*addr);
+                                                return Ok(());
+                                            }
+                                            (crate::ast::BinaryOp::Add, crate::sema::table::SymbolLocation::Absolute(addr)) => {
+                                                // x = x + 1 -> INC $addr
+                                                emitter.emit_inst("INC", &format!("${:04X}", *addr));
+                                                emitter.reg_state.invalidate_memory(*addr);
+                                                return Ok(());
+                                            }
+                                            (crate::ast::BinaryOp::Sub, crate::sema::table::SymbolLocation::ZeroPage(addr)) => {
+                                                // x = x - 1 -> DEC $addr
+                                                emitter.emit_inst("DEC", &format!("${:02X}", *addr));
+                                                emitter.reg_state.invalidate_zero_page(*addr);
+                                                return Ok(());
+                                            }
+                                            (crate::ast::BinaryOp::Sub, crate::sema::table::SymbolLocation::Absolute(addr)) => {
+                                                // x = x - 1 -> DEC $addr
+                                                emitter.emit_inst("DEC", &format!("${:04X}", *addr));
+                                                emitter.reg_state.invalidate_memory(*addr);
+                                                return Ok(());
+                                            }
+                                            _ => {
+                                                // Not an INC/DEC pattern, fall through to normal codegen
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 1. Generate code for value (result in A)
             generate_expr(value, emitter, info)?;
 

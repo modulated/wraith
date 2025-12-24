@@ -96,8 +96,16 @@ impl Emitter {
         self.output.push_str(&format!(".ORG ${:04X}\n", address));
     }
 
+    pub fn emit_word(&mut self, value: u16) {
+        self.output.push_str(&format!(".WORD ${:04X}\n", value));
+    }
+
+    pub fn emit_word_label(&mut self, label: &str) {
+        self.output.push_str(&format!(".WORD {}\n", label));
+    }
+
     pub fn emit_byte(&mut self, value: u8) {
-        self.output.push_str(&format!("    .byte ${:02X}\n", value));
+        self.output.push_str(&format!(".BYTE ${:02X}\n", value));
         self.byte_count += 1;
     }
 
@@ -115,14 +123,6 @@ impl Emitter {
         }
         self.output.push('\n');
         self.byte_count += values.len() as u16;
-    }
-
-    pub fn emit_word(&mut self, value: u16) {
-        // Emit 16-bit value in little-endian format
-        let low = (value & 0xFF) as u8;
-        let high = ((value >> 8) & 0xFF) as u8;
-        self.output.push_str(&format!("    .byte ${:02X}, ${:02X}\n", low, high));
-        self.byte_count += 2;
     }
 
     pub fn finish(self) -> String {

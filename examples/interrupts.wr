@@ -1,0 +1,93 @@
+//! Interrupt Handler Example for 6502
+//!
+//! Demonstrates the use of NMI, IRQ, and RESET interrupt vectors.
+//! This example shows how to write interrupt service routines (ISRs)
+//! for the 6502 processor.
+//!
+//! IMPORTANT: For bare-metal 6502 systems, start execution at `reset_handler`,
+//! NOT at `main`. The reset_handler initializes the system and calls main.
+//! The RESET vector at $FFFC points to reset_handler.
+
+import { enable_interrupts } from "intrinsics.wr";
+
+// Memory-mapped I/O addresses
+addr STATUS_LED = 0x6000;
+addr IRQ_COUNTER = 0x6001;
+addr NMI_FLAG = 0x6002;
+
+// Constants for LED states
+const LED_OFF: u8 = 0b00000000;
+const LED_ON: u8 = 0b11111111;
+const LED_BLINK: u8 = 0b10101010;
+
+/// NMI (Non-Maskable Interrupt) Handler
+/// Triggered by external hardware events that cannot be disabled
+/// Vector: $FFFA
+#[nmi]
+fn nmi_handler() {
+    // Set NMI flag to indicate interrupt occurred
+    NMI_FLAG = 1;
+
+    // Flash the LED to indicate NMI
+    STATUS_LED = LED_BLINK;
+}
+
+/// IRQ (Interrupt Request) Handler
+/// Triggered by maskable hardware interrupts (can be disabled via SEI)
+/// Vector: $FFFE
+#[irq]
+fn irq_handler() {
+    // Read current counter value
+    count: u8 = IRQ_COUNTER;
+
+    // Increment counter
+    count = count + 1;
+    IRQ_COUNTER = count;
+
+    // Toggle LED on every 10th interrupt
+    if count == 10 {
+        STATUS_LED = LED_ON;
+        IRQ_COUNTER = 0;
+    }
+}
+
+/// RESET Handler
+/// Entry point when the processor starts or is reset
+/// Vector: $FFFC
+#[reset]
+fn reset_handler() {
+    // Initialize memory
+    IRQ_COUNTER = 0;
+    NMI_FLAG = 0;
+    STATUS_LED = LED_OFF;
+
+    // Setup complete - turn on LED
+    STATUS_LED = LED_ON;
+
+    // Enable interrupts by clearing the I-mask bit
+    enable_interrupts();
+
+    // Jump to main program
+    main();
+}
+
+/// Main program loop
+/// Note: For bare-metal 6502, main should never return!
+fn main() {
+    // Initialize the system
+    STATUS_LED = LED_ON;
+
+    // Main loop - interrupts are now enabled!
+    // IRQ and NMI handlers will fire when triggered
+    counter: u8 = 0;
+    while true {
+        counter = counter + 1;
+        // CPU executes this loop while waiting for interrupts
+        // IRQ/NMI handlers will interrupt this loop when triggered
+
+        // Reset counter to prevent overflow
+        if counter == 255 {
+            counter = 0;
+        }
+    }
+}

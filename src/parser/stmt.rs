@@ -397,34 +397,51 @@ impl Parser<'_> {
         let expr = self.parse_expr()?;
 
         // Check for assignment operators
-        if let Some(
-            Token::Eq
-            | Token::PlusEq
-            | Token::MinusEq
-            | Token::StarEq
-            | Token::SlashEq
-            | Token::PercentEq
-            | Token::AmpEq
-            | Token::PipeEq
-            | Token::CaretEq
-            | Token::ShlEq
-            | Token::ShrEq,
-        ) = self.peek()
-        {
-            self.advance();
-            let value = self.parse_expr()?;
-            self.expect(&Token::Semi)?;
-            let span = start.merge(self.previous_span());
+        if let Some(op_token) = self.peek().cloned() {
+            let compound_op = match op_token {
+                Token::Eq => None,
+                Token::PlusEq => Some(crate::ast::BinaryOp::Add),
+                Token::MinusEq => Some(crate::ast::BinaryOp::Sub),
+                Token::StarEq => Some(crate::ast::BinaryOp::Mul),
+                Token::SlashEq => Some(crate::ast::BinaryOp::Div),
+                Token::PercentEq => Some(crate::ast::BinaryOp::Mod),
+                Token::AmpEq => Some(crate::ast::BinaryOp::BitAnd),
+                Token::PipeEq => Some(crate::ast::BinaryOp::BitOr),
+                Token::CaretEq => Some(crate::ast::BinaryOp::BitXor),
+                Token::ShlEq => Some(crate::ast::BinaryOp::Shl),
+                Token::ShrEq => Some(crate::ast::BinaryOp::Shr),
+                _ => None,
+            };
 
-            // For compound assignments, we need to expand them
-            // For now, just support simple assignment
-            return Ok(Spanned::new(
-                Stmt::Assign {
-                    target: expr,
-                    value,
-                },
-                span,
-            ));
+            if compound_op.is_some() || matches!(op_token, Token::Eq) {
+                self.advance();
+                let right_value = self.parse_expr()?;
+                self.expect(&Token::Semi)?;
+                let span = start.merge(self.previous_span());
+
+                // Expand compound assignments: x += y becomes x = x + y
+                let value = if let Some(op) = compound_op {
+                    let left_clone = expr.clone();
+                    Spanned::new(
+                        crate::ast::Expr::Binary {
+                            left: Box::new(left_clone),
+                            op,
+                            right: Box::new(right_value),
+                        },
+                        span,
+                    )
+                } else {
+                    right_value
+                };
+
+                return Ok(Spanned::new(
+                    Stmt::Assign {
+                        target: expr,
+                        value,
+                    },
+                    span,
+                ));
+            }
         }
 
         self.expect(&Token::Semi)?;

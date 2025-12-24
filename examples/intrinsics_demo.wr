@@ -1,0 +1,132 @@
+//! Intrinsics Demo - Demonstrates CPU control functions
+//!
+//! This example shows how to use the intrinsics library for low-level
+//! CPU control operations that map directly to 6502 instructions.
+
+import {
+    enable_interrupts,
+    disable_interrupts,
+    set_decimal,
+    clear_decimal,
+    clear_carry,
+    nop,
+    wait_for_interrupt,
+    brk
+} from "intrinsics.wr";
+
+// Memory-mapped I/O
+addr CONTROL_PORT = 0x6000;
+addr STATUS_PORT = 0x6001;
+addr DATA_PORT = 0x6002;
+
+/// Example: Critical section using interrupt disable/enable
+fn critical_section_example() {
+    // Disable interrupts for critical section
+    disable_interrupts();
+
+    // Critical code that must not be interrupted
+    CONTROL_PORT = 0xFF;
+    STATUS_PORT = 0xAA;
+    DATA_PORT = 0x55;
+
+    // Re-enable interrupts
+    enable_interrupts();
+}
+
+/// Example: BCD arithmetic for decimal display
+fn bcd_addition_example() -> u8 {
+    // Switch to decimal mode for BCD arithmetic
+    set_decimal();
+
+    // In BCD mode: 0x09 + 0x01 = 0x10 (not 0x0A!)
+    // This is useful for calculations that display as decimal
+    a: u8 = 0x09;
+    b: u8 = 0x01;
+    result: u8 = a + b;  // Result will be 0x10 in BCD mode
+
+    // Switch back to binary mode
+    clear_decimal();
+
+    return result;
+}
+
+/// Example: Manual carry flag control for multi-byte arithmetic
+fn manual_carry_example() {
+    // Example: 16-bit addition using carry flag
+    // This would normally be handled by compiler, but shown for educational purposes
+
+    // Low byte addition with carry cleared
+    clear_carry();
+    low_a: u8 = 0xFF;
+    low_b: u8 = 0x01;
+    low_result: u8 = low_a + low_b;  // Will set carry flag
+
+    // High byte addition with carry (handled by compiler automatically in real code)
+    // The carry from low byte addition propagates to high byte
+    high_a: u8 = 0x12;
+    high_b: u8 = 0x34;
+    high_result: u8 = high_a + high_b;  // Plus carry from previous addition
+}
+
+/// Example: Timing loop using NOP
+fn delay_cycles(count: u8) {
+    i: u8 = 0;
+    while i < count {
+        nop();  // Each NOP burns 2 cycles
+        nop();
+        nop();
+        nop();
+        nop();  // 10 cycles total per iteration (plus loop overhead)
+        i += 1;
+    }
+}
+
+/// Example: Interrupt-driven wait loop
+fn wait_for_event() {
+    // Enable interrupts and wait for one to occur
+    // The interrupt handler will break out of the wait loop
+    wait_for_interrupt();
+}
+
+/// Main function demonstrating intrinsics usage
+#[reset]
+fn reset_handler() {
+    // Initialize in known state
+    clear_decimal();   // Ensure binary mode
+    disable_interrupts();  // Start with interrupts disabled
+
+    // Initialize hardware
+    CONTROL_PORT = 0x00;
+    STATUS_PORT = 0x00;
+    DATA_PORT = 0x00;
+
+    main();
+}
+
+fn main() {
+    // Example 1: Critical section
+    critical_section_example();
+
+    // Example 2: BCD arithmetic
+    bcd_result: u8 = bcd_addition_example();
+    DATA_PORT = bcd_result;  // Should be 0x10
+
+    // Example 3: Short delay
+    delay_cycles(10);
+
+    // Example 4: Wait for interrupt
+    enable_interrupts();
+    // In a real system, this would wait for an IRQ to occur
+    // wait_for_event();  // Commented out as it's an infinite loop
+
+    // Normal operation continues...
+    STATUS_PORT = 0xFF;
+    brk();
+}
+
+/// Example IRQ handler
+#[irq]
+fn irq_handler() {
+    // Handle the interrupt
+    DATA_PORT = DATA_PORT + 1;
+}

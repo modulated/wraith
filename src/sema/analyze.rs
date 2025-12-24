@@ -445,6 +445,11 @@ impl SemanticAnalyzer {
             let name = &symbol_name.node;
             if let Some(symbol) = imported_info.table.lookup(name) {
                 self.table.insert(name.clone(), symbol.clone());
+
+                // Also import function metadata if this is a function
+                if let Some(metadata) = imported_info.function_metadata.get(name) {
+                    self.function_metadata.insert(name.clone(), metadata.clone());
+                }
             } else {
                 return Err(SemaError::ImportError {
                     path: import.path.node.clone(),

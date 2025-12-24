@@ -1,0 +1,157 @@
+// Wraith Intrinsics - Low-level CPU control functions
+// These functions map directly to 6502 instructions for processor control
+
+// ============================================================================
+// Interrupt Control
+// ============================================================================
+
+/// Enable interrupts by clearing the interrupt disable flag
+/// Maps to: CLI (Clear Interrupt Disable)
+/// Cycles: 2
+///
+/// After calling this function, the CPU will respond to IRQ interrupts.
+/// Note: NMI interrupts are always enabled and cannot be disabled.
+inline fn enable_interrupts() {
+    asm {
+        "CLI"
+    }
+}
+
+/// Disable interrupts by setting the interrupt disable flag
+/// Maps to: SEI (Set Interrupt Disable)
+/// Cycles: 2
+///
+/// After calling this function, the CPU will ignore IRQ interrupts.
+/// Use this for critical sections that must not be interrupted.
+/// Note: NMI interrupts cannot be disabled and will still occur.
+inline fn disable_interrupts() {
+    asm {
+        "SEI"
+    }
+}
+
+// ============================================================================
+// Carry Flag Control
+// ============================================================================
+
+/// Clear the carry flag
+/// Maps to: CLC (Clear Carry)
+/// Cycles: 2
+///
+/// Used before addition operations to ensure no carry-in.
+/// The compiler normally handles this automatically for additions.
+inline fn clear_carry() {
+    asm {
+        "CLC"
+    }
+}
+
+/// Set the carry flag
+/// Maps to: SEC (Set Carry)
+/// Cycles: 2
+///
+/// Used before subtraction operations to ensure no borrow.
+/// The compiler normally handles this automatically for subtractions.
+/// Can also be used for manual multi-byte arithmetic.
+inline fn set_carry() {
+    asm {
+        "SEC"
+    }
+}
+
+// ============================================================================
+// Decimal Mode Control
+// ============================================================================
+
+/// Clear decimal mode - use binary arithmetic
+/// Maps to: CLD (Clear Decimal Mode)
+/// Cycles: 2
+///
+/// Switches the CPU to binary arithmetic mode (the default).
+/// In binary mode, ADC and SBC perform normal binary addition/subtraction.
+/// Most programs should run in binary mode.
+inline fn clear_decimal() {
+    asm {
+        "CLD"
+    }
+}
+
+/// Set decimal mode - use BCD arithmetic
+/// Maps to: SED (Set Decimal Mode)
+/// Cycles: 2
+///
+/// Switches the CPU to Binary-Coded Decimal (BCD) mode.
+/// In BCD mode, ADC and SBC treat values as packed BCD digits (0-9).
+/// Useful for calculations that need to display decimal results.
+/// Example: 0x09 + 0x01 = 0x10 (not 0x0A)
+inline fn set_decimal() {
+    asm {
+        "SED"
+    }
+}
+
+// ============================================================================
+// Other CPU Control
+// ============================================================================
+
+/// Clear the overflow flag
+/// Maps to: CLV (Clear Overflow)
+/// Cycles: 2
+///
+/// Clears the overflow (V) flag in the processor status register.
+/// The overflow flag is set by ADC/SBC for signed arithmetic overflow.
+inline fn clear_overflow() {
+    asm {
+        "CLV"
+    }
+}
+
+/// No operation - waste CPU cycles
+/// Maps to: NOP (No Operation)
+/// Cycles: 2
+///
+/// Does nothing for 2 CPU cycles. Useful for:
+/// - Timing delays
+/// - Code alignment
+/// - Placeholder for future instructions
+inline fn nop() {
+    asm {
+        "NOP"
+    }
+}
+
+/// Software interrupt / breakpoint
+/// Maps to: BRK (Break)
+/// Cycles: 7
+///
+/// Triggers a software interrupt:
+/// 1. Pushes PC+2 to stack
+/// 2. Pushes status flags to stack (with B flag set)
+/// 3. Sets interrupt disable flag
+/// 4. Jumps to IRQ/BRK vector at $FFFE
+///
+/// Used for debugging or implementing system calls.
+/// Note: Most debuggers/emulators treat BRK as a breakpoint.
+inline fn brk() {
+    asm {
+        "BRK"
+    }
+}
+
+// ============================================================================
+// Wait for Interrupt (undocumented on NMOS 6502, but useful concept)
+// ============================================================================
+
+/// Halt execution until an interrupt occurs
+///
+/// This creates a simple busy-wait loop that can be interrupted.
+/// More efficient than a pure busy loop as it signals the intent.
+/// On actual hardware, consider using a WDM or STP instruction if available
+/// (65C02/65816), but for NMOS 6502 we use a tight loop.
+inline fn wait_for_interrupt() {
+    asm {
+        "CLI"
+        "wfi_loop:"
+        "JMP wfi_loop"
+    }
+}

@@ -65,5 +65,90 @@ pub fn generate(ast: &SourceFile, program: &ProgramInfo) -> Result<String, Codeg
         generate_item(item, &mut emitter, program, &mut section_alloc)?;
     }
 
+    // Generate interrupt vector table
+    generate_interrupt_vectors(ast, &mut emitter)?;
+
     Ok(emitter.finish())
+}
+
+/// Generate the 6502 interrupt vector table at $FFFA-$FFFF
+fn generate_interrupt_vectors(ast: &SourceFile, emitter: &mut Emitter) -> Result<(), CodegenError> {
+    use crate::ast::{FnAttribute, Item};
+
+    // Find interrupt handlers
+    let mut nmi_handler: Option<String> = None;
+    let mut reset_handler: Option<String> = None;
+    let mut irq_handler: Option<String> = None;
+
+    for item in &ast.items {
+        if let Item::Function(func) = &item.node {
+            let name = func.name.node.clone();
+
+            for attr in &func.attributes {
+                match attr {
+                    FnAttribute::Nmi => {
+                        if nmi_handler.is_some() {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "Multiple NMI handlers defined".to_string()
+                            ));
+                        }
+                        nmi_handler = Some(name.clone());
+                    }
+                    FnAttribute::Reset => {
+                        if reset_handler.is_some() {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "Multiple RESET handlers defined".to_string()
+                            ));
+                        }
+                        reset_handler = Some(name.clone());
+                    }
+                    FnAttribute::Irq => {
+                        if irq_handler.is_some() {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "Multiple IRQ handlers defined".to_string()
+                            ));
+                        }
+                        irq_handler = Some(name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Only generate vector table if at least one handler is defined
+    if nmi_handler.is_some() || reset_handler.is_some() || irq_handler.is_some() {
+        emitter.emit_comment("============================");
+        emitter.emit_comment("Interrupt Vector Table");
+        emitter.emit_org(0xFFFA);
+
+        // NMI vector at $FFFA
+        if let Some(handler) = nmi_handler {
+            emitter.emit_comment(&format!("NMI vector -> {}", handler));
+            emitter.emit_word_label(&handler);
+        } else {
+            emitter.emit_comment("NMI vector (not used)");
+            emitter.emit_word(0);
+        }
+
+        // RESET vector at $FFFC
+        if let Some(handler) = reset_handler {
+            emitter.emit_comment(&format!("RESET vector -> {}", handler));
+            emitter.emit_word_label(&handler);
+        } else {
+            emitter.emit_comment("RESET vector (not used)");
+            emitter.emit_word(0);
+        }
+
+        // IRQ/BRK vector at $FFFE
+        if let Some(handler) = irq_handler {
+            emitter.emit_comment(&format!("IRQ/BRK vector -> {}", handler));
+            emitter.emit_word_label(&handler);
+        } else {
+            emitter.emit_comment("IRQ/BRK vector (not used)");
+            emitter.emit_word(0);
+        }
+    }
+
+    Ok(())
 }
