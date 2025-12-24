@@ -22,22 +22,22 @@ addr UART_LSR = UART_BASE + 5;  // Line Status
 // ============================================================================
 
 // LCR register bit values
-const LCR_DLAB: u8 = 0x80;    // Divisor Latch Access Bit
-const LCR_8N1: u8 = 0x03;     // 8 data bits, no parity, 1 stop bit
+const LCR_DLAB: u8 = 0b10000000;  // Divisor Latch Access Bit (bit 7)
+const LCR_8N1: u8 = 0b00000011;   // 8 data bits, no parity, 1 stop bit (bits 0-1)
 
 // FCR register bits
-const FCR_ENABLE: u8 = 0x01;  // Enable FIFOs
-const FCR_RX_RST: u8 = 0x02;  // Reset RX FIFO
-const FCR_TX_RST: u8 = 0x04;  // Reset TX FIFO
-const FCR_TRIGGER: u8 = 0xC0; // 14-byte trigger level
+const FCR_ENABLE: u8 = 0b00000001;  // Enable FIFOs (bit 0)
+const FCR_RX_RST: u8 = 0b00000010;  // Reset RX FIFO (bit 1)
+const FCR_TX_RST: u8 = 0b00000100;  // Reset TX FIFO (bit 2)
+const FCR_TRIGGER: u8 = 0b11000000; // 14-byte trigger level (bits 6-7)
 
 // LSR register bits
-const LSR_DATA_RDY: u8 = 0x01;  // Data ready
-const LSR_THR_EMPTY: u8 = 0x20; // Transmitter holding register empty
+const LSR_DATA_RDY: u8 = 0b00000001;  // Data ready (bit 0)
+const LSR_THR_EMPTY: u8 = 0b00100000; // Transmitter holding register empty (bit 5)
 
 // MCR register bits
-const MCR_DTR: u8 = 0x01;     // Data Terminal Ready
-const MCR_RTS: u8 = 0x02;     // Request to Send
+const MCR_DTR: u8 = 0b00000001;  // Data Terminal Ready (bit 0)
+const MCR_RTS: u8 = 0b00000010;  // Request to Send (bit 1)
 
 // Baud rate divisors (for 1.8432 MHz crystal)
 const BAUD_9600: u8 = 12;
@@ -111,7 +111,7 @@ fn uart_getc() -> u8 {
 /// Print a byte as two hex digits
 fn uart_print_hex(value: u8) {
     high: u8 = value >> 4;
-    low: u8 = value & 0x0F;
+    low: u8 = value & 0b00001111;  // Mask low nibble
 
     // Print high nibble
     if high < 10 {
