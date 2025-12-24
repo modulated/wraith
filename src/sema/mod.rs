@@ -305,6 +305,59 @@ impl std::fmt::Display for SemaError {
 
 impl std::error::Error for SemaError {}
 
+/// Compiler warnings (non-fatal diagnostics)
+#[derive(Debug, Clone)]
+pub enum Warning {
+    /// Unused variable
+    UnusedVariable {
+        name: String,
+        span: Span,
+    },
+
+    /// Unused import
+    UnusedImport {
+        name: String,
+        span: Span,
+    },
+
+    /// Unreachable code after return/break/continue
+    UnreachableCode {
+        span: Span,
+    },
+
+    /// Unused function parameter
+    UnusedParameter {
+        name: String,
+        span: Span,
+    },
+}
+
+impl Warning {
+    /// Format warning with source context (similar to error formatting)
+    pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
+        let (message, span) = match self {
+            Warning::UnusedVariable { name, span } => {
+                (format!("unused variable: `{}`", name), span)
+            }
+            Warning::UnusedImport { name, span } => {
+                (format!("unused import: `{}`", name), span)
+            }
+            Warning::UnreachableCode { span } => {
+                ("unreachable code".to_string(), span)
+            }
+            Warning::UnusedParameter { name, span } => {
+                (format!("unused parameter: `{}`", name), span)
+            }
+        };
+
+        format!(
+            "warning: {}\n{}",
+            message,
+            span.format_error_context(source, filename, &message)
+        )
+    }
+}
+
 use crate::ast::{FnParam, Span, Spanned, Stmt};
 use crate::sema::table::SymbolInfo;
 use std::collections::HashMap;
@@ -328,6 +381,8 @@ pub struct ProgramInfo {
     pub folded_constants: HashMap<Span, const_eval::ConstValue>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
+    /// Compiler warnings collected during analysis
+    pub warnings: Vec<Warning>,
 }
 
 pub fn analyze(ast: &SourceFile) -> Result<ProgramInfo, SemaError> {

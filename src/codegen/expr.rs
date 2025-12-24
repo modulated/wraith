@@ -306,7 +306,7 @@ fn generate_binary(
         generate_expr(right, emitter, info)?;
 
         // 4. Store right operand in TEMP
-        emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+        emitter.emit_sta_zp(emitter.memory_layout.temp_reg());
 
         // 5. Restore left operand from Y -> A
         emitter.emit_inst("TYA", "");
@@ -319,7 +319,7 @@ fn generate_binary(
         generate_expr(right, emitter, info)?;
 
         // 2. Store right operand in TEMP
-        emitter.emit_inst("STA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+        emitter.emit_sta_zp(emitter.memory_layout.temp_reg());
 
         // 3. Generate left operand -> A (simple, no side effects)
         generate_expr(left, emitter, info)?;

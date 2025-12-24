@@ -154,6 +154,9 @@ impl Parser<'_> {
                 match name.as_str() {
                     "noreturn" => FnAttribute::NoReturn,
                     "interrupt" => FnAttribute::Interrupt,
+                    "nmi" => FnAttribute::Nmi,
+                    "irq" => FnAttribute::Irq,
+                    "reset" => FnAttribute::Reset,
                     "org" => {
                         self.expect(&Token::LParen)?;
                         let addr = match self.peek().cloned() {

@@ -2,7 +2,7 @@
 //!
 //! Handles generation of functions and other items.
 
-use crate::ast::{Function, Item, PrimitiveType, Spanned, TypeExpr};
+use crate::ast::{FnAttribute, Function, Item, PrimitiveType, Spanned, TypeExpr};
 use crate::codegen::section_allocator::SectionAllocator;
 use crate::codegen::stmt::generate_stmt;
 use crate::codegen::{CodegenError, Emitter};
@@ -61,6 +61,13 @@ fn generate_function(
 ) -> Result<(), CodegenError> {
     let name = &func.name.node;
 
+    // Check if this is an interrupt handler (need to know for size calculation)
+    // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
+    let is_interrupt = func.attributes.iter().any(|attr| matches!(
+        attr,
+        FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
+    ));
+
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
         let mut temp_emitter = Emitter::new();
@@ -69,11 +76,28 @@ fn generate_function(
         temp_emitter.label_counter = emitter.label_counter;
         temp_emitter.match_counter = emitter.match_counter;
 
+        // Include interrupt prologue size if needed (5 instructions = 10 bytes)
+        if is_interrupt {
+            temp_emitter.emit_inst("PHA", "");
+            temp_emitter.emit_inst("TXA", "");
+            temp_emitter.emit_inst("PHA", "");
+            temp_emitter.emit_inst("TYA", "");
+            temp_emitter.emit_inst("PHA", "");
+        }
+
         // Generate function body to measure size
         generate_stmt(&func.body, &mut temp_emitter, info)?;
 
-        // Add RTS if needed (for void functions)
-        if func.return_type.is_none() {
+        // Include epilogue size
+        if is_interrupt {
+            // 6 instructions for epilogue
+            temp_emitter.emit_inst("PLA", "");
+            temp_emitter.emit_inst("TAY", "");
+            temp_emitter.emit_inst("PLA", "");
+            temp_emitter.emit_inst("TAX", "");
+            temp_emitter.emit_inst("PLA", "");
+            temp_emitter.emit_inst("RTI", "");
+        } else if func.return_type.is_none() {
             temp_emitter.emit_inst("RTS", "");
         }
 
@@ -151,20 +175,42 @@ fn generate_function(
 
     emitter.emit_label(name);
 
-    // Prologue (placeholder)
-    // emitter.emit_inst("PHA", "");
+    // Check if this is an interrupt handler
+    // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
+    let is_interrupt = func.attributes.iter().any(|attr| matches!(
+        attr,
+        FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
+    ));
+
+    // Emit interrupt prologue if needed
+    if is_interrupt {
+        emitter.emit_comment("Interrupt handler prologue - save registers");
+        emitter.emit_inst("PHA", "");
+        emitter.emit_inst("TXA", "");
+        emitter.emit_inst("PHA", "");
+        emitter.emit_inst("TYA", "");
+        emitter.emit_inst("PHA", "");
+    }
 
     // Body
     generate_stmt(&func.body, emitter, info)?;
 
-    // Epilogue (placeholder)
-    // emitter.emit_inst("PLA", "");
-
-    // Emit RTS for functions without explicit return (void functions)
-    // Functions with explicit return statements will have already emitted RTS
-    // TODO: Properly track control flow to avoid duplicate RTS in some cases
-    if func.return_type.is_none() {
-        emitter.emit_inst("RTS", "");
+    // Emit epilogue
+    if is_interrupt {
+        emitter.emit_comment("Interrupt handler epilogue - restore registers");
+        emitter.emit_inst("PLA", "");
+        emitter.emit_inst("TAY", "");
+        emitter.emit_inst("PLA", "");
+        emitter.emit_inst("TAX", "");
+        emitter.emit_inst("PLA", "");
+        emitter.emit_inst("RTI", "");
+    } else {
+        // Emit RTS for functions without explicit return (void functions)
+        // Functions with explicit return statements will have already emitted RTS
+        // TODO: Properly track control flow to avoid duplicate RTS in some cases
+        if func.return_type.is_none() {
+            emitter.emit_inst("RTS", "");
+        }
     }
 
     Ok(())

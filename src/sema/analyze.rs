@@ -8,7 +8,7 @@ use crate::sema::const_eval::{eval_const_expr_with_env, ConstEnv, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
 use crate::sema::type_defs::TypeRegistry;
 use crate::sema::types::Type;
-use crate::sema::{FunctionMetadata, ProgramInfo, SemaError};
+use crate::sema::{FunctionMetadata, ProgramInfo, SemaError, Warning};
 
 use crate::ast::Span;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +17,7 @@ use std::path::PathBuf;
 pub struct SemanticAnalyzer {
     pub table: SymbolTable,
     pub errors: Vec<SemaError>,
+    pub warnings: Vec<Warning>,
     current_return_type: Option<Type>,
     resolved_symbols: HashMap<Span, SymbolInfo>,
     function_metadata: HashMap<String, FunctionMetadata>,
@@ -27,6 +28,8 @@ pub struct SemanticAnalyzer {
     zp_allocator: ZeroPageAllocator,
     const_env: ConstEnv,
     loop_depth: usize,
+    /// Track variable usage for unused variable warnings
+    used_variables: HashSet<String>,
 }
 
 /// Zero page memory allocator
@@ -113,6 +116,7 @@ impl SemanticAnalyzer {
         Self {
             table: SymbolTable::new(),
             errors: Vec::new(),
+            warnings: Vec::new(),
             current_return_type: None,
             resolved_symbols: HashMap::new(),
             function_metadata: HashMap::new(),
@@ -123,6 +127,7 @@ impl SemanticAnalyzer {
             zp_allocator: ZeroPageAllocator::new(),
             const_env: ConstEnv::new(),
             loop_depth: 0,
+            used_variables: HashSet::new(),
         }
     }
 
@@ -130,6 +135,7 @@ impl SemanticAnalyzer {
         Self {
             table: SymbolTable::new(),
             errors: Vec::new(),
+            warnings: Vec::new(),
             current_return_type: None,
             resolved_symbols: HashMap::new(),
             function_metadata: HashMap::new(),
@@ -140,6 +146,7 @@ impl SemanticAnalyzer {
             zp_allocator: ZeroPageAllocator::new(),
             const_env: ConstEnv::new(),
             loop_depth: 0,
+            used_variables: HashSet::new(),
         }
     }
 
@@ -196,6 +203,7 @@ impl SemanticAnalyzer {
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
             type_registry: self.type_registry.clone(),
+            warnings: self.warnings.clone(),
         })
     }
 

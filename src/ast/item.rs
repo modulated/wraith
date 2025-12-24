@@ -18,8 +18,14 @@ pub enum FnAttribute {
     Inline,
     /// Function never returns
     NoReturn,
-    /// Interrupt handler (compiler handles register save/restore)
+    /// Generic interrupt handler (compiler handles register save/restore)
     Interrupt,
+    /// NMI (Non-Maskable Interrupt) handler - vector at $FFFA
+    Nmi,
+    /// IRQ (Interrupt Request) handler - vector at $FFFE
+    Irq,
+    /// Reset vector handler - vector at $FFFC
+    Reset,
     /// Place at specific address
     Org(u16),
     /// Place in specific memory section

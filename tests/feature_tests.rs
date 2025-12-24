@@ -412,3 +412,92 @@ fn test_constant_address_expression() {
     assert_asm_contains(&asm, "SCREEN = $C100");  // 0xC000 + 0x100
     assert_asm_contains(&asm, "STA SCREEN");      // Symbolic name
 }
+
+// ============================================================================
+// INTERRUPT HANDLERS
+// ============================================================================
+
+#[test]
+fn test_nmi_handler() {
+    let asm = assert_compiles(
+        r#"
+        addr OUT = 0x400;
+        #[nmi]
+        fn nmi_handler() {
+            OUT = 0xFF;
+        }
+        fn main() {}
+        "#,
+    );
+    // Should have prologue
+    assert_asm_contains(&asm, "PHA");
+    assert_asm_contains(&asm, "TXA");
+    assert_asm_contains(&asm, "TYA");
+    // Should have epilogue
+    assert_asm_contains(&asm, "TAY");
+    assert_asm_contains(&asm, "TAX");
+    assert_asm_contains(&asm, "RTI");
+    // Should have vector table
+    assert_asm_contains(&asm, ".ORG $FFFA");
+    assert_asm_contains(&asm, ".word nmi_handler");
+}
+
+#[test]
+fn test_irq_handler() {
+    let asm = assert_compiles(
+        r#"
+        addr OUT = 0x400;
+        #[irq]
+        fn irq_handler() {
+            OUT = 0x42;
+        }
+        fn main() {}
+        "#,
+    );
+    // Should use RTI
+    assert_asm_contains(&asm, "RTI");
+    // Should have IRQ vector
+    assert_asm_contains(&asm, ".word irq_handler");
+}
+
+#[test]
+fn test_reset_handler() {
+    let asm = assert_compiles(
+        r#"
+        #[reset]
+        fn start() {
+        }
+        fn main() {}
+        "#,
+    );
+    // Should have RESET vector
+    assert_asm_contains(&asm, ".word start");
+}
+
+#[test]
+fn test_all_interrupt_vectors() {
+    let asm = assert_compiles(
+        r#"
+        addr OUT = 0x400;
+        #[nmi]
+        fn nmi_handler() {
+            OUT = 1;
+        }
+        #[reset]
+        fn reset_handler() {
+            OUT = 2;
+        }
+        #[irq]
+        fn irq_handler() {
+            OUT = 3;
+        }
+        fn main() {}
+        "#,
+    );
+    // Verify vector table exists at correct location
+    assert_asm_contains(&asm, ".ORG $FFFA");
+    // Verify all three vectors are present
+    assert_asm_contains(&asm, ".word nmi_handler");
+    assert_asm_contains(&asm, ".word reset_handler");
+    assert_asm_contains(&asm, ".word irq_handler");
+}
