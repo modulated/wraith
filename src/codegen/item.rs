@@ -61,6 +61,24 @@ fn generate_function(
 ) -> Result<(), CodegenError> {
     let name = &func.name.node;
 
+    // First pass: Generate function into temporary emitter to measure size
+    let function_size = {
+        let mut temp_emitter = Emitter::new();
+        // Copy register state and other context
+        temp_emitter.reg_state = emitter.reg_state.clone();
+
+        // Generate function body to measure size
+        generate_stmt(&func.body, &mut temp_emitter, info)?;
+
+        // Add RTS if needed (for void functions)
+        if func.return_type.is_none() {
+            temp_emitter.emit_inst("RTS", "");
+        }
+
+        // Get the actual size + 10 bytes padding for safety
+        temp_emitter.byte_count() + 10
+    };
+
     // Determine function address
     // Priority: explicit org > section attribute > default section
     let function_addr = if let Some(metadata) = info.function_metadata.get(name) {
@@ -69,18 +87,16 @@ fn generate_function(
             emitter.emit_org(org_addr);
             org_addr
         } else if let Some(section_name) = &metadata.section {
-            // Allocate in specified section
-            // Estimate function size (for now, use a conservative 256 bytes)
-            // TODO: Calculate actual function size
+            // Allocate in specified section using actual measured size
             let addr = section_alloc
-                .allocate(section_name, 256)
+                .allocate(section_name, function_size)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
             addr
         } else {
             // Use default section (CODE)
             let addr = section_alloc
-                .allocate_default(256)
+                .allocate_default(function_size)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
             addr
@@ -88,7 +104,7 @@ fn generate_function(
     } else {
         // No metadata - use default section
         let addr = section_alloc
-            .allocate_default(256)
+            .allocate_default(function_size)
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(addr);
         addr

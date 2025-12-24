@@ -27,6 +27,8 @@ pub struct Emitter {
     loop_stack: Vec<LoopContext>,
     /// Inline depth tracking (>0 means we're generating inline code)
     inline_depth: u32,
+    /// Current byte count (tracks code size during generation)
+    byte_count: u16,
 }
 
 impl Default for Emitter {
@@ -46,6 +48,7 @@ impl Emitter {
             reg_state: RegisterState::new(),
             loop_stack: Vec::new(),
             inline_depth: 0,
+            byte_count: 0,
         }
     }
 
@@ -73,6 +76,9 @@ impl Emitter {
             self.output.push_str(operand);
         }
         self.output.push('\n');
+
+        // Track byte count
+        self.byte_count += Self::instruction_size(mnemonic, operand);
     }
 
     pub fn emit_comment(&mut self, comment: &str) {
@@ -92,6 +98,7 @@ impl Emitter {
 
     pub fn emit_byte(&mut self, value: u8) {
         self.output.push_str(&format!("    .byte ${:02X}\n", value));
+        self.byte_count += 1;
     }
 
     pub fn emit_bytes(&mut self, values: &[u8]) {
@@ -107,6 +114,7 @@ impl Emitter {
             self.output.push_str(&format!("${:02X}", byte));
         }
         self.output.push('\n');
+        self.byte_count += values.len() as u16;
     }
 
     pub fn emit_word(&mut self, value: u16) {
@@ -114,10 +122,77 @@ impl Emitter {
         let low = (value & 0xFF) as u8;
         let high = ((value >> 8) & 0xFF) as u8;
         self.output.push_str(&format!("    .byte ${:02X}, ${:02X}\n", low, high));
+        self.byte_count += 2;
     }
 
     pub fn finish(self) -> String {
         self.output
+    }
+
+    /// Get the current byte count (code size)
+    pub fn byte_count(&self) -> u16 {
+        self.byte_count
+    }
+
+    /// Reset the byte counter (used for measuring individual functions)
+    pub fn reset_byte_count(&mut self) {
+        self.byte_count = 0;
+    }
+
+    /// Calculate the size of a 6502 instruction in bytes
+    fn instruction_size(mnemonic: &str, operand: &str) -> u16 {
+        if operand.is_empty() {
+            // Implied or accumulator mode (1 byte)
+            match mnemonic {
+                "RTS" | "RTI" | "PHA" | "PLA" | "PHP" | "PLP" |
+                "TAX" | "TAY" | "TXA" | "TYA" | "TXS" | "TSX" |
+                "INX" | "INY" | "DEX" | "DEY" | "CLC" | "SEC" |
+                "CLI" | "SEI" | "CLD" | "SED" | "CLV" | "NOP" |
+                "BRK" | "ASL" | "LSR" | "ROL" | "ROR" => 1,
+                _ => 1,  // Default for unknown implied
+            }
+        } else if operand.starts_with('#') {
+            // Immediate mode (2 bytes)
+            2
+        } else if operand.starts_with('(') {
+            // Indirect modes
+            if operand.contains("),Y") || operand.contains("),y") {
+                // Indirect indexed: (zp),Y (2 bytes)
+                2
+            } else if operand.contains(",X)") || operand.contains(",x)") {
+                // Indexed indirect: (zp,X) (2 bytes)
+                2
+            } else {
+                // Indirect: (addr) (3 bytes for JMP)
+                3
+            }
+        } else if operand.contains(",X") || operand.contains(",x") ||
+                  operand.contains(",Y") || operand.contains(",y") {
+            // Indexed addressing
+            if operand.starts_with('$') && operand.len() <= 4 { // $XX format
+                // Zero page indexed (2 bytes)
+                2
+            } else {
+                // Absolute indexed (3 bytes)
+                3
+            }
+        } else if mnemonic.starts_with('B') && mnemonic != "BIT" {
+            // Branch instructions (2 bytes)
+            2
+        } else if operand.starts_with('$') {
+            // Direct addressing
+            let hex_part = operand.trim_start_matches('$');
+            if hex_part.len() <= 2 {
+                // Zero page (2 bytes)
+                2
+            } else {
+                // Absolute (3 bytes)
+                3
+            }
+        } else {
+            // Label reference or symbol - assume 3 bytes (absolute)
+            3
+        }
     }
 
     // ========================================================================
