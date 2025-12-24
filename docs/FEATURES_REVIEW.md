@@ -12,17 +12,25 @@ These features are already parsed by the compiler but have no code generation.
 
 ### 1.1 ForEach Loops
 
-**Status:** AST complete, codegen missing
-**Location:** `src/ast/stmt.rs:112-117`
-**Description:** Iterate over arrays/slices
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `src/ast/stmt.rs:112-117`, `src/sema/analyze.rs:1101-1160`, `src/codegen/stmt.rs:331-446`
+**Description:** Iterate over arrays with `for item: u8 in array` syntax
 **Use Case:** Buffer processing, array operations
 **Priority:** MEDIUM
 
 ```wraith
-for u8 byte in buffer {
+// Explicit type
+for byte: u8 in buffer {
     process(byte);
 }
+
+// Inferred type
+for item in array {
+    process(item);
+}
 ```
+
+Uses X register as loop counter and indirect indexed addressing `(ptr),Y` for efficient array access.
 
 ### 1.2 Slice Type Support
 
@@ -425,10 +433,9 @@ u8 random_range(min, max);
 
 ### MEDIUM Priority (Nice to Have)
 
-10. ⬜ ForEach loops
-11. ⬜ Module system with visibility
-12. ⬜ Peephole optimization
-13. ⬜ Memory section control
+10. ⬜ Module system with visibility
+11. ⬜ Peephole optimization
+12. ⬜ Memory section control
 15. ⬜ Parser improvements (enum patterns, lookahead)
 16. ⬜ Slice type support
 17. ⬜ CPU flags access
@@ -482,6 +489,7 @@ u8 random_range(min, max);
 ✅ **Register State Tracking Fix** - Fixed binary operation bug that caused incorrect optimization
 ✅ **Break/Continue Statements** - Verified full implementation with loop context tracking (parser, sema, codegen)
 ✅ **Warning System** - Non-fatal diagnostics for unused variables, unused parameters, unused imports, unreachable code, and non-exhaustive match patterns with source context
+✅ **ForEach Loops** - Verified full implementation for array iteration with `for item: u8 in array` syntax using X register and indirect indexed addressing
 
 ---
 
