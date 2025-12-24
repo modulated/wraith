@@ -2,6 +2,7 @@ pub mod emitter;
 pub mod expr;
 pub mod item;
 pub mod memory_layout;
+pub mod peephole;
 pub mod regstate;
 pub mod section_allocator;
 pub mod stmt;
@@ -68,7 +69,13 @@ pub fn generate(ast: &SourceFile, program: &ProgramInfo) -> Result<String, Codeg
     // Generate interrupt vector table
     generate_interrupt_vectors(ast, &mut emitter)?;
 
-    Ok(emitter.finish())
+    // Apply peephole optimizations
+    let asm = emitter.finish();
+    let lines = peephole::parse_assembly(&asm);
+    let optimized = peephole::optimize(&lines);
+    let final_asm = peephole::lines_to_string(&optimized);
+
+    Ok(final_asm)
 }
 
 /// Generate the 6502 interrupt vector table at $FFFA-$FFFF

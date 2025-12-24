@@ -210,15 +210,21 @@ static mut scratch: u8;
 
 ### 7.1 Peephole Optimization
 
-**Status:** Not implemented
-**Description:** Local instruction pattern optimization
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `src/codegen/peephole.rs`, `src/codegen/mod.rs:72-78`
+**Description:** Pattern-based local instruction optimization
 **Priority:** MEDIUM
 
-**Examples:**
+**Implemented optimizations:**
 
--   `LDA x; STA x` → remove
--   `LDA #0; CMP #0` → remove LDA, keep CMP
--   `LDA x; PHA; PLA` → remove if A not used
+-   **Redundant loads:** `LDA $40; LDA $40` → `LDA $40`
+-   **Redundant stores:** `STA $40; STA $40` → `STA $40`
+-   **Load after store:** `STA $40; LDA $40` → `STA $40` (A already has value)
+-   **Dead stores:** `STA $40; LDA #$05; STA $40` → `LDA #$05; STA $40`
+-   **No-op operations:** `ORA #$00`, `AND #$FF`, `EOR #$00` → removed
+-   **Redundant transfers:** `TAX; TXA` → removed
+
+Runs iteratively until no more optimizations can be applied.
 
 ### 7.2 Advanced Register Allocation
 
@@ -434,8 +440,7 @@ u8 random_range(min, max);
 ### MEDIUM Priority (Nice to Have)
 
 10. ⬜ Module system with visibility
-11. ⬜ Peephole optimization
-12. ⬜ Memory section control
+11. ⬜ Memory section control
 15. ⬜ Parser improvements (enum patterns, lookahead)
 16. ⬜ Slice type support
 17. ⬜ CPU flags access
@@ -490,6 +495,7 @@ u8 random_range(min, max);
 ✅ **Break/Continue Statements** - Verified full implementation with loop context tracking (parser, sema, codegen)
 ✅ **Warning System** - Non-fatal diagnostics for unused variables, unused parameters, unused imports, unreachable code, and non-exhaustive match patterns with source context
 ✅ **ForEach Loops** - Verified full implementation for array iteration with `for item: u8 in array` syntax using X register and indirect indexed addressing
+✅ **Peephole Optimization** - Pattern-based assembly optimization eliminating redundant loads/stores, dead code, and no-op instructions
 
 ---
 
