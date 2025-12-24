@@ -32,6 +32,8 @@ pub struct SemanticAnalyzer {
     used_variables: HashSet<String>,
     /// Track declared variables in current scope (name -> span) for unused variable detection
     declared_variables: Vec<(String, Span)>,
+    /// Track function parameters (name -> span) for unused parameter detection
+    declared_parameters: Vec<(String, Span)>,
 }
 
 /// Zero page memory allocator
@@ -131,6 +133,7 @@ impl SemanticAnalyzer {
             loop_depth: 0,
             used_variables: HashSet::new(),
             declared_variables: Vec::new(),
+            declared_parameters: Vec::new(),
         }
     }
 
@@ -151,6 +154,7 @@ impl SemanticAnalyzer {
             loop_depth: 0,
             used_variables: HashSet::new(),
             declared_variables: Vec::new(),
+            declared_parameters: Vec::new(),
         }
     }
 
@@ -666,15 +670,18 @@ impl SemanticAnalyzer {
                     location,
                     mutable: false,
                 };
-                self.table.insert(name, info.clone());
+                self.table.insert(name.clone(), info.clone());
                 // Add to resolved_symbols so codegen (especially inline asm) can find it
                 self.resolved_symbols.insert(param.name.span, info);
+
+                // Track parameter for unused parameter detection
+                self.declared_parameters.push((name, param.name.span));
             }
 
             // Analyze body
             self.analyze_stmt(&func.body)?;
 
-            // Check for unused variables
+            // Check for unused variables and parameters
             self.check_unused_variables();
 
             self.current_return_type = None;
@@ -683,8 +690,9 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
-    /// Check for unused variables and generate warnings
+    /// Check for unused variables and parameters, generate warnings
     fn check_unused_variables(&mut self) {
+        // Check unused local variables
         for (var_name, var_span) in &self.declared_variables {
             if !self.used_variables.contains(var_name) {
                 self.warnings.push(Warning::UnusedVariable {
@@ -693,8 +701,21 @@ impl SemanticAnalyzer {
                 });
             }
         }
+
+        // Check unused function parameters
+        // Skip parameters starting with _ (convention for intentionally unused)
+        for (param_name, param_span) in &self.declared_parameters {
+            if !param_name.starts_with('_') && !self.used_variables.contains(param_name) {
+                self.warnings.push(Warning::UnusedParameter {
+                    name: param_name.clone(),
+                    span: *param_span,
+                });
+            }
+        }
+
         // Clear for next function/scope
         self.declared_variables.clear();
+        self.declared_parameters.clear();
         self.used_variables.clear();
     }
 
