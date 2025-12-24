@@ -18,8 +18,8 @@ pub struct Emitter {
     output: String,
     #[allow(dead_code)]
     indent: usize,
-    label_counter: usize,
-    match_counter: u32,
+    pub label_counter: usize,
+    pub match_counter: u32,
     pub memory_layout: MemoryLayout,
     /// Register state tracking for optimization
     pub reg_state: RegisterState,
@@ -93,7 +93,7 @@ impl Emitter {
     }
 
     pub fn emit_org(&mut self, address: u16) {
-        self.output.push_str(&format!("    * = ${:04X}\n", address));
+        self.output.push_str(&format!(".ORG ${:04X}\n", address));
     }
 
     pub fn emit_byte(&mut self, value: u8) {

@@ -1,13 +1,13 @@
-UART_DLL = $7F00
-UART_LSR = $7F05
-UART_RBR = $7F00
-UART_LCR = $7F03
-UART_THR = $7F00
-UART_MCR = $7F04
-UART_IER = $7F01
-UART_DLM = $7F01
-UART_FCR = $7F02
-    * = $9000
+UART_DLM = $9001
+UART_LCR = $9003
+UART_IER = $9001
+UART_LSR = $9005
+UART_DLL = $9000
+UART_FCR = $9002
+UART_THR = $9000
+UART_MCR = $9004
+UART_RBR = $9000
+.ORG $9000
     ; Function: uart_init
     ;   Params: none
     ;   Returns: void
@@ -28,7 +28,7 @@ uart_init:
     LDA #$00
     STA UART_IER
     RTS
-    * = $902E
+.ORG $902E
     ; Function: uart_wait_tx
     ;   Params: none
     ;   Returns: void
@@ -58,7 +58,7 @@ eq_end_4:
     JMP while_start_1
 while_end_2:
     RTS
-    * = $9060
+.ORG $9060
     ; Function: uart_putc
     ;   Params: ch: u8
     ;   Returns: void
@@ -69,7 +69,7 @@ uart_putc:
     LDA $41
     STA UART_THR
     RTS
-    * = $9073
+.ORG $9073
     ; Function: uart_newline
     ;   Params: none
     ;   Returns: void
@@ -84,7 +84,7 @@ uart_newline:
     STA $50
     JSR uart_putc
     RTS
-    * = $908C
+.ORG $908C
     ; Function: uart_data_ready
     ;   Params: none
     ;   Returns: u8
@@ -96,7 +96,7 @@ uart_data_ready:
     STA $20
     AND $20
     RTS
-    * = $90A2
+.ORG $90A2
     ; Function: uart_getc
     ;   Params: none
     ;   Returns: u8
@@ -122,7 +122,7 @@ eq_end_8:
 while_end_6:
     LDA UART_RBR
     RTS
-    * = $90CB
+.ORG $90CB
     ; Function: uart_print_hex
     ;   Params: value: u8
     ;   Returns: void
@@ -204,7 +204,7 @@ else_15:
     JSR uart_putc
 end_16:
     RTS
-    * = $9154
+.ORG $9154
     ; Function: echo_loop
     ;   Params: none
     ;   Returns: void
@@ -272,7 +272,7 @@ end_26:
     JMP while_start_19
 while_end_20:
     RTS
-    * = $8000
+.ORG $8000
     ; Function: main
     ;   Params: none
     ;   Returns: void

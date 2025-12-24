@@ -64,8 +64,10 @@ fn generate_function(
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
         let mut temp_emitter = Emitter::new();
-        // Copy register state and other context
+        // Copy register state and label counter to avoid label conflicts
         temp_emitter.reg_state = emitter.reg_state.clone();
+        temp_emitter.label_counter = emitter.label_counter;
+        temp_emitter.match_counter = emitter.match_counter;
 
         // Generate function body to measure size
         generate_stmt(&func.body, &mut temp_emitter, info)?;
