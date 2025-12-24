@@ -5,7 +5,7 @@
 // HARDWARE ADDRESSES - Memory-mapped I/O registers
 // ============================================================================
 
-addr UART_BASE = 0x9000;
+addr UART_BASE = 0x7F00;
 
 addr UART_RBR = UART_BASE + 0;  // Receiver Buffer (read, DLAB=0)
 addr UART_THR = UART_BASE + 0;  // Transmitter Holding (write, DLAB=0)

@@ -224,7 +224,7 @@ fn test_while_loop() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "while_");
+    assert_asm_contains(&asm, "wh_");
     assert_asm_contains(&asm, "JMP");
 }
 
@@ -242,7 +242,7 @@ fn test_for_range_loop() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "loop_");
+    assert_asm_contains(&asm, "fl_");
 }
 
 // ============================================================================

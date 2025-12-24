@@ -251,8 +251,8 @@ fn generate_unary(
         }
         crate::ast::UnaryOp::Not => {
             // Logical NOT: convert to boolean (0 or 1) and invert
-            let true_label = emitter.next_label("not_true");
-            let end_label = emitter.next_label("not_end");
+            let true_label = emitter.next_label("nt");
+            let end_label = emitter.next_label("nx");
 
             emitter.emit_inst("CMP", "#$00");
             emitter.emit_inst("BEQ", &true_label); // If zero, result is true (1)
@@ -406,7 +406,7 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
             // Generate string literal with length prefix
             // Create unique label for this string
             let str_label = emitter.next_label("str");
-            let skip_label = emitter.next_label("str_skip");
+            let skip_label = emitter.next_label("ss");
 
             // Jump over the string data
             emitter.emit_inst("JMP", &skip_label);
@@ -438,7 +438,7 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
         crate::ast::Literal::Array(elements) => {
             // Generate array literal - store data in memory and return address
             let arr_label = emitter.next_label("arr");
-            let skip_label = emitter.next_label("arr_skip");
+            let skip_label = emitter.next_label("as");
 
             // Jump over the array data
             emitter.emit_inst("JMP", &skip_label);
@@ -471,8 +471,8 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
         }
         crate::ast::Literal::ArrayFill { value, count } => {
             // Generate array filled with repeated value
-            let arr_label = emitter.next_label("arr_fill");
-            let skip_label = emitter.next_label("arr_fill_skip");
+            let arr_label = emitter.next_label("af");
+            let skip_label = emitter.next_label("af");
 
             // Jump over the array data
             emitter.emit_inst("JMP", &skip_label);
@@ -568,8 +568,8 @@ fn generate_variable(
 
 fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // A == TEMP: Compare and set A to 1 if equal, 0 otherwise
-    let true_label = emitter.next_label("eq_true");
-    let end_label = emitter.next_label("eq_end");
+    let true_label = emitter.next_label("et");
+    let end_label = emitter.next_label("ex");
 
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BEQ", &true_label);
@@ -588,8 +588,8 @@ fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 fn generate_compare_ne(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // A != TEMP: Opposite of equal
-    let true_label = emitter.next_label("ne_true");
-    let end_label = emitter.next_label("ne_end");
+    let true_label = emitter.next_label("nt");
+    let end_label = emitter.next_label("nx");
 
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BNE", &true_label);
@@ -608,8 +608,8 @@ fn generate_compare_ne(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 fn generate_compare_lt(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // A < TEMP: Use CMP which sets carry flag if A >= TEMP
-    let true_label = emitter.next_label("lt_true");
-    let end_label = emitter.next_label("lt_end");
+    let true_label = emitter.next_label("lt");
+    let end_label = emitter.next_label("lx");
 
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCC", &true_label); // Branch if carry clear (A < TEMP)
@@ -628,8 +628,8 @@ fn generate_compare_lt(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 fn generate_compare_ge(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // A >= TEMP: Opposite of <
-    let true_label = emitter.next_label("ge_true");
-    let end_label = emitter.next_label("ge_end");
+    let true_label = emitter.next_label("gt");
+    let end_label = emitter.next_label("gx");
 
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCS", &true_label); // Branch if carry set (A >= TEMP)
@@ -654,8 +654,8 @@ fn generate_compare_gt(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // So A > B means A >= B AND A != B
     // Or simply: CMP sets flags, if carry set AND not equal, then A > B
 
-    let true_label = emitter.next_label("gt_true");
-    let end_label = emitter.next_label("gt_end");
+    let true_label = emitter.next_label("gt");
+    let end_label = emitter.next_label("gx");
 
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BEQ", &end_label); // If equal, result is 0 (false)
@@ -678,8 +678,8 @@ fn generate_compare_le(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // A <= B means A < B OR A == B
     // CMP: if carry clear OR equal, then A <= TEMP
 
-    let false_label = emitter.next_label("le_false");
-    let end_label = emitter.next_label("le_end");
+    let false_label = emitter.next_label("lf");
+    let end_label = emitter.next_label("lx");
 
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BEQ", &end_label); // If equal, keep A as is, set to 1 after
@@ -704,8 +704,8 @@ fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Shift A left by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
 
-    let loop_label = emitter.next_label("shl_loop");
-    let end_label = emitter.next_label("shl_end");
+    let loop_label = emitter.next_label("sl");
+    let end_label = emitter.next_label("sx");
 
     // Load shift count into X
     emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
@@ -728,8 +728,8 @@ fn generate_shift_right(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Shift A right by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
 
-    let loop_label = emitter.next_label("shr_loop");
-    let end_label = emitter.next_label("shr_end");
+    let loop_label = emitter.next_label("sr");
+    let end_label = emitter.next_label("sx");
 
     // Load shift count into X
     emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
@@ -757,7 +757,7 @@ fn generate_logical_and(
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // Short-circuit AND: if left is false, skip right and return false
-    let end_label = emitter.next_label("and_end");
+    let end_label = emitter.next_label("ax");
 
     // Evaluate left operand
     generate_expr(left, emitter, info)?;
@@ -770,7 +770,7 @@ fn generate_logical_and(
     generate_expr(right, emitter, info)?;
 
     // Convert right to boolean (0 or 1)
-    let true_label = emitter.next_label("and_true");
+    let true_label = emitter.next_label("at");
     emitter.emit_inst("CMP", "#$00");
     emitter.emit_inst("BNE", &true_label);
 
@@ -793,9 +793,9 @@ fn generate_logical_or(
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // Short-circuit OR: if left is true, skip right and return true
-    let true_label = emitter.next_label("or_true");
-    let eval_right_label = emitter.next_label("or_eval_right");
-    let end_label = emitter.next_label("or_end");
+    let true_label = emitter.next_label("ot");
+    let eval_right_label = emitter.next_label("or");
+    let end_label = emitter.next_label("ox");
 
     // Evaluate left operand
     generate_expr(left, emitter, info)?;
@@ -833,8 +833,8 @@ fn generate_multiply(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Result in A (will overflow for results > 255)
     const RESULT_REG: u8 = 0x22;
 
-    let loop_label = emitter.next_label("mul_loop");
-    let end_label = emitter.next_label("mul_end");
+    let loop_label = emitter.next_label("ml");
+    let end_label = emitter.next_label("mx");
 
     // Save multiplicand (A) to X
     emitter.emit_inst("TAX", "");
@@ -873,8 +873,8 @@ fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
     const QUOTIENT_REG: u8 = 0x22;
     const DIVIDEND_REG: u8 = 0x23;
 
-    let loop_label = emitter.next_label("div_loop");
-    let end_label = emitter.next_label("div_end");
+    let loop_label = emitter.next_label("dl");
+    let end_label = emitter.next_label("dx");
 
     // Check for division by zero
     emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
@@ -914,8 +914,8 @@ fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Result (remainder) in A
     const DIVIDEND_REG: u8 = 0x23;
 
-    let loop_label = emitter.next_label("mod_loop");
-    let end_label = emitter.next_label("mod_end");
+    let loop_label = emitter.next_label("md");
+    let end_label = emitter.next_label("mx");
 
     // Check for division by zero
     emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
@@ -1036,7 +1036,7 @@ fn generate_struct_init(
 
     // Generate labels for struct data
     let struct_label = emitter.next_label(&format!("struct_{}", name.node));
-    let skip_label = emitter.next_label("struct_skip");
+    let skip_label = emitter.next_label("ks");
 
     // Jump over the data
     emitter.emit_inst("JMP", &skip_label);
@@ -1194,8 +1194,9 @@ fn generate_enum_variant(
         ))?;
 
     // Generate labels for enum data
-    let enum_label = emitter.next_label(&format!("enum_{}_{}", enum_name.node, variant.node));
-    let skip_label = emitter.next_label("enum_skip");
+    // Use short label prefix to stay within 12-char assembler limit
+    let enum_label = emitter.next_label("en");
+    let skip_label = emitter.next_label("es");
 
     // Jump over the data
     emitter.emit_inst("JMP", &skip_label);
@@ -1341,8 +1342,8 @@ fn generate_type_cast(
                         // Sign extension: if bit 7 of A is set, X = $FF, else X = $00
                         emitter.emit_inst("TAX", ""); // Save value in X temporarily
                         emitter.emit_inst("AND", "#$80"); // Check sign bit
-                        let neg_label = emitter.next_label("sign_neg");
-                        let end_label = emitter.next_label("sign_end");
+                        let neg_label = emitter.next_label("sn");
+                        let end_label = emitter.next_label("sx");
 
                         emitter.emit_inst("BEQ", &neg_label); // If zero (positive), use 0
                         emitter.emit_inst("LDA", "#$FF"); // Negative: high byte = $FF
@@ -1375,8 +1376,8 @@ fn generate_type_cast(
                     // Cast to bool: 0 = false, non-zero = true
                     // Convert to canonical boolean (0 or 1)
                     emitter.emit_comment("Cast to bool");
-                    let true_label = emitter.next_label("bool_true");
-                    let end_label = emitter.next_label("bool_end");
+                    let true_label = emitter.next_label("bt");
+                    let end_label = emitter.next_label("bx");
 
                     emitter.emit_inst("CMP", "#$00");
                     emitter.emit_inst("BNE", &true_label);

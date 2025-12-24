@@ -170,7 +170,7 @@ fn test_codegen_control_flow() {
     assert!(asm.contains("JMP"));
     // Check for generated labels
     assert!(asm.contains("else_"));
-    assert!(asm.contains("while_start_"));
+    assert!(asm.contains("wh_"));
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn test_codegen_comparison_eq() {
     // 2. Branch on condition
     // 3. Set result to 0 or 1
     assert!(asm.contains("CMP $20"), "Should compare with TEMP");
-    assert!(asm.contains("BEQ eq_true_"), "Should branch if equal");
+    assert!(asm.contains("BEQ et_"), "Should branch if equal");
     assert!(asm.contains("LDA #$00"), "Should load false value");
     assert!(asm.contains("LDA #$01"), "Should load true value");
 
@@ -296,11 +296,11 @@ fn test_codegen_logical_and_short_circuit() {
     // 3. Otherwise evaluate right
     assert!(asm.contains("LDA X"), "Should load left operand from X");
     assert!(asm.contains("CMP #$00"), "Should check if false");
-    assert!(asm.contains("BEQ and_end_"), "Should short-circuit if false");
+    assert!(asm.contains("BEQ ax_"), "Should short-circuit if false");
 
     // CMP should come before BEQ
     let first_cmp = asm.find("CMP #$00").unwrap();
-    let first_beq = asm.find("BEQ and_end_").unwrap();
+    let first_beq = asm.find("BEQ ax_").unwrap();
     assert!(first_cmp < first_beq, "CMP before BEQ for short-circuit");
 }
 
@@ -328,14 +328,14 @@ fn test_codegen_multiplication() {
     // 3. Loop: add multiplicand to result
     assert!(asm.contains("TAX"), "Should save multiplicand to X");
     assert!(asm.contains("TAY"), "Should save multiplier to Y");
-    assert!(asm.contains("mul_loop_"), "Should have multiply loop");
+    assert!(asm.contains("ml_"), "Should have multiply loop");
     assert!(asm.contains("TXA"), "Should load multiplicand");
     assert!(asm.contains("DEY"), "Should decrement counter");
-    assert!(asm.contains("BNE mul_loop_"), "Should loop until done");
+    assert!(asm.contains("BNE ml_"), "Should loop until done");
 
     // Verify ordering
-    assert!(appears_before(&asm, "TAX", "mul_loop_"), "Setup before loop");
-    assert!(appears_before(&asm, "mul_loop_", "BNE mul_loop_"), "Loop label before branch");
+    assert!(appears_before(&asm, "TAX", "ml_"), "Setup before loop");
+    assert!(appears_before(&asm, "ml_", "BNE ml_"), "Loop label before branch");
 }
 
 #[test]
@@ -358,15 +358,15 @@ fn test_codegen_division() {
 
     // Division uses repeated subtraction
     assert!(asm.contains("CPX #$00"), "Should check for division by zero");
-    assert!(asm.contains("BEQ div_end_"), "Should skip if divisor is zero");
-    assert!(asm.contains("div_loop_"), "Should have division loop");
+    assert!(asm.contains("BEQ dx_"), "Should skip if divisor is zero");
+    assert!(asm.contains("dl_"), "Should have division loop");
     assert!(asm.contains("SBC $20"), "Should subtract divisor");
     assert!(asm.contains("INC $22"), "Should increment quotient");
-    assert!(asm.contains("BCC div_end_"), "Should exit when dividend < divisor");
+    assert!(asm.contains("BCC dx_"), "Should exit when dividend < divisor");
 
     // Verify ordering
-    assert!(appears_before(&asm, "CPX", "BEQ div_end_"), "Zero check before skip");
-    assert!(appears_before(&asm, "div_loop_", "SBC"), "Loop before subtraction");
+    assert!(appears_before(&asm, "CPX", "BEQ dx_"), "Zero check before skip");
+    assert!(appears_before(&asm, "dl_", "SBC"), "Loop before subtraction");
 }
 
 #[test]
@@ -387,13 +387,13 @@ fn test_codegen_shift_operations() {
 
     // Shift uses iterative ASL
     assert!(asm.contains("LDX $20"), "Should load shift count");
-    assert!(asm.contains("shl_loop_"), "Should have shift loop");
+    assert!(asm.contains("sl_"), "Should have shift loop");
     assert!(asm.contains("ASL A"), "Should arithmetic shift left");
     assert!(asm.contains("DEX"), "Should decrement counter");
-    assert!(asm.contains("BNE shl_loop_"), "Should loop");
+    assert!(asm.contains("BNE sl_"), "Should loop");
 
     // Verify ordering
-    assert!(appears_before(&asm, "LDX", "shl_loop_"), "Load count before loop");
+    assert!(appears_before(&asm, "LDX", "sl_"), "Load count before loop");
     assert!(appears_before(&asm, "ASL A", "DEX"), "Shift before decrement");
 }
 
@@ -417,18 +417,18 @@ fn test_codegen_for_loop() {
     // 2. Store end value in temp location
     // 3. Loop: check condition with CPX, execute body, increment with INX
     assert!(asm.contains("TAX"), "Should transfer counter to X");
-    assert!(asm.contains("for_loop_"), "Should have loop label");
-    assert!(asm.contains("for_end_"), "Should have end label");
+    assert!(asm.contains("fl_"), "Should have loop label");
+    assert!(asm.contains("fx_"), "Should have end label");
     assert!(asm.contains("CPX $21"), "Should compare X with end value");
-    assert!(asm.contains("BCS for_end_"), "Should exit if counter >= end");
+    assert!(asm.contains("BCS fx_"), "Should exit if counter >= end");
     assert!(asm.contains("INX"), "Should increment X register");
-    assert!(asm.contains("JMP for_loop_"), "Should jump back to start");
+    assert!(asm.contains("JMP fl_"), "Should jump back to start");
 
     // Verify ordering
-    assert!(appears_before(&asm, "TAX", "for_loop_"), "Transfer to X before loop");
-    assert!(appears_before(&asm, "STA $21", "for_loop_"), "Store end before loop");
-    assert!(appears_before(&asm, "for_loop_", "CPX"), "Loop label before check");
-    assert!(appears_before(&asm, "INX", "JMP for_loop_"), "Increment before jump");
+    assert!(appears_before(&asm, "TAX", "fl_"), "Transfer to X before loop");
+    assert!(appears_before(&asm, "STA $21", "fl_"), "Store end before loop");
+    assert!(appears_before(&asm, "fl_", "CPX"), "Loop label before check");
+    assert!(appears_before(&asm, "INX", "JMP fl_"), "Increment before jump");
 }
 
 #[test]
@@ -479,11 +479,11 @@ fn test_codegen_nested_expressions() {
 
     // Should have both addition and multiplication
     assert!(asm.contains("ADC $20"), "Should have addition");
-    assert!(asm.contains("mul_loop_"), "Should have multiplication");
+    assert!(asm.contains("ml_"), "Should have multiplication");
 
     // Addition should come before multiplication
     let add_pos = asm.find("ADC $20").unwrap();
-    let mul_pos = asm.find("mul_loop_").unwrap();
+    let mul_pos = asm.find("ml_").unwrap();
     assert!(add_pos < mul_pos, "Addition (inner) should come before multiplication (outer)");
 }
 
@@ -510,13 +510,13 @@ fn test_codegen_enum_unit_variant() {
 
     // Should generate enum data with tag
     assert!(asm.contains("; Enum variant: Direction::North"), "Should have enum comment");
-    assert!(asm.contains("JMP enum_skip_"), "Should jump over data");
-    assert!(asm.contains("enum_Direction_North_"), "Should have enum label");
+    assert!(asm.contains("JMP es_"), "Should jump over data");
+    assert!(asm.contains("en_"), "Should have enum label");
     assert!(asm.contains(".byte $00"), "Should emit tag byte 0 for first variant");
 
     // Should load address into A:X
-    assert!(asm.contains("LDA #<enum_Direction_North_"), "Should load low byte of address");
-    assert!(asm.contains("LDX #>enum_Direction_North_"), "Should load high byte of address");
+    assert!(asm.contains("LDA #<en_"), "Should load low byte of address");
+    assert!(asm.contains("LDX #>en_"), "Should load high byte of address");
 }
 
 #[test]
@@ -538,15 +538,15 @@ fn test_codegen_enum_tuple_variant() {
 
     // Should generate enum data with tag and fields
     assert!(asm.contains("; Enum variant: Color::RGB"), "Should have enum comment");
-    assert!(asm.contains("enum_Color_RGB_"), "Should have enum label");
+    assert!(asm.contains("en_"), "Should have enum label");
     assert!(asm.contains(".byte $00"), "Should emit tag byte");
     assert!(asm.contains(".byte $FF"), "Should emit 255 (0xFF) for first field");
     assert!(asm.contains(".byte $80"), "Should emit 128 (0x80) for second field");
     assert!(asm.contains(".byte $40"), "Should emit 64 (0x40) for third field");
 
     // Should load address into A:X
-    assert!(asm.contains("LDA #<enum_Color_RGB_"), "Should load low byte of address");
-    assert!(asm.contains("LDX #>enum_Color_RGB_"), "Should load high byte of address");
+    assert!(asm.contains("LDA #<en_"), "Should load low byte of address");
+    assert!(asm.contains("LDX #>en_"), "Should load high byte of address");
 }
 
 #[test]
@@ -568,7 +568,7 @@ fn test_codegen_enum_struct_variant() {
 
     // Should generate enum data with tag and named fields
     assert!(asm.contains("; Enum variant: Message::Point"), "Should have enum comment");
-    assert!(asm.contains("enum_Message_Point_"), "Should have enum label");
+    assert!(asm.contains("en_"), "Should have enum label");
     assert!(asm.contains(".byte $00"), "Should emit tag byte");
     assert!(asm.contains(".byte $0A"), "Should emit 10 (0x0A) for x field");
     assert!(asm.contains(".byte $14"), "Should emit 20 (0x14) for y field");
@@ -652,7 +652,7 @@ fn test_codegen_enum_multiple_variants() {
 
     // Should generate enum with tag 1 (second variant)
     assert!(asm.contains("; Enum variant: Option::Some"), "Should have enum comment");
-    assert!(asm.contains("enum_Option_Some_"), "Should have enum label");
+    assert!(asm.contains("en_"), "Should have enum label");
     assert!(asm.contains(".byte $01"), "Should emit tag byte 1 for second variant");
     assert!(asm.contains(".byte $2A"), "Should emit 42 (0x2A) for data");
 }

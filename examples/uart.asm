@@ -1,12 +1,12 @@
-UART_DLM = $9001
-UART_LCR = $9003
-UART_IER = $9001
-UART_LSR = $9005
-UART_DLL = $9000
-UART_FCR = $9002
-UART_THR = $9000
-UART_MCR = $9004
-UART_RBR = $9000
+UART_LCR = $7F03
+UART_DLL = $7F00
+UART_FCR = $7F02
+UART_THR = $7F00
+UART_DLM = $7F01
+UART_LSR = $7F05
+UART_IER = $7F01
+UART_RBR = $7F00
+UART_MCR = $7F04
 .ORG $9000
     ; Function: uart_init
     ;   Params: none
@@ -36,7 +36,7 @@ uart_init:
 uart_wait_tx:
     LDA #$00
     STA $40
-while_start_1:
+wh_1:
     LDA #$20
     STA $20
     AND $20
@@ -45,18 +45,18 @@ while_start_1:
     STA $20
     TYA
     CMP $20
-    BEQ eq_true_3
+    BEQ et_3
     LDA #$00
-    JMP eq_end_4
-eq_true_3:
+    JMP ex_4
+et_3:
     LDA #$01
-eq_end_4:
+ex_4:
     CMP #$00
-    BEQ while_end_2
+    BEQ we_2
     LDA UART_LSR
     STA $40
-    JMP while_start_1
-while_end_2:
+    JMP wh_1
+we_2:
     RTS
 .ORG $9060
     ; Function: uart_putc
@@ -102,7 +102,7 @@ uart_data_ready:
     ;   Returns: u8
     ;   Location: $90A2
 uart_getc:
-while_start_5:
+wh_5:
     ; Call: uart_data_ready()
     JSR uart_data_ready
     TAY
@@ -110,16 +110,16 @@ while_start_5:
     STA $20
     TYA
     CMP $20
-    BEQ eq_true_7
+    BEQ et_7
     LDA #$00
-    JMP eq_end_8
-eq_true_7:
+    JMP ex_8
+et_7:
     LDA #$01
-eq_end_8:
+ex_8:
     CMP #$00
-    BEQ while_end_6
-    JMP while_start_5
-while_end_6:
+    BEQ we_6
+    JMP wh_5
+we_6:
     LDA UART_RBR
     RTS
 .ORG $90CB
@@ -133,12 +133,12 @@ uart_print_hex:
     LDA $43
     LDX $20
     CPX #$00
-    BEQ shr_end_10
-shr_loop_9:
+    BEQ sx_10
+sr_9:
     LSR A
     DEX
-    BNE shr_loop_9
-shr_end_10:
+    BNE sr_9
+sx_10:
     STA $44
     LDA #$0F
     STA $20
@@ -149,12 +149,12 @@ shr_end_10:
     STA $20
     LDA $44
     CMP $20
-    BCC lt_true_13
+    BCC lt_13
     LDA #$00
-    JMP lt_end_14
-lt_true_13:
+    JMP lx_14
+lt_13:
     LDA #$01
-lt_end_14:
+lx_14:
     CMP #$00
     BEQ else_11
     ; Call: uart_putc(...) [1 arg]
@@ -178,12 +178,12 @@ end_12:
     STA $20
     LDA $45
     CMP $20
-    BCC lt_true_17
+    BCC lt_17
     LDA #$00
-    JMP lt_end_18
-lt_true_17:
+    JMP lx_18
+lt_17:
     LDA #$01
-lt_end_18:
+lx_18:
     CMP #$00
     BEQ else_15
     ; Call: uart_putc(...) [1 arg]
@@ -220,10 +220,10 @@ echo_loop:
     LDA #$20
     STA $50
     JSR uart_putc
-while_start_19:
+wh_19:
     LDA #$01
     CMP #$00
-    BEQ while_end_20
+    BEQ we_20
     ; Call: uart_getc()
     JSR uart_getc
     STA $46
@@ -233,12 +233,12 @@ while_start_19:
     LDA #$0D
     STA $20
     CMP $20
-    BEQ eq_true_23
+    BEQ et_23
     LDA #$00
-    JMP eq_end_24
-eq_true_23:
+    JMP ex_24
+et_23:
     LDA #$01
-eq_end_24:
+ex_24:
     CMP #$00
     BEQ else_21
     ; Call: uart_newline()
@@ -257,20 +257,20 @@ end_22:
     LDA #$1B
     STA $20
     CMP $20
-    BEQ eq_true_27
+    BEQ et_27
     LDA #$00
-    JMP eq_end_28
-eq_true_27:
+    JMP ex_28
+et_27:
     LDA #$01
-eq_end_28:
+ex_28:
     CMP #$00
     BEQ else_25
-    JMP while_end_20
+    JMP we_20
     JMP end_26
 else_25:
 end_26:
-    JMP while_start_19
-while_end_20:
+    JMP wh_19
+we_20:
     RTS
 .ORG $8000
     ; Function: main

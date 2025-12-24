@@ -173,8 +173,8 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::While { condition, body } => {
-            let start_label = emitter.next_label("while_start");
-            let end_label = emitter.next_label("while_end");
+            let start_label = emitter.next_label("wh");
+            let end_label = emitter.next_label("we");
 
             emitter.emit_label(&start_label);
 
@@ -198,8 +198,8 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Loop { body } => {
-            let loop_label = emitter.next_label("loop_start");
-            let end_label = emitter.next_label("loop_end");
+            let loop_label = emitter.next_label("lp");
+            let end_label = emitter.next_label("lx");
 
             emitter.emit_label(&loop_label);
 
@@ -225,8 +225,8 @@ pub fn generate_stmt(
             // This frees up zero page and is faster (INX vs INC, CPX vs CMP+LDA)
             let loop_end_temp = emitter.memory_layout.loop_end_temp();
 
-            let loop_label = emitter.next_label("for_loop");
-            let end_label = emitter.next_label("for_end");
+            let loop_label = emitter.next_label("fl");
+            let end_label = emitter.next_label("fx");
 
             // Initialize loop variable with range start -> X register
             generate_expr(&range.start, emitter, info)?;
@@ -245,7 +245,7 @@ pub fn generate_stmt(
 
             if range.inclusive {
                 // If counter > end, exit
-                let continue_label = emitter.next_label("for_continue");
+                let continue_label = emitter.next_label("fc");
                 emitter.emit_inst("BEQ", &continue_label); // Equal is ok for inclusive
                 emitter.emit_inst("BCS", &end_label); // Counter > end, exit
                 emitter.emit_label(&continue_label);
@@ -331,8 +331,8 @@ pub fn generate_stmt(
                 }
             };
 
-            let loop_label = emitter.next_label("foreach_loop");
-            let end_label = emitter.next_label("foreach_end");
+            let loop_label = emitter.next_label("fe");
+            let end_label = emitter.next_label("fz");
 
             // Initialize counter to 0 in X register
             emitter.emit_inst("LDX", "#$00");
