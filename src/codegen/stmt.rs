@@ -441,7 +441,6 @@ pub fn generate_stmt(
         Stmt::Match { expr, arms } => {
             generate_match(expr, arms, emitter, info)
         }
-        _ => Ok(()), // TODO: Implement other statements
     }
 }
 
