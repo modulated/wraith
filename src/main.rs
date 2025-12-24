@@ -84,6 +84,12 @@ fn main() {
         }
     };
 
+    // Display warnings
+    for warning in &program_info.warnings {
+        eprintln!("{}", warning.format_with_source_and_file(&source, Some(file)));
+        eprintln!(); // Add blank line between warnings
+    }
+
     // Code generation
     let code = match codegen::generate(&ast, &program_info) {
         Ok(code) => code,

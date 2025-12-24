@@ -61,17 +61,21 @@ x := 10;  // Infer u8 from literal
 
 ### 3.1 Warning System
 
-**Status:** Not implemented
+**Status:** ✅ COMPLETE (2025-12-25)
+**Location:** `src/sema/mod.rs`, `src/sema/analyze.rs`, `src/main.rs`
 **Description:** Non-fatal diagnostics for code quality
 **Priority:** MEDIUM
 
-**Suggested warnings:**
+**Implemented warnings:**
 
--   Unused variables
--   Unused imports
--   Unreachable code after return
--   Unnecessary zero page allocations
--   Non-exhaustive match patterns
+-   ✅ Unused variables - Detects variables that are declared but never used
+-   ✅ Unreachable code - Detects code after return/break/continue statements
+-   ⬜ Unused imports
+-   ⬜ Unused function parameters
+-   ⬜ Unnecessary zero page allocations
+-   ⬜ Non-exhaustive match patterns
+
+Warnings are displayed with full source context (file, line, column) similar to error messages.
 
 ### 3.2 Error Recovery
 
@@ -417,16 +421,14 @@ u8 random_range(min, max);
 ### HIGH Priority (Implement Soon)
 
 1. ⬜ Language reference documentation
-2. ⬜ Break/continue implementation with proper loop context tracking
-3. ⬜ Semantic validation (duplicate functions, undefined variables at sema phase)
+2. ⬜ Semantic validation (duplicate functions, undefined variables at sema phase)
 
 ### MEDIUM Priority (Nice to Have)
 
 10. ⬜ ForEach loops
 11. ⬜ Module system with visibility
 12. ⬜ Peephole optimization
-13. ⬜ Warning system
-14. ⬜ Memory section control
+13. ⬜ Memory section control
 15. ⬜ Parser improvements (enum patterns, lookahead)
 16. ⬜ Slice type support
 17. ⬜ CPU flags access
@@ -478,6 +480,8 @@ u8 random_range(min, max);
 ✅ **Import Function Metadata Fix** - Inline functions from imported modules now work correctly
 ✅ **Compiler Output Improvements** - Cargo-style colored output with timing information
 ✅ **Register State Tracking Fix** - Fixed binary operation bug that caused incorrect optimization
+✅ **Break/Continue Statements** - Verified full implementation with loop context tracking (parser, sema, codegen)
+✅ **Warning System** - Non-fatal diagnostics for unused variables and unreachable code with source context
 
 ---
 

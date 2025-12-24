@@ -30,6 +30,8 @@ pub struct SemanticAnalyzer {
     loop_depth: usize,
     /// Track variable usage for unused variable warnings
     used_variables: HashSet<String>,
+    /// Track declared variables in current scope (name -> span) for unused variable detection
+    declared_variables: Vec<(String, Span)>,
 }
 
 /// Zero page memory allocator
@@ -128,6 +130,7 @@ impl SemanticAnalyzer {
             const_env: ConstEnv::new(),
             loop_depth: 0,
             used_variables: HashSet::new(),
+            declared_variables: Vec::new(),
         }
     }
 
@@ -147,6 +150,7 @@ impl SemanticAnalyzer {
             const_env: ConstEnv::new(),
             loop_depth: 0,
             used_variables: HashSet::new(),
+            declared_variables: Vec::new(),
         }
     }
 
@@ -670,18 +674,50 @@ impl SemanticAnalyzer {
             // Analyze body
             self.analyze_stmt(&func.body)?;
 
+            // Check for unused variables
+            self.check_unused_variables();
+
             self.current_return_type = None;
             self.table.exit_scope();
         }
         Ok(())
     }
 
+    /// Check for unused variables and generate warnings
+    fn check_unused_variables(&mut self) {
+        for (var_name, var_span) in &self.declared_variables {
+            if !self.used_variables.contains(var_name) {
+                self.warnings.push(Warning::UnusedVariable {
+                    name: var_name.clone(),
+                    span: *var_span,
+                });
+            }
+        }
+        // Clear for next function/scope
+        self.declared_variables.clear();
+        self.used_variables.clear();
+    }
+
     fn analyze_stmt(&mut self, stmt: &Spanned<Stmt>) -> Result<(), SemaError> {
         match &stmt.node {
             Stmt::Block(stmts) => {
                 self.table.enter_scope();
-                for s in stmts {
+                let mut found_terminator = false;
+                for s in stmts.iter() {
+                    if found_terminator {
+                        // Warn about unreachable code after return/break/continue
+                        self.warnings.push(Warning::UnreachableCode {
+                            span: s.span,
+                        });
+                        // Continue analyzing (don't skip) to find other errors/warnings
+                    }
+
                     self.analyze_stmt(s)?;
+
+                    // Check if this statement terminates control flow
+                    if matches!(s.node, Stmt::Return(_) | Stmt::Break | Stmt::Continue) {
+                        found_terminator = true;
+                    }
                 }
                 self.table.exit_scope();
             }
@@ -745,6 +781,9 @@ impl SemanticAnalyzer {
                 self.table.insert(name.node.clone(), info.clone());
                 // Also add to resolved_symbols so codegen can find it
                 self.resolved_symbols.insert(name.span, info);
+
+                // Track declared variable for unused variable warnings
+                self.declared_variables.push((name.node.clone(), name.span));
             }
             Stmt::Assign { target, value } => {
                 let target_ty = self.check_expr(target)?;
@@ -1082,6 +1121,10 @@ impl SemanticAnalyzer {
                 };
 
                 self.resolved_symbols.insert(expr.span, info.clone());
+
+                // Mark variable as used (for unused variable warnings)
+                self.used_variables.insert(name.clone());
+
                 Ok(info.ty)
             }
             Expr::Binary { left, op, right } => {
