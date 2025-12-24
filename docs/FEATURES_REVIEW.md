@@ -72,8 +72,8 @@ x := 10;  // Infer u8 from literal
 -   ✅ Unreachable code - Detects code after return/break/continue statements
 -   ✅ Unused function parameters - Detects parameters that are never used (skips `_`-prefixed names)
 -   ✅ Unused imports - Detects imported symbols that are never referenced
+-   ✅ Non-exhaustive match patterns - Detects when match doesn't cover all enum variants (skips if wildcard present)
 -   ⬜ Unnecessary zero page allocations
--   ⬜ Non-exhaustive match patterns
 
 Warnings are displayed with full source context (file, line, column) similar to error messages. Parameters starting with `_` are excluded from unused parameter warnings (common convention for intentionally unused parameters).
 
@@ -481,7 +481,7 @@ u8 random_range(min, max);
 ✅ **Compiler Output Improvements** - Cargo-style colored output with timing information
 ✅ **Register State Tracking Fix** - Fixed binary operation bug that caused incorrect optimization
 ✅ **Break/Continue Statements** - Verified full implementation with loop context tracking (parser, sema, codegen)
-✅ **Warning System** - Non-fatal diagnostics for unused variables, unused parameters, unused imports, and unreachable code with source context
+✅ **Warning System** - Non-fatal diagnostics for unused variables, unused parameters, unused imports, unreachable code, and non-exhaustive match patterns with source context
 
 ---
 

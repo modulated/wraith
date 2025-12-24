@@ -748,6 +748,122 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// Check if a match statement exhaustively covers all enum variants
+    fn check_match_exhaustiveness(
+        &mut self,
+        enum_name: &str,
+        arms: &[crate::ast::MatchArm],
+        match_span: Span,
+    ) -> Result<(), SemaError> {
+        use crate::ast::Pattern;
+
+        // Get the enum definition
+        let enum_def = if let Some(def) = self.type_registry.get_enum(enum_name) {
+            def.clone()
+        } else {
+            // Not an enum or not found - skip exhaustiveness check
+            return Ok(());
+        };
+
+        // Check if there's a wildcard pattern
+        let has_wildcard = arms.iter().any(|arm| {
+            matches!(arm.pattern.node, Pattern::Wildcard)
+        });
+
+        if has_wildcard {
+            // Wildcard covers everything - match is exhaustive
+            return Ok(());
+        }
+
+        // Collect covered variants
+        let mut covered_variants = std::collections::HashSet::new();
+        for arm in arms {
+            if let Pattern::EnumVariant { variant, .. } = &arm.pattern.node {
+                covered_variants.insert(variant.node.clone());
+            }
+        }
+
+        // Find missing variants
+        let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();
+        let missing_variants: Vec<String> = all_variants
+            .iter()
+            .filter(|v| !covered_variants.contains(*v))
+            .cloned()
+            .collect();
+
+        if !missing_variants.is_empty() {
+            // Generate warning for non-exhaustive match
+            self.warnings.push(Warning::NonExhaustiveMatch {
+                missing_patterns: missing_variants,
+                span: match_span,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Add pattern bindings to the current scope
+    fn add_pattern_bindings(
+        &mut self,
+        pattern: &crate::ast::Pattern,
+        match_ty: &Type,
+    ) -> Result<(), SemaError> {
+        use crate::ast::Pattern;
+
+        match pattern {
+            Pattern::EnumVariant { enum_name, variant, bindings } => {
+                use crate::sema::type_defs::VariantData;
+
+                // Get enum definition to find variant field types
+                if let Some(enum_def) = self.type_registry.get_enum(&enum_name.node) {
+                    if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == variant.node) {
+                        // Add bindings for tuple variant fields
+                        match &variant_def.data {
+                            VariantData::Tuple(field_types) => {
+                                for (i, binding) in bindings.iter().enumerate() {
+                                    if let Some(field_ty) = field_types.get(i) {
+                                        let addr = self.zp_allocator.allocate()?;
+                                        let info = SymbolInfo {
+                                            name: binding.name.node.clone(),
+                                            kind: SymbolKind::Variable,
+                                            ty: field_ty.clone(),
+                                            location: SymbolLocation::ZeroPage(addr),
+                                            mutable: false,
+                                        };
+                                        self.table.insert(binding.name.node.clone(), info);
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Unit and Struct variants don't have tuple-style bindings
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Variable(name) => {
+                // Bind the entire matched value
+                let addr = self.zp_allocator.allocate()?;
+                let info = SymbolInfo {
+                    name: name.clone(),
+                    kind: SymbolKind::Variable,
+                    ty: match_ty.clone(),
+                    location: SymbolLocation::ZeroPage(addr),
+                    mutable: false,
+                };
+                self.table.insert(name.clone(), info);
+            }
+            Pattern::Wildcard => {
+                // No bindings for wildcard
+            }
+            _ => {
+                // Literal and Range patterns don't create bindings
+            }
+        }
+
+        Ok(())
+    }
+
     fn analyze_stmt(&mut self, stmt: &Spanned<Stmt>) -> Result<(), SemaError> {
         match &stmt.node {
             Stmt::Block(stmts) => {
@@ -1058,6 +1174,29 @@ impl SemanticAnalyzer {
             Stmt::Continue => {
                 if self.loop_depth == 0 {
                     return Err(SemaError::BreakOutsideLoop { span: stmt.span });
+                }
+            }
+            Stmt::Match { expr, arms } => {
+                // Check the matched expression type
+                let match_ty = self.check_expr(expr)?;
+
+                // Check exhaustiveness for enum types
+                if let Type::Named(enum_name) = &match_ty {
+                    self.check_match_exhaustiveness(enum_name, arms, stmt.span)?;
+                }
+
+                // Analyze each arm
+                for arm in arms {
+                    // Enter new scope for pattern bindings
+                    self.table.enter_scope();
+
+                    // Add pattern bindings to scope
+                    self.add_pattern_bindings(&arm.pattern.node, &match_ty)?;
+
+                    // Analyze arm body
+                    self.analyze_stmt(&arm.body)?;
+
+                    self.table.exit_scope();
                 }
             }
             _ => {}

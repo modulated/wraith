@@ -330,6 +330,12 @@ pub enum Warning {
         name: String,
         span: Span,
     },
+
+    /// Non-exhaustive match (missing enum variants)
+    NonExhaustiveMatch {
+        missing_patterns: Vec<String>,
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -347,6 +353,10 @@ impl Warning {
             }
             Warning::UnusedParameter { name, span } => {
                 (format!("unused parameter: `{}`", name), span)
+            }
+            Warning::NonExhaustiveMatch { missing_patterns, span } => {
+                let patterns = missing_patterns.join("`, `");
+                (format!("non-exhaustive match, missing: `{}`", patterns), span)
             }
         };
 
