@@ -71,7 +71,7 @@ x := 10;  // Infer u8 from literal
 -   ✅ Unused variables - Detects variables that are declared but never used
 -   ✅ Unreachable code - Detects code after return/break/continue statements
 -   ✅ Unused function parameters - Detects parameters that are never used (skips `_`-prefixed names)
--   ⬜ Unused imports
+-   ✅ Unused imports - Detects imported symbols that are never referenced
 -   ⬜ Unnecessary zero page allocations
 -   ⬜ Non-exhaustive match patterns
 
@@ -481,7 +481,7 @@ u8 random_range(min, max);
 ✅ **Compiler Output Improvements** - Cargo-style colored output with timing information
 ✅ **Register State Tracking Fix** - Fixed binary operation bug that caused incorrect optimization
 ✅ **Break/Continue Statements** - Verified full implementation with loop context tracking (parser, sema, codegen)
-✅ **Warning System** - Non-fatal diagnostics for unused variables, unused parameters, and unreachable code with source context
+✅ **Warning System** - Non-fatal diagnostics for unused variables, unused parameters, unused imports, and unreachable code with source context
 
 ---
 

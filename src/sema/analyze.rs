@@ -28,12 +28,16 @@ pub struct SemanticAnalyzer {
     zp_allocator: ZeroPageAllocator,
     const_env: ConstEnv,
     loop_depth: usize,
-    /// Track variable usage for unused variable warnings
+    /// Track variable usage for unused variable warnings (per-function, cleared after each function)
     used_variables: HashSet<String>,
+    /// Track ALL symbol usage across entire file (never cleared, for import checking)
+    all_used_symbols: HashSet<String>,
     /// Track declared variables in current scope (name -> span) for unused variable detection
     declared_variables: Vec<(String, Span)>,
     /// Track function parameters (name -> span) for unused parameter detection
     declared_parameters: Vec<(String, Span)>,
+    /// Track imported symbols (name -> span) for unused import detection
+    imported_symbols: Vec<(String, Span)>,
 }
 
 /// Zero page memory allocator
@@ -132,8 +136,10 @@ impl SemanticAnalyzer {
             const_env: ConstEnv::new(),
             loop_depth: 0,
             used_variables: HashSet::new(),
+            all_used_symbols: HashSet::new(),
             declared_variables: Vec::new(),
             declared_parameters: Vec::new(),
+            imported_symbols: Vec::new(),
         }
     }
 
@@ -153,8 +159,10 @@ impl SemanticAnalyzer {
             const_env: ConstEnv::new(),
             loop_depth: 0,
             used_variables: HashSet::new(),
+            all_used_symbols: HashSet::new(),
             declared_variables: Vec::new(),
             declared_parameters: Vec::new(),
+            imported_symbols: Vec::new(),
         }
     }
 
@@ -204,6 +212,9 @@ impl SemanticAnalyzer {
         if !self.errors.is_empty() {
             return Err(self.errors[0].clone());
         }
+
+        // Check for unused imports after all analysis is complete
+        self.check_unused_imports();
 
         Ok(ProgramInfo {
             table: self.table.clone(),
@@ -462,6 +473,9 @@ impl SemanticAnalyzer {
             if let Some(symbol) = imported_info.table.lookup(name) {
                 self.table.insert(name.clone(), symbol.clone());
 
+                // Track imported symbol for unused import detection
+                self.imported_symbols.push((name.clone(), symbol_name.span));
+
                 // Also import function metadata if this is a function
                 if let Some(metadata) = imported_info.function_metadata.get(name) {
                     self.function_metadata.insert(name.clone(), metadata.clone());
@@ -717,6 +731,21 @@ impl SemanticAnalyzer {
         self.declared_variables.clear();
         self.declared_parameters.clear();
         self.used_variables.clear();
+    }
+
+    /// Check for unused imports and generate warnings
+    /// This should be called at the end of file analysis, after all symbols have been used
+    fn check_unused_imports(&mut self) {
+        // all_used_symbols tracks usage across entire file
+        // Check which imported symbols were never used
+        for (import_name, import_span) in &self.imported_symbols {
+            if !self.all_used_symbols.contains(import_name) {
+                self.warnings.push(Warning::UnusedImport {
+                    name: import_name.clone(),
+                    span: *import_span,
+                });
+            }
+        }
     }
 
     fn analyze_stmt(&mut self, stmt: &Spanned<Stmt>) -> Result<(), SemaError> {
@@ -1143,8 +1172,10 @@ impl SemanticAnalyzer {
 
                 self.resolved_symbols.insert(expr.span, info.clone());
 
-                // Mark variable as used (for unused variable warnings)
+                // Mark variable as used (for unused variable/parameter warnings)
                 self.used_variables.insert(name.clone());
+                // Also track in all_used_symbols (for unused import warnings)
+                self.all_used_symbols.insert(name.clone());
 
                 Ok(info.ty)
             }
@@ -1198,6 +1229,10 @@ impl SemanticAnalyzer {
                 }
             }
             Expr::Call { function, args } => {
+                // Mark function as used (for unused variable/import warnings)
+                self.used_variables.insert(function.node.clone());
+                self.all_used_symbols.insert(function.node.clone());
+
                 // TODO: Check function signature
                 let (param_types, ret_type) = if let Some(info) = self.table.lookup(&function.node)
                 {
