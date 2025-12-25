@@ -1,0 +1,13 @@
+//! Common test infrastructure for Wraith compiler tests
+//!
+//! This module provides shared utilities, helpers, and fixtures
+//! used across the test suite.
+
+pub mod harness;
+pub mod assertions;
+pub mod fixtures;
+
+// Re-export commonly used items
+pub use harness::*;
+pub use assertions::*;
+pub use fixtures::*;

@@ -240,16 +240,6 @@ impl SemanticAnalyzer {
                     });
                 }
 
-
-                // Check for duplicate function definition
-                if self.table.defined_in_current_scope(&name) {
-                    return Err(SemaError::DuplicateSymbol {
-                        name: name.clone(),
-                        span: func.name.span,
-                        previous_span: None, // Could track this if we store spans
-                    });
-                }
-
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Function,
@@ -259,7 +249,6 @@ impl SemanticAnalyzer {
                 };
                 self.table.insert(name.clone(), info);
 
-                // Extract org and section attributes if present
                 // Extract org and section attributes if present
                 let org_address = func.attributes.iter().find_map(|attr| {
                     if let crate::ast::FnAttribute::Org(addr) = attr {
@@ -499,16 +488,38 @@ impl SemanticAnalyzer {
         use crate::sema::type_defs::{FieldInfo, StructDef};
 
         let name = struct_def.name.node.clone();
+
+        // Check for duplicate struct definition
+        if self.type_registry.get_struct(&name).is_some() {
+            return Err(SemaError::DuplicateSymbol {
+                name: name.clone(),
+                span: struct_def.name.span,
+                previous_span: None,
+            });
+        }
+
         let mut fields = Vec::new();
         let mut offset = 0;
+        let mut seen_fields = HashSet::new();
 
         // Calculate field offsets
         for field in &struct_def.fields {
+            let field_name = field.name.node.clone();
+
+            // Check for duplicate field
+            if !seen_fields.insert(field_name.clone()) {
+                return Err(SemaError::DuplicateSymbol {
+                    name: field_name,
+                    span: field.name.span,
+                    previous_span: None,
+                });
+            }
+
             let field_type = self.resolve_type(&field.ty.node)?;
             let size = self.type_size(&field_type);
 
             fields.push(FieldInfo {
-                name: field.name.node.clone(),
+                name: field_name,
                 ty: field_type,
                 offset,
             });
@@ -550,8 +561,19 @@ impl SemanticAnalyzer {
         use crate::ast::EnumVariant;
 
         let name = enum_def.name.node.clone();
+
+        // Check for duplicate enum definition
+        if self.type_registry.get_enum(&name).is_some() {
+            return Err(SemaError::DuplicateSymbol {
+                name: name.clone(),
+                span: enum_def.name.span,
+                previous_span: None,
+            });
+        }
+
         let mut variants = Vec::new();
         let mut next_tag: u8 = 0;
+        let mut seen_variants = HashSet::new();
 
         // Process each variant
         for variant in &enum_def.variants {
@@ -592,6 +614,21 @@ impl SemanticAnalyzer {
                     (var_name.node.clone(), VariantData::Struct(variant_fields), tag)
                 }
             };
+
+            // Check for duplicate variant
+            if !seen_variants.insert(variant_name.clone()) {
+                // Get the span from the variant
+                let variant_span = match variant {
+                    EnumVariant::Unit { name, .. } => name.span,
+                    EnumVariant::Tuple { name, .. } => name.span,
+                    EnumVariant::Struct { name, .. } => name.span,
+                };
+                return Err(SemaError::DuplicateSymbol {
+                    name: variant_name,
+                    span: variant_span,
+                    previous_span: None,
+                });
+            }
 
             variants.push(VariantInfo {
                 name: variant_name,
@@ -655,16 +692,6 @@ impl SemanticAnalyzer {
             // Allocate parameters in zero page using allocator
             for param in &func.params {
                 let name = param.name.node.clone();
-
-                // Check for duplicate parameter names
-                if self.table.defined_in_current_scope(&name) {
-                    return Err(SemaError::DuplicateSymbol {
-                        name: name.clone(),
-                        span: param.name.span,
-                        previous_span: None,
-                    });
-                }
-
 
                 // Check for duplicate parameter names
                 if self.table.defined_in_current_scope(&name) {

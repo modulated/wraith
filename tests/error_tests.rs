@@ -308,3 +308,81 @@ fn test_regular_variable_can_be_reassigned() {
         "#,
     );
 }
+
+#[test]
+fn test_semantic_error_duplicate_struct() {
+    assert_error_contains(
+        r#"
+        struct Point {
+            u8 x,
+            u8 y,
+        }
+        struct Point {
+            u8 a,
+            u8 b,
+        }
+        fn main() {}
+        "#,
+        "duplicate",
+    );
+}
+
+#[test]
+fn test_semantic_error_duplicate_enum() {
+    assert_error_contains(
+        r#"
+        enum Color {
+            Red,
+            Blue,
+        }
+        enum Color {
+            Green,
+            Yellow,
+        }
+        fn main() {}
+        "#,
+        "duplicate",
+    );
+}
+
+#[test]
+fn test_semantic_error_duplicate_struct_field() {
+    assert_error_contains(
+        r#"
+        struct Point {
+            u8 x,
+            u8 y,
+            u8 x,
+        }
+        fn main() {}
+        "#,
+        "duplicate",
+    );
+}
+
+#[test]
+fn test_semantic_error_duplicate_enum_variant() {
+    assert_error_contains(
+        r#"
+        enum Direction {
+            North,
+            South,
+            North,
+        }
+        fn main() {}
+        "#,
+        "duplicate",
+    );
+}
+
+#[test]
+fn test_semantic_error_duplicate_function_parameter() {
+    assert_error_contains(
+        r#"
+        fn foo(x: u8, y: u8, x: u8) {
+        }
+        fn main() {}
+        "#,
+        "duplicate",
+    );
+}

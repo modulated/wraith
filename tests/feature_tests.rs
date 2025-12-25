@@ -312,9 +312,9 @@ fn test_array_literal() {
         }
         "#,
     );
-    assert_asm_contains(&asm, ".byte $01");
-    assert_asm_contains(&asm, ".byte $02");
-    assert_asm_contains(&asm, ".byte $03");
+    assert_asm_contains(&asm, ".BYTE $01");
+    assert_asm_contains(&asm, ".BYTE $02");
+    assert_asm_contains(&asm, ".BYTE $03");
 }
 
 #[test]
@@ -327,7 +327,7 @@ fn test_array_fill() {
         "#,
     );
     // Should have 5 zero bytes
-    assert_eq!(count_pattern(&asm, ".byte $00"), 5);
+    assert_eq!(count_pattern(&asm, ".BYTE $00"), 5);
 }
 
 // ============================================================================
@@ -439,7 +439,7 @@ fn test_nmi_handler() {
     assert_asm_contains(&asm, "RTI");
     // Should have vector table
     assert_asm_contains(&asm, ".ORG $FFFA");
-    assert_asm_contains(&asm, ".word nmi_handler");
+    assert_asm_contains(&asm, ".WORD nmi_handler");
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn test_irq_handler() {
     // Should use RTI
     assert_asm_contains(&asm, "RTI");
     // Should have IRQ vector
-    assert_asm_contains(&asm, ".word irq_handler");
+    assert_asm_contains(&asm, ".WORD irq_handler");
 }
 
 #[test]
@@ -471,7 +471,7 @@ fn test_reset_handler() {
         "#,
     );
     // Should have RESET vector
-    assert_asm_contains(&asm, ".word start");
+    assert_asm_contains(&asm, ".WORD start");
 }
 
 #[test]
@@ -497,7 +497,7 @@ fn test_all_interrupt_vectors() {
     // Verify vector table exists at correct location
     assert_asm_contains(&asm, ".ORG $FFFA");
     // Verify all three vectors are present
-    assert_asm_contains(&asm, ".word nmi_handler");
-    assert_asm_contains(&asm, ".word reset_handler");
-    assert_asm_contains(&asm, ".word irq_handler");
+    assert_asm_contains(&asm, ".WORD nmi_handler");
+    assert_asm_contains(&asm, ".WORD reset_handler");
+    assert_asm_contains(&asm, ".WORD irq_handler");
 }

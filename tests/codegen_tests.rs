@@ -229,14 +229,14 @@ fn test_codegen_string_literal() {
     // 6. Load address
     assert!(asm.contains("JMP"), "Should jump over string data");
     assert!(asm.contains("str_"), "Should have string label");
-    assert!(asm.contains(".byte $05, $00"), "Should have length prefix (5)");
+    assert!(asm.contains(".BYTE $05, $00"), "Should have length prefix (5)");
     assert!(asm.contains("$48"), "Should contain 'H' (0x48)");
     assert!(asm.contains("LDA #<str_"), "Should load low byte of address");
     assert!(asm.contains("LDX #>str_"), "Should load high byte of address");
 
     // Verify ordering
-    assert!(appears_before(&asm, "JMP", ".byte $05"), "Jump before data");
-    assert!(appears_before(&asm, ".byte $05", "LDA #<str_"), "Data before address load");
+    assert!(appears_before(&asm, "JMP", ".BYTE $05"), "Jump before data");
+    assert!(appears_before(&asm, ".BYTE $05", "LDA #<str_"), "Data before address load");
 }
 
 #[test]
@@ -512,7 +512,7 @@ fn test_codegen_enum_unit_variant() {
     assert!(asm.contains("; Enum variant: Direction::North"), "Should have enum comment");
     assert!(asm.contains("JMP es_"), "Should jump over data");
     assert!(asm.contains("en_"), "Should have enum label");
-    assert!(asm.contains(".byte $00"), "Should emit tag byte 0 for first variant");
+    assert!(asm.contains(".BYTE $00"), "Should emit tag byte 0 for first variant");
 
     // Should load address into A:X
     assert!(asm.contains("LDA #<en_"), "Should load low byte of address");
@@ -539,10 +539,10 @@ fn test_codegen_enum_tuple_variant() {
     // Should generate enum data with tag and fields
     assert!(asm.contains("; Enum variant: Color::RGB"), "Should have enum comment");
     assert!(asm.contains("en_"), "Should have enum label");
-    assert!(asm.contains(".byte $00"), "Should emit tag byte");
-    assert!(asm.contains(".byte $FF"), "Should emit 255 (0xFF) for first field");
-    assert!(asm.contains(".byte $80"), "Should emit 128 (0x80) for second field");
-    assert!(asm.contains(".byte $40"), "Should emit 64 (0x40) for third field");
+    assert!(asm.contains(".BYTE $00"), "Should emit tag byte");
+    assert!(asm.contains(".BYTE $FF"), "Should emit 255 (0xFF) for first field");
+    assert!(asm.contains(".BYTE $80"), "Should emit 128 (0x80) for second field");
+    assert!(asm.contains(".BYTE $40"), "Should emit 64 (0x40) for third field");
 
     // Should load address into A:X
     assert!(asm.contains("LDA #<en_"), "Should load low byte of address");
@@ -569,9 +569,9 @@ fn test_codegen_enum_struct_variant() {
     // Should generate enum data with tag and named fields
     assert!(asm.contains("; Enum variant: Message::Point"), "Should have enum comment");
     assert!(asm.contains("en_"), "Should have enum label");
-    assert!(asm.contains(".byte $00"), "Should emit tag byte");
-    assert!(asm.contains(".byte $0A"), "Should emit 10 (0x0A) for x field");
-    assert!(asm.contains(".byte $14"), "Should emit 20 (0x14) for y field");
+    assert!(asm.contains(".BYTE $00"), "Should emit tag byte");
+    assert!(asm.contains(".BYTE $0A"), "Should emit 10 (0x0A) for x field");
+    assert!(asm.contains(".BYTE $14"), "Should emit 20 (0x14) for y field");
 }
 
 #[test]
@@ -653,8 +653,8 @@ fn test_codegen_enum_multiple_variants() {
     // Should generate enum with tag 1 (second variant)
     assert!(asm.contains("; Enum variant: Option::Some"), "Should have enum comment");
     assert!(asm.contains("en_"), "Should have enum label");
-    assert!(asm.contains(".byte $01"), "Should emit tag byte 1 for second variant");
-    assert!(asm.contains(".byte $2A"), "Should emit 42 (0x2A) for data");
+    assert!(asm.contains(".BYTE $01"), "Should emit tag byte 1 for second variant");
+    assert!(asm.contains(".BYTE $2A"), "Should emit 42 (0x2A) for data");
 }
 
 #[test]
