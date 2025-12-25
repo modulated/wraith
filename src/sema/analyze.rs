@@ -232,7 +232,9 @@ impl SemanticAnalyzer {
                 let name = func.name.node.clone();
 
                 // Check for instruction conflict
-                if crate::sema::is_instruction_conflict(&name) {
+                // Exception: inline functions (intrinsics) are allowed to use instruction names
+                // because they're meant to be direct wrappers for CPU instructions
+                if !func.is_inline && crate::sema::is_instruction_conflict(&name) {
                     return Err(SemaError::InstructionConflict {
                         name: name.clone(),
                         span: func.name.span,

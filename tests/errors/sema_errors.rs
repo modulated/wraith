@@ -339,6 +339,24 @@ fn case_insensitive_instruction_conflict() {
     );
 }
 
+#[test]
+fn inline_function_can_use_instruction_name() {
+    // Inline functions (intrinsics) are allowed to use instruction names
+    // because they're meant to be direct wrappers for CPU instructions
+    let _asm = compile_success(
+        r#"
+        inline fn nop() {
+            asm {
+                "NOP"
+            }
+        }
+        fn main() {
+            nop();
+        }
+        "#,
+    );
+}
+
 // ============================================================================
 // Positive Tests (should compile)
 // ============================================================================
