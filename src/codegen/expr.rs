@@ -414,9 +414,10 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
             // Emit string data with label
             emitter.emit_label(&str_label);
 
-            // Emit length as u16 (little-endian)
+            // Emit length as u16 (little-endian) using two bytes
             let len = s.len() as u16;
-            emitter.emit_word(len);
+            let len_bytes = [(len & 0xFF) as u8, ((len >> 8) & 0xFF) as u8];
+            emitter.emit_bytes(&len_bytes);
 
             // Emit string bytes
             if !s.is_empty() {

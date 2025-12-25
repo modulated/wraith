@@ -7,9 +7,9 @@ use wraith::{Parser, codegen, lex};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ANSI color codes
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
+const GREEN: &str = "\x1b[92m";
+const RED: &str = "\x1b[91m";
+const YELLOW: &str = "\x1b[93m";
 const RESET: &str = "\x1b[0m";
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
     if args.len() == 2 {
         match args[1].as_str() {
             "--version" | "-v" => {
-                println!("Wraith Compiler {} - modulated", VERSION);
+                println!("Wraith Compiler {}", VERSION);
                 return;
             }
             "--help" | "-h" => {

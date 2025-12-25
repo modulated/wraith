@@ -114,7 +114,7 @@ impl Emitter {
             return;
         }
 
-        self.output.push_str("    .byte ");
+        self.output.push_str("    .BYTE ");
         for (i, byte) in values.iter().enumerate() {
             if i > 0 {
                 self.output.push_str(", ");

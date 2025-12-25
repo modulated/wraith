@@ -1,0 +1,152 @@
+// 65C22 VIA for 65C02
+//
+// The 6522 VIA has 16 registers selected by address lines RS0-RS3.
+// Each register has its own memory address (BASE + offset).
+
+// ============================================================================
+// HARDWARE ADDRESSES - Memory-mapped I/O registers
+// ============================================================================
+
+addr VIA_BASE = 0x6500;
+
+// Port registers (read/write)
+addr ORB  = VIA_BASE + 0x0;  // Output Register B / Input Register B
+addr ORA  = VIA_BASE + 0x1;  // Output Register A / Input Register A
+addr DDRB = VIA_BASE + 0x2;  // Data Direction Register B
+addr DDRA = VIA_BASE + 0x3;  // Data Direction Register A
+
+// Timer registers
+addr T1CL = VIA_BASE + 0x4;  // Timer 1 Low-Order Latches/Counter
+addr T1CH = VIA_BASE + 0x5;  // Timer 1 High-Order Counter
+addr T1LL = VIA_BASE + 0x6;  // Timer 1 Low-Order Latches
+addr T1LH = VIA_BASE + 0x7;  // Timer 1 High-Order Latches
+addr T2CL = VIA_BASE + 0x8;  // Timer 2 Low-Order Latches/Counter
+addr T2CH = VIA_BASE + 0x9;  // Timer 2 High-Order Counter
+
+// Control and status registers
+addr SR  = VIA_BASE + 0xA;   // Shift Register
+addr ACR = VIA_BASE + 0xB;   // Auxiliary Control Register
+addr PCR = VIA_BASE + 0xC;   // Peripheral Control Register
+addr IFR = VIA_BASE + 0xD;   // Interrupt Flag Register
+addr IER = VIA_BASE + 0xE;   // Interrupt Enable Register
+addr ORA_NH = VIA_BASE + 0xF; // ORA No Handshake
+
+// ============================================================================
+// BIT MASKS - Common bit patterns for configuration
+// ============================================================================
+
+// Data direction bits (1 = output, 0 = input)
+const DIR_OUTPUT: u8 = 0xFF;
+const DIR_INPUT: u8  = 0x00;
+
+// ACR (Auxiliary Control Register) bits
+const ACR_T1_CONTINUOUS: u8 = 0x40;  // Timer 1 continuous interrupts
+const ACR_T1_PB7_ENABLE: u8 = 0x80;  // Timer 1 output on PB7
+
+// IER (Interrupt Enable Register) bits
+const IER_SET_FLAG: u8   = 0x80;     // Set to enable, clear to disable
+const IER_TIMER1: u8     = 0x40;     // Timer 1 interrupt
+const IER_TIMER2: u8     = 0x20;     // Timer 2 interrupt
+const IER_CB1: u8        = 0x10;     // CB1 interrupt
+const IER_CB2: u8        = 0x08;     // CB2 interrupt
+const IER_SR: u8         = 0x04;     // Shift register interrupt
+const IER_CA1: u8        = 0x02;     // CA1 interrupt
+const IER_CA2: u8        = 0x01;     // CA2 interrupt
+
+// ============================================================================
+// PORT A FUNCTIONS
+// ============================================================================
+
+#[inline]
+fn set_port_a_direction(direction: u8) {
+    DDRA = direction;
+}
+
+#[inline]
+fn write_port_a(data: u8) {
+    ORA = data;
+}
+
+#[inline]
+fn read_port_a() -> u8 {
+    return ORA;
+}
+
+#[inline]
+fn write_port_a_masked(mask: u8, data: u8) {
+    // Read current value, clear masked bits, set new bits
+    ORA = (ORA & ~mask) | (data & mask);
+}
+
+// ============================================================================
+// PORT B FUNCTIONS
+// ============================================================================
+
+#[inline]
+fn set_port_b_direction(direction: u8) {
+    DDRB = direction;
+}
+
+#[inline]
+fn write_port_b(data: u8) {
+    ORB = data;
+}
+
+#[inline]
+fn read_port_b() -> u8 {
+    return ORB;
+}
+
+#[inline]
+fn write_port_b_masked(mask: u8, data: u8) {
+    // Read current value, clear masked bits, set new bits
+    ORB = (ORB & ~mask) | (data & mask);
+}
+
+// ============================================================================
+// TIMER FUNCTIONS
+// ============================================================================
+
+#[inline]
+fn set_timer1_interval_low(low_byte: u8) {
+    T1LL = low_byte;
+}
+
+#[inline]
+fn set_timer1_interval_high(high_byte: u8) {
+    T1LH = high_byte;
+}
+
+#[inline]
+fn enable_timer1_interrupt() {
+    IER = IER_SET_FLAG | IER_TIMER1;
+}
+
+#[inline]
+fn disable_timer1_interrupt() {
+    IER = IER_TIMER1;  // Clear bit 7 to disable
+}
+
+// ============================================================================
+// EXAMPLE USAGE
+// ============================================================================
+
+addr OUT = 0x6000;
+
+#[org(0x8000)]
+fn main() {
+    // Configure Port A as all outputs
+    set_port_a_direction(DIR_OUTPUT);
+
+    // Configure Port B as all inputs
+    set_port_b_direction(DIR_INPUT);
+
+    // Write pattern to Port A
+    write_port_a(0xAA);
+
+    // Read from Port B
+    OUT = read_port_b();
+
+    // Example: Toggle bits 0-3 of Port A, preserve bits 4-7
+    write_port_a_masked(0x0F, 0x05);  // Set bits 0 and 2
+}
