@@ -302,7 +302,7 @@ fn test_mut_variable_can_be_reassigned() {
     let _asm = assert_compiles(
         r#"
         fn main() {
-            counter: u8 = 0;
+            mut counter: u8 = 0;
             counter = counter + 1;  // Works because variable is declared with 'mut'
         }
         "#,

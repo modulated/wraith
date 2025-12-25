@@ -10,8 +10,8 @@
 addr VIA_BASE = 0x6500;
 
 // Port registers (read/write)
-addr ORB  = VIA_BASE + 0x0;  // Output Register B / Input Register B
-addr ORA  = VIA_BASE + 0x1;  // Output Register A / Input Register A
+addr IRB  = VIA_BASE + 0x0;  // Output Register B / Input Register B
+addr IRA  = VIA_BASE + 0x1;  // Output Register A / Input Register A
 addr DDRB = VIA_BASE + 0x2;  // Data Direction Register B
 addr DDRA = VIA_BASE + 0x3;  // Data Direction Register A
 
@@ -64,18 +64,18 @@ fn set_port_a_direction(direction: u8) {
 
 #[inline]
 fn write_port_a(data: u8) {
-    ORA = data;
+    IRA = data;
 }
 
 #[inline]
 fn read_port_a() -> u8 {
-    return ORA;
+    return IRA;
 }
 
 #[inline]
 fn write_port_a_masked(mask: u8, data: u8) {
     // Read current value, clear masked bits, set new bits
-    ORA = (ORA & ~mask) | (data & mask);
+    IRA = (IRA & ~mask) | (data & mask);
 }
 
 // ============================================================================
@@ -89,18 +89,18 @@ fn set_port_b_direction(direction: u8) {
 
 #[inline]
 fn write_port_b(data: u8) {
-    ORB = data;
+    IRB = data;
 }
 
 #[inline]
 fn read_port_b() -> u8 {
-    return ORB;
+    return IRB;
 }
 
 #[inline]
 fn write_port_b_masked(mask: u8, data: u8) {
     // Read current value, clear masked bits, set new bits
-    ORB = (ORB & ~mask) | (data & mask);
+    IRB = (IRB & ~mask) | (data & mask);
 }
 
 // ============================================================================
@@ -132,6 +132,7 @@ fn disable_timer1_interrupt() {
 // ============================================================================
 
 addr OUT = 0x6000;
+addr OUT2 = 0x6001;
 
 #[org(0x8000)]
 fn main() {
@@ -141,6 +142,8 @@ fn main() {
     // Configure Port B as all inputs
     set_port_b_direction(DIR_INPUT);
 
+    IRB = 0xAA;
+
     // Write pattern to Port A
     write_port_a(0xAA);
 
@@ -149,4 +152,6 @@ fn main() {
 
     // Example: Toggle bits 0-3 of Port A, preserve bits 4-7
     write_port_a_masked(0x0F, 0x05);  // Set bits 0 and 2
+
+    OUT2 = read_port_a();
 }

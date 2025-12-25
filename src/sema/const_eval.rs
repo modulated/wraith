@@ -61,10 +61,12 @@ pub fn eval_const_expr_with_env(expr: &Spanned<Expr>, env: &ConstEnv) -> Result<
         Expr::Binary { left, op, right } => eval_binary_with_env(left, *op, right, expr.span, env),
         Expr::Unary { op, operand } => eval_unary_with_env(*op, operand, expr.span, env),
         Expr::Paren(inner) => eval_const_expr_with_env(inner, env),
-        Expr::Cast { expr: inner, .. } => {
-            // For now, just evaluate the inner expression
-            // TODO: Handle actual type conversions
-            eval_const_expr_with_env(inner, env)
+        Expr::Cast { expr: inner, target_type } => {
+            // Evaluate the inner expression
+            let value = eval_const_expr_with_env(inner, env)?;
+
+            // Perform type conversion based on target type
+            apply_type_cast(value, target_type, expr.span)
         }
         _ => Err(SemaError::Custom {
             message: "expression is not constant".to_string(),
@@ -241,6 +243,90 @@ fn eval_unary_with_env(
         }
         _ => Err(SemaError::Custom {
             message: "unsupported unary operation in constant expression".to_string(),
+            span,
+        }),
+    }
+}
+
+/// Apply type cast to a constant value
+fn apply_type_cast(
+    value: ConstValue,
+    target_type: &Spanned<crate::ast::TypeExpr>,
+    span: crate::ast::Span,
+) -> Result<ConstValue, SemaError> {
+    use crate::ast::{PrimitiveType, TypeExpr};
+
+    match &target_type.node {
+        TypeExpr::Primitive(prim) => match prim {
+            PrimitiveType::Bool => {
+                // Convert to boolean: 0 = false, non-zero = true
+                if let Some(b) = value.as_bool() {
+                    Ok(ConstValue::Bool(b))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to bool".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::U8 => {
+                // Truncate to 8-bit unsigned
+                if let Some(n) = value.as_integer() {
+                    Ok(ConstValue::Integer((n as u8) as i64))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to u8".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::I8 => {
+                // Truncate to 8-bit signed
+                if let Some(n) = value.as_integer() {
+                    Ok(ConstValue::Integer((n as i8) as i64))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to i8".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::U16 => {
+                // Truncate/extend to 16-bit unsigned
+                if let Some(n) = value.as_integer() {
+                    Ok(ConstValue::Integer((n as u16) as i64))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to u16".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::I16 => {
+                // Truncate/extend to 16-bit signed
+                if let Some(n) = value.as_integer() {
+                    Ok(ConstValue::Integer((n as i16) as i64))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to i16".to_string(),
+                        span,
+                    })
+                }
+            }
+        },
+        TypeExpr::Pointer { .. } => {
+            // Pointer casts: treat as integer value
+            if let Some(n) = value.as_integer() {
+                Ok(ConstValue::Integer(n))
+            } else {
+                Err(SemaError::Custom {
+                    message: "cannot cast to pointer type".to_string(),
+                    span,
+                })
+            }
+        }
+        _ => Err(SemaError::Custom {
+            message: "unsupported type cast in constant expression".to_string(),
             span,
         }),
     }

@@ -206,9 +206,9 @@ fn generate_function(
         emitter.emit_inst("RTI", "");
     } else {
         // Emit RTS for functions without explicit return (void functions)
-        // Functions with explicit return statements will have already emitted RTS
-        // TODO: Properly track control flow to avoid duplicate RTS in some cases
-        if func.return_type.is_none() {
+        // Only emit if the last instruction wasn't already a terminal instruction (RTS, RTI, or JMP)
+        // This avoids duplicate RTS when the function body ends with a return statement
+        if func.return_type.is_none() && !emitter.last_was_terminal() {
             emitter.emit_inst("RTS", "");
         }
     }
@@ -219,7 +219,7 @@ fn generate_function(
 fn generate_static(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
-    _info: &ProgramInfo,
+    info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // Skip code generation for const (non-mutable statics)
     // They are compile-time constants that get folded into the code
@@ -233,23 +233,59 @@ fn generate_static(
     // Emit label for the static variable
     emitter.emit_label(name);
 
+    // Look up the symbol to get its type and size
+    let sym = info.table.lookup(name)
+        .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
+
+    let type_size = sym.ty.size();
+
     // Emit initial value as data
-    // For now, only support integer literals
     match &stat.init.node {
         crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) => {
-            // TODO: Handle larger values
-            emitter.emit_comment(&format!("static {}: {}", name, val));
-            // In real 6502 assembly, we'd use .byte directive
-            // For now, just emit a placeholder
-            // The actual data emission would look like:
-            // .byte $XX
+            emitter.emit_comment(&format!("static {}: {} (size: {})", name, val, type_size));
+
+            // Emit value as bytes (little-endian for multi-byte values)
+            let value = *val as u64; // Convert to u64 for bit manipulation
+            match type_size {
+                1 => {
+                    // Single byte (u8 or i8)
+                    emitter.emit_byte((value & 0xFF) as u8);
+                }
+                2 => {
+                    // Two bytes (u16 or i16) - little-endian
+                    emitter.emit_byte((value & 0xFF) as u8);        // Low byte
+                    emitter.emit_byte(((value >> 8) & 0xFF) as u8); // High byte
+                }
+                _ => {
+                    // For larger types, emit as many bytes as needed
+                    for i in 0..type_size {
+                        emitter.emit_byte(((value >> (i * 8)) & 0xFF) as u8);
+                    }
+                }
+            }
         }
         crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) => {
             emitter.emit_comment(&format!("static {} (array of {} elements)", name, elements.len()));
-            // Would emit .byte for each element
+
+            // Emit each element as a byte
+            for elem in elements {
+                if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) = &elem.node {
+                    emitter.emit_byte(*val as u8);
+                } else {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "Only integer literals supported in static array initialization".to_string()
+                    ));
+                }
+            }
+        }
+        crate::ast::Expr::Literal(crate::ast::Literal::Bool(b)) => {
+            emitter.emit_comment(&format!("static {} (bool)", name));
+            emitter.emit_byte(if *b { 1 } else { 0 });
         }
         _ => {
-            emitter.emit_comment(&format!("static {} (complex initializer)", name));
+            return Err(CodegenError::UnsupportedOperation(
+                "Only constant literal expressions supported in static initialization".to_string()
+            ));
         }
     }
 

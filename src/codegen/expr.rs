@@ -57,7 +57,16 @@ pub fn generate_expr(
             variant,
             data,
         } => generate_enum_variant(enum_name, variant, data, emitter, info),
-        _ => Ok(()), // TODO: Implement other expressions
+        Expr::SliceLen(slice) => {
+            // Slice length access: slice.len
+            // Slices are represented as a pointer (2 bytes) + length (2 bytes)
+            // The length is stored in the second word after the pointer
+            // For now, we don't fully support slices, so return an error
+            let _ = slice; // Suppress unused variable warning
+            Err(CodegenError::UnsupportedOperation(
+                "Slice length access (.len) not yet fully implemented".to_string()
+            ))
+        }
     }
 }
 
@@ -215,11 +224,22 @@ fn generate_unary(
                         }
                     };
 
-                    // Load the address into A (low byte)
+                    // Load the address into A (low byte) and X (high byte) for 16-bit addresses
+                    // For zero page addresses (< 256), high byte is 0
+                    // For absolute addresses (>= 256), load both bytes
                     emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
 
-                    // For u16 addresses, high byte would go in another register
-                    // TODO: Handle 16-bit address-of properly
+                    if addr > 0xFF {
+                        // 16-bit address: load high byte into X
+                        emitter.emit_inst("LDX", &format!("#${:02X}", (addr >> 8) & 0xFF));
+                        emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(((addr >> 8) & 0xFF) as i64));
+                    } else {
+                        // Zero page address: high byte is 0
+                        emitter.emit_inst("LDX", "#$00");
+                        emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(0));
+                    }
+
+                    emitter.reg_state.set_a(crate::codegen::regstate::RegisterValue::Immediate((addr & 0xFF) as i64));
 
                     return Ok(());
                 } else {
@@ -382,8 +402,10 @@ fn generate_binary(
             // A <= B is same as B >= A
             generate_compare_le(emitter)?;
         }
-        // TODO: Implement other ops (Mul, Div, Shl, Shr, etc.)
-        _ => return Err(CodegenError::UnsupportedOperation(format!("Binary operator: {:?}", op))),
+        // And/Or are handled earlier with short-circuit evaluation
+        crate::ast::BinaryOp::And | crate::ast::BinaryOp::Or => {
+            unreachable!("And/Or should be handled earlier in generate_binary")
+        }
     }
 
     Ok(())
@@ -392,9 +414,26 @@ fn generate_binary(
 fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<(), CodegenError> {
     match lit {
         crate::ast::Literal::Integer(val) => {
-            // TODO: Handle values > 255
-            // Use optimized load that skips if value already in A
-            emitter.emit_lda_immediate(*val);
+            // Handle values based on size
+            // For 8-bit values (0-255 or -128 to 127), load into A only
+            // For 16-bit values, load low byte into A and high byte into X
+            let value = *val as u64; // Convert to unsigned for bit manipulation
+
+            if value <= 0xFF {
+                // 8-bit value: load into A only
+                emitter.emit_lda_immediate(*val);
+            } else if value <= 0xFFFF {
+                // 16-bit value: load low byte into A, high byte into X
+                emitter.emit_inst("LDA", &format!("#${:02X}", value & 0xFF));
+                emitter.emit_inst("LDX", &format!("#${:02X}", (value >> 8) & 0xFF));
+                emitter.reg_state.set_a(crate::codegen::regstate::RegisterValue::Immediate((value & 0xFF) as i64));
+                emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(((value >> 8) & 0xFF) as i64));
+            } else {
+                // Values larger than 16-bit not supported on 6502
+                return Err(CodegenError::UnsupportedOperation(
+                    format!("Integer literal {} too large for 6502 (max 65535)", val)
+                ));
+            }
             Ok(())
         }
         crate::ast::Literal::Bool(val) => {
@@ -447,16 +486,40 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
             // Emit array data with label
             emitter.emit_label(&arr_label);
 
-            // Emit each element (assuming u8 for now)
+            // Emit each element
+            // Try to evaluate each element as a constant expression
             for elem in elements {
-                // For simple integer literals, emit directly
-                if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) = &elem.node {
-                    emitter.emit_byte(*val as u8);
-                } else {
-                    // TODO: Support complex expressions in array literals
-                    return Err(CodegenError::UnsupportedOperation(
-                        "Only integer literals supported in array literals".to_string()
-                    ));
+                match &elem.node {
+                    // Fast path for simple literals
+                    crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) => {
+                        emitter.emit_byte(*val as u8);
+                    }
+                    crate::ast::Expr::Literal(crate::ast::Literal::Bool(b)) => {
+                        emitter.emit_byte(if *b { 1 } else { 0 });
+                    }
+                    // For complex expressions, try to evaluate as constant
+                    _ => {
+                        // Try to evaluate as constant expression
+                        use crate::sema::const_eval::eval_const_expr;
+                        match eval_const_expr(elem) {
+                            Ok(const_val) => {
+                                // Successfully evaluated as constant
+                                if let Some(int_val) = const_val.as_integer() {
+                                    emitter.emit_byte(int_val as u8);
+                                } else {
+                                    return Err(CodegenError::UnsupportedOperation(
+                                        "Array elements must evaluate to integer constants".to_string()
+                                    ));
+                                }
+                            }
+                            Err(_) => {
+                                // Not a constant expression - runtime array construction not supported in literals
+                                return Err(CodegenError::UnsupportedOperation(
+                                    "Array literals must contain constant expressions (literals or compile-time constants)".to_string()
+                                ));
+                            }
+                        }
+                    }
                 }
             }
 
@@ -481,17 +544,35 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
             // Emit array data with label
             emitter.emit_label(&arr_label);
 
-            // Get the fill value (must be a simple literal)
-            if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) = &value.node {
-                let byte_val = *val as u8;
-                // Emit the value 'count' times
-                for _ in 0..*count {
-                    emitter.emit_byte(byte_val);
+            // Get the fill value (must be a constant expression)
+            let byte_val = match &value.node {
+                crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) => *val as u8,
+                crate::ast::Expr::Literal(crate::ast::Literal::Bool(b)) => if *b { 1 } else { 0 },
+                _ => {
+                    // Try to evaluate as constant expression
+                    use crate::sema::const_eval::eval_const_expr;
+                    match eval_const_expr(value) {
+                        Ok(const_val) => {
+                            if let Some(int_val) = const_val.as_integer() {
+                                int_val as u8
+                            } else {
+                                return Err(CodegenError::UnsupportedOperation(
+                                    "Array fill value must evaluate to an integer constant".to_string()
+                                ));
+                            }
+                        }
+                        Err(_) => {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "Array fill value must be a constant expression".to_string()
+                            ));
+                        }
+                    }
                 }
-            } else {
-                return Err(CodegenError::UnsupportedOperation(
-                    "Only integer literals supported in array fill".to_string()
-                ));
+            };
+
+            // Emit the value 'count' times
+            for _ in 0..*count {
+                emitter.emit_byte(byte_val);
             }
 
             // Skip label
@@ -532,16 +613,9 @@ fn generate_variable(
                 emitter.emit_lda_zp(addr);
                 Ok(())
             }
-            SymbolLocation::Stack(offset) => {
-                // Stack relative addressing: LDA $offset, X (assuming X is frame pointer)
-                // For now, we don't have a frame pointer setup, so this is a placeholder
-                // TODO: Implement stack frame access
-                emitter.emit_comment(&format!("Load local {} (offset {})", name, offset));
-                Ok(())
-            }
-            _ => Err(CodegenError::UnsupportedOperation(format!(
-                "Variable '{}' has unsupported location type: {:?}",
-                name, sym.location
+            SymbolLocation::None => Err(CodegenError::UnsupportedOperation(format!(
+                "Variable '{}' has no storage location",
+                name
             ))),
         }
     } else {
@@ -998,12 +1072,6 @@ fn generate_index(
                     emitter.reg_state.modify_a();
                     Ok(())
                 }
-                crate::sema::table::SymbolLocation::Stack(_) => {
-                    // Stack-based arrays not yet supported
-                    Err(CodegenError::UnsupportedOperation(
-                        "stack-based array indexing not yet implemented".to_string()
-                    ))
-                }
                 crate::sema::table::SymbolLocation::None => {
                     // Compile-time constants don't have runtime storage
                     Err(CodegenError::UnsupportedOperation(
@@ -1397,8 +1465,12 @@ fn generate_type_cast(
             emitter.emit_comment("Cast to pointer (no conversion)");
         }
         _ => {
-            // For complex types, we don't know how to cast yet
-            emitter.emit_comment("Cast to complex type (TODO)");
+            // Casting to/from complex types (structs, enums, etc.) is not supported
+            // Only primitive type casts are part of the language
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "cannot cast to complex type: {:?}",
+                target_type.node
+            )));
         }
     }
 

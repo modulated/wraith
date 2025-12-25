@@ -62,7 +62,7 @@ impl SectionAllocator {
 
 impl Default for SectionAllocator {
     fn default() -> Self {
-        Self::new(MemoryConfig::default())
+        Self::new(MemoryConfig::load_or_default())
     }
 }
 
@@ -74,23 +74,23 @@ mod tests {
     fn test_section_allocation() {
         let mut alloc = SectionAllocator::default();
 
-        // Allocate in STDLIB section
+        // Allocate in STDLIB section (0xC000-0xCFFF)
         let addr1 = alloc.allocate("STDLIB", 100).unwrap();
-        assert_eq!(addr1, 0x8000);
+        assert_eq!(addr1, 0xC000);
 
         let addr2 = alloc.allocate("STDLIB", 50).unwrap();
-        assert_eq!(addr2, 0x8064); // 0x8000 + 100
+        assert_eq!(addr2, 0xC064); // 0xC000 + 100
 
-        // Allocate in CODE section
+        // Allocate in CODE section (0x8000-0xBFFF)
         let addr3 = alloc.allocate("CODE", 200).unwrap();
-        assert_eq!(addr3, 0x9000);
+        assert_eq!(addr3, 0x8000);
     }
 
     #[test]
     fn test_section_overflow() {
         let mut alloc = SectionAllocator::default();
 
-        // STDLIB is 0x8000-0x8FFF (4096 bytes)
+        // STDLIB is 0xC000-0xCFFF (4096 bytes)
         let result = alloc.allocate("STDLIB", 5000);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("overflow"));

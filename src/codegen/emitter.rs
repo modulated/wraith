@@ -29,6 +29,8 @@ pub struct Emitter {
     inline_depth: u32,
     /// Current byte count (tracks code size during generation)
     byte_count: u16,
+    /// Track if the last instruction was a terminal instruction (RTS, RTI, or unconditional JMP)
+    last_was_terminal: bool,
 }
 
 impl Default for Emitter {
@@ -49,6 +51,7 @@ impl Emitter {
             loop_stack: Vec::new(),
             inline_depth: 0,
             byte_count: 0,
+            last_was_terminal: false,
         }
     }
 
@@ -66,6 +69,8 @@ impl Emitter {
     pub fn emit_label(&mut self, label: &str) {
         self.output.push_str(label);
         self.output.push_str(":\n");
+        // A label means control flow can continue from elsewhere
+        self.last_was_terminal = false;
     }
 
     pub fn emit_inst(&mut self, mnemonic: &str, operand: &str) {
@@ -79,6 +84,9 @@ impl Emitter {
 
         // Track byte count
         self.byte_count += Self::instruction_size(mnemonic, operand);
+
+        // Track if this is a terminal instruction (RTS, RTI, or unconditional JMP)
+        self.last_was_terminal = matches!(mnemonic, "RTS" | "RTI" | "JMP");
     }
 
     pub fn emit_comment(&mut self, comment: &str) {
@@ -298,6 +306,16 @@ impl Emitter {
     /// Get the current loop context (for break/continue)
     pub fn current_loop(&self) -> Option<&LoopContext> {
         self.loop_stack.last()
+    }
+
+    // ========================================================================
+    // CONTROL FLOW TRACKING
+    // ========================================================================
+
+    /// Check if the last instruction was a terminal instruction (RTS, RTI, or JMP)
+    /// This is useful to avoid emitting duplicate RTS instructions
+    pub fn last_was_terminal(&self) -> bool {
+        self.last_was_terminal
     }
 
     // ========================================================================

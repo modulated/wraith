@@ -13,7 +13,7 @@ fn type_mismatch_assignment() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 10;
+            mut x: u8 = 10;
             x = 300;
         }
         "#,
@@ -26,7 +26,7 @@ fn invalid_operation() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 10;
+            mut x: u8 = 10;
             y: u16 = 20;
             z: u8 = x + y;
         }
@@ -61,6 +61,19 @@ fn return_type_mismatch() {
     );
 }
 
+#[test]
+fn immutable_assignment() {
+    assert_error_contains(
+        r#"
+        fn main() {
+            x: u8 = 10;
+            x = 20;
+        }
+        "#,
+        "immutable",
+    );
+}
+
 // ============================================================================
 // Undefined Symbols
 // ============================================================================
@@ -70,7 +83,7 @@ fn undefined_variable() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = y;
+            mut x: u8 = y;
         }
         "#,
         "undefined",
@@ -349,7 +362,7 @@ fn regular_variable_can_be_reassigned() {
     let _asm = compile_success(
         r#"
         fn main() {
-            counter: u8 = 0;
+            mut counter: u8 = 0;
             counter = counter + 1;
         }
         "#,
@@ -362,7 +375,7 @@ fn error_has_source_context() {
     let result = compile(
         r#"
         fn main() {
-            x: u8 = y;
+            mut x: u8 = y;
         }
         "#,
     );

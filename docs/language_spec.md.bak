@@ -39,12 +39,17 @@ flag: bool = true;
 
 ### Mutability
 
-**All variables are mutable by default**. This is a low-level systems language that trusts the programmer.
+**Variables are immutable by default** (like Rust). Use the `mut` keyword to make a variable mutable.
 
 ```
 x: u8 = 10;
-x = 20;                      // OK - all variables are mutable
+x = 20;                      // ERROR: cannot assign to immutable variable
+
+mut y: u8 = 10;
+y = 20;                      // OK - y is mutable
 ```
+
+This encourages safer code by making mutation explicit, while still allowing full control when needed.
 
 ### Zero Page Hint
 
@@ -56,44 +61,6 @@ zp counter: u16 = 0;         // Zero page hint
 ```
 
 Zero page ($00-$FF) provides faster access (3 cycles vs 4 cycles) and enables special addressing modes. When register allocation optimization is enabled, the compiler may also promote frequently-used variables to zero page automatically, even without the `zp` hint.
-
-### Constants
-
-Use the `const` keyword to declare compile-time constants. Constants are evaluated at compile time and cannot be reassigned.
-
-```
-const MAX_SPRITES: u8 = 8;
-const SCREEN_WIDTH: u16 = 320;
-const PI_TIMES_100: u8 = 314;
-
-fn init() {
-    for i in 0..MAX_SPRITES {
-        // use constant
-    }
-}
-```
-
-Constants are checked for overflow at compile time:
-
-```
-const INVALID: u8 = 256;     // ERROR: constant overflow (256 doesn't fit in u8)
-```
-
-### Memory-Mapped Addresses
-
-Use the `addr` keyword to declare memory-mapped I/O addresses:
-
-```
-addr LED: u16 = 0x6000;      // Memory-mapped LED
-addr BUTTON: u16 = 0x6001;   // Memory-mapped button
-
-fn main() {
-    LED = 1;                 // Write to address
-    state: u8 = BUTTON;      // Read from address
-}
-```
-
-Addresses can be read from or written to like variables, but they represent fixed memory locations.
 
 ## Functions
 
@@ -555,75 +522,6 @@ struct TightLayout {
 }
 ```
 
-## Modules and Imports
-
-Wraith supports a simple file-based import system for code organization and reuse.
-
-### Import Syntax
-
-```
-import {symbol1, symbol2, symbol3} from "module.wr";
-```
-
-### Example
-
-**math.wr:**
-```
-const PI: u8 = 3;
-
-fn add(a: u8, b: u8) -> u8 {
-    return a + b;
-}
-
-fn mul(a: u8, b: u8) -> u8 {
-    return a * b;
-}
-```
-
-**main.wr:**
-```
-import {add, mul, PI} from "math.wr";
-
-fn main() {
-    result: u8 = add(10, 20);
-    area: u8 = mul(PI, 4);
-}
-```
-
-### Import Resolution
-
-- **Relative imports**: Start with `./` or `../`
-  ```
-  import {foo} from "./utils.wr";
-  import {bar} from "../lib/helper.wr";
-  ```
-
-- **Non-relative imports**: Searched in standard library directory first, then current directory
-  ```
-  import {memcpy} from "std.wr";  // Searches stdlib first
-  ```
-
-### Unused Import Warnings
-
-The compiler warns about imported symbols that are never used:
-
-```
-import {foo, bar, baz} from "module.wr";
-
-fn main() {
-    x: u8 = foo();    // Only foo is used
-}
-// Warning: unused import 'bar'
-// Warning: unused import 'baz'
-```
-
-### Limitations
-
-- No module hierarchy or namespaces (flat file imports only)
-- No pub/private visibility (all symbols in a file are importable)
-- No re-exports
-- No wildcard imports (`import *`)
-
 ## Memory Layout
 
 ### Zero Page ($00-$FF)
@@ -632,24 +530,17 @@ fn main() {
 -   Required for some addressing modes
 -   Limited to 256 bytes
 -   Requested with `zp` keyword hint (compiler will try to honor)
--   **When zero page is exhausted**: Compilation fails with `OutOfZeroPage` error
 
 ### Stack ($0100-$01FF)
 
 -   Hardware stack, 256 bytes
--   Used only for:
-  - JSR/RTS (function return addresses)
-  - Preserving registers (PHA/PLA) in interrupt handlers
-  - Temporary storage during complex expressions
--   **Not used for**:
-  - Function arguments (passed via zero page)
-  - Local variables (allocated in zero page or absolute memory)
+-   Used only for JSR/RTS (function return addresses)
+-   Not used for argument passing or locals
 
 ### General Memory ($0200+)
 
 -   Regular variables and data
 -   Slower access than zero page
--   Used when variables don't fit in zero page
 -   Unlimited (up to 64KB total address space)
 
 ## Complete Example
@@ -845,11 +736,13 @@ jump_table:
 ## Reserved Keywords
 
 ```
-addr      asm       bool      break     const     else      enum
-fn        for       from      i8        i16       if        import
-in        inline    loop      match     return    struct    u8
-u16       while     zp        as        true      false
+asm       bool      break     else      enum      fn        for
+i8        i16       if        in        inline    loop      match
+return    struct    u8        u16       while     zp        as
+true      false
 ```
+
+Note: `mut` is reserved for future use but not currently active in the language.
 
 ## Operators
 

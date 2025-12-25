@@ -18,7 +18,6 @@ pub enum SymbolKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolLocation {
     ZeroPage(u8),
-    Stack(i8),
     Absolute(u16),
     None, // For types or compile-time constants
 }

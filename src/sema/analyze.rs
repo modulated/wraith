@@ -231,6 +231,14 @@ impl SemanticAnalyzer {
             Item::Function(func) => {
                 let name = func.name.node.clone();
 
+                // Check for instruction conflict
+                if crate::sema::is_instruction_conflict(&name) {
+                    return Err(SemaError::InstructionConflict {
+                        name: name.clone(),
+                        span: func.name.span,
+                    });
+                }
+
                 // Check for duplicate function definition
                 if self.table.defined_in_current_scope(&name) {
                     return Err(SemaError::DuplicateSymbol {
@@ -292,6 +300,14 @@ impl SemanticAnalyzer {
             Item::Static(stat) => {
                 let name = stat.name.node.clone();
 
+                // Check for instruction conflict
+                if crate::sema::is_instruction_conflict(&name) {
+                    return Err(SemaError::InstructionConflict {
+                        name: name.clone(),
+                        span: stat.name.span,
+                    });
+                }
+
                 // Check for duplicate static definition
                 if self.table.defined_in_current_scope(&name) {
                     return Err(SemaError::DuplicateSymbol {
@@ -309,11 +325,41 @@ impl SemanticAnalyzer {
                         previous_span: None,
                     });
                 }
+
+                // Resolve the type first so we can check bounds
+                let declared_ty = self.resolve_type(&stat.ty.node)?;
 
                 // If it's a non-mutable static (const), evaluate it and add to const_env
                 if !stat.mutable {
                     match eval_const_expr_with_env(&stat.init, &self.const_env) {
                         Ok(val) => {
+                            // Check that the constant value fits within the declared type
+                            if let Some(int_val) = val.as_integer() {
+                                // Check overflow based on type
+                                let fits = match &declared_ty {
+                                    Type::Primitive(crate::ast::PrimitiveType::U8) => {
+                                        int_val >= 0 && int_val <= 255
+                                    }
+                                    Type::Primitive(crate::ast::PrimitiveType::I8) => {
+                                        int_val >= -128 && int_val <= 127
+                                    }
+                                    Type::Primitive(crate::ast::PrimitiveType::U16) => {
+                                        int_val >= 0 && int_val <= 65535
+                                    }
+                                    Type::Primitive(crate::ast::PrimitiveType::I16) => {
+                                        int_val >= -32768 && int_val <= 32767
+                                    }
+                                    _ => true, // For non-primitive types, don't check
+                                };
+
+                                if !fits {
+                                    return Err(SemaError::ConstantOverflow {
+                                        value: int_val,
+                                        ty: declared_ty.display_name(),
+                                        span: stat.init.span,
+                                    });
+                                }
+                            }
                             self.const_env.insert(name.clone(), val);
                         }
                         Err(_) => {
@@ -325,7 +371,7 @@ impl SemanticAnalyzer {
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Constant,
-                    ty: self.resolve_type(&stat.ty.node)?,
+                    ty: declared_ty,
                     location: SymbolLocation::Absolute(0),
                     mutable: stat.mutable,
                 };
@@ -333,6 +379,14 @@ impl SemanticAnalyzer {
             }
             Item::Address(addr) => {
                 let name = addr.name.node.clone();
+
+                // Check for instruction conflict
+                if crate::sema::is_instruction_conflict(&name) {
+                    return Err(SemaError::InstructionConflict {
+                        name: name.clone(),
+                        span: addr.name.span,
+                    });
+                }
 
                 // Check for duplicate address definition
                 if self.table.defined_in_current_scope(&name) {
@@ -489,6 +543,14 @@ impl SemanticAnalyzer {
 
         let name = struct_def.name.node.clone();
 
+        // Check for instruction conflict
+        if crate::sema::is_instruction_conflict(&name) {
+            return Err(SemaError::InstructionConflict {
+                name: name.clone(),
+                span: struct_def.name.span,
+            });
+        }
+
         // Check for duplicate struct definition
         if self.type_registry.get_struct(&name).is_some() {
             return Err(SemaError::DuplicateSymbol {
@@ -561,6 +623,14 @@ impl SemanticAnalyzer {
         use crate::ast::EnumVariant;
 
         let name = enum_def.name.node.clone();
+
+        // Check for instruction conflict
+        if crate::sema::is_instruction_conflict(&name) {
+            return Err(SemaError::InstructionConflict {
+                name: name.clone(),
+                span: enum_def.name.span,
+            });
+        }
 
         // Check for duplicate enum definition
         if self.type_registry.get_enum(&name).is_some() {
@@ -1399,7 +1469,7 @@ impl SemanticAnalyzer {
                 self.used_variables.insert(function.node.clone());
                 self.all_used_symbols.insert(function.node.clone());
 
-                // TODO: Check function signature
+                // Verify function signature: check that it's a function and get param/return types
                 let (param_types, ret_type) = if let Some(info) = self.table.lookup(&function.node)
                 {
                     if let Type::Function(param_types, ret_type) = &info.ty {
@@ -1646,7 +1716,24 @@ impl SemanticAnalyzer {
                     }
                 }
             }
-            _ => Ok(Type::Void), // TODO: Handle other expressions
+            Expr::SliceLen(slice_expr) => {
+                // Verify the expression is actually a slice
+                let slice_ty = self.check_expr(slice_expr)?;
+
+                // For now, we don't have a dedicated Slice type in the type system
+                // But we can check if it's a pointer or array and return u16 (size type)
+                match &slice_ty {
+                    Type::Pointer(..) | Type::Array(_, _) => {
+                        // Slice length is always u16 on 6502 (our usize equivalent)
+                        Ok(Type::Primitive(crate::ast::PrimitiveType::U16))
+                    }
+                    _ => Err(SemaError::TypeMismatch {
+                        expected: "slice or array".to_string(),
+                        found: slice_ty.display_name(),
+                        span: slice_expr.span,
+                    }),
+                }
+            }
         }
     }
 

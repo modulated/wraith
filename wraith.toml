@@ -1,0 +1,26 @@
+# Wraith Compiler Configuration
+# Memory layout for 6502 target
+
+# Memory sections define where code and data can be placed
+# Each section has a name, start address, and end address
+
+[[sections]]
+name = "STDLIB"
+start = 0xC000
+end = 0xCFFF
+description = "Standard library functions (4KB)"
+
+[[sections]]
+name = "CODE"
+start = 0x8000
+end = 0xBFFF
+description = "User code (16KB)"
+
+[[sections]]
+name = "DATA"
+start = 0xD000
+end = 0xEFFF
+description = "Constants and data (8KB)"
+
+# Default section for functions without explicit #[org] or #[section]
+default_section = "CODE"

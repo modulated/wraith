@@ -58,16 +58,9 @@ pub fn generate_stmt(
                             emitter.emit_inst("STX", &format!("${:02X}", addr + 1));
                         }
                     }
-                    crate::sema::table::SymbolLocation::Stack(offset) => {
-                        // TODO: Implement stack frame management
-                        emitter.emit_comment(&format!(
-                            "VarDecl {} (stack offset {})",
-                            name.node, offset
-                        ));
-                    }
-                    _ => {
+                    crate::sema::table::SymbolLocation::None => {
                         return Err(CodegenError::UnsupportedOperation(format!(
-                            "VarDecl '{}' has unsupported location type",
+                            "VarDecl '{}' has no storage location",
                             name.node
                         )))
                     }
@@ -167,16 +160,9 @@ pub fn generate_stmt(
                             crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                                 emitter.emit_sta_zp(addr);
                             }
-                            crate::sema::table::SymbolLocation::Stack(offset) => {
-                                // Placeholder for stack store
-                                emitter.emit_comment(&format!(
-                                    "Store local {} (offset {})",
-                                    name, offset
-                                ));
-                            }
-                            _ => {
+                            crate::sema::table::SymbolLocation::None => {
                                 return Err(CodegenError::UnsupportedOperation(format!(
-                                    "Variable '{}' has unsupported location type",
+                                    "Variable '{}' has no storage location",
                                     name
                                 )))
                             }
@@ -611,9 +597,83 @@ fn generate_match(
     for (i, arm) in arms.iter().enumerate() {
         emitter.emit_label(&format!("match_{}_arm_{}", match_id, i));
 
-        // TODO: Extract bindings for enum variant patterns
-        // For now, enum pattern matching works but doesn't extract bound variables
-        // To implement: load variant data from offset ($20)+1 onwards based on variant type
+        // Extract bindings for enum variant patterns
+        if let Pattern::EnumVariant { enum_name, variant, bindings } = &arm.pattern.node {
+            if !bindings.is_empty() {
+                // Look up the enum definition to get field information
+                let enum_def = info.type_registry.get_enum(&enum_name.node)
+                    .ok_or_else(|| CodegenError::UnsupportedOperation(
+                        format!("enum '{}' not found in type registry", enum_name.node)
+                    ))?;
+
+                let variant_info = enum_def.get_variant(&variant.node)
+                    .ok_or_else(|| CodegenError::UnsupportedOperation(
+                        format!("variant '{}' not found in enum '{}'", variant.node, enum_name.node)
+                    ))?;
+
+                // Extract field values from enum data
+                // Enum layout in memory: [tag: u8][field0][field1]...
+                // The pointer at ($20) points to the tag byte
+                // Field data starts at offset 1
+
+                match &variant_info.data {
+                    crate::sema::type_defs::VariantData::Tuple(field_types) => {
+                        // Tuple variant: extract each field by position
+                        if bindings.len() != field_types.len() {
+                            return Err(CodegenError::UnsupportedOperation(
+                                format!("Pattern binding count mismatch: expected {}, got {}",
+                                    field_types.len(), bindings.len())
+                            ));
+                        }
+
+                        let mut offset = 1; // Start after the tag byte
+                        for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
+                            // Load field value using indirect indexed addressing
+                            emitter.emit_inst("LDY", &format!("#${:02X}", offset));
+                            emitter.emit_inst("LDA", "($20),Y");
+
+                            // Store in the binding variable
+                            // Look up the binding variable in resolved_symbols
+                            if let Some(var_sym) = info.resolved_symbols.get(&binding.name.span) {
+                                match var_sym.location {
+                                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                                        emitter.emit_sta_zp(addr);
+                                    }
+                                    crate::sema::table::SymbolLocation::Absolute(addr) => {
+                                        emitter.emit_sta_abs(addr);
+                                    }
+                                    _ => {
+                                        return Err(CodegenError::UnsupportedOperation(
+                                            format!("Binding '{}' has unsupported location", binding.name.node)
+                                        ));
+                                    }
+                                }
+                            } else {
+                                return Err(CodegenError::SymbolNotFound(binding.name.node.clone()));
+                            }
+
+                            // Move to next field (assuming u8 fields for now)
+                            offset += field_type.size() as u8;
+                        }
+                    }
+                    crate::sema::type_defs::VariantData::Struct(_) => {
+                        // Struct variant: bindings should match field names
+                        // For now, not implemented
+                        return Err(CodegenError::UnsupportedOperation(
+                            "Pattern bindings for struct variants not yet implemented".to_string()
+                        ));
+                    }
+                    crate::sema::type_defs::VariantData::Unit => {
+                        // Unit variant shouldn't have bindings
+                        if !bindings.is_empty() {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "Unit variant should not have bindings".to_string()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         generate_stmt(&arm.body, emitter, info)?;
         emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
@@ -648,14 +708,6 @@ fn substitute_asm_vars(instruction: &str, info: &ProgramInfo) -> Result<String, 
             let address = match symbol.location {
                 crate::sema::table::SymbolLocation::ZeroPage(addr) => format!("${:02X}", addr),
                 crate::sema::table::SymbolLocation::Absolute(addr) => format!("${:04X}", addr),
-                crate::sema::table::SymbolLocation::Stack(offset) => {
-                    // Stack variables are relative to a base address
-                    // For 6502, we typically use zero page for stack frame pointer
-                    // For now, use absolute addressing
-                    let layout = crate::codegen::memory_layout::MemoryLayout::new();
-                    let param_base = layout.param_base;
-                    format!("${:02X}", (param_base as i16 + offset as i16) as u8)
-                }
                 crate::sema::table::SymbolLocation::None => {
                     return Err(CodegenError::SymbolNotFound(format!(
                         "{} has no memory location",

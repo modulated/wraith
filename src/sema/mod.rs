@@ -108,9 +108,22 @@ pub enum SemaError {
         span: Span,
     },
 
+    /// Identifier conflicts with 6502 instruction mnemonic
+    InstructionConflict {
+        name: String,
+        span: Span,
+    },
+
     /// Generic error with custom message
     Custom {
         message: String,
+        span: Span,
+    },
+
+    /// Constant value overflow for declared type
+    ConstantOverflow {
+        value: i64,
+        ty: String,
         span: Span,
     },
 }
@@ -191,8 +204,16 @@ impl SemaError {
                 let msg = "no more zero page addresses available".to_string();
                 format!("error: out of zero page memory\n{}", span.format_error_context(source, filename, &msg))
             }
+            SemaError::InstructionConflict { name, span } => {
+                let msg = format!("identifier '{}' conflicts with instruction mnemonic", name);
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+            }
             SemaError::Custom { message, span } => {
                 format!("error: {}\n{}", message, span.format_error_context(source, filename, message))
+            }
+            SemaError::ConstantOverflow { value, ty, span } => {
+                let msg = format!("constant value {} does not fit in type {}", value, ty);
+                format!("error: constant overflow\n{}", span.format_error_context(source, filename, &msg))
             }
         }
     }
@@ -296,8 +317,22 @@ impl std::fmt::Display for SemaError {
                     span.start, span.end
                 )
             }
+            SemaError::InstructionConflict { name, span } => {
+                write!(
+                    f,
+                    "identifier '{}' at {}..{} conflicts with instruction mnemonic",
+                    name, span.start, span.end
+                )
+            }
             SemaError::Custom { message, span } => {
                 write!(f, "{} at {}..{}", message, span.start, span.end)
+            }
+            SemaError::ConstantOverflow { value, ty, span } => {
+                write!(
+                    f,
+                    "constant overflow at {}..{}: value {} does not fit in type {}",
+                    span.start, span.end, value, ty
+                )
             }
         }
     }
@@ -393,6 +428,31 @@ pub struct ProgramInfo {
     pub type_registry: type_defs::TypeRegistry,
     /// Compiler warnings collected during analysis
     pub warnings: Vec<Warning>,
+}
+
+/// 6502 and 65C02 instruction mnemonics
+/// Using these as identifiers will cause assembly conflicts
+const INSTRUCTION_MNEMONICS: &[&str] = &[
+    // Standard 6502 instructions
+    "ADC", "AND", "ASL", "BCC", "BCS", "BEQ", "BIT", "BMI", "BNE", "BPL",
+    "BRK", "BVC", "BVS", "CLC", "CLD", "CLI", "CLV", "CMP", "CPX", "CPY",
+    "DEC", "DEX", "DEY", "EOR", "INC", "INX", "INY", "JMP", "JSR", "LDA",
+    "LDX", "LDY", "LSR", "NOP", "ORA", "PHA", "PHP", "PLA", "PLP", "ROL",
+    "ROR", "RTI", "RTS", "SBC", "SEC", "SED", "SEI", "STA", "STX", "STY",
+    "TAX", "TAY", "TSX", "TXA", "TXS", "TYA",
+    // 65C02 extensions
+    "BRA", "PHX", "PHY", "PLX", "PLY", "STZ", "TRB", "TSB", "WAI", "STP",
+    // 65C02 bit manipulation (BBR0-7, BBS0-7, RMB0-7, SMB0-7)
+    "BBR0", "BBR1", "BBR2", "BBR3", "BBR4", "BBR5", "BBR6", "BBR7",
+    "BBS0", "BBS1", "BBS2", "BBS3", "BBS4", "BBS5", "BBS6", "BBS7",
+    "RMB0", "RMB1", "RMB2", "RMB3", "RMB4", "RMB5", "RMB6", "RMB7",
+    "SMB0", "SMB1", "SMB2", "SMB3", "SMB4", "SMB5", "SMB6", "SMB7",
+];
+
+/// Check if an identifier conflicts with a instruction mnemonic
+pub fn is_instruction_conflict(name: &str) -> bool {
+    let uppercase = name.to_uppercase();
+    INSTRUCTION_MNEMONICS.contains(&uppercase.as_str())
 }
 
 pub fn analyze(ast: &SourceFile) -> Result<ProgramInfo, SemaError> {

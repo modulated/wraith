@@ -12,7 +12,7 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Variable declaration with zp modifier: zp name: type = expr;
+            // Variable declaration with modifiers: zp name: type = expr;
             Some(Token::Zp) => self.parse_var_decl(),
 
             // Control flow
@@ -69,7 +69,7 @@ impl Parser<'_> {
             self.advance();
         }
 
-        // All variables are mutable by default
+        // Variables are mutable by default
         let mutable = true;
 
         // Parse name
