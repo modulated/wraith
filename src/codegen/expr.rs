@@ -77,12 +77,11 @@ fn generate_call(
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     // Check if function should be inlined
-    if let Some(metadata) = info.function_metadata.get(&function.node) {
-        if metadata.is_inline {
+    if let Some(metadata) = info.function_metadata.get(&function.node)
+        && metadata.is_inline {
             // Inline the function call
             return generate_inline_call(function, args, emitter, info, metadata);
         }
-    }
 
     // 6502 calling convention: Arguments are passed in zero page locations
     // Parameters are allocated starting at param_base (from memory layout)
@@ -151,26 +150,72 @@ fn generate_inline_call(
         ));
     }
 
-    // Simple inline strategy for V1:
-    // Store arguments in the same parameter locations we would use for a normal call
-    // Then generate the function body inline (without JSR/RTS)
-    // This works because the body will reference the parameter locations
-
-    let param_base = emitter.memory_layout.param_base;
-
-    // Store arguments to parameter locations (same as normal call)
+    // Store arguments to the parameter locations that were allocated during semantic analysis
+    // Each parameter has a specific zero-page address that was assigned when the function was defined
+    // We need to store the argument values at those exact addresses
     for (i, arg) in args.iter().enumerate() {
         generate_expr(arg, emitter, info)?;
-        let param_addr = param_base + i as u8;
-        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
+
+        // Get the parameter info for this position
+        let param = &params[i];
+
+        // Look up the parameter's allocated location from inline_param_symbols
+        if let Some(ref param_symbols) = metadata.inline_param_symbols {
+            if let Some(param_info) = param_symbols.get(&param.name.span) {
+                match param_info.location {
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                        emitter.emit_inst("STA", &format!("${:02X}", addr));
+                    }
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            format!("Inline function parameter '{}' must be in zero page", param.name.node)
+                        ));
+                    }
+                }
+            } else {
+                return Err(CodegenError::UnsupportedOperation(
+                    format!("Parameter symbol '{}' not found for inline function", param.name.node)
+                ));
+            }
+        } else {
+            return Err(CodegenError::UnsupportedOperation(
+                format!("No parameter symbols for inline function {}", function.node)
+            ));
+        }
     }
 
     // Generate the function body inline
     // Push inline context so return statements won't emit RTS
     emitter.push_inline();
 
-    use crate::codegen::stmt::generate_stmt;
-    let result = generate_stmt(body, emitter, info);
+    // For inline functions from imported modules, we need to merge the parameter symbols
+    // from the original module into the current ProgramInfo so the function body can
+    // reference its parameters correctly
+    let result = if let Some(ref param_symbols) = metadata.inline_param_symbols {
+        // Create a modified ProgramInfo with merged resolved_symbols
+        let mut merged_resolved = info.resolved_symbols.clone();
+        for (span, symbol) in param_symbols {
+            merged_resolved.insert(*span, symbol.clone());
+        }
+
+        let modified_info = crate::sema::ProgramInfo {
+            table: info.table.clone(),
+            resolved_symbols: merged_resolved,
+            function_metadata: info.function_metadata.clone(),
+            folded_constants: info.folded_constants.clone(),
+            type_registry: info.type_registry.clone(),
+            warnings: info.warnings.clone(),
+        };
+
+        use crate::codegen::stmt::generate_stmt;
+        generate_stmt(body, emitter, &modified_info)
+    } else {
+        // No parameter symbols stored - this indicates a bug in semantic analysis
+        // Inline functions should always have parameter symbols populated
+        return Err(CodegenError::UnsupportedOperation(
+            format!("Inline function {} has no parameter symbols (compiler bug)", function.node)
+        ));
+    };
 
     // Pop inline context
     emitter.pop_inline();

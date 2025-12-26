@@ -1,0 +1,12 @@
+[package]
+name = "wraith-fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+afl = "0.17"
+wraith = { path = ".." }
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"

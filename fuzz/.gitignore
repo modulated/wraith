@@ -1,0 +1,10 @@
+# AFL++ output directory
+out/
+
+# Cargo build artifacts
+target/
+Cargo.lock
+
+# Minimized crash inputs
+*.min
+minimized*.wr

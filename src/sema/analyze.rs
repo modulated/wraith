@@ -232,9 +232,14 @@ impl SemanticAnalyzer {
                 let name = func.name.node.clone();
 
                 // Check for instruction conflict
+                // Check if function has inline attribute
+                let is_inline = func.attributes.iter().any(|attr| {
+                    matches!(attr, crate::ast::FnAttribute::Inline)
+                });
+
                 // Exception: inline functions (intrinsics) are allowed to use instruction names
                 // because they're meant to be direct wrappers for CPU instructions
-                if !func.is_inline && crate::sema::is_instruction_conflict(&name) {
+                if !is_inline && crate::sema::is_instruction_conflict(&name) {
                     return Err(SemaError::InstructionConflict {
                         name: name.clone(),
                         span: func.name.span,
@@ -276,11 +281,6 @@ impl SemanticAnalyzer {
                     }
                 });
 
-                // Check if function is inline
-                let is_inline = func.is_inline || func.attributes.iter().any(|attr| {
-                    matches!(attr, crate::ast::FnAttribute::Inline)
-                });
-
                 // For inline functions, store body and parameters for later expansion
                 let (inline_body, inline_params) = if is_inline {
                     (Some(func.body.clone()), Some(func.params.clone()))
@@ -296,6 +296,7 @@ impl SemanticAnalyzer {
                         is_inline,
                         inline_body,
                         inline_params,
+                        inline_param_symbols: None, // Will be populated in second pass
                     },
                 );
             }
@@ -340,16 +341,16 @@ impl SemanticAnalyzer {
                                 // Check overflow based on type
                                 let fits = match &declared_ty {
                                     Type::Primitive(crate::ast::PrimitiveType::U8) => {
-                                        int_val >= 0 && int_val <= 255
+                                        (0..=255).contains(&int_val)
                                     }
                                     Type::Primitive(crate::ast::PrimitiveType::I8) => {
-                                        int_val >= -128 && int_val <= 127
+                                        (-128..=127).contains(&int_val)
                                     }
                                     Type::Primitive(crate::ast::PrimitiveType::U16) => {
-                                        int_val >= 0 && int_val <= 65535
+                                        (0..=65535).contains(&int_val)
                                     }
                                     Type::Primitive(crate::ast::PrimitiveType::I16) => {
-                                        int_val >= -32768 && int_val <= 32767
+                                        (-32768..=32767).contains(&int_val)
                                     }
                                     _ => true, // For non-primitive types, don't check
                                 };
@@ -750,6 +751,13 @@ impl SemanticAnalyzer {
 
     fn analyze_item(&mut self, item: &Spanned<Item>) -> Result<(), SemaError> {
         if let Item::Function(func) = &item.node {
+            let func_name = func.name.node.clone();
+
+            // Check if this is an inline function
+            let is_inline = func.attributes.iter().any(|attr| {
+                matches!(attr, crate::ast::FnAttribute::Inline)
+            });
+
             self.table.enter_scope();
 
             // Set current return type for checking return statements
@@ -759,6 +767,13 @@ impl SemanticAnalyzer {
                 Type::Void
             };
             self.current_return_type = Some(return_type);
+
+            // For inline functions, track symbols before body analysis
+            let resolved_before = if is_inline {
+                Some(self.resolved_symbols.clone())
+            } else {
+                None
+            };
 
             // Register parameters
             // Allocate parameters in zero page using allocator
@@ -785,7 +800,7 @@ impl SemanticAnalyzer {
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Add to resolved_symbols so codegen (especially inline asm) can find it
-                self.resolved_symbols.insert(param.name.span, info);
+                self.resolved_symbols.insert(param.name.span, info.clone());
 
                 // Track parameter for unused parameter detection
                 self.declared_parameters.push((name, param.name.span));
@@ -793,6 +808,23 @@ impl SemanticAnalyzer {
 
             // Analyze body
             self.analyze_stmt(&func.body)?;
+
+            // For inline functions, capture all symbols that were added during body analysis
+            // This includes both parameter definitions and all references to them
+            if is_inline
+                && let Some(before) = resolved_before {
+                    // Collect all NEW symbols that were added during parameter registration and body analysis
+                    let mut inline_symbols = std::collections::HashMap::new();
+                    for (span, info) in &self.resolved_symbols {
+                        if !before.contains_key(span) {
+                            inline_symbols.insert(*span, info.clone());
+                        }
+                    }
+
+                    if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+                        metadata.inline_param_symbols = Some(inline_symbols);
+                    }
+                }
 
             // Check for unused variables and parameters
             self.check_unused_variables();
@@ -830,6 +862,42 @@ impl SemanticAnalyzer {
         self.declared_variables.clear();
         self.declared_parameters.clear();
         self.used_variables.clear();
+    }
+
+    /// Extract variable references from inline assembly template strings
+    /// Variables are referenced as {var_name} or {struct.field}
+    fn extract_asm_variables(&mut self, instruction: &str) {
+        let mut chars = instruction.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '{' {
+                // Extract variable name between { and }
+                let mut var_name = String::new();
+
+                while let Some(&next_ch) = chars.peek() {
+                    if next_ch == '}' {
+                        chars.next(); // Consume the '}'
+                        break;
+                    }
+                    var_name.push(next_ch);
+                    chars.next();
+                }
+
+                // Handle struct field access: {struct.field}
+                // Mark the base variable (before the dot) as used
+                let base_var = if let Some(dot_pos) = var_name.find('.') {
+                    &var_name[..dot_pos]
+                } else {
+                    &var_name
+                };
+
+                if !base_var.is_empty() {
+                    // Mark variable as used
+                    self.used_variables.insert(base_var.to_string());
+                    self.all_used_symbols.insert(base_var.to_string());
+                }
+            }
+        }
     }
 
     /// Check for unused imports and generate warnings
@@ -914,8 +982,8 @@ impl SemanticAnalyzer {
                 use crate::sema::type_defs::VariantData;
 
                 // Get enum definition to find variant field types
-                if let Some(enum_def) = self.type_registry.get_enum(&enum_name.node) {
-                    if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == variant.node) {
+                if let Some(enum_def) = self.type_registry.get_enum(&enum_name.node)
+                    && let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == variant.node) {
                         // Add bindings for tuple variant fields
                         match &variant_def.data {
                             VariantData::Tuple(field_types) => {
@@ -938,7 +1006,6 @@ impl SemanticAnalyzer {
                             }
                         }
                     }
-                }
             }
             Pattern::Variable(name) => {
                 // Bind the entire matched value
@@ -1068,16 +1135,14 @@ impl SemanticAnalyzer {
                 }
 
                 // Check mutability
-                if let Expr::Variable(name) = &target.node {
-                    if let Some(info) = self.table.lookup(name) {
-                        if !info.mutable {
+                if let Expr::Variable(name) = &target.node
+                    && let Some(info) = self.table.lookup(name)
+                        && !info.mutable {
                             return Err(SemaError::ImmutableAssignment {
                                 symbol: name.clone(),
                                 span: target.span,
                             });
                         }
-                    }
-                }
             }
             Stmt::Return(expr) => {
                 let expr_ty = if let Some(e) = expr {
@@ -1086,15 +1151,14 @@ impl SemanticAnalyzer {
                     Type::Void
                 };
 
-                if let Some(ret_ty) = &self.current_return_type {
-                    if &expr_ty != ret_ty {
+                if let Some(ret_ty) = &self.current_return_type
+                    && &expr_ty != ret_ty {
                         return Err(SemaError::ReturnTypeMismatch {
                             expected: ret_ty.display_name(),
                             found: expr_ty.display_name(),
                             span: expr.as_ref().map(|e| e.span).unwrap_or(stmt.span),
                         });
                     }
-                }
             }
             Stmt::If {
                 condition,
@@ -1298,7 +1362,13 @@ impl SemanticAnalyzer {
                     self.table.exit_scope();
                 }
             }
-            _ => {}
+            Stmt::Asm { lines } => {
+                // Parse inline assembly to extract variable references
+                // Variables are referenced as {var_name} or {struct.field}
+                for line in lines {
+                    self.extract_asm_variables(&line.instruction);
+                }
+            }
         }
         Ok(())
     }
@@ -1328,11 +1398,10 @@ impl SemanticAnalyzer {
         // Use const_env so we can fold references to const variables
         // BUT: don't fold if the expression contains references to addr (runtime values)
         let contains_addr_ref = self.contains_addr_reference(expr);
-        if !contains_addr_ref {
-            if let Ok(const_val) = eval_const_expr_with_env(expr, &self.const_env) {
+        if !contains_addr_ref
+            && let Ok(const_val) = eval_const_expr_with_env(expr, &self.const_env) {
                 self.folded_constants.insert(expr.span, const_val);
             }
-        }
 
         match &expr.node {
             Expr::Literal(lit) => match lit {
@@ -1353,10 +1422,10 @@ impl SemanticAnalyzer {
                             Ok(Type::Primitive(crate::ast::PrimitiveType::U16))
                         } else {
                             // Value too large for any type
-                            return Err(SemaError::Custom {
+                            Err(SemaError::Custom {
                                 message: format!("integer literal {} is too large (max 65535 for u16)", val),
                                 span: expr.span,
-                            });
+                            })
                         }
                     }
                 }

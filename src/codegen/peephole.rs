@@ -141,8 +141,8 @@ fn eliminate_redundant_loads(lines: &[Line]) -> Vec<Line> {
     let mut i = 0;
 
     while i < lines.len() {
-        if i + 1 < lines.len() {
-            if let (
+        if i + 1 < lines.len()
+            && let (
                 Line::Instruction { mnemonic: m1, operand: op1, .. },
                 Line::Instruction { mnemonic: m2, operand: op2, .. },
             ) = (&lines[i], &lines[i + 1])
@@ -158,7 +158,6 @@ fn eliminate_redundant_loads(lines: &[Line]) -> Vec<Line> {
                     continue;
                 }
             }
-        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -173,8 +172,8 @@ fn eliminate_redundant_stores(lines: &[Line]) -> Vec<Line> {
     let mut i = 0;
 
     while i < lines.len() {
-        if i + 1 < lines.len() {
-            if let (
+        if i + 1 < lines.len()
+            && let (
                 Line::Instruction { mnemonic: m1, operand: op1, .. },
                 Line::Instruction { mnemonic: m2, operand: op2, .. },
             ) = (&lines[i], &lines[i + 1])
@@ -190,7 +189,6 @@ fn eliminate_redundant_stores(lines: &[Line]) -> Vec<Line> {
                     continue;
                 }
             }
-        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -205,8 +203,8 @@ fn eliminate_load_after_store(lines: &[Line]) -> Vec<Line> {
     let mut i = 0;
 
     while i < lines.len() {
-        if i + 1 < lines.len() {
-            if let (
+        if i + 1 < lines.len()
+            && let (
                 Line::Instruction { mnemonic: m1, operand: op1, .. },
                 Line::Instruction { mnemonic: m2, operand: op2, .. },
             ) = (&lines[i], &lines[i + 1])
@@ -230,7 +228,6 @@ fn eliminate_load_after_store(lines: &[Line]) -> Vec<Line> {
                     continue;
                 }
             }
-        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -245,8 +242,8 @@ fn eliminate_dead_stores(lines: &[Line]) -> Vec<Line> {
     let mut i = 0;
 
     while i < lines.len() {
-        if i + 2 < lines.len() {
-            if let (
+        if i + 2 < lines.len()
+            && let (
                 Line::Instruction { mnemonic: m1, operand: op1, .. },
                 Line::Instruction { mnemonic: m2, .. },
                 Line::Instruction { mnemonic: m3, operand: op3, .. },
@@ -262,7 +259,6 @@ fn eliminate_dead_stores(lines: &[Line]) -> Vec<Line> {
                     continue;
                 }
             }
-        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -304,8 +300,8 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
     let mut i = 0;
 
     while i < lines.len() {
-        if i + 1 < lines.len() {
-            if let (
+        if i + 1 < lines.len()
+            && let (
                 Line::Instruction { mnemonic: m1, operand: None, .. },
                 Line::Instruction { mnemonic: m2, operand: None, .. },
             ) = (&lines[i], &lines[i + 1])
@@ -331,7 +327,6 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
                     continue;
                 }
             }
-        }
 
         result.push(lines[i].clone());
         i += 1;

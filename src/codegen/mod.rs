@@ -44,17 +44,15 @@ pub fn generate(ast: &SourceFile, program: &ProgramInfo) -> Result<String, Codeg
 
     // Emit addresses from resolved_symbols (includes both local and imported addresses)
     for symbol in program.resolved_symbols.values() {
-        if symbol.kind == SymbolKind::Address {
-            if let SymbolLocation::Absolute(addr) = symbol.location {
-                if emitted_addresses.insert(symbol.name.clone()) {
+        if symbol.kind == SymbolKind::Address
+            && let SymbolLocation::Absolute(addr) = symbol.location
+                && emitted_addresses.insert(symbol.name.clone()) {
                     // Emit comment if this address was imported
                     if let Some(source) = import_sources.get(&symbol.name) {
                         emitter.emit_comment(&format!("Imported from {}", source));
                     }
                     emitter.emit_raw(&format!("{} = ${:04X}", symbol.name, addr));
                 }
-            }
-        }
     }
 
     // Generate code for all items except addresses (already emitted above)

@@ -1,0 +1,4 @@
+struct Point {
+    u8 x,
+    u8 y
+}

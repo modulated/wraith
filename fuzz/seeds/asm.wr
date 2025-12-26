@@ -1,0 +1,6 @@
+#[inline]
+fn nop() {
+    asm {
+        "NOP",
+    }
+}

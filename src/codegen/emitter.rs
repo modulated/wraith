@@ -27,6 +27,8 @@ pub struct Emitter {
     loop_stack: Vec<LoopContext>,
     /// Inline depth tracking (>0 means we're generating inline code)
     inline_depth: u32,
+    /// Suffix for uniquifying labels in current inline expansion
+    inline_label_suffix: Option<usize>,
     /// Current byte count (tracks code size during generation)
     byte_count: u16,
     /// Track if the last instruction was a terminal instruction (RTS, RTI, or unconditional JMP)
@@ -42,7 +44,7 @@ impl Default for Emitter {
 impl Emitter {
     pub fn new() -> Self {
         Self {
-            output: String::new(),
+            output: ".setcpu \"65C02\"\n\n".to_string(),
             indent: 0,
             label_counter: 0,
             match_counter: 0,
@@ -50,6 +52,7 @@ impl Emitter {
             reg_state: RegisterState::new(),
             loop_stack: Vec::new(),
             inline_depth: 0,
+            inline_label_suffix: None,
             byte_count: 0,
             last_was_terminal: false,
         }
@@ -323,8 +326,12 @@ impl Emitter {
     // ========================================================================
 
     /// Push an inline context (increment depth)
+    /// Sets a unique label suffix for this inline expansion
     pub fn push_inline(&mut self) {
         self.inline_depth += 1;
+        // Assign a unique suffix for labels in this inline expansion
+        self.label_counter += 1;
+        self.inline_label_suffix = Some(self.label_counter);
     }
 
     /// Pop an inline context (decrement depth)
@@ -332,10 +339,19 @@ impl Emitter {
         if self.inline_depth > 0 {
             self.inline_depth -= 1;
         }
+        // Clear the label suffix when exiting inline context
+        if self.inline_depth == 0 {
+            self.inline_label_suffix = None;
+        }
     }
 
     /// Check if we're currently generating inline code
     pub fn is_inlining(&self) -> bool {
         self.inline_depth > 0
+    }
+
+    /// Get the current inline label suffix (if inlining)
+    pub fn inline_label_suffix(&self) -> Option<usize> {
+        self.inline_label_suffix
     }
 }

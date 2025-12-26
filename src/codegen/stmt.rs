@@ -84,14 +84,14 @@ pub fn generate_stmt(
         Stmt::Assign { target, value } => {
             // Optimization: detect x = x + 1 and x = x - 1 patterns
             // Use INC/DEC instead of LDA/ADC/STA or LDA/SBC/STA
-            if let crate::ast::Expr::Variable(target_name) = &target.node {
-                if let crate::ast::Expr::Binary { left, op, right } = &value.node {
+            if let crate::ast::Expr::Variable(target_name) = &target.node
+                && let crate::ast::Expr::Binary { left, op, right } = &value.node {
                     // Check if left side is the same variable as target
-                    if let crate::ast::Expr::Variable(left_name) = &left.node {
-                        if left_name == target_name {
+                    if let crate::ast::Expr::Variable(left_name) = &left.node
+                        && left_name == target_name {
                             // Check if right side is literal 1
-                            if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &right.node {
-                                if *n == 1 {
+                            if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &right.node
+                                && *n == 1 {
                                     // Look up variable location
                                     let sym = info.resolved_symbols.get(&target.span)
                                         .or_else(|| info.table.lookup(target_name));
@@ -128,11 +128,8 @@ pub fn generate_stmt(
                                         }
                                     }
                                 }
-                            }
                         }
-                    }
                 }
-            }
 
             // 1. Generate code for value (result in A)
             generate_expr(value, emitter, info)?;
@@ -460,7 +457,14 @@ pub fn generate_stmt(
                 // Substitute {var} patterns with actual addresses
                 let substituted = substitute_asm_vars(&line.instruction, info)?;
 
-                let parts: Vec<&str> = substituted.split_whitespace().collect();
+                // If we're inside an inline function expansion, uniquify labels
+                let final_line = if let Some(suffix) = emitter.inline_label_suffix() {
+                    uniquify_asm_labels(&substituted, suffix)
+                } else {
+                    substituted
+                };
+
+                let parts: Vec<&str> = final_line.split_whitespace().collect();
                 if parts.is_empty() {
                     continue;
                 }
@@ -598,8 +602,8 @@ fn generate_match(
         emitter.emit_label(&format!("match_{}_arm_{}", match_id, i));
 
         // Extract bindings for enum variant patterns
-        if let Pattern::EnumVariant { enum_name, variant, bindings } = &arm.pattern.node {
-            if !bindings.is_empty() {
+        if let Pattern::EnumVariant { enum_name, variant, bindings } = &arm.pattern.node
+            && !bindings.is_empty() {
                 // Look up the enum definition to get field information
                 let enum_def = info.type_registry.get_enum(&enum_name.node)
                     .ok_or_else(|| CodegenError::UnsupportedOperation(
@@ -673,7 +677,6 @@ fn generate_match(
                     }
                 }
             }
-        }
 
         generate_stmt(&arm.body, emitter, info)?;
         emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
@@ -725,4 +728,61 @@ fn substitute_asm_vars(instruction: &str, info: &ProgramInfo) -> Result<String, 
     }
 
     Ok(result)
+}
+
+/// Uniquify assembly labels by appending a suffix
+/// This is needed when inlining functions to avoid duplicate label errors
+fn uniquify_asm_labels(line: &str, suffix: usize) -> String {
+    let trimmed = line.trim();
+
+    // Check if this is a label definition (ends with :)
+    if let Some(label_name) = trimmed.strip_suffix(':') {
+        // Label definition: append suffix before the colon
+        return format!("{}_{}:", label_name, suffix);
+    }
+
+    // Check if line contains a label reference
+    // Label references are typically in the operand part of an instruction
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.len() < 2 {
+        // No operand, return as-is
+        return line.to_string();
+    }
+
+    let mnemonic = parts[0];
+    let operand = parts[1..].join(" ");
+
+    // Special case: BBS/BBR instructions have format "BBS0 $20,label"
+    // where the label is after a comma
+    if (mnemonic.starts_with("BBS") || mnemonic.starts_with("BBR"))
+        && let Some(comma_pos) = operand.find(',') {
+            let addr_part = &operand[..comma_pos];
+            let label_part = operand[comma_pos + 1..].trim();
+            return format!("{} {},{}_{}", mnemonic, addr_part, label_part, suffix);
+        }
+
+    // Check if operand looks like a label reference
+    // Labels are alphanumeric/underscore, not registers ($, #, A, X, Y) or numbers
+    let is_label_ref = !operand.starts_with('$')  // Not hex address
+                    && !operand.starts_with('#')  // Not immediate
+                    && operand != "A"              // Not accumulator
+                    && !operand.starts_with("A,") // Not indexed
+                    && !operand.starts_with("X")  // Not X register
+                    && !operand.starts_with("Y")  // Not Y register
+                    && operand.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
+
+    if is_label_ref {
+        // Split operand by comma (for "label,X" style addressing)
+        let op_parts: Vec<&str> = operand.split(',').collect();
+        let label_part = op_parts[0];
+        let rest = if op_parts.len() > 1 {
+            format!(",{}", op_parts[1..].join(","))
+        } else {
+            String::new()
+        };
+
+        format!("{} {}_{}{}", mnemonic, label_part, suffix, rest)
+    } else {
+        line.to_string()
+    }
 }
