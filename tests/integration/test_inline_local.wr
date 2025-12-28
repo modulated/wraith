@@ -1,0 +1,16 @@
+//! Test local inline function
+
+#[inline]
+fn my_min(a: u8, b: u8) -> u8 {
+    if a < b {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+addr TEST_OUTPUT = 0x6000;
+
+fn main() {
+    TEST_OUTPUT = my_min(10, 20);
+}

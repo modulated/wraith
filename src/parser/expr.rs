@@ -501,6 +501,11 @@ impl Parser<'_> {
                     start,
                 ))
             }
+            Some(Token::Str) => {
+                self.advance();
+                // Use named type that semantic analyzer will recognize
+                Ok(Spanned::new(TypeExpr::named("str"), start))
+            }
 
             // Named type
             Some(Token::Ident(name)) => {

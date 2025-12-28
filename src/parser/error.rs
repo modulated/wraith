@@ -168,13 +168,13 @@ fn format_token(token: &Token) -> String {
         Token::Zp => "keyword 'zp'".to_string(),
         Token::Read => "keyword 'read'".to_string(),
         Token::Write => "keyword 'write'".to_string(),
-        Token::Inline => "keyword 'inline'".to_string(),
         Token::Asm => "keyword 'asm'".to_string(),
         Token::U8 => "type 'u8'".to_string(),
         Token::I8 => "type 'i8'".to_string(),
         Token::U16 => "type 'u16'".to_string(),
         Token::I16 => "type 'i16'".to_string(),
         Token::Bool => "type 'bool'".to_string(),
+        Token::Str => "type 'str'".to_string(),
         Token::Comment => "comment".to_string(),
     }
 }

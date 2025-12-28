@@ -47,8 +47,6 @@ pub enum Token {
     From,
     #[token("asm")]
     Asm,
-    #[token("inline")]
-    Inline,
     #[token("addr")]
     Addr,
     #[token("read")]
@@ -73,6 +71,8 @@ pub enum Token {
     I16,
     #[token("bool")]
     Bool,
+    #[token("str")]
+    Str,
 
     // === Arithmetic operators ===
     #[token("+")]
@@ -188,7 +188,8 @@ pub enum Token {
 
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();
-        Some(s[1..s.len()-1].to_string())
+        let content = &s[1..s.len()-1];
+        Some(unescape_string(content))
     })]
     String(String),
 
@@ -197,7 +198,7 @@ pub enum Token {
     Ident(String),
 
     // === Comments (skipped) ===
-    #[regex(r"//[^\n]*", logos::skip)]
+    #[regex(r"//[^\n]*?", logos::skip)]
     #[regex(r"/\*([^*]|\*[^/])*\*/", logos::skip)]
     Comment,
 }
@@ -208,6 +209,34 @@ fn parse_hex(s: &str) -> Option<i64> {
 
 fn parse_binary(s: &str) -> Option<i64> {
     i64::from_str_radix(&s[2..], 2).ok()
+}
+
+/// Process escape sequences in a string literal
+fn unescape_string(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('0') => result.push('\0'),
+                Some(c) => {
+                    // Unknown escape sequence - preserve it as-is
+                    result.push('\\');
+                    result.push(c);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 /// A token with its span in the source

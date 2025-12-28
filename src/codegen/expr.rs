@@ -4,7 +4,7 @@
 //! Result is typically left in the Accumulator (A).
 
 use crate::ast::{Expr, Spanned};
-use crate::codegen::{CodegenError, Emitter};
+use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 use crate::sema::table::SymbolLocation;
 
@@ -19,6 +19,7 @@ pub fn generate_expr(
     expr: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Check if this expression was constant-folded
     if let Some(const_val) = info.folded_constants.get(&expr.span) {
@@ -33,23 +34,44 @@ pub fn generate_expr(
                 emitter.emit_inst("LDA", if *b { "#$01" } else { "#$00" });
                 return Ok(());
             }
-            _ => {
-                // Fall through to normal codegen for non-integer constants
+            crate::sema::const_eval::ConstValue::String(s) => {
+                // Register string with collector (deduplicated automatically)
+                let str_label = string_collector.add_string(s.clone());
+
+                // Escape special characters for display in comment
+                let display = s.chars()
+                    .map(|c| match c {
+                        '\n' => "\\n".to_string(),
+                        '\r' => "\\r".to_string(),
+                        '\t' => "\\t".to_string(),
+                        '\0' => "\\0".to_string(),
+                        '\\' => "\\\\".to_string(),
+                        '"' => "\\\"".to_string(),
+                        c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+                        c => format!("\\x{:02X}", c as u8),
+                    })
+                    .collect::<String>();
+
+                // Load address of string into A (low byte) and X (high byte)
+                emitter.emit_comment(&format!("Const string: \"{}\" -> {}", display, str_label));
+                emitter.emit_inst("LDA", &format!("#<{}", str_label));
+                emitter.emit_inst("LDX", &format!("#>{}", str_label));
+                return Ok(());
             }
         }
     }
 
     match &expr.node {
-        Expr::Literal(lit) => generate_literal(lit, emitter),
+        Expr::Literal(lit) => generate_literal(lit, emitter, string_collector),
         Expr::Variable(name) => generate_variable(name, expr.span, emitter, info),
-        Expr::Binary { left, op, right } => generate_binary(left, *op, right, emitter, info),
-        Expr::Unary { op, operand } => generate_unary(*op, operand, emitter, info),
-        Expr::Call { function, args } => generate_call(function, args, emitter, info),
-        Expr::Paren(inner) => generate_expr(inner, emitter, info), // Just unwrap
+        Expr::Binary { left, op, right } => generate_binary(left, *op, right, emitter, info, string_collector),
+        Expr::Unary { op, operand } => generate_unary(*op, operand, emitter, info, string_collector),
+        Expr::Call { function, args } => generate_call(function, args, emitter, info, string_collector),
+        Expr::Paren(inner) => generate_expr(inner, emitter, info, string_collector), // Just unwrap
         Expr::Cast { expr: inner, target_type } => {
-            generate_type_cast(inner, target_type, emitter, info)
+            generate_type_cast(inner, target_type, emitter, info, string_collector)
         }
-        Expr::Index { object, index } => generate_index(object, index, emitter, info),
+        Expr::Index { object, index } => generate_index(object, index, emitter, info, string_collector),
         Expr::StructInit { name, fields } => generate_struct_init(name, fields, emitter, info),
         Expr::Field { object, field } => generate_field_access(object, field, emitter, info),
         Expr::EnumVariant {
@@ -57,15 +79,52 @@ pub fn generate_expr(
             variant,
             data,
         } => generate_enum_variant(enum_name, variant, data, emitter, info),
-        Expr::SliceLen(slice) => {
-            // Slice length access: slice.len
-            // Slices are represented as a pointer (2 bytes) + length (2 bytes)
-            // The length is stored in the second word after the pointer
-            // For now, we don't fully support slices, so return an error
-            let _ = slice; // Suppress unused variable warning
-            Err(CodegenError::UnsupportedOperation(
-                "Slice length access (.len) not yet fully implemented".to_string()
-            ))
+        Expr::SliceLen(object) => {
+            // Get the type of the object to determine how to access its length
+            if let Some(obj_ty) = info.resolved_types.get(&object.span) {
+                match obj_ty {
+                    crate::sema::types::Type::String => {
+                        // String .len access
+                        // String is a pointer to length-prefixed data: [u16 length][bytes...]
+                        emitter.emit_comment("String .len access");
+
+                        // Get string address in A:X
+                        generate_expr(object, emitter, info, string_collector)?;
+
+                        // Store pointer to temp location ($F0-$F1)
+                        emitter.emit_inst("STA", "$F0");
+                        emitter.emit_inst("STX", "$F1");
+
+                        // Load length (first 2 bytes) via indirect indexed
+                        emitter.emit_inst("LDY", "#$00");
+                        emitter.emit_inst("LDA", "($F0),Y"); // Low byte of length
+                        emitter.emit_inst("TAX", "");  // Save low byte in X
+                        emitter.emit_inst("INY", "");
+                        emitter.emit_inst("LDA", "($F0),Y"); // High byte of length
+                        // Result: length in A (high) and X (low)
+                        // Swap them so A has low byte, X has high byte (standard u16 convention)
+                        emitter.emit_inst("PHA", "");  // Save high byte
+                        emitter.emit_inst("TXA", "");  // Get low byte to A
+                        emitter.emit_inst("TAY", "");  // Save low byte in Y
+                        emitter.emit_inst("PLA", "");  // Get high byte back to A
+                        emitter.emit_inst("TAX", "");  // High byte to X
+                        emitter.emit_inst("TYA", "");  // Low byte to A
+
+                        Ok(())
+                    }
+                    _ => {
+                        // Other types not yet supported
+                        Err(CodegenError::UnsupportedOperation(
+                            format!("Length access (.len) not yet implemented for type: {}", obj_ty.display_name())
+                        ))
+                    }
+                }
+            } else {
+                // No type information available - this shouldn't happen if semantic analysis passed
+                Err(CodegenError::UnsupportedOperation(
+                    "Length access (.len) missing type information (compiler bug)".to_string()
+                ))
+            }
         }
     }
 }
@@ -75,12 +134,13 @@ fn generate_call(
     args: &[Spanned<Expr>],
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Check if function should be inlined
     if let Some(metadata) = info.function_metadata.get(&function.node)
         && metadata.is_inline {
             // Inline the function call
-            return generate_inline_call(function, args, emitter, info, metadata);
+            return generate_inline_call(function, args, emitter, info, metadata, string_collector);
         }
 
     // 6502 calling convention: Arguments are passed in zero page locations
@@ -102,7 +162,7 @@ fn generate_call(
         let param_addr = param_base + i as u8;
 
         // Generate argument expression (result in A)
-        generate_expr(arg, emitter, info)?;
+        generate_expr(arg, emitter, info, string_collector)?;
 
         // Store to parameter location
         emitter.emit_inst("STA", &format!("${:02X}", param_addr));
@@ -122,6 +182,7 @@ fn generate_inline_call(
     emitter: &mut Emitter,
     info: &ProgramInfo,
     metadata: &crate::sema::FunctionMetadata,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Emit inline expansion comment
     if args.is_empty() {
@@ -154,7 +215,7 @@ fn generate_inline_call(
     // Each parameter has a specific zero-page address that was assigned when the function was defined
     // We need to store the argument values at those exact addresses
     for (i, arg) in args.iter().enumerate() {
-        generate_expr(arg, emitter, info)?;
+        generate_expr(arg, emitter, info, string_collector)?;
 
         // Get the parameter info for this position
         let param = &params[i];
@@ -204,11 +265,13 @@ fn generate_inline_call(
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
             type_registry: info.type_registry.clone(),
+            resolved_types: info.resolved_types.clone(),
+            imported_items: info.imported_items.clone(),
             warnings: info.warnings.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;
-        generate_stmt(body, emitter, &modified_info)
+        generate_stmt(body, emitter, &modified_info, string_collector)
     } else {
         // No parameter symbols stored - this indicates a bug in semantic analysis
         // Inline functions should always have parameter symbols populated
@@ -228,11 +291,12 @@ fn generate_unary(
     operand: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match op {
         crate::ast::UnaryOp::Deref => {
             // Dereference: *ptr - Load value from address stored in operand
-            generate_expr(operand, emitter, info)?;
+            generate_expr(operand, emitter, info, string_collector)?;
 
             // A now contains the address (low byte for u8 pointers)
             // For 6502, we need to set up indirect addressing
@@ -300,7 +364,7 @@ fn generate_unary(
     }
 
     // For other operations, evaluate operand first
-    generate_expr(operand, emitter, info)?;
+    generate_expr(operand, emitter, info, string_collector)?;
 
     // Apply unary operation to A
     match op {
@@ -346,11 +410,12 @@ fn generate_binary(
     right: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Handle short-circuit logical operations specially
     match op {
-        crate::ast::BinaryOp::And => return generate_logical_and(left, right, emitter, info),
-        crate::ast::BinaryOp::Or => return generate_logical_or(left, right, emitter, info),
+        crate::ast::BinaryOp::And => return generate_logical_and(left, right, emitter, info, string_collector),
+        crate::ast::BinaryOp::Or => return generate_logical_or(left, right, emitter, info, string_collector),
         _ => {}
     }
 
@@ -361,14 +426,14 @@ fn generate_binary(
         // Complex left expression: use Y register for temporary storage
         // This is faster than PHA/PLA (2+3=5 cycles vs 3+4=7 cycles)
         // 1. Generate left operand -> A
-        generate_expr(left, emitter, info)?;
+        generate_expr(left, emitter, info, string_collector)?;
 
         // 2. Save A to Y register
         emitter.emit_inst("TAY", "");
         emitter.reg_state.transfer_a_to_y();
 
         // 3. Generate right operand -> A
-        generate_expr(right, emitter, info)?;
+        generate_expr(right, emitter, info, string_collector)?;
 
         // 4. Store right operand in TEMP
         emitter.emit_sta_zp(emitter.memory_layout.temp_reg());
@@ -381,13 +446,13 @@ fn generate_binary(
         // This saves PHA/PLA instructions (4 cycles)
 
         // 1. Generate right operand -> A
-        generate_expr(right, emitter, info)?;
+        generate_expr(right, emitter, info, string_collector)?;
 
         // 2. Store right operand in TEMP
         emitter.emit_sta_zp(emitter.memory_layout.temp_reg());
 
         // 3. Generate left operand -> A (simple, no side effects)
-        generate_expr(left, emitter, info)?;
+        generate_expr(left, emitter, info, string_collector)?;
     }
 
     // 6. Perform operation
@@ -456,7 +521,7 @@ fn generate_binary(
     Ok(())
 }
 
-fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<(), CodegenError> {
+fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter, string_collector: &mut StringCollector) -> Result<(), CodegenError> {
     match lit {
         crate::ast::Literal::Integer(val) => {
             // Handle values based on size
@@ -487,33 +552,11 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter) -> Result<
             Ok(())
         }
         crate::ast::Literal::String(s) => {
-            // Generate string literal with length prefix
-            // Create unique label for this string
-            let str_label = emitter.next_label("str");
-            let skip_label = emitter.next_label("ss");
-
-            // Jump over the string data
-            emitter.emit_inst("JMP", &skip_label);
-
-            // Emit string data with label
-            emitter.emit_label(&str_label);
-
-            // Emit length as u16 (little-endian) using two bytes
-            let len = s.len() as u16;
-            let len_bytes = [(len & 0xFF) as u8, ((len >> 8) & 0xFF) as u8];
-            emitter.emit_bytes(&len_bytes);
-
-            // Emit string bytes
-            if !s.is_empty() {
-                emitter.emit_bytes(s.as_bytes());
-            }
-
-            // Skip label
-            emitter.emit_label(&skip_label);
+            // Register string with collector (deduplicated automatically)
+            let str_label = string_collector.add_string(s.clone());
 
             // Load address of string into A (low byte) and X (high byte)
-            // For now, we'll use a comment since we don't have real address resolution
-            emitter.emit_comment(&format!("Load address of string: \"{}\"", s));
+            emitter.emit_comment(&format!("String literal: \"{}\" -> {}", s, str_label));
             emitter.emit_inst("LDA", &format!("#<{}", str_label));
             emitter.emit_inst("LDX", &format!("#>{}", str_label));
 
@@ -875,19 +918,20 @@ fn generate_logical_and(
     right: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Short-circuit AND: if left is false, skip right and return false
     let end_label = emitter.next_label("ax");
 
     // Evaluate left operand
-    generate_expr(left, emitter, info)?;
+    generate_expr(left, emitter, info, string_collector)?;
 
     // If left is false (0), result is false
     emitter.emit_inst("CMP", "#$00");
     emitter.emit_inst("BEQ", &end_label); // If zero, A is already 0, done
 
     // Left was true, evaluate right
-    generate_expr(right, emitter, info)?;
+    generate_expr(right, emitter, info, string_collector)?;
 
     // Convert right to boolean (0 or 1)
     let true_label = emitter.next_label("at");
@@ -911,6 +955,7 @@ fn generate_logical_or(
     right: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Short-circuit OR: if left is true, skip right and return true
     let true_label = emitter.next_label("ot");
@@ -918,7 +963,7 @@ fn generate_logical_or(
     let end_label = emitter.next_label("ox");
 
     // Evaluate left operand
-    generate_expr(left, emitter, info)?;
+    generate_expr(left, emitter, info, string_collector)?;
 
     // If left is true (non-zero), result is true
     emitter.emit_inst("CMP", "#$00");
@@ -927,7 +972,7 @@ fn generate_logical_or(
 
     // Left was false, evaluate right
     emitter.emit_label(&eval_right_label);
-    generate_expr(right, emitter, info)?;
+    generate_expr(right, emitter, info, string_collector)?;
 
     // Convert right to boolean
     emitter.emit_inst("CMP", "#$00");
@@ -1069,7 +1114,48 @@ fn generate_index(
     index: &Spanned<Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    // Check if we're indexing a string
+    if let Some(obj_ty) = info.resolved_types.get(&object.span)
+        && matches!(obj_ty, crate::sema::types::Type::String)
+    {
+        // String indexing: s[i]
+        // String format: [u16 length][bytes...]
+        // Strategy:
+        // 1. Get string pointer in A:X
+        // 2. Store to temp ($F0-$F1)
+        // 3. Add 2 to pointer (skip length prefix)
+        // 4. Get index in Y register
+        // 5. Load byte: LDA ($F0),Y
+
+        emitter.emit_comment("String indexing: s[i]");
+
+        // Get string pointer
+        generate_expr(object, emitter, info, string_collector)?;
+        emitter.emit_inst("STA", "$F0");
+        emitter.emit_inst("STX", "$F1");
+
+        // Skip length prefix (add 2 to pointer)
+        emitter.emit_inst("LDA", "$F0");
+        emitter.emit_inst("CLC", "");
+        emitter.emit_inst("ADC", "#$02");
+        emitter.emit_inst("STA", "$F0");
+        emitter.emit_inst("LDA", "$F1");
+        emitter.emit_inst("ADC", "#$00");
+        emitter.emit_inst("STA", "$F1");
+
+        // Get index in Y
+        generate_expr(index, emitter, info, string_collector)?;
+        emitter.emit_inst("TAY", "");
+
+        // Load byte
+        emitter.emit_inst("LDA", "($F0),Y");
+        emitter.reg_state.modify_a();
+
+        return Ok(());
+    }
+
     // For array indexing: array[index]
     // Strategy:
     // 1. Get the base address of the array
@@ -1100,7 +1186,7 @@ fn generate_index(
                     }
 
                     // Generate index expression -> A, then transfer to Y
-                    generate_expr(index, emitter, info)?;
+                    generate_expr(index, emitter, info, string_collector)?;
                     emitter.emit_inst("TAY", "Transfer index to Y");
 
                     // Use indirect indexed addressing: LDA (ptr),Y
@@ -1111,7 +1197,7 @@ fn generate_index(
                 }
                 crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                     // Array in zero page - use indirect indexed addressing
-                    generate_expr(index, emitter, info)?;
+                    generate_expr(index, emitter, info, string_collector)?;
                     emitter.emit_inst("TAY", "Transfer index to Y");
                     emitter.emit_inst("LDA", &format!("(${:02X}),Y", addr));
                     emitter.reg_state.modify_a();
@@ -1435,11 +1521,12 @@ fn generate_type_cast(
     target_type: &Spanned<crate::ast::TypeExpr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::{PrimitiveType, TypeExpr};
 
     // Evaluate the source expression
-    generate_expr(expr, emitter, info)?;
+    generate_expr(expr, emitter, info, string_collector)?;
 
     // Determine target type
     match &target_type.node {

@@ -1,0 +1,9 @@
+//! Simple math test
+
+import { min } from "math.wr";
+
+addr TEST_OUTPUT = 0x6000;
+
+fn main() {
+    TEST_OUTPUT = min(10, 20);
+}

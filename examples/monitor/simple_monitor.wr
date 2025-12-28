@@ -1,0 +1,118 @@
+// Simplified Monitor - Basic UART echo and memory display
+// This is a working starting point that demonstrates the core concepts
+
+import {
+    uart_init, uart_putc, uart_getc, uart_newline,
+    uart_puthex_byte, uart_puthex_word
+} from "./uart.wr";
+
+// Print welcome message
+fn print_welcome() {
+    // "Wraith Monitor\n"
+    uart_putc(0x57);  // W
+    uart_putc(0x72);  // r
+    uart_putc(0x61);  // a
+    uart_putc(0x69);  // i
+    uart_putc(0x74);  // t
+    uart_putc(0x68);  // h
+    uart_putc(0x20);  // space
+    uart_putc(0x4D);  // M
+    uart_putc(0x6F);  // o
+    uart_putc(0x6E);  // n
+    uart_putc(0x69);  // i
+    uart_putc(0x74);  // t
+    uart_putc(0x6F);  // o
+    uart_putc(0x72);  // r
+    uart_newline();
+    uart_newline();
+}
+
+// Simple memory dump - show bytes from 0x0200-0x020F
+fn dump_memory() {
+    uart_putc(0x30);  // 0
+    uart_putc(0x32);  // 2
+    uart_putc(0x30);  // 0
+    uart_putc(0x30);  // 0
+    uart_putc(0x3A);  // :
+    uart_putc(0x20);  // space
+
+    // Read and display 16 bytes
+    asm {
+        "LDX #$00",
+        "dump_loop:",
+        "LDA $0200,X",
+        "PHA",
+        "JSR print_hex_a",
+        "LDA #$20",
+        "JSR {uart_putc}",
+        "INX",
+        "CPX #$10",
+        "BNE dump_loop",
+        "JMP dump_done",
+
+        "print_hex_a:",
+        "PHA",
+        "LSR A",
+        "LSR A",
+        "LSR A",
+        "LSR A",
+        "JSR print_nibble",
+        "PLA",
+        "AND #$0F",
+        "JSR print_nibble",
+        "PLA",
+        "RTS",
+
+        "print_nibble:",
+        "CMP #$0A",
+        "BCC is_digit",
+        "CLC",
+        "ADC #$37",
+        "JMP {uart_putc}",
+        "is_digit:",
+        "CLC",
+        "ADC #$30",
+        "JMP {uart_putc}",
+
+        "dump_done:"
+    }
+
+    uart_newline();
+}
+
+// Main entry point
+#[reset]
+#[org(0x8000)]
+fn main() {
+    // Initialize UART
+    uart_init();
+
+    // Print welcome
+    print_welcome();
+
+    // Show initial memory contents
+    dump_memory();
+
+    // Simple echo loop with hex display
+    loop {
+        // Print prompt
+        uart_putc(0x3E);  // >
+        uart_putc(0x20);  // space
+
+        // Get character
+        ch: u8 = uart_getc();
+
+        // Echo it
+        uart_putc(ch);
+        uart_putc(0x20);  // space
+
+        // Show hex value
+        uart_puthex_byte(ch);
+        uart_newline();
+
+        // If it's 'D', dump memory again
+        if ch == 0x44 || ch == 0x64 {  // 'D' or 'd'
+            dump_memory();
+        }
+    }
+}

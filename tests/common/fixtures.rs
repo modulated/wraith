@@ -2,6 +2,8 @@
 //!
 //! Provides reusable test programs for various scenarios
 
+#![allow(dead_code)]
+
 /// Minimal valid program
 pub const MINIMAL_PROGRAM: &str = "fn main() {}";
 
@@ -25,7 +27,8 @@ fn main() {
 
 /// Inline function
 pub const INLINE_FUNCTION: &str = r#"
-inline fn add(a: u8, b: u8) -> u8 {
+#[inline]
+fn add(a: u8, b: u8) -> u8 {
     return a + b;
 }
 

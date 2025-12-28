@@ -1,0 +1,11 @@
+//! Library with inline functions for import testing
+
+#[inline]
+fn add_two(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+#[inline]
+fn multiply_by_two(x: u8) -> u8 {
+    return x + x;
+}

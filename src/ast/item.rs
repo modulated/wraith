@@ -89,7 +89,6 @@ pub struct Function {
     pub return_type: Option<Spanned<TypeExpr>>,
     pub body: Spanned<Stmt>,
     pub attributes: Vec<FnAttribute>,
-    pub is_inline: bool,
 }
 
 /// A struct definition

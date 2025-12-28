@@ -1,7 +1,8 @@
 // Test inline function expansion
 
 // Simple inline function with implicit return
-inline fn add(a: u8, b: u8) -> u8 {
+#[inline]
+fn add(a: u8, b: u8) -> u8 {
     return a + b;
 }
 

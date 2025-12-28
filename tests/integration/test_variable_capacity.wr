@@ -1,0 +1,57 @@
+// Test that we can allocate many variables with the expanded zero page layout
+// Before: Only 16 bytes available ($40-$4F) - would fail with ~10 variables
+// After: 64 bytes available ($40-$7F) - can handle 64+ u8 variables
+
+fn test_many_variables() {
+    // Declare 30 u8 variables - this would have failed with old layout
+    v01: u8 = 1;
+    v02: u8 = 2;
+    v03: u8 = 3;
+    v04: u8 = 4;
+    v05: u8 = 5;
+    v06: u8 = 6;
+    v07: u8 = 7;
+    v08: u8 = 8;
+    v09: u8 = 9;
+    v10: u8 = 10;
+    v11: u8 = 11;
+    v12: u8 = 12;
+    v13: u8 = 13;
+    v14: u8 = 14;
+    v15: u8 = 15;
+    v16: u8 = 16;
+    v17: u8 = 17;  // This would fail with old 16-byte limit
+    v18: u8 = 18;
+    v19: u8 = 19;
+    v20: u8 = 20;
+    v21: u8 = 21;
+    v22: u8 = 22;
+    v23: u8 = 23;
+    v24: u8 = 24;
+    v25: u8 = 25;
+    v26: u8 = 26;
+    v27: u8 = 27;
+    v28: u8 = 28;
+    v29: u8 = 29;
+    v30: u8 = 30;
+
+    // Use the last variable to verify it was allocated
+    result: u8 = v30 + v01;
+}
+
+fn test_array_pointers() {
+    // Arrays need 2 bytes each for pointers
+    // Before: Could allocate ~8 arrays in 16 bytes
+    // After: Can allocate ~32 arrays in 64 bytes
+
+    arr1: [u8; 5] = [1, 2, 3, 4, 5];
+    arr2: [u8; 5] = [6, 7, 8, 9, 10];
+    arr3: [u8; 5] = [11, 12, 13, 14, 15];
+    arr4: [u8; 5] = [16, 17, 18, 19, 20];
+    arr5: [u8; 5] = [21, 22, 23, 24, 25];
+    arr6: [u8; 5] = [26, 27, 28, 29, 30];
+    arr7: [u8; 5] = [31, 32, 33, 34, 35];
+    arr8: [u8; 5] = [36, 37, 38, 39, 40];
+    arr9: [u8; 5] = [41, 42, 43, 44, 45];  // This would fail with old layout
+    arr10: [u8; 5] = [46, 47, 48, 49, 50];
+}

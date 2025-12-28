@@ -1,0 +1,124 @@
+//! Math Library Integration Tests
+//!
+//! Tests for the math.wr standard library functions,
+//! including comparison, bit manipulation, saturating arithmetic,
+//! and advanced bit operations.
+
+import {
+    min,
+    max,
+    clamp,
+    saturating_add,
+    saturating_sub,
+    set_bit,
+    clear_bit,
+    test_bit,
+    count_bits,
+    reverse_bits,
+    swap_nibbles
+} from "math.wr";
+
+// Test output address for verification
+addr TEST_OUTPUT = 0x6000;
+
+fn main() {
+    // ========================================================================
+    // Comparison Operations Tests
+    // ========================================================================
+
+    // Test min: expect 10
+    TEST_OUTPUT = min(10, 20);
+
+    // Test max: expect 20
+    TEST_OUTPUT = max(10, 20);
+
+    // Test clamp: value > max, expect 100
+    TEST_OUTPUT = clamp(150, 0, 100);
+
+    // Test clamp: value < min, expect 50
+    TEST_OUTPUT = clamp(10, 50, 200);
+
+    // Test clamp: value in range, expect 75
+    TEST_OUTPUT = clamp(75, 50, 100);
+
+    // ========================================================================
+    // Saturating Arithmetic Tests
+    // ========================================================================
+
+    // Test saturating_add: overflow, expect 255
+    TEST_OUTPUT = saturating_add(250, 10);
+
+    // Test saturating_add: no overflow, expect 15
+    TEST_OUTPUT = saturating_add(10, 5);
+
+    // Test saturating_sub: underflow, expect 0
+    TEST_OUTPUT = saturating_sub(5, 10);
+
+    // Test saturating_sub: no underflow, expect 5
+    TEST_OUTPUT = saturating_sub(10, 5);
+
+    // ========================================================================
+    // Bit Manipulation Tests (65C02 SMB/RMB/BBS)
+    // ========================================================================
+
+    // Test set_bit: bit 3 of 0x00, expect 0x08 (8)
+    TEST_OUTPUT = set_bit(0b00000000, 3);
+
+    // Test set_bit: bit 0 of 0x00, expect 0x01 (1)
+    TEST_OUTPUT = set_bit(0b00000000, 0);
+
+    // Test set_bit: bit 7 of 0x00, expect 0x80 (128)
+    TEST_OUTPUT = set_bit(0b00000000, 7);
+
+    // Test clear_bit: bit 3 of 0xFF, expect 0xF7 (247)
+    TEST_OUTPUT = clear_bit(0b11111111, 3);
+
+    // Test clear_bit: bit 0 of 0xFF, expect 0xFE (254)
+    TEST_OUTPUT = clear_bit(0b11111111, 0);
+
+    // Test clear_bit: bit 7 of 0xFF, expect 0x7F (127)
+    TEST_OUTPUT = clear_bit(0b11111111, 7);
+
+    // Test test_bit: bit 3 set, expect 1
+    TEST_OUTPUT = test_bit(0b00001000, 3);
+
+    // Test test_bit: bit 3 clear, expect 0
+    TEST_OUTPUT = test_bit(0b00000000, 3);
+
+    // Test test_bit: bit 7 set, expect 1
+    TEST_OUTPUT = test_bit(0b10000000, 7);
+
+    // ========================================================================
+    // Advanced Bit Operations Tests
+    // ========================================================================
+
+    // Test count_bits: 5 bits set, expect 5
+    TEST_OUTPUT = count_bits(0b10110110);
+
+    // Test count_bits: all bits set, expect 8
+    TEST_OUTPUT = count_bits(0xFF);
+
+    // Test count_bits: no bits set, expect 0
+    TEST_OUTPUT = count_bits(0x00);
+
+    // Test count_bits: alternating pattern, expect 4
+    TEST_OUTPUT = count_bits(0b10101010);
+
+    // Test swap_nibbles: 0xAB, expect 0xBA (186)
+    TEST_OUTPUT = swap_nibbles(0xAB);
+
+    // Test swap_nibbles: 0x12, expect 0x21 (33)
+    TEST_OUTPUT = swap_nibbles(0x12);
+
+    // Test swap_nibbles: 0xF0, expect 0x0F (15)
+    TEST_OUTPUT = swap_nibbles(0xF0);
+
+    // Test reverse_bits: 0b10001101, expect 0b10110001 (177)
+    TEST_OUTPUT = reverse_bits(0b10001101);
+
+    // Test reverse_bits: 0b10000000, expect 0b00000001 (1)
+    TEST_OUTPUT = reverse_bits(0b10000000);
+
+    // Test reverse_bits: 0b11110000, expect 0b00001111 (15)
+    TEST_OUTPUT = reverse_bits(0b11110000);
+}

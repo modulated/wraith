@@ -22,7 +22,9 @@ pub struct SemanticAnalyzer {
     resolved_symbols: HashMap<Span, SymbolInfo>,
     function_metadata: HashMap<String, FunctionMetadata>,
     folded_constants: HashMap<Span, ConstValue>,
+    resolved_types: HashMap<Span, Type>,
     type_registry: TypeRegistry,
+    imported_items: Vec<Spanned<Item>>,
     base_path: Option<PathBuf>,
     imported_files: HashSet<PathBuf>,
     zp_allocator: ZeroPageAllocator,
@@ -129,7 +131,9 @@ impl SemanticAnalyzer {
             resolved_symbols: HashMap::new(),
             function_metadata: HashMap::new(),
             folded_constants: HashMap::new(),
+            resolved_types: HashMap::new(),
             type_registry: TypeRegistry::new(),
+            imported_items: Vec::new(),
             base_path: None,
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
@@ -152,7 +156,9 @@ impl SemanticAnalyzer {
             resolved_symbols: HashMap::new(),
             function_metadata: HashMap::new(),
             folded_constants: HashMap::new(),
+            resolved_types: HashMap::new(),
             type_registry: TypeRegistry::new(),
+            imported_items: Vec::new(),
             base_path: Some(base_path),
             imported_files: HashSet::new(),
             zp_allocator: ZeroPageAllocator::new(),
@@ -222,6 +228,8 @@ impl SemanticAnalyzer {
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
             type_registry: self.type_registry.clone(),
+            resolved_types: self.resolved_types.clone(),
+            imported_items: self.imported_items.clone(),
             warnings: self.warnings.clone(),
         })
     }
@@ -513,6 +521,14 @@ impl SemanticAnalyzer {
         imported_analyzer.imported_files = self.imported_files.clone();
         let imported_info = imported_analyzer.analyze(&ast)?;
 
+        // Collect all items from the imported file for codegen
+        // We collect ALL items, not just the imported symbols, because functions
+        // may depend on other functions in the same module
+        self.imported_items.extend(ast.items.clone());
+
+        // Also collect items from transitively imported modules
+        self.imported_items.extend(imported_info.imported_items.clone());
+
         // Import the requested symbols into our table
         for symbol_name in &import.symbols {
             let name = &symbol_name.node;
@@ -532,6 +548,38 @@ impl SemanticAnalyzer {
                     reason: format!("symbol '{}' not found in imported file", name),
                     span: symbol_name.span,
                 });
+            }
+        }
+
+        // Merge ALL resolved_symbols from the imported module
+        // This is necessary because when we emit imported functions during codegen,
+        // they reference symbols (variables, constants, addresses) using their original spans
+        for (span, symbol) in &imported_info.resolved_symbols {
+            self.resolved_symbols.insert(*span, symbol.clone());
+
+            // Also add constants and addresses to the symbol table so they're visible
+            // to code in this module
+            if matches!(symbol.kind, crate::sema::table::SymbolKind::Constant | crate::sema::table::SymbolKind::Address)
+                && self.table.lookup(&symbol.name).is_none()
+            {
+                self.table.insert(symbol.name.clone(), symbol.clone());
+            }
+        }
+
+        // Merge folded_constants so constant expressions from imported modules are available
+        for (span, value) in &imported_info.folded_constants {
+            self.folded_constants.insert(*span, value.clone());
+        }
+
+        // Merge resolved_types so type information from imported modules is available
+        for (span, ty) in &imported_info.resolved_types {
+            self.resolved_types.insert(*span, ty.clone());
+        }
+
+        // Merge function_metadata (already done above in the loop, but ensure transitives)
+        for (name, metadata) in &imported_info.function_metadata {
+            if !self.function_metadata.contains_key(name) {
+                self.function_metadata.insert(name.clone(), metadata.clone());
             }
         }
 
@@ -1403,7 +1451,7 @@ impl SemanticAnalyzer {
                 self.folded_constants.insert(expr.span, const_val);
             }
 
-        match &expr.node {
+        let result_ty = match &expr.node {
             Expr::Literal(lit) => match lit {
                 crate::ast::Literal::Integer(val) => {
                     // Infer type based on value range
@@ -1515,8 +1563,20 @@ impl SemanticAnalyzer {
                     _ => {}
                 }
 
-                // Standard case: both operands must have the same type
-                if left_ty != right_ty {
+                // Special handling for shift operations: allow u16 to be shifted by u8
+                // (shift amounts realistically never exceed 255)
+                let types_compatible = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+                    // Allow same-type shifts (u8 >> u8, u16 >> u16, etc.)
+                    // Or allow larger type to be shifted by u8 (u16 >> u8)
+                    left_ty == right_ty
+                        || (matches!(left_ty, Type::Primitive(crate::ast::PrimitiveType::U16))
+                            && matches!(right_ty, Type::Primitive(crate::ast::PrimitiveType::U8)))
+                } else {
+                    // For all other operations, types must match
+                    left_ty == right_ty
+                };
+
+                if !types_compatible {
                     return Err(SemaError::InvalidBinaryOp {
                         op: format!("{:?}", op),
                         left_ty: left_ty.display_name(),
@@ -1772,15 +1832,19 @@ impl SemanticAnalyzer {
                 // Type check the object being indexed
                 let object_ty = self.check_expr(object)?;
 
-                // Extract element type from array type
+                // Extract element type from array or string type
                 match &object_ty {
                     Type::Array(element_ty, _size) => {
                         // Return the element type
                         Ok((**element_ty).clone())
                     }
+                    Type::String => {
+                        // String indexing returns u8 (a single byte)
+                        Ok(Type::Primitive(crate::ast::PrimitiveType::U8))
+                    }
                     _ => {
                         Err(SemaError::TypeMismatch {
-                            expected: "array".to_string(),
+                            expected: "array or string".to_string(),
                             found: object_ty.display_name(),
                             span: object.span,
                         })
@@ -1788,30 +1852,41 @@ impl SemanticAnalyzer {
                 }
             }
             Expr::SliceLen(slice_expr) => {
-                // Verify the expression is actually a slice
+                // Verify the expression is actually a slice, array, or string
                 let slice_ty = self.check_expr(slice_expr)?;
 
-                // For now, we don't have a dedicated Slice type in the type system
-                // But we can check if it's a pointer or array and return u16 (size type)
+                // Check if it's a type that has a length
                 match &slice_ty {
-                    Type::Pointer(..) | Type::Array(_, _) => {
-                        // Slice length is always u16 on 6502 (our usize equivalent)
+                    Type::Pointer(..) | Type::Array(_, _) | Type::String => {
+                        // Slice/array/string length is always u16 on 6502 (our usize equivalent)
                         Ok(Type::Primitive(crate::ast::PrimitiveType::U16))
                     }
                     _ => Err(SemaError::TypeMismatch {
-                        expected: "slice or array".to_string(),
+                        expected: "slice, array, or string".to_string(),
                         found: slice_ty.display_name(),
                         span: slice_expr.span,
                     }),
                 }
             }
+        };
+
+        // Store the resolved type for this expression so codegen can access it
+        if let Ok(ref ty) = result_ty {
+            self.resolved_types.insert(expr.span, ty.clone());
         }
+
+        result_ty
     }
 
     fn resolve_type(&self, ty: &TypeExpr) -> Result<Type, SemaError> {
         match ty {
             TypeExpr::Primitive(p) => Ok(Type::Primitive(*p)),
             TypeExpr::Named(name) => {
+                // Special case: "str" maps to Type::String
+                if name == "str" {
+                    return Ok(Type::String);
+                }
+
                 // Check if it's a known type (struct or enum)
                 if self.type_registry.structs.contains_key(name) || self.type_registry.enums.contains_key(name) {
                     Ok(Type::Named(name.clone()))

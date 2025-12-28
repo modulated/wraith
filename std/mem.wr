@@ -10,13 +10,13 @@
 fn memcpy(dest: u16, src: u16, len: u8) {
     // For simplicity in this demo, we use inline assembly
     asm {
-        "LDY #$00"
-        "loop_memcpy:"
-        "LDA {src},Y"
-        "STA {dest},Y"
-        "INY"
-        "CPY {len}"
-        "BNE loop_memcpy"
+        "LDY #$00",
+        "loop_memcpy:",
+        "LDA {src},Y",
+        "STA {dest},Y",
+        "INY",
+        "CPY {len}",
+        "BNE loop_memcpy",
     }
 }
 
@@ -26,13 +26,13 @@ fn memcpy(dest: u16, src: u16, len: u8) {
 /// - len: Number of bytes to fill
 fn memset(dest: u16, value: u8, len: u8) {
     asm {
-        "LDA {value}"
-        "LDY #$00"
-        "loop_memset:"
-        "STA {dest},Y"
-        "INY"
-        "CPY {len}"
-        "BNE loop_memset"
+        "LDA {value}",
+        "LDY #$00",
+        "loop_memset:",
+        "STA {dest},Y",
+        "INY",
+        "CPY {len}",
+        "BNE loop_memset",
     }
 }
 
@@ -43,17 +43,71 @@ fn memset(dest: u16, value: u8, len: u8) {
 /// Returns: 1 if equal, 0 if not equal (as u8 for simplicity)
 fn memcmp(a: u16, b: u16, len: u8) -> u8 {
     asm {
-        "LDY #$00"
-        "loop_memcmp:"
-        "LDA {a},Y"
-        "CMP {b},Y"
-        "BNE not_equal"
-        "INY"
-        "CPY {len}"
-        "BNE loop_memcmp"
-        "LDA #$01"
-        "RTS"
-        "not_equal:"
-        "LDA #$00"
+        "LDY #$00",
+        "loop_memcmp:",
+        "LDA {a},Y",
+        "CMP {b},Y",
+        "BNE not_equal",
+        "INY",
+        "CPY {len}",
+        "BNE loop_memcmp",
+        "LDA #$01",
+        "RTS",
+        "not_equal:",
+        "LDA #$00",
+    }
+}
+
+// ============================================================================
+// Indirect Memory Access
+// ============================================================================
+
+/// Read a byte from an address using indirect addressing
+///
+/// Equivalent to: byte = *(address) in C
+/// Uses 6502 indirect indexed addressing mode
+///
+/// Example:
+/// ```
+/// value: u8 = mem_read(0x0400);  // Read from $0400
+/// ```
+fn mem_read(address: u16) -> u8 {
+    asm {
+        "LDY #$00",
+        "LDA ({address}),Y"
+    }
+    // Result is in A register, will be returned
+}
+
+/// Write a byte to an address using indirect addressing
+///
+/// Equivalent to: *(address) = value in C
+/// Uses 6502 indirect indexed addressing mode
+///
+/// Example:
+/// ```
+/// mem_write(0x0400, 42);  // Write 42 to $0400
+/// ```
+fn mem_write(address: u16, value: u8) {
+    asm {
+        "LDY #$00",
+        "LDA {value}",
+        "STA ({address}),Y"
+    }
+}
+
+/// Jump to address (indirect)
+///
+/// Transfers execution to the address specified.
+/// WARNING: This is typically used for monitor/debugger "Go" commands.
+/// Execution may not return unless the target code explicitly returns.
+///
+/// Example:
+/// ```
+/// mem_jump(0x8000);  // Execute code at $8000
+/// ```
+fn mem_jump(address: u16) {
+    asm {
+        "JMP ({address})"
     }
 }

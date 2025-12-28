@@ -345,7 +345,8 @@ fn inline_function_can_use_instruction_name() {
     // because they're meant to be direct wrappers for CPU instructions
     let _asm = compile_success(
         r#"
-        inline fn nop() {
+        #[inline]
+        fn nop() {
             asm {
                 "NOP"
             }

@@ -360,6 +360,15 @@ impl Parser<'_> {
             if let Some(Token::String(s)) = self.peek().cloned() {
                 self.advance();
                 lines.push(AsmLine { instruction: s });
+
+                // Require comma after each assembly line
+                // Allow optional trailing comma before closing brace
+                if !self.check(&Token::RBrace) {
+                    self.expect(&Token::Comma)?;
+                } else if self.check(&Token::Comma) {
+                    // Consume optional trailing comma
+                    self.advance();
+                }
             } else {
                 return Err(ParseError::unexpected_token(
                     self.current_span(),

@@ -49,12 +49,13 @@ pub fn compile(source: &str) -> CompileResult {
 
     // Code generation
     match generate(&ast, &program) {
-        Ok(asm) => CompileResult::Success(warnings, asm),
+        Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }
 }
 
 /// Compile a Wraith source string with a base path for imports
+#[allow(dead_code)]
 pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
     // Lex
     let tokens = match lex(source) {
@@ -83,7 +84,7 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
 
     // Code generation
     match generate(&ast, &program) {
-        Ok(asm) => CompileResult::Success(warnings, asm),
+        Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }
 }
@@ -134,7 +135,7 @@ pub fn analyze_only(source: &str) -> Result<ProgramInfo, String> {
 }
 
 // Legacy alias for backward compatibility with old test files
-#[allow(dead_code)]
+#[allow(unused_imports)]
 pub use compile_success as assert_compiles;
 
 /// Assert that source fails to compile with specific error phase

@@ -79,7 +79,6 @@ fn test_type_error_mismatch_assignment() {
 }
 
 #[test]
-#[ignore] // Type checking for invalid operations not fully implemented
 fn test_type_error_invalid_operation() {
     assert_error_contains(
         r#"
@@ -89,7 +88,7 @@ fn test_type_error_invalid_operation() {
             z: u8 = x + y;  // Can't add u8 and bool
         }
         "#,
-        "Invalid",
+        "invalid binary operation",
     );
 }
 
@@ -142,20 +141,6 @@ fn test_type_error_return_type_mismatch() {
         fn main() {}
         "#,
         "type mismatch",
-    );
-}
-
-#[test]
-#[ignore] // All variables are mutable by default in current language design
-fn test_type_error_immutable_assignment() {
-    assert_error_contains(
-        r#"
-        fn main() {
-            x: u8 = 10;
-            x = 20;  // x is not mutable
-        }
-        "#,
-        "immutable",
     );
 }
 

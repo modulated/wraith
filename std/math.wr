@@ -1,0 +1,333 @@
+// Wraith Math Standard Library
+// Mathematical operations optimized for u8 on 65C02
+//
+// This library provides efficient integer math operations for the 6502/65C02
+// processor, focusing on unsigned 8-bit values. Where applicable, 65C02-specific
+// instructions (SMB, RMB, BBS) are used for optimal performance.
+
+// ============================================================================
+// Comparison Operations
+// ============================================================================
+
+/// Return the minimum of two u8 values
+/// Optimized assembly: Uses CMP and BCC to avoid boolean intermediate
+/// Cycles: ~8 (1 comparison + 1 conditional branch)
+#[inline]
+fn min(a: u8, b: u8) -> u8 {
+    asm {
+        "LDA {a}",
+        "CMP {b}",
+        "BCC ISMIN",
+        "LDA {b}",
+        "ISMIN:",
+    }
+}
+
+/// Return the maximum of two u8 values
+/// Optimized assembly: Uses CMP and BCS to avoid boolean intermediate
+/// Cycles: ~8 (1 comparison + 1 conditional branch)
+#[inline]
+fn max(a: u8, b: u8) -> u8 {
+    asm {
+        "LDA {a}",
+        "CMP {b}",
+        "BCS ISMAX",
+        "LDA {b}",
+        "ISMAX:",
+    }
+}
+
+/// Clamp a value between min and max bounds (inclusive)
+/// Optimized assembly: Two comparisons with early exit
+/// Cycles: ~12-16 (best case: in range, worst case: clamped twice)
+#[inline]
+fn clamp(value: u8, min_val: u8, max_val: u8) -> u8 {
+    asm {
+        "LDA {value}",
+        "CMP {min_val}",
+        "BCS CHECK_MAX",
+        "LDA {min_val}",
+        "JMP DONE_CLAMP",
+        "CHECK_MAX:",
+        "CMP {max_val}",
+        "BCC DONE_CLAMP",
+        "BEQ DONE_CLAMP",
+        "LDA {max_val}",
+        "DONE_CLAMP:",
+    }
+}
+
+// ============================================================================
+// Bit Manipulation (65C02 SMB/RMB/BBS instructions)
+// ============================================================================
+
+/// Set a specific bit (0-7) in a byte using 65C02 SMB instructions
+/// Cycles: ~18-20
+/// Note: Uses zero page $20 for temporary storage
+#[inline]
+fn set_bit(value: u8, bit: u8) -> u8 {
+
+    asm {
+        "LDA {value}",
+        "STA $20",
+
+        "LDX {bit}",
+        "CPX #$00",
+        "BEQ bit0_s",
+        "CPX #$01",
+        "BEQ bit1_s",
+        "CPX #$02",
+        "BEQ bit2_s",
+        "CPX #$03",
+        "BEQ bit3_s",
+        "CPX #$04",
+        "BEQ bit4_s",
+        "CPX #$05",
+        "BEQ bit5_s",
+        "CPX #$06",
+        "BEQ bit6_s",
+        "SMB7 $20",
+        "JMP done_s",
+        "bit0_s:",
+        "SMB0 $20",
+        "JMP done_s",
+        "bit1_s:",
+        "SMB1 $20",
+        "JMP done_s",
+        "bit2_s:",
+        "SMB2 $20",
+        "JMP done_s",
+        "bit3_s:",
+        "SMB3 $20",
+        "JMP done_s",
+        "bit4_s:",
+        "SMB4 $20",
+        "JMP done_s",
+        "bit5_s:",
+        "SMB5 $20",
+        "JMP done_s",
+        "bit6_s:",
+        "SMB6 $20",
+        "JMP done_s",
+        "done_s:",
+        "LDA $20",
+
+    }
+
+}
+
+/// Clear a specific bit (0-7) in a byte using 65C02 RMB instructions
+/// Cycles: ~18-20
+/// Note: Uses zero page $20 for temporary storage
+#[inline]
+fn clear_bit(value: u8, bit: u8) -> u8 {
+
+    asm {
+        "LDA {value}",
+        "STA $20",
+
+        "LDX {bit}",
+        "CPX #$00",
+        "BEQ bit0_c",
+        "CPX #$01",
+        "BEQ bit1_c",
+        "CPX #$02",
+        "BEQ bit2_c",
+        "CPX #$03",
+        "BEQ bit3_c",
+        "CPX #$04",
+        "BEQ bit4_c",
+        "CPX #$05",
+        "BEQ bit5_c",
+        "CPX #$06",
+        "BEQ bit6_c",
+        "RMB7 $20",
+        "JMP done_c",
+        "bit0_c:",
+        "RMB0 $20",
+        "JMP done_c",
+        "bit1_c:",
+        "RMB1 $20",
+        "JMP done_c",
+        "bit2_c:",
+        "RMB2 $20",
+        "JMP done_c",
+        "bit3_c:",
+        "RMB3 $20",
+        "JMP done_c",
+        "bit4_c:",
+        "RMB4 $20",
+        "JMP done_c",
+        "bit5_c:",
+        "RMB5 $20",
+        "JMP done_c",
+        "bit6_c:",
+        "RMB6 $20",
+        "JMP done_c",
+        "done_c:",
+        "LDA $20",
+
+    }
+
+}
+
+/// Test if a specific bit (0-7) is set using 65C02 BBS instructions
+/// Cycles: ~20-22
+/// Returns: 1 if bit is set, 0 if clear
+/// Note: Uses zero page $20 for temporary storage
+#[inline]
+fn test_bit(value: u8, bit: u8) -> u8 {
+
+    asm {
+        "LDA {value}",
+        "STA $20",
+
+        "LDX {bit}",
+        "CPX #$00",
+        "BEQ bit0_t",
+        "CPX #$01",
+        "BEQ bit1_t",
+        "CPX #$02",
+        "BEQ bit2_t",
+        "CPX #$03",
+        "BEQ bit3_t",
+        "CPX #$04",
+        "BEQ bit4_t",
+        "CPX #$05",
+        "BEQ bit5_t",
+        "CPX #$06",
+        "BEQ bit6_t",
+        "BBS7 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit0_t:",
+        "BBS0 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit1_t:",
+        "BBS1 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit2_t:",
+        "BBS2 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit3_t:",
+        "BBS3 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit4_t:",
+        "BBS4 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit5_t:",
+        "BBS5 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit6_t:",
+        "BBS6 $20,bit_set_t",
+        "JMP bit_clear_t",
+        "bit_set_t:",
+        "LDA #$01",
+        "JMP done_t",
+        "bit_clear_t:",
+        "LDA #$00",
+        "done_t:",
+
+    }
+
+}
+
+// ============================================================================
+// Saturating Arithmetic
+// ============================================================================
+
+/// Add two u8 values with saturation at 255
+/// Optimized assembly: Result left in accumulator (no temp variable)
+/// Cycles: ~6-8 (saved 2 cycles by eliminating STA)
+/// Returns: a + b, or 255 if overflow would occur
+#[inline]
+fn saturating_add(a: u8, b: u8) -> u8 {
+    asm {
+        "CLC",
+        "LDA {a}",
+        "ADC {b}",
+        "BCC no_overflow_add",
+        "LDA #$FF",
+        "no_overflow_add:",
+    }
+}
+
+/// Subtract b from a with saturation at 0
+/// Optimized assembly: Result left in accumulator (no temp variable)
+/// Cycles: ~6-8 (saved 2 cycles by eliminating STA)
+/// Returns: a - b, or 0 if underflow would occur
+#[inline]
+fn saturating_sub(a: u8, b: u8) -> u8 {
+    asm {
+        "SEC",
+        "LDA {a}",
+        "SBC {b}",
+        "BCS no_underflow_sub",
+        "LDA #$00",
+        "no_underflow_sub:",
+    }
+}
+
+// ============================================================================
+// Advanced Bit Operations
+// ============================================================================
+
+/// Count the number of set bits (population count)
+/// Optimized assembly: Uses Y register for counting, TYA at end
+/// Cycles: ~58-76 (saved 2 cycles by using TYA instead of STY/LDA)
+/// Returns: number of 1 bits in the value
+#[inline]
+fn count_bits(value: u8) -> u8 {
+    asm {
+        "LDA {value}",
+        "LDX #$08",
+        "LDY #$00",
+        "count_loop:",
+        "LSR A",
+        "BCC bit_not_set",
+        "INY",
+        "bit_not_set:",
+        "DEX",
+        "BNE count_loop",
+        "TYA",
+    }
+}
+
+/// Reverse the bits in a byte
+/// Optimized assembly: Uses zero page $20 for temp storage
+/// Cycles: ~66-76 (saved cycles by using fixed ZP instead of variable)
+/// Example: 0b11010010 -> 0b01001011
+/// Note: Uses zero page $20 for temporary storage
+#[inline]
+fn reverse_bits(value: u8) -> u8 {
+    asm {
+        "LDA #$00",
+        "STA $20",
+        "LDA {value}",
+        "LDX #$08",
+        "reverse_loop:",
+        "LSR A",
+        "ROL $20",
+        "DEX",
+        "BNE reverse_loop",
+        "LDA $20",
+    }
+}
+
+/// Swap the high and low nibbles of a byte
+/// Optimized assembly: Result left in accumulator
+/// Cycles: ~10-14 (saved 2 cycles by eliminating STA)
+/// Example: 0xAB -> 0xBA
+#[inline]
+fn swap_nibbles(value: u8) -> u8 {
+    asm {
+        "LDA {value}",
+        "ASL A",
+        "ADC #$80",
+        "ROL A",
+        "ADC #$80",
+        "ROL A",
+        "ADC #$80",
+        "ROL A",
+        "ADC #$80",
+    }
+}

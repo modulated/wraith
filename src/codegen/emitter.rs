@@ -44,7 +44,7 @@ impl Default for Emitter {
 impl Emitter {
     pub fn new() -> Self {
         Self {
-            output: ".setcpu \"65C02\"\n\n".to_string(),
+            output: ".SETCPU \"65C02\"\n\n".to_string(),
             indent: 0,
             label_counter: 0,
             match_counter: 0,

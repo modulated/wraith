@@ -1,9 +1,9 @@
 [package]
 name = "wraith"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
-logos = "0.15"
+logos = "0.16"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+toml = "0.9.8"

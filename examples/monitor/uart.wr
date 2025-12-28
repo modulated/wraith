@@ -1,0 +1,278 @@
+// UART driver for TL16C550B
+// Provides basic serial communication functions
+
+// ============================================================================
+// TL16C550B UART Hardware Definitions
+// ============================================================================
+
+// UART base address - change this to relocate the UART
+const UART_BASE: u16 = 0xE000;
+
+// UART registers (DLAB = 0)
+addr UART_RBR = UART_BASE + 0x00;  // Receiver Buffer Register (read)
+addr UART_THR = UART_BASE + 0x00;  // Transmitter Holding Register (write)
+addr UART_IER = UART_BASE + 0x01;  // Interrupt Enable Register
+addr UART_IIR = UART_BASE + 0x02;  // Interrupt Identification Register (read)
+addr UART_FCR = UART_BASE + 0x02;  // FIFO Control Register (write)
+addr UART_LCR = UART_BASE + 0x03;  // Line Control Register
+addr UART_MCR = UART_BASE + 0x04;  // Modem Control Register
+addr UART_LSR = UART_BASE + 0x05;  // Line Status Register
+addr UART_MSR = UART_BASE + 0x06;  // Modem Status Register
+addr UART_SCR = UART_BASE + 0x07;  // Scratch Register
+
+// UART registers (DLAB = 1) - for baud rate divisor
+addr UART_DLL = UART_BASE + 0x00;  // Divisor Latch Low
+addr UART_DLM = UART_BASE + 0x01;  // Divisor Latch High
+
+// UART Line Status Register bits
+const UART_LSR_DR: u8   = 0x01;  // Data Ready
+const UART_LSR_OE: u8   = 0x02;  // Overrun Error
+const UART_LSR_PE: u8   = 0x04;  // Parity Error
+const UART_LSR_FE: u8   = 0x08;  // Framing Error
+const UART_LSR_BI: u8   = 0x10;  // Break Interrupt
+const UART_LSR_THRE: u8 = 0x20;  // Transmitter Holding Register Empty
+const UART_LSR_TEMT: u8 = 0x40;  // Transmitter Empty
+const UART_LSR_FIFOE: u8 = 0x80; // FIFO Error
+
+// UART Line Control Register bits
+const UART_LCR_WLS0: u8 = 0x01;  // Word Length Select bit 0
+const UART_LCR_WLS1: u8 = 0x02;  // Word Length Select bit 1
+const UART_LCR_STB: u8  = 0x04;  // Stop Bits
+const UART_LCR_PEN: u8  = 0x08;  // Parity Enable
+const UART_LCR_EPS: u8  = 0x10;  // Even Parity Select
+const UART_LCR_STKP: u8 = 0x20;  // Stick Parity
+const UART_LCR_BRK: u8  = 0x40;  // Break Control
+const UART_LCR_DLAB: u8 = 0x80;  // Divisor Latch Access Bit
+
+// UART FIFO Control Register bits
+const UART_FCR_ENABLE: u8 = 0x01;  // Enable FIFO
+const UART_FCR_RFRST: u8  = 0x02;  // Receiver FIFO Reset
+const UART_FCR_TFRST: u8  = 0x04;  // Transmitter FIFO Reset
+
+// Hardware constants and definitions
+
+// ============================================================================
+// Baud Rate Divisors (for 1.8432 MHz UART clock)
+// ============================================================================
+
+const BAUD_9600: u16 = 12;  // 1843200 / (16 * 9600) = 12
+const BAUD_19200: u16 = 6;  // 1843200 / (16 * 19200) = 6
+const BAUD_38400: u16 = 3;  // 1843200 / (16 * 38400) = 3
+const BAUD_57600: u16 = 2;  // 1843200 / (16 * 57600) = 2
+const BAUD_115200: u16 = 1; // 1843200 / (16 * 115200) = 1
+
+// ============================================================================
+// ASCII Character Constants
+// ============================================================================
+
+const ASCII_NUL: u8 = 0x00;    // Null
+const ASCII_BS: u8 = 0x08;     // Backspace
+const ASCII_TAB: u8 = 0x09;    // Horizontal Tab
+const ASCII_LF: u8 = 0x0A;     // Line Feed (newline)
+const ASCII_CR: u8 = 0x0D;     // Carriage Return
+const ASCII_ESC: u8 = 0x1B;    // Escape
+const ASCII_SPACE: u8 = 0x20;  // Space
+const ASCII_DEL: u8 = 0x7F;    // Delete
+
+
+// ============================================================================
+// UART Initialization
+// ============================================================================
+
+/// Initialize UART to 9600 baud, 8N1 (8 data bits, no parity, 1 stop bit)
+fn uart_init() {
+    // Set DLAB = 1 to access divisor latches
+    UART_LCR = UART_LCR_DLAB;
+
+    // Set baud rate divisor (9600 baud)
+    // Split 16-bit divisor into low and high bytes
+    divisor: u16 = BAUD_9600;
+    UART_DLL = divisor as u8;              // Low byte
+    UART_DLM = (divisor >> 8) as u8;       // High byte
+
+    // Set 8N1 format: 8 data bits, no parity, 1 stop bit
+    // DLAB = 0, No break, No parity, 1 stop bit, 8 bit word
+    UART_LCR = UART_LCR_WLS0 | UART_LCR_WLS1;  // 8 bits (WLS=11)
+
+    // Enable and reset FIFOs
+    UART_FCR = UART_FCR_ENABLE | UART_FCR_RFRST | UART_FCR_TFRST;
+
+    // Disable interrupts
+    UART_IER = 0x00;
+}
+
+// ============================================================================
+// Low-level UART I/O
+// ============================================================================
+
+/// Check if transmitter is ready to send
+fn uart_tx_ready() -> u8 {
+    if (UART_LSR & UART_LSR_THRE) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// Check if receiver has data available
+fn uart_rx_ready() -> u8 {
+    if (UART_LSR & UART_LSR_DR) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// Wait for transmitter to be ready
+fn uart_wait_tx() {
+    loop {
+        if uart_tx_ready() != 0 {
+            break;
+        }
+    }
+}
+
+/// Wait for receiver to have data
+fn uart_wait_rx() {
+    loop {
+        if uart_rx_ready() != 0 {
+            break;
+        }
+    }
+}
+
+/// Send a single byte over UART
+fn uart_putc(ch: u8) {
+    uart_wait_tx();
+    UART_THR = ch;
+}
+
+/// Receive a single byte from UART
+fn uart_getc() -> u8 {
+    uart_wait_rx();
+    return UART_RBR;
+}
+
+// ============================================================================
+// High-level UART I/O
+// ============================================================================
+
+/// Send a string over UART (null-terminated not supported, use fixed arrays)
+/// This is a helper that would need to be called multiple times for each char
+fn uart_puts_char(ch: u8) {
+    if ch == 0 {
+        return;  // Null terminator
+    }
+
+    // Convert LF to CRLF for terminal compatibility
+    if ch == ASCII_LF {
+        uart_putc(ASCII_CR);
+        uart_putc(ASCII_LF);
+    } else {
+        uart_putc(ch);
+    }
+}
+
+/// Send newline (CRLF)
+fn uart_newline() {
+    uart_putc(ASCII_CR);
+    uart_putc(ASCII_LF);
+}
+
+/// Send a space character
+fn uart_space() {
+    uart_putc(ASCII_SPACE);
+}
+
+/// Print a single hex digit (0-F)
+fn uart_puthex_digit(value: u8) {
+    digit: u8 = value & 0x0F;
+
+    if digit < 10 {
+        uart_putc(0x30 + digit);  // '0' + digit
+    } else {
+        uart_putc(0x41 + (digit - 10));  // 'A' + (digit - 10)
+    }
+}
+
+/// Print a byte as 2 hex digits
+fn uart_puthex_byte(value: u8) {
+    uart_puthex_digit(value >> 4);   // High nibble
+    uart_puthex_digit(value);         // Low nibble
+}
+
+/// Print a 16-bit word as 4 hex digits
+fn uart_puthex_word(value: u16) {
+    uart_puthex_byte((value >> 8) as u8);  // High byte
+    uart_puthex_byte(value as u8);         // Low byte
+}
+
+/// Get a line of input from UART (stores in buffer, returns length)
+/// Since we can't return arrays, this stores at a fixed location
+/// Returns: number of characters read
+fn uart_getline(buffer_addr: u16, max_len: u8) -> u8 {
+    pos: u8 = 0;
+    done: u8 = 0;
+
+    loop {
+        if done != 0 {
+            break;
+        }
+
+        ch: u8 = uart_getc();
+
+        if ch == ASCII_CR || ch == ASCII_LF {
+            // End of line
+            uart_newline();
+            done = 1;
+        } else if ch == ASCII_BS || ch == ASCII_DEL {
+            // Backspace
+            if pos > 0 {
+                pos = pos - 1;
+                uart_putc(ASCII_BS);
+                uart_putc(ASCII_SPACE);
+                uart_putc(ASCII_BS);
+            }
+        } else if ch >= 0x20 && ch < 0x7F {
+            // Printable character
+            if pos < max_len {
+                // Store character at buffer_addr + pos
+                // We'll need to use inline assembly for this
+                asm {
+                    "LDA {ch}",
+                    "LDX {pos}",
+                    "STA ({buffer_addr},X)"
+                }
+                uart_putc(ch);  // Echo
+                pos = pos + 1;
+            }
+        }
+    }
+
+    return pos;
+}
+
+/// Convert ASCII hex digit to value (returns 0xFF on error)
+fn hex_to_nibble(ch: u8) -> u8 {
+    if ch >= 0x30 && ch <= 0x39 {
+        // '0' - '9'
+        return ch - 0x30;
+    } else if ch >= 0x41 && ch <= 0x46 {
+        // 'A' - 'F'
+        return ch - 0x41 + 10;
+    } else if ch >= 0x61 && ch <= 0x66 {
+        // 'a' - 'f'
+        return ch - 0x61 + 10;
+    }
+    return 0xFF;  // Invalid
+}
+
+/// Convert 2 ASCII hex digits to byte
+fn hex_to_byte(high: u8, low: u8) -> u8 {
+    h: u8 = hex_to_nibble(high);
+    l: u8 = hex_to_nibble(low);
+
+    if h == 0xFF || l == 0xFF {
+        return 0;
+    }
+
+    return (h << 4) | l;
+}

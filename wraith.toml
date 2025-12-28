@@ -1,5 +1,4 @@
 # Wraith Compiler Configuration
-# Memory layout for 6502 target
 
 # Memory sections define where code and data can be placed
 # Each section has a name, start address, and end address

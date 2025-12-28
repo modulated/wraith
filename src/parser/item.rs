@@ -38,7 +38,7 @@ impl Parser<'_> {
                 Ok(Spanned::new(Item::Import(import), span))
             }
 
-            Some(Token::Fn) | Some(Token::Inline) => {
+            Some(Token::Fn) => {
                 let func = self.parse_function(attributes)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Function(Box::new(func)), span))
@@ -142,16 +142,13 @@ impl Parser<'_> {
         self.expect(&Token::Hash)?;
         self.expect(&Token::LBracket)?;
 
-        // Handle both identifiers and keywords as attribute names
+        // Handle identifiers as attribute names
         let attr = match self.peek().cloned() {
-            Some(Token::Inline) => {
-                self.advance();
-                FnAttribute::Inline
-            }
             Some(Token::Ident(name)) => {
                 let name_span = self.current_span();
                 self.advance();
                 match name.as_str() {
+                    "inline" => FnAttribute::Inline,
                     "noreturn" => FnAttribute::NoReturn,
                     "interrupt" => FnAttribute::Interrupt,
                     "nmi" => FnAttribute::Nmi,
@@ -220,13 +217,7 @@ impl Parser<'_> {
     }
 
     /// Parse a function definition
-    fn parse_function(&mut self, mut attributes: Vec<FnAttribute>) -> ParseResult<Function> {
-        let is_inline = self.check(&Token::Inline);
-        if is_inline {
-            self.advance();
-            attributes.push(FnAttribute::Inline);
-        }
-
+    fn parse_function(&mut self, attributes: Vec<FnAttribute>) -> ParseResult<Function> {
         self.expect(&Token::Fn)?;
 
         let name = self.expect_ident()?;
@@ -270,7 +261,6 @@ impl Parser<'_> {
             return_type,
             body,
             attributes,
-            is_inline,
         })
     }
 

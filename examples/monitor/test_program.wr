@@ -1,0 +1,121 @@
+// Example test program that can be loaded into RAM and executed via monitor
+// This demonstrates user programs that can be run with the G (Go) command
+//
+// To use:
+// 1. Compile this separately: wraith test_program.wr
+// 2. Extract hex bytes from the assembly
+// 3. Use monitor W command to write bytes to RAM (e.g., starting at 0x0300)
+// 4. Use monitor G command to execute: G 0300
+
+import { uart_putc, uart_newline, uart_puthex_byte } from "uart.wr";
+
+// Simple test program: Count from 0 to 9 and print to UART
+#[org(0x0300)]
+fn test_count() {
+    mut i: u8 = 0;
+
+    // Print "Count: "
+    uart_putc(0x43);  // C
+    uart_putc(0x6F);  // o
+    uart_putc(0x75);  // u
+    uart_putc(0x6E);  // n
+    uart_putc(0x74);  // t
+    uart_putc(0x3A);  // :
+    uart_putc(0x20);  // space
+
+    loop {
+        if i >= 10 {
+            break;
+        }
+
+        // Print number as hex
+        uart_puthex_byte(i);
+        uart_putc(0x20);  // space
+
+        i = i + 1;
+    }
+
+    uart_newline();
+
+    // Return to monitor
+    asm {
+        "RTS"
+    }
+}
+
+// Another test: Toggle bits at a memory address
+#[org(0x0350)]
+fn test_toggle() {
+    addr TARGET = 0x0200;
+
+    mut i: u8 = 0;
+
+    loop {
+        if i >= 8 {
+            break;
+        }
+
+        // Toggle a bit
+        TARGET = TARGET ^ (1 << i);
+
+        // Print result
+        uart_putc(0x42);  // B
+        uart_putc(0x69);  // i
+        uart_putc(0x74);  // t
+        uart_putc(0x20);  // space
+        uart_puthex_byte(i);
+        uart_putc(0x3A);  // :
+        uart_putc(0x20);  // space
+        uart_puthex_byte(TARGET);
+        uart_newline();
+
+        i = i + 1;
+    }
+
+    asm {
+        "RTS"
+    }
+}
+
+// LED blinker example (if you have LEDs on VIA port)
+#[org(0x0380)]
+fn test_blink() {
+    import { VIA_PORTB, VIA_DDRB } from "hardware.wr";
+
+    // Set VIA Port B to output
+    VIA_DDRB = 0xFF;
+
+    mut pattern: u8 = 0x01;
+    mut count: u8 = 0;
+
+    loop {
+        if count >= 16 {
+            break;
+        }
+
+        // Output pattern to LEDs
+        VIA_PORTB = pattern;
+
+        // Delay loop
+        mut delay: u16 = 0;
+        loop {
+            if delay >= 1000 {
+                break;
+            }
+            delay = delay + 1;
+        }
+
+        // Rotate pattern
+        if pattern == 0x80 {
+            pattern = 0x01;
+        } else {
+            pattern = pattern << 1;
+        }
+
+        count = count + 1;
+    }
+
+    asm {
+        "RTS"
+    }
+}

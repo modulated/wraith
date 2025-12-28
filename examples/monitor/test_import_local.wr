@@ -1,0 +1,8 @@
+import { ASCII_SPACE } from "./hardware.wr";
+
+fn test(ch: u8) -> u8 {
+    if ch == ASCII_SPACE {
+        return 1;
+    }
+    return 0;
+}

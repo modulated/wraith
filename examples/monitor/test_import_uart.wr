@@ -1,0 +1,12 @@
+// Test importing functions from uart.wr
+import { uart_init, uart_putc, uart_newline } from "./uart.wr";
+
+#[reset]
+fn main() {
+    uart_init();
+    uart_putc(0x48);  // 'H'
+    uart_putc(0x69);  // 'i'
+    uart_newline();
+
+    loop {}
+}

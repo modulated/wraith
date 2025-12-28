@@ -72,7 +72,6 @@ fn test_function_definition() {
         return_type: Some(Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8))),
         body: Spanned::dummy(Stmt::Block(vec![])),
         attributes: vec![],
-        is_inline: false,
     };
 
     assert_eq!(func.name.node, "add");
@@ -148,7 +147,6 @@ fn test_source_file() {
             return_type: Some(Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8))),
             body: Spanned::dummy(Stmt::Block(vec![])),
             attributes: vec![],
-            is_inline: false,
         }))),
     ]);
 

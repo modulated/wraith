@@ -91,11 +91,10 @@ fn main() {
     }
 
     // Code generation
-    let code = match codegen::generate(&ast, &program_info) {
-        Ok(code) => code,
+    let (code, section_alloc) = match codegen::generate(&ast, &program_info) {
+        Ok(result) => result,
         Err(e) => {
-            eprintln!("{}Error:{} code generation failed", RED, RESET);
-            eprintln!("{:?}", e);
+            eprintln!("{}Error:{} {}", RED, RESET, e);
             std::process::exit(1);
         }
     };
@@ -111,6 +110,14 @@ fn main() {
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
 
     println!("{}{:>12}{} {} in {:.2}ms", GREEN, "Finished", RESET, out_file, elapsed_ms);
+
+    // Print section statistics
+    let stats = section_alloc.get_statistics();
+    for stat in stats {
+        if stat.used > 0 {
+            println!("{}{:>12}{} {}", YELLOW, stat.name, RESET, stat.format_compact());
+        }
+    }
 }
 
 fn print_usage(program: &str) {

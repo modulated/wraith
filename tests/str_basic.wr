@@ -1,0 +1,11 @@
+// Test basic str type support
+const GREETING: str = "Hello, World!";
+
+fn test(msg: str) -> str {
+    return msg;
+}
+
+fn main() {
+    s: str = "Test";
+    result: str = test(GREETING);
+}

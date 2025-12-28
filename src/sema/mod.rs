@@ -415,6 +415,9 @@ pub struct FunctionMetadata {
     /// For inline functions, store the body and parameters for expansion
     pub inline_body: Option<Spanned<Stmt>>,
     pub inline_params: Option<Vec<FnParam>>,
+    /// For inline functions, store resolved symbols for parameters
+    /// This allows inline expansion across module boundaries
+    pub inline_param_symbols: Option<HashMap<Span, SymbolInfo>>,
 }
 
 pub struct ProgramInfo {
@@ -426,6 +429,10 @@ pub struct ProgramInfo {
     pub folded_constants: HashMap<Span, const_eval::ConstValue>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
+    /// Map of expression spans to their resolved types
+    pub resolved_types: HashMap<Span, types::Type>,
+    /// Items from imported modules that need to be emitted in codegen
+    pub imported_items: Vec<Spanned<crate::ast::Item>>,
     /// Compiler warnings collected during analysis
     pub warnings: Vec<Warning>,
 }

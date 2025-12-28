@@ -1,0 +1,487 @@
+// Standalone Monitor - No imports, works with current compiler
+// This version inlines all necessary UART code to avoid import issues
+
+// ============================================================================
+// Hardware Definitions
+// ============================================================================
+
+const UART_BASE: u16 = 0xE000;
+const BAUD_9600: u16 = 12;  // Divisor for 1.8432MHz crystal
+
+addr UART_RBR = 0xE000;  // Receiver Buffer Register
+addr UART_THR = 0xE000;  // Transmitter Holding Register
+addr UART_IER = 0xE001;  // Interrupt Enable Register
+addr UART_LCR = 0xE003;  // Line Control Register
+addr UART_MCR = 0xE004;  // Modem Control Register
+addr UART_LSR = 0xE005;  // Line Status Register
+addr UART_FCR = 0xE002;  // FIFO Control Register
+addr UART_DLL = 0xE000;  // Divisor Latch Low
+addr UART_DLM = 0xE001;  // Divisor Latch High
+
+const UART_LSR_DR: u8   = 0x01;  // Data Ready
+const UART_LSR_THRE: u8 = 0x20;  // Transmitter Holding Register Empty
+const UART_LCR_DLAB: u8 = 0x80;  // Divisor Latch Access Bit
+const UART_LCR_WLS0: u8 = 0x01;  // Word Length Select bit 0
+const UART_LCR_WLS1: u8 = 0x02;  // Word Length Select bit 1
+const UART_FCR_ENABLE: u8 = 0x01;  // Enable FIFO
+const UART_FCR_RFRST: u8  = 0x02;  // Receiver FIFO Reset
+const UART_FCR_TFRST: u8  = 0x04;  // Transmitter FIFO Reset
+
+const ASCII_SPACE: u8 = 0x20;
+const ASCII_CR: u8 = 0x0D;
+const ASCII_LF: u8 = 0x0A;
+const ASCII_BS: u8 = 0x08;
+
+// Monitor storage
+const CMD_BUFFER: u16 = 0x0200;
+const CMD_MAX_LEN: u8 = 64;
+
+addr TEMP_ADDR_LO = 0x00F0;
+addr TEMP_ADDR_HI = 0x00F1;
+addr TEMP_VAL = 0x00F2;
+addr TEMP_ADDR2_LO = 0x00F3;
+addr TEMP_ADDR2_HI = 0x00F4;
+
+// ============================================================================
+// String Constants using str type
+// ============================================================================
+
+const WELCOME: str = "\n\rWraith Monitor v1.0\nType 'H' for help\n\n";
+const PROMPT: str = "> ";
+const ERROR: str = "?ERR\n";
+const OK: str = "OK\n";
+const HELP_HEADER: str = "Commands:\n";
+const HELP_READ: str = "R AAAA - Read\n";
+const HELP_WRITE: str = "W AAAA DD - Write\n";
+const HELP_GO: str = "G AAAA - Go\n";
+const HELP_DUMP: str = "D AAAA BBBB - Dump\n";
+const JUMP_TO: str = "Jump to ";
+const RETURNED: str = "\nReturned\n";
+
+// ============================================================================
+// UART Functions (inlined to avoid import issues)
+// ============================================================================
+
+fn uart_init() {
+    UART_LCR = UART_LCR_DLAB;
+    UART_DLL = BAUD_9600 as u8;
+    UART_DLM = (BAUD_9600 >> 8) as u8;
+    UART_LCR = UART_LCR_WLS0 | UART_LCR_WLS1;
+    UART_FCR = UART_FCR_ENABLE | UART_FCR_RFRST | UART_FCR_TFRST;
+    UART_IER = 0x00;
+}
+
+fn uart_wait_tx() {
+    done: u8 = 0;
+    loop {
+        if done != 0 { break; }
+        if (UART_LSR & UART_LSR_THRE) != 0 {
+            done = 1;
+        }
+    }
+}
+
+fn uart_wait_rx() {
+    done: u8 = 0;
+    loop {
+        if done != 0 { break; }
+        if (UART_LSR & UART_LSR_DR) != 0 {
+            done = 1;
+        }
+    }
+}
+
+fn uart_putc(ch: u8) {
+    uart_wait_tx();
+    UART_THR = ch;
+}
+
+fn uart_getc() -> u8 {
+    uart_wait_rx();
+    return UART_RBR;
+}
+
+fn uart_puts(s: str) {
+    i: u16 = 0 as u16;
+    loop {
+        if i >= s.len { break; }
+        uart_putc(s[i as u8]);
+        i = i + 1 as u16;
+    }
+}
+
+fn uart_newline() {
+    uart_putc(ASCII_CR);
+    uart_putc(ASCII_LF);
+}
+
+fn uart_space() {
+    uart_putc(ASCII_SPACE);
+}
+
+fn uart_puthex_nibble(n: u8) {
+    if n < 10 {
+        uart_putc(0x30 + n);  // '0' + n
+    } else {
+        uart_putc(0x37 + n);  // 'A' - 10 + n
+    }
+}
+
+fn uart_puthex_byte(value: u8) {
+    uart_puthex_nibble((value >> 4) & 0x0F);
+    uart_puthex_nibble(value & 0x0F);
+}
+
+fn uart_puthex_word(value: u16) {
+    uart_puthex_byte((value >> 8) as u8);
+    uart_puthex_byte(value as u8);
+}
+
+fn uart_getline(buffer: u16, max_len: u8) -> u8 {
+    pos: u8 = 0;
+    done: u8 = 0;
+
+    loop {
+        if done != 0 { break; }
+
+        ch: u8 = uart_getc();
+
+        if ch == ASCII_CR || ch == ASCII_LF {
+            uart_newline();
+            done = 1;
+        } else if ch == ASCII_BS || ch == 0x7F {
+            if pos > 0 {
+                pos = pos - 1;
+                uart_putc(ASCII_BS);
+                uart_putc(ASCII_SPACE);
+                uart_putc(ASCII_BS);
+            }
+        } else if pos < max_len {
+            asm {
+                "LDX {pos}",
+                "LDA {ch}",
+                "STA $0200,X"
+            }
+            uart_putc(ch);
+            pos = pos + 1;
+        }
+    }
+
+    return pos;
+}
+
+fn hex_to_nibble(ch: u8) -> u8 {
+    if ch >= 0x30 && ch <= 0x39 {
+        return ch - 0x30;
+    } else if ch >= 0x41 && ch <= 0x46 {
+        return ch - 0x37;
+    } else if ch >= 0x61 && ch <= 0x66 {
+        return ch - 0x57;
+    }
+    return 0xFF;
+}
+
+fn hex_to_byte(ch1: u8, ch2: u8) -> u8 {
+    n1: u8 = hex_to_nibble(ch1);
+    n2: u8 = hex_to_nibble(ch2);
+    if n1 == 0xFF || n2 == 0xFF {
+        return 0xFF;
+    }
+    return (n1 << 4) | n2;
+}
+
+// ============================================================================
+// Print Functions using str type
+// ============================================================================
+
+fn print_welcome() {
+    uart_puts(WELCOME);
+}
+
+fn print_prompt() {
+    uart_puts(PROMPT);
+}
+
+fn print_error() {
+    uart_puts(ERROR);
+}
+
+fn print_ok() {
+    uart_puts(OK);
+}
+
+fn print_help() {
+    uart_puts(HELP_HEADER);
+    uart_puts(HELP_READ);
+    uart_puts(HELP_WRITE);
+    uart_puts(HELP_GO);
+    uart_puts(HELP_DUMP);
+}
+
+// ============================================================================
+// 16-bit Temp Storage Helpers
+// ============================================================================
+
+fn set_temp_addr(value: u16) {
+    TEMP_ADDR_LO = value as u8;
+    TEMP_ADDR_HI = (value >> 8) as u8;
+}
+
+fn get_temp_addr() -> u16 {
+    lo: u8 = TEMP_ADDR_LO;
+    hi: u8 = TEMP_ADDR_HI;
+    return ((hi as u16) << 8) | (lo as u16);
+}
+
+fn set_temp_addr2(value: u16) {
+    TEMP_ADDR2_LO = value as u8;
+    TEMP_ADDR2_HI = (value >> 8) as u8;
+}
+
+fn get_temp_addr2() -> u16 {
+    lo: u8 = TEMP_ADDR2_LO;
+    hi: u8 = TEMP_ADDR2_HI;
+    return ((hi as u16) << 8) | (lo as u16);
+}
+
+// ============================================================================
+// Memory Operations
+// ============================================================================
+
+fn mem_read(address: u16) -> u8 {
+    asm {
+        "LDY #$00",
+        "LDA ({address}),Y"
+    }
+}
+
+fn mem_write(address: u16, value: u8) {
+    asm {
+        "LDY #$00",
+        "LDA {value}",
+        "STA ({address}),Y"
+    }
+}
+
+fn mem_jump(address: u16) {
+    asm {
+        "JMP ({address})"
+    }
+}
+
+// ============================================================================
+// Command Parser
+// ============================================================================
+
+fn skip_spaces(pos: u8) -> u8 {
+    p: u8 = pos;
+    done: u8 = 0;
+
+    loop {
+        if done != 0 { break; }
+        ch: u8 = 0;
+        asm {
+            "LDX {p}",
+            "LDA $0200,X",
+            "STA {ch}"
+        }
+        if ch == ASCII_SPACE {
+            p = p + 1;
+        } else {
+            done = 1;
+        }
+    }
+    return p;
+}
+
+fn parse_hex_word(pos: u8) -> u8 {
+    p: u8 = pos;
+    result: u16 = 0 as u16;
+    i: u8 = 0;
+
+    loop {
+        if i >= 4 { break; }
+        ch: u8 = 0;
+        asm {
+            "LDX {p}",
+            "LDA $0200,X",
+            "STA {ch}"
+        }
+        nibble: u8 = hex_to_nibble(ch);
+        if nibble == 0xFF {
+            return 0xFF;
+        }
+        result = (result << 4) | (nibble as u16);
+        p = p + 1;
+        i = i + 1;
+    }
+
+    set_temp_addr(result);
+    return p;
+}
+
+fn parse_hex_byte(pos: u8) -> u8 {
+    p: u8 = pos;
+    ch1: u8 = 0;
+    ch2: u8 = 0;
+
+    asm {
+        "LDX {p}",
+        "LDA $0200,X",
+        "STA {ch1}",
+        "INX",
+        "LDA $0200,X",
+        "STA {ch2}"
+    }
+
+    result: u8 = hex_to_byte(ch1, ch2);
+    TEMP_VAL = result;
+    return p + 2;
+}
+
+// ============================================================================
+// Command Handlers
+// ============================================================================
+
+fn cmd_read() {
+    address: u16 = get_temp_addr();
+    value: u8 = mem_read(address);
+    uart_puthex_word(address);
+    uart_putc(0x3A);  // :
+    uart_space();
+    uart_puthex_byte(value);
+    uart_newline();
+}
+
+fn cmd_write() {
+    mem_write(get_temp_addr(), TEMP_VAL);
+    print_ok();
+}
+
+fn cmd_go() {
+    address: u16 = get_temp_addr();
+    uart_puts(JUMP_TO);
+    uart_puthex_word(address);
+    uart_newline();
+    mem_jump(address);
+    uart_puts(RETURNED);
+}
+
+fn cmd_dump() {
+    address: u16 = get_temp_addr();
+    end: u16 = get_temp_addr2();
+    count: u8 = 0;
+
+    loop {
+        if address > end { break; }
+
+        if count == 0 {
+            uart_puthex_word(address);
+            uart_putc(0x3A);  // :
+            uart_space();
+        }
+
+        value: u8 = mem_read(address);
+        uart_puthex_byte(value);
+        uart_space();
+
+        address = address + (1 as u16);
+        count = count + 1;
+
+        if count >= 16 {
+            uart_newline();
+            count = 0;
+        }
+    }
+
+    if count != 0 {
+        uart_newline();
+    }
+}
+
+// ============================================================================
+// Command Dispatcher
+// ============================================================================
+
+fn process_command(len: u8) {
+    if len == 0 { return; }
+
+    cmd: u8 = 0;
+    asm {
+        "LDA $0200",
+        "STA {cmd}"
+    }
+
+    if cmd >= 0x61 && cmd <= 0x7A {
+        cmd = cmd - 0x20;
+    }
+
+    pos: u8 = 1;
+    pos = skip_spaces(pos);
+
+    if cmd == 0x48 {
+        print_help();
+        return;
+    } else if cmd == 0x52 {
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            cmd_read();
+            return;
+        }
+    } else if cmd == 0x57 {
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            pos = skip_spaces(pos);
+            pos = parse_hex_byte(pos);
+            if pos != 0xFF {
+                cmd_write();
+                return;
+            }
+        }
+    } else if cmd == 0x47 {
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            cmd_go();
+            return;
+        }
+    } else if cmd == 0x44 {
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            start: u16 = get_temp_addr();
+            pos = skip_spaces(pos);
+            pos = parse_hex_word(pos);
+            if pos != 0xFF {
+                set_temp_addr2(get_temp_addr());
+                set_temp_addr(start);
+                cmd_dump();
+                return;
+            }
+        }
+    }
+
+    print_error();
+}
+
+// ============================================================================
+// Main Monitor Loop
+// ============================================================================
+
+#[reset]
+fn main() {
+    // CPU initialization
+    asm {
+        "LDX #$FF",
+        "TXS",           // Set stack pointer
+        "CLD",           // Clear decimal mode
+        "SEI"            // Disable interrupts
+    }
+
+    uart_init();
+    print_welcome();
+
+    loop {
+        print_prompt();
+        len: u8 = uart_getline(CMD_BUFFER, CMD_MAX_LEN);
+        process_command(len);
+    }
+}

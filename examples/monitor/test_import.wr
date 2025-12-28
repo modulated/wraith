@@ -1,0 +1,16 @@
+// Simple test of the import system
+import { VIA_PORTB, VIA_DDRB } from "./via.wr";
+
+fn test_via() {
+    // Configure PORTB as output
+    VIA_DDRB = 0xFF;
+
+    // Set all bits high
+    VIA_PORTB = 0xFF;
+}
+
+#[reset]
+fn main() {
+    test_via();
+    loop {}
+}

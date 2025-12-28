@@ -1,0 +1,7 @@
+//! Test importing from intrinsics.wr
+
+import { nop } from "intrinsics.wr";
+
+fn main() {
+    nop();
+}

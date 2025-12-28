@@ -1,10 +1,10 @@
 # 6502 Language Specification
 
-A C-like systems programming language designed specifically for the 6502 processor, taking inspiration from Rust's type system while remaining simple and explicit.
+A systems programming language designed specifically for the 6502 processor, taking modern inspiration while remaining simple and explicit.
 
 ## Design Philosophy
 
--   **Simple and Explicit**: No type inference, explicit mutability, clear syntax
+-   **Simple and Explicit**: No type inference, explicit code, clear syntax
 -   **6502-Optimized**: Zero page hints, efficient calling convention, minimal overhead
 -   **Memory-Conscious**: Direct control over memory layout and access patterns
 -   **No Runtime Overhead**: Compile-time features only, no garbage collection
@@ -48,7 +48,7 @@ x = 20;                      // OK - all variables are mutable
 
 ### Zero Page Hint
 
-The `zp` keyword suggests the compiler allocate a variable to zero page for faster access. This is a **hint**, not a requirement - the compiler may ignore it if zero page space is exhausted.
+The `zp` keyword suggests the compiler allocate a variable to zero page for faster access. This is a **hint**, not a requirement - the compiler may ignore it if deemed not necessary.
 
 ```
 zp fast_var: u8 = 0;         // Compiler will try to use zero page
@@ -112,7 +112,8 @@ fn no_return(x: u8) {
 ### Function Attributes
 
 ```
-inline fn fast_function(x: u8) -> u8 {
+#[inline]
+fn fast_function(x: u8) -> u8 {
     return x * 2;
 }
 
@@ -129,26 +130,30 @@ fn irq_handler() {
 
 ### Calling Convention
 
-**Zero Page Convention:**
+**Zero Page Parameter Passing:**
 
--   `$02-$0F`: Function arguments (14 bytes)
--   `$10-$1F`: Return values (16 bytes)
--   `$20-$3F`: Caller-saved temporaries (32 bytes)
--   `$40-$7F`: Callee-saved locals (64 bytes)
+Arguments are passed via zero page memory for fast access. The 6502's zero page provides faster addressing (3-4 cycles vs 4-5 for absolute addressing) and enables special addressing modes.
+
+**Memory Layout:**
+
+-   `$00-$1F` (32 bytes): System reserved
+-   `$20-$2F` (16 bytes): Temporary storage for compiler-generated code
+-   `$30-$3F` (16 bytes): Pointer operations scratch space
+-   `$40-$7F` (64 bytes): Local variable allocation
+-   `$80-$BF` (64 bytes): Function parameter passing
+-   `$C0-$FF` (64 bytes): Available for future expansion
 -   Hardware stack (`$0100-$01FF`): Only JSR/RTS return addresses
 
-**Example:**
+**Parameter Passing:**
 
-```
-fn add(a: u8, b: u8) -> u8 {
-    return a + b;
-}
+-   Arguments stored sequentially starting at `$80`: first arg at `$80`, second at `$81`, etc.
+-   Return values passed in A register (with X for 16-bit values)
+-   Caller stores arguments before JSR, callee reads from parameter locations
+-   Maximum 64 bytes of parameters per function call
 
-// Compiles to:
-// Args: a=$02, b=$03
-// Return: $10
-// Caller loads $02, $03, JSR add, reads $10
-```
+**Call Depth:**
+
+With only return addresses on hardware stack (2 bytes per JSR/RTS), the maximum call depth is **128 function calls**. If parameters were also stack-based, depth would be reduced to ~20-40 calls depending on parameter count.
 
 ## Memory Mapped I/O
 
@@ -206,16 +211,6 @@ p2: Point = Point { x: 5, y: 5 };
 p2.x = 15;
 
 x_coord: u8 = p.x;
-```
-
-### Attributes
-
-```
-#[zp_section]
-struct FastData {
-    counter: u8,
-    temp: u8,
-}
 ```
 
 ## Enums
@@ -311,19 +306,6 @@ ptr2: *u8  = &y;
 // Pointer arithmetic
 screen: *u8 = 0x0400 as *u8;
 *(screen + 10) = 65;       // Write 'A' at offset 10
-```
-
-### Memory-Mapped I/O
-
-```
-VIC_BORDER: *u8 = 0xD020 as *u8;
-VIC_BACKGROUND: *u8 = 0xD021 as *u8;
-VIC_RASTER: *u8 = 0xD012 as *u8;
-
-fn set_colors() {
-    *VIC_BORDER = 0;
-    *VIC_BACKGROUND = 6;
-}
 ```
 
 ## Control Flow
@@ -437,6 +419,7 @@ ptr: *u8 = addr as *u8;
 ```
 
 No implicit conversions - all casts must be explicit.
+No error checking - casts that are invalid will overflow/underflow
 
 ## Inline Assembly
 
@@ -476,83 +459,20 @@ Variables in `{}` are substituted with their memory locations.
 #[inline]               // Suggest inlining
 fn small_function() { }
 
-#[noreturn]             // Never returns
-fn panic() { }
-
-#[interrupt]            // Interrupt handler
+#[irq]            // Interrupt request handler
 fn irq() { }
+
+#[nmi]            // Non maskable interrupt handler
+fn nmi() { }
+
+#[reset]          // Reset handler
+fn reset() { }
 
 #[org(0x8000)]         // Place at specific address
 fn main() -> u8 { }
 
 #[section("STDLIB")]   // Place in named memory section
 fn imported_fn() { }
-```
-
-#### Inline Functions
-
-The `#[inline]` attribute or `inline fn` syntax causes the compiler to expand function calls inline rather than using JSR/RTS instructions. This eliminates function call overhead but increases code size.
-
-**Usage:**
-
-```wraith
-// Using inline keyword
-inline fn add(a: u8, b: u8) -> u8 {
-    return a + b;
-}
-
-// Using attribute
-#[inline]
-fn double(x: u8) -> u8 {
-    return x + x;
-}
-
-fn main() {
-    result: u8 = add(5, 3);  // Expanded inline, no JSR
-}
-```
-
-**How it works:**
-
-- Function body is stored during semantic analysis
-- At call sites, the body is expanded directly into the caller
-- Parameters are stored in the same zero-page locations as normal calls
-- Return statements in inline functions don't emit RTS
-- Result is left in the A register
-
-**Benefits:**
-
-- Eliminates JSR/RTS overhead (12 cycles saved per call)
-- Enables additional optimizations (constant propagation, dead code elimination)
-- Ideal for small, frequently-called functions
-
-**Limitations:**
-
-- Increases code size (body duplicated at each call site)
-- Currently uses simple parameter location reuse (no true parameter substitution)
-- Recursive inline functions are not supported
-- Function still has a separate definition for potential non-inline calls
-
-**Best practices:**
-
-- Use for small functions (< 10 instructions)
-- Use for functions called frequently in hot loops
-- Avoid for large functions or functions called infrequently
-- Consider code size vs performance tradeoffs
-
-### Type Attributes
-
-```
-#[zp_section]
-struct FastVars {
-    u8 counter,
-}
-
-#[packed]
-struct TightLayout {
-    u8 a,
-    u16 b,
-}
 ```
 
 ## Modules and Imports
@@ -567,92 +487,32 @@ import {symbol1, symbol2, symbol3} from "module.wr";
 
 ### Example
 
-**math.wr:**
-```
-const PI: u8 = 3;
-
-fn add(a: u8, b: u8) -> u8 {
-    return a + b;
-}
-
-fn mul(a: u8, b: u8) -> u8 {
-    return a * b;
-}
-```
-
-**main.wr:**
-```
-import {add, mul, PI} from "math.wr";
-
-fn main() {
-    result: u8 = add(10, 20);
-    area: u8 = mul(PI, 4);
-}
-```
+TODO - add example
 
 ### Import Resolution
 
-- **Relative imports**: Start with `./` or `../`
-  ```
-  import {foo} from "./utils.wr";
-  import {bar} from "../lib/helper.wr";
-  ```
+-   **Relative imports**: Start with `./` or `../`
 
-- **Non-relative imports**: Searched in standard library directory first, then current directory
-  ```
-  import {memcpy} from "std.wr";  // Searches stdlib first
-  ```
+    ```
+    import {foo} from "./utils.wr";
+    import {bar} from "../lib/helper.wr";
+    ```
 
-### Unused Import Warnings
-
-The compiler warns about imported symbols that are never used:
-
-```
-import {foo, bar, baz} from "module.wr";
-
-fn main() {
-    x: u8 = foo();    // Only foo is used
-}
-// Warning: unused import 'bar'
-// Warning: unused import 'baz'
-```
+-   **Non-relative imports**: Searched in standard library directory first, then current directory
+    ```
+    import {memcpy} from "std.wr";  // Searches stdlib first
+    ```
 
 ### Limitations
 
-- No module hierarchy or namespaces (flat file imports only)
-- No pub/private visibility (all symbols in a file are importable)
-- No re-exports
-- No wildcard imports (`import *`)
+These may be changed in future versions.
 
-## Memory Layout
+-   No module hierarchy or namespaces (flat file imports only)
+-   No pub/private visibility (all symbols in a file are importable)
+-   No re-exports
+-   No wildcard imports (`import *`)
 
-### Zero Page ($00-$FF)
-
--   Fastest access (3 vs 4 cycles)
--   Required for some addressing modes
--   Limited to 256 bytes
--   Requested with `zp` keyword hint (compiler will try to honor)
--   **When zero page is exhausted**: Compilation fails with `OutOfZeroPage` error
-
-### Stack ($0100-$01FF)
-
--   Hardware stack, 256 bytes
--   Used only for:
-  - JSR/RTS (function return addresses)
-  - Preserving registers (PHA/PLA) in interrupt handlers
-  - Temporary storage during complex expressions
--   **Not used for**:
-  - Function arguments (passed via zero page)
-  - Local variables (allocated in zero page or absolute memory)
-
-### General Memory ($0200+)
-
--   Regular variables and data
--   Slower access than zero page
--   Used when variables don't fit in zero page
--   Unlimited (up to 64KB total address space)
-
-## Complete Example
+## Example Program
 
 ```
 struct Sprite {
@@ -702,144 +562,6 @@ fn main() -> u8 {
 
     return 0;
 }
-```
-
-## Assembly Mapping Examples
-
-### Variable Access
-
-```
-x: u8 = 42;
-
-// Compiles to:
-LDA #42
-STA $0200    // x at $0200
-```
-
-### Zero Page Variable
-
-```
-zp x: u8 = 42;
-
-// Compiles to:
-LDA #42
-STA $80      // x at $80 (zero page)
-```
-
-### 16-bit Addition
-
-```
-a: u16 = 100;
-b: u16 = 200;
-c: u16 = a + b;
-
-// Compiles to:
-CLC
-LDA $0200    // a low
-ADC $0202    // b low
-STA $0204    // c low
-LDA $0201    // a high
-ADC $0203    // b high
-STA $0205    // c high
-```
-
-### Function Call
-
-```
-fn add(a: u8, b: u8) -> u8 {
-    return a + b;
-}
-result: u8 = add(5, 10);
-
-// Compiles to:
-LDA #5
-STA $02      // arg0
-LDA #10
-STA $03      // arg1
-JSR add
-LDA $10      // return value
-STA result
-
-add:
-    CLC
-    LDA $02
-    ADC $03
-    STA $10
-    RTS
-```
-
-### Struct Access
-
-```
-p: Point = Point { x: 10, y: 20 };
-a: u8 = p.x;
-
-// Compiles to:
-LDA #10
-STA $0200    // p.x
-LDA #20
-STA $0201    // p.y
-
-LDA $0200    // load p.x
-STA $0202    // store to a
-```
-
-### Array Indexing
-
-```
-arr: [u8; 5] = [1, 2, 3, 4, 5];
-x: u8 = arr[2];
-
-// Compiles to:
-LDX #2
-LDA arr_data,X
-STA x
-```
-
-### Pointer Dereference
-
-```
-value: u8 = 42;
-ptr: *u8 = &value;
-x: u8 = *ptr;
-
-// Compiles to:
-LDA #42
-STA $0200    // value
-
-LDA #$00
-STA $0201    // ptr low
-LDA #$02
-STA $0202    // ptr high
-
-LDY #0
-LDA ($0201),Y  // dereference
-STA $0203    // x
-```
-
-### Match Statement Jump Table
-
-```
-match tag {
-    0 => { case0(); },
-    1 => { case1(); },
-    2 => { case2(); },
-}
-
-// Compiles to:
-LDA tag
-ASL          // multiply by 2
-TAX
-LDA jump_table+1,X
-PHA
-LDA jump_table,X
-PHA
-RTS          // jump to address
-
-jump_table:
-    .word case0-1
-    .word case1-1
-    .word case2-1
 ```
 
 ## Reserved Keywords
@@ -895,32 +617,3 @@ u16       while     zp        as        true      false
    comment
 */
 ```
-
-## Future Considerations
-
-Features not yet specified but may be added:
-
--   Module system for code organization
--   Basic preprocessor or build system integration
--   Expanded standard library (if any)
--   More sophisticated optimization hints
--   Debugging annotations
--   Macro system (currently excluded for simplicity)
-
-## Design Rationale
-
-### Why No Type Inference?
-
-Keeps compilation simple and code explicit. On a resource-constrained system, clarity is paramount.
-
-### Why Zero Page Hints?
-
-The 6502's zero page is a critical performance feature. Giving programmers control while letting the compiler decide is a good balance.
-
-### Why Fat Pointers for Slices?
-
-Bounds checking can be optional, but having length available enables safer code and clearer APIs. The 3-byte overhead is acceptable.
-
-### Why This Calling Convention?
-
-Zero page access is fast (3-4 cycles vs 4-5 for absolute). Keeping the hardware stack clean simplifies debugging and reduces overhead.

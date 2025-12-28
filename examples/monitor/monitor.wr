@@ -1,0 +1,402 @@
+// Simple Monitor/Debugger for 6502 Homebrew Computer
+// Commands:
+//   R AAAA        - Read byte from address AAAA
+//   W AAAA DD    - Write byte DD to address AAAA
+//   G AAAA       - Go/Jump to address AAAA
+//   D AAAA BBBB  - Dump memory from AAAA to BBBB
+//   H            - Help
+
+import {
+    uart_init, uart_putc, uart_newline, uart_space,
+    uart_puthex_byte, uart_puthex_word, uart_getline,
+    hex_to_byte, hex_to_nibble,
+    ASCII_SPACE
+} from "./uart.wr";
+
+import {
+    set_stack_pointer, clear_decimal, disable_interrupts, enable_interrupts
+} from "intrinsics.wr";
+
+import {
+    mem_read, mem_write, mem_jump
+} from "mem.wr";
+
+// ============================================================================
+// Monitor Data Storage (in zero page for easy access)
+// ============================================================================
+
+// Command buffer in low RAM (256 bytes should be plenty)
+const CMD_BUFFER: u16 = 0x0200;
+const CMD_MAX_LEN: u8 = 64;
+
+// Temporary storage for parsed values
+addr TEMP_ADDR_LO = 0x00F0;  // 16-bit temporary address (low byte)
+addr TEMP_ADDR_HI = 0x00F1;  // 16-bit temporary address (high byte)
+addr TEMP_VAL = 0x00F2;       // 8-bit temporary value
+addr TEMP_ADDR2_LO = 0x00F3; // Second address for range commands (low byte)
+addr TEMP_ADDR2_HI = 0x00F4; // Second address for range commands (high byte)
+
+// ============================================================================
+// Helper Functions for 16-bit Temp Storage
+// ============================================================================
+
+/// Store u16 value in TEMP_ADDR
+fn set_temp_addr(value: u16) {
+    TEMP_ADDR_LO = value as u8;
+    TEMP_ADDR_HI = (value >> 8) as u8;
+}
+
+/// Read u16 value from TEMP_ADDR
+fn get_temp_addr() -> u16 {
+    lo: u8 = TEMP_ADDR_LO;
+    hi: u8 = TEMP_ADDR_HI;
+    return ((hi as u16) << 8) | (lo as u16);
+}
+
+/// Store u16 value in TEMP_ADDR2
+fn set_temp_addr2(value: u16) {
+    TEMP_ADDR2_LO = value as u8;
+    TEMP_ADDR2_HI = (value >> 8) as u8;
+}
+
+/// Read u16 value from TEMP_ADDR2
+fn get_temp_addr2() -> u16 {
+    lo: u8 = TEMP_ADDR2_LO;
+    hi: u8 = TEMP_ADDR2_HI;
+    return ((hi as u16) << 8) | (lo as u16);
+}
+
+// ============================================================================
+// String Output Helpers
+// ============================================================================
+
+// String constants 
+const WELCOME: str = "\n\rWraith Monitor v1.0\nType 'H' for help\n\n";
+const PROMPT: str = "> ";
+const ERROR: str = "?ERR\n";
+const OK: str = "OK\n";
+const HELP_HEADER: str = "Commands:\n";
+const HELP_READ: str = "R AAAA - Read\n";
+const HELP_WRITE: str = "W AAAA DD - Write\n";
+const HELP_GO: str = "G AAAA - Go\n";
+const HELP_DUMP: str = "D AAAA BBBB - Dump\n";
+const JUMP_TO: str = "Jump to ";
+const RETURNED: str = "\nReturned\n";
+
+/// Helper function to print a string
+fn puts(s: str) {
+    i: u16 = 0 as u16;
+    loop {
+        if i >= s.len { break; }
+        uart_putc(s[i as u8]);
+        i = i + 1 as u16;
+    }
+}
+
+fn print_welcome() {
+    puts(WELCOME);
+}
+
+fn print_prompt() {
+    puts(PROMPT);
+}
+
+fn print_error() {
+    puts(ERROR);
+}
+
+fn print_ok() {
+    puts(OK);
+}
+
+fn print_help() {
+    puts(HELP_HEADER);
+    puts(HELP_READ);
+    puts(HELP_WRITE);
+    puts(HELP_GO);
+    puts(HELP_DUMP);
+}
+
+// ============================================================================
+// Command Parser Helpers
+// ============================================================================
+
+/// Skip whitespace in buffer, returns new position
+fn skip_spaces(pos: u8) -> u8 {
+    p: u8 = pos;
+    done: u8 = 0;
+
+    loop {
+        if done != 0 {
+            break;
+        }
+
+        // Read character from buffer
+        ch: u8 = 0;
+        asm {
+            "LDX {p}",
+            "LDA $0200,X",
+            "STA {ch}"
+        }
+
+        if ch == ASCII_SPACE {
+            p = p + 1;
+        } else {
+            done = 1;
+        }
+    }
+
+    return p;
+}
+
+/// Parse 4 hex digits into 16-bit address, returns new position (or 0xFF on error)
+fn parse_hex_word(pos: u8) -> u8 {
+    p: u8 = pos;
+    result: u16 = 0 as u16;
+    i: u8 = 0;
+
+    // Parse 4 hex digits
+    loop {
+        if i >= 4 {
+            break;
+        }
+
+        // Read character from buffer
+        ch: u8 = 0;
+        asm {
+            "LDX {p}",
+            "LDA $0200,X",
+            "STA {ch}"
+        }
+
+        nibble: u8 = hex_to_nibble(ch);
+        if nibble == 0xFF {
+            return 0xFF;  // Error
+        }
+
+        result = (result << 4) | (nibble as u16);
+        p = p + 1;
+        i = i + 1;
+    }
+
+    set_temp_addr(result);
+    return p;
+}
+
+/// Parse 2 hex digits into byte, returns new position (or 0xFF on error)
+fn parse_hex_byte(pos: u8) -> u8 {
+    p: u8 = pos;
+
+    // Read two characters from buffer
+    ch1: u8 = 0;
+    ch2: u8 = 0;
+
+    asm {
+        "LDX {p}",
+        "LDA $0200,X",
+        "STA {ch1}",
+        "INX",
+        "LDA $0200,X",
+        "STA {ch2}"
+    }
+
+    result: u8 = hex_to_byte(ch1, ch2);
+    TEMP_VAL = result;
+
+    return p + 2;
+}
+
+// ============================================================================
+// Command Handlers
+// ============================================================================
+
+/// Handle 'R AAAA' - Read byte from address
+fn cmd_read() {
+    address: u16 = get_temp_addr();
+    value: u8 = mem_read(address);
+    uart_puthex_word(address);
+    uart_putc(0x3A);  // :
+    uart_space();
+    uart_puthex_byte(value);
+    uart_newline();
+}
+
+/// Handle 'W AAAA DD' - Write byte to address
+fn cmd_write() {
+    mem_write(get_temp_addr(), TEMP_VAL);
+    print_ok();
+}
+
+/// Handle 'G AAAA' - Jump to address
+fn cmd_go() {
+    address: u16 = get_temp_addr();
+    puts(JUMP_TO);
+    uart_puthex_word(address);
+    uart_newline();
+
+    // Jump to address (does not return unless code returns here)
+    mem_jump(address);
+
+    // If we return, show message
+    puts(RETURNED);
+}
+
+/// Handle 'D AAAA BBBB' - Dump memory range
+fn cmd_dump() {
+    address: u16 = get_temp_addr();
+    end: u16 = get_temp_addr2();
+    count: u8 = 0;
+
+    loop {
+        if address > end {
+            break;
+        }
+
+        // Print address at start of line
+        if count == 0 {
+            uart_puthex_word(address);
+            uart_putc(0x3A);  // :
+            uart_space();
+        }
+
+        // Print byte
+        value: u8 = mem_read(address);
+        uart_puthex_byte(value);
+        uart_space();
+
+        address = address + (1 as u16);
+        count = count + 1;
+
+        // 16 bytes per line
+        if count >= 16 {
+            uart_newline();
+            count = 0;
+        }
+    }
+
+    if count != 0 {
+        uart_newline();
+    }
+}
+
+// ============================================================================
+// Command Dispatcher
+// ============================================================================
+
+fn process_command(len: u8) {
+    if len == 0 {
+        return;  // Empty command
+    }
+
+    // Get first character (command)
+    cmd: u8 = 0;
+    asm {
+        "LDA $0200",
+        "STA {cmd}"
+    }
+
+    // Convert to uppercase
+    if cmd >= 0x61 && cmd <= 0x7A {
+        cmd = cmd - 0x20;
+    }
+
+    pos: u8 = 1;
+    pos = skip_spaces(pos);
+
+    if cmd == 0x48 {
+        // 'H' - Help
+        print_help();
+        return;
+    } else if cmd == 0x52 {
+        // 'R' - Read
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            cmd_read();
+            return;
+        }
+    } else if cmd == 0x57 {
+        // 'W' - Write
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            pos = skip_spaces(pos);
+            pos = parse_hex_byte(pos);
+            if pos != 0xFF {
+                cmd_write();
+                return;
+            }
+        }
+    } else if cmd == 0x47 {
+        // 'G' - Go
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            cmd_go();
+            return;
+        }
+    } else if cmd == 0x44 {
+        // 'D' - Dump
+        pos = parse_hex_word(pos);
+        if pos != 0xFF {
+            // First address is now in TEMP_ADDR, save it
+            start: u16 = get_temp_addr();
+            pos = skip_spaces(pos);
+            pos = parse_hex_word(pos);
+            if pos != 0xFF {
+                // Second address is now in TEMP_ADDR
+                // Store start in TEMP_ADDR, end in TEMP_ADDR2
+                set_temp_addr2(get_temp_addr());
+                set_temp_addr(start);
+                cmd_dump();
+                return;
+            }
+        }
+    }
+
+    // If we got here, command was invalid
+    print_error();
+}
+
+// ============================================================================
+// Main Monitor Loop
+// ============================================================================
+
+#[reset]
+fn main() {
+    // 6502 CPU initialization
+    set_stack_pointer(0xFF);    // Initialize stack pointer to top of stack ($01FF)
+    clear_decimal();           // Clear decimal mode (D flag is undefined on power-up)
+    disable_interrupts();      // Disable interrupts (redundant after reset, but explicit)
+
+    // Initialize UART
+    uart_init();
+
+    // Print welcome message
+    print_welcome();
+    enable_interrupts();      
+
+    // Main command loop
+    loop {
+        print_prompt();
+
+        // Get command line
+        len: u8 = uart_getline(CMD_BUFFER, CMD_MAX_LEN);
+
+        // Process command
+        process_command(len);
+    }
+}
+
+// Default NMI handler - just return
+#[nmi]
+fn nmi_handler() {
+    asm {
+        "RTI"
+    }
+}
+
+// Default IRQ handler - just return
+#[irq]
+fn irq_handler() {
+    asm {
+        "RTI"
+    }
+}

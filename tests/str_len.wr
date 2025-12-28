@@ -1,0 +1,15 @@
+// Test string .len support
+const GREETING: str = "Hello, World!";
+
+fn get_length(s: str) -> u16 {
+    return s.len;
+}
+
+fn main() {
+    test_str: str = "Test";
+    len: u16 = test_str.len;
+
+    greeting_len: u16 = GREETING.len;
+
+    result: u16 = get_length("Wraith");
+}

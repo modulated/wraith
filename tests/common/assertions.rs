@@ -51,17 +51,12 @@ pub fn assert_asm_count(asm: &str, pattern: &str, expected: usize) {
 }
 
 /// Assert that assembly matches a regex pattern
-/// Note: Requires regex crate as dev dependency
+/// Note: Currently unused, reserved for future regex-based testing
 #[allow(dead_code)]
-#[cfg(feature = "regex")]
-pub fn assert_asm_matches_regex(asm: &str, pattern: &str) {
-    let re = regex::Regex::new(pattern).expect("Invalid regex pattern");
-    assert!(
-        re.is_match(asm),
-        "Expected assembly to match regex '{}' but it didn't.\nAssembly:\n{}",
-        pattern,
-        asm
-    );
+pub fn assert_asm_matches_regex(_asm: &str, _pattern: &str) {
+    // This function is a placeholder for future regex-based assembly testing
+    // To use, add regex as a dev dependency in Cargo.toml
+    unimplemented!("Regex support not yet implemented")
 }
 
 /// Assert that an optimization was applied (pattern removed)

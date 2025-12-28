@@ -1,0 +1,20 @@
+// Test string indexing support
+const MESSAGE: str = "ABC";
+
+fn get_char(s: str, idx: u8) -> u8 {
+    return s[idx];
+}
+
+fn main() {
+    test_str: str = "Hello";
+
+    // Direct indexing
+    ch1: u8 = test_str[0];  // Should be 'H'
+    ch2: u8 = test_str[4];  // Should be 'o'
+
+    // Constant string indexing
+    ch3: u8 = MESSAGE[1];  // Should be 'B'
+
+    // Function call
+    result: u8 = get_char("Test", 0);  // Should be 'T'
+}

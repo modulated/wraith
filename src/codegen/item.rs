@@ -3,9 +3,9 @@
 //! Handles generation of functions and other items.
 
 use crate::ast::{FnAttribute, Function, Item, PrimitiveType, Spanned, TypeExpr};
-use crate::codegen::section_allocator::SectionAllocator;
+use crate::codegen::section_allocator::{AllocationSource, SectionAllocator};
 use crate::codegen::stmt::generate_stmt;
-use crate::codegen::{CodegenError, Emitter};
+use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 
 /// Format a type for display in comments
@@ -44,9 +44,10 @@ pub fn generate_item(
     emitter: &mut Emitter,
     info: &ProgramInfo,
     section_alloc: &mut SectionAllocator,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match &item.node {
-        Item::Function(func) => generate_function(func, emitter, info, section_alloc),
+        Item::Function(func) => generate_function(func, emitter, info, section_alloc, string_collector),
         Item::Static(stat) => generate_static(stat, emitter, info),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
@@ -58,8 +59,16 @@ fn generate_function(
     emitter: &mut Emitter,
     info: &ProgramInfo,
     section_alloc: &mut SectionAllocator,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     let name = &func.name.node;
+
+    // Skip code generation for inline functions - they're expanded at call sites
+    if let Some(metadata) = info.function_metadata.get(name)
+        && metadata.is_inline
+    {
+        return Ok(());
+    }
 
     // Check if this is an interrupt handler (need to know for size calculation)
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
@@ -86,7 +95,7 @@ fn generate_function(
         }
 
         // Generate function body to measure size
-        generate_stmt(&func.body, &mut temp_emitter, info)?;
+        generate_stmt(&func.body, &mut temp_emitter, info, string_collector)?;
 
         // Include epilogue size
         if is_interrupt {
@@ -107,25 +116,25 @@ fn generate_function(
 
     // Determine function address
     // Priority: explicit org > section attribute > default section
-    let function_addr = if let Some(metadata) = info.function_metadata.get(name) {
+    let (function_addr, allocation_source) = if let Some(metadata) = info.function_metadata.get(name) {
         if let Some(org_addr) = metadata.org_address {
             // Explicit org address takes precedence
             emitter.emit_org(org_addr);
-            org_addr
+            (org_addr, AllocationSource::ExplicitOrg)
         } else if let Some(section_name) = &metadata.section {
             // Allocate in specified section using actual measured size
             let addr = section_alloc
                 .allocate(section_name, function_size)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
-            addr
+            (addr, AllocationSource::Section(section_name.clone()))
         } else {
             // Use default section (CODE)
             let addr = section_alloc
                 .allocate_default(function_size)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
-            addr
+            (addr, AllocationSource::AutoAllocated)
         }
     } else {
         // No metadata - use default section
@@ -133,8 +142,16 @@ fn generate_function(
             .allocate_default(function_size)
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(addr);
-        addr
+        (addr, AllocationSource::AutoAllocated)
     };
+
+    // Record this allocation for conflict detection
+    section_alloc.record_allocation(
+        name.clone(),
+        function_addr,
+        function_size,
+        allocation_source,
+    );
 
     // Emit function header comment with signature and location
     emitter.emit_comment(&format!("Function: {}", name));
@@ -193,7 +210,7 @@ fn generate_function(
     }
 
     // Body
-    generate_stmt(&func.body, emitter, info)?;
+    generate_stmt(&func.body, emitter, info, string_collector)?;
 
     // Emit epilogue
     if is_interrupt {

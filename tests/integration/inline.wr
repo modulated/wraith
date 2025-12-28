@@ -7,10 +7,10 @@ fn main() {
 fn add(a: u8, b: u8) -> u8 {
     u8 result = 0;
     asm {
-        "CLC"
-        "LDA {a}"
-        "ADC {b}"
-        "STA {result}"
+        "CLC",
+        "LDA {a}",
+        "ADC {b}",
+        "STA {result}",
     }
     return result;
 }

@@ -1,0 +1,13 @@
+//! Test inline functions imported from another module
+
+import { add_two, multiply_by_two } from "test_inline_import_lib.wr";
+
+addr TEST_OUTPUT = 0x6000;
+
+fn main() {
+    // Test inline function with two parameters (this was the bug!)
+    TEST_OUTPUT = add_two(10, 20);
+
+    // Test inline function with one parameter
+    TEST_OUTPUT = multiply_by_two(15);
+}

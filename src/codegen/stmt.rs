@@ -4,18 +4,19 @@
 
 use crate::ast::{Spanned, Stmt};
 use crate::codegen::expr::generate_expr;
-use crate::codegen::{CodegenError, Emitter};
+use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 
 pub fn generate_stmt(
     stmt: &Spanned<Stmt>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match &stmt.node {
         Stmt::Block(stmts) => {
             for s in stmts {
-                generate_stmt(s, emitter, info)?;
+                generate_stmt(s, emitter, info, string_collector)?;
             }
             Ok(())
         }
@@ -27,7 +28,7 @@ pub fn generate_stmt(
             zero_page: _,
         } => {
             // Generate initialization expression
-            generate_expr(init, emitter, info)?;
+            generate_expr(init, emitter, info, string_collector)?;
 
             // Store in variable location
             // Look up by span in resolved_symbols since local vars aren't in global table
@@ -72,7 +73,7 @@ pub fn generate_stmt(
         }
         Stmt::Return(expr) => {
             if let Some(e) = expr {
-                generate_expr(e, emitter, info)?;
+                generate_expr(e, emitter, info, string_collector)?;
             }
             // Only emit RTS if we're not in an inline context
             // When inlining, the return value is already in A and we just continue
@@ -132,7 +133,7 @@ pub fn generate_stmt(
                 }
 
             // 1. Generate code for value (result in A)
-            generate_expr(value, emitter, info)?;
+            generate_expr(value, emitter, info, string_collector)?;
 
             // 2. Store A into target
             // We need a helper to generate store instructions based on target
@@ -177,7 +178,7 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Expr(expr) => {
-            generate_expr(expr, emitter, info)?;
+            generate_expr(expr, emitter, info, string_collector)?;
             Ok(())
         }
         Stmt::If {
@@ -189,18 +190,18 @@ pub fn generate_stmt(
             let end_label = emitter.next_label("end");
 
             // Condition
-            generate_expr(condition, emitter, info)?;
+            generate_expr(condition, emitter, info, string_collector)?;
             emitter.emit_inst("CMP", "#$00");
             emitter.emit_inst("BEQ", &else_label);
 
             // Then
-            generate_stmt(then_branch, emitter, info)?;
+            generate_stmt(then_branch, emitter, info, string_collector)?;
             emitter.emit_inst("JMP", &end_label);
 
             // Else
             emitter.emit_label(&else_label);
             if let Some(else_b) = else_branch {
-                generate_stmt(else_b, emitter, info)?;
+                generate_stmt(else_b, emitter, info, string_collector)?;
             }
 
             // End
@@ -214,7 +215,7 @@ pub fn generate_stmt(
             emitter.emit_label(&start_label);
 
             // Condition
-            generate_expr(condition, emitter, info)?;
+            generate_expr(condition, emitter, info, string_collector)?;
             emitter.emit_inst("CMP", "#$00");
             emitter.emit_inst("BEQ", &end_label);
 
@@ -222,7 +223,7 @@ pub fn generate_stmt(
             emitter.push_loop(start_label.clone(), end_label.clone());
 
             // Body
-            generate_stmt(body, emitter, info)?;
+            generate_stmt(body, emitter, info, string_collector)?;
 
             // Pop loop context
             emitter.pop_loop();
@@ -241,7 +242,7 @@ pub fn generate_stmt(
             // Push loop context for break/continue
             emitter.push_loop(loop_label.clone(), end_label.clone());
 
-            generate_stmt(body, emitter, info)?;
+            generate_stmt(body, emitter, info, string_collector)?;
 
             // Pop loop context
             emitter.pop_loop();
@@ -264,12 +265,12 @@ pub fn generate_stmt(
             let end_label = emitter.next_label("fx");
 
             // Initialize loop variable with range start -> X register
-            generate_expr(&range.start, emitter, info)?;
+            generate_expr(&range.start, emitter, info, string_collector)?;
             emitter.emit_inst("TAX", ""); // Transfer A to X (counter in X)
             emitter.reg_state.transfer_a_to_x();
 
             // Generate end value and store in temp location
-            generate_expr(&range.end, emitter, info)?;
+            generate_expr(&range.end, emitter, info, string_collector)?;
             emitter.emit_inst("STA", &format!("${:02X}", loop_end_temp));
 
             // Loop start
@@ -295,7 +296,7 @@ pub fn generate_stmt(
             // Execute body (note: X is used for counter, may need to save/restore if body uses X)
             // For now, we accept that the body can't use X register
             emitter.reg_state.invalidate_all(); // Body might use registers
-            generate_stmt(body, emitter, info)?;
+            generate_stmt(body, emitter, info, string_collector)?;
 
             // Pop loop context
             emitter.pop_loop();
@@ -413,7 +414,7 @@ pub fn generate_stmt(
             emitter.reg_state.invalidate_all();
 
             // Execute loop body
-            generate_stmt(body, emitter, info)?;
+            generate_stmt(body, emitter, info, string_collector)?;
 
             // Pop loop context
             emitter.pop_loop();
@@ -481,7 +482,7 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Match { expr, arms } => {
-            generate_match(expr, arms, emitter, info)
+            generate_match(expr, arms, emitter, info, string_collector)
         }
     }
 }
@@ -491,6 +492,7 @@ fn generate_match(
     arms: &[crate::ast::MatchArm],
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
 
@@ -504,7 +506,7 @@ fn generate_match(
     });
 
     // Evaluate the matched expression into accumulator
-    generate_expr(expr, emitter, info)?;
+    generate_expr(expr, emitter, info, string_collector)?;
 
     if is_enum_match {
         // For enum matching, expression returns a pointer in A:X
@@ -678,7 +680,7 @@ fn generate_match(
                 }
             }
 
-        generate_stmt(&arm.body, emitter, info)?;
+        generate_stmt(&arm.body, emitter, info, string_collector)?;
         emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
     }
 

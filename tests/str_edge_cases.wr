@@ -1,0 +1,154 @@
+// Test string edge cases
+// Tests empty strings, special characters, and boundary conditions
+
+const EMPTY: str = "";
+const SINGLE: str = "A";
+const NEWLINE: str = "Line1\nLine2";
+const TAB: str = "Col1\tCol2";
+const QUOTE: str = "Say \"Hello\"";
+const BACKSLASH: str = "Path\\File";
+const MIXED: str = "Special:\n\t\r\0";
+const LONG: str = "This is a longer string to test length calculations and iteration over many characters!";
+
+/// Test empty string handling
+fn test_empty() -> u16 {
+    return EMPTY.len;  // Should be 0
+}
+
+/// Test single character string
+fn test_single() -> u8 {
+    if SINGLE.len == (1 as u16) {
+        return SINGLE[0];  // Should be 'A' (65)
+    }
+    return 0;
+}
+
+/// Test string with newline escape
+fn test_newline_len() -> u16 {
+    // "Line1\nLine2" = 5 + 1 + 5 = 11 bytes
+    return NEWLINE.len;
+}
+
+/// Find the newline character
+fn test_newline_find() -> u16 {
+    i: u16 = 0 as u16;
+    loop {
+        if i >= NEWLINE.len { return 0xFFFF; }
+        if NEWLINE[i as u8] == (0x0A) {  // '\n' = 0x0A
+            return i;  // Should be 5
+        }
+        i = i + 1 as u16;
+    }
+}
+
+/// Test tab character
+fn test_tab_find() -> u16 {
+    i: u16 = 0 as u16;
+    loop {
+        if i >= TAB.len { return 0xFFFF; }
+        if TAB[i as u8] == (0x09) {  // '\t' = 0x09
+            return i;  // Should be 4
+        }
+        i = i + 1 as u16;
+    }
+}
+
+/// Test null character
+fn test_null_find() -> u16 {
+    i: u16 = 0 as u16;
+    loop {
+        if i >= MIXED.len { return 0xFFFF; }
+        if MIXED[i as u8] == (0x00) {  // '\0' = 0x00
+            return i;
+        }
+        i = i + 1 as u16;
+    }
+}
+
+/// Test boundary - access first character
+fn test_first_char(s: str) -> u8 {
+    if s.len > (0 as u16) {
+        return s[0];
+    }
+    return 0xFF;  // Error marker
+}
+
+/// Test boundary - access last character
+fn test_last_char(s: str) -> u8 {
+    if s.len > (0 as u16) {
+        last_idx: u16 = s.len - (1 as u16);
+        return s[last_idx as u8];
+    }
+    return 0xFF;  // Error marker
+}
+
+/// Count escape sequences in string
+fn count_escapes(s: str) -> u16 {
+    count: u16 = 0 as u16;
+    i: u16 = 0 as u16;
+    loop {
+        if i >= s.len { break; }
+        ch: u8 = s[i as u8];
+        // Count special characters: \n, \r, \t, \0
+        if ch == (0x0A) { count = count + 1 as u16; }  // \n
+        if ch == (0x0D) { count = count + 1 as u16; }  // \r
+        if ch == (0x09) { count = count + 1 as u16; }  // \t
+        if ch == (0x00) { count = count + 1 as u16; }  // \0
+        i = i + 1 as u16;
+    }
+    return count;
+}
+
+/// Compare empty string with itself
+fn test_empty_eq() -> bool {
+    a: str = "";
+    b: str = "";
+    if a.len != b.len { return false; }
+    return true;  // Both empty, equal
+}
+
+/// Test length of longer string
+fn test_long_len() -> u16 {
+    return LONG.len;
+}
+
+fn main() {
+    // Test empty string
+    empty_len: u16 = test_empty();  // Should be 0
+    empty_eq: bool = test_empty_eq();  // Should be true
+
+    // Test single character
+    single_ch: u8 = test_single();  // Should be 65 ('A')
+
+    // Test escape sequences
+    nl_len: u16 = test_newline_len();  // Should be 11
+    nl_pos: u16 = test_newline_find();  // Should be 5
+    tab_pos: u16 = test_tab_find();  // Should be 4
+    null_pos: u16 = test_null_find();  // Should find \0 in MIXED
+
+    // Test boundary conditions
+    first: u8 = test_first_char("Test");  // Should be 'T'
+    last: u8 = test_last_char("Test");  // Should be 't'
+    first_empty: u8 = test_first_char("");  // Should be 0xFF
+    last_empty: u8 = test_last_char("");  // Should be 0xFF
+
+    // Test escape counting
+    escape_count: u16 = count_escapes(MIXED);  // Should be 4 (\n, \t, \r, \0)
+
+    // Test long string
+    long_len: u16 = test_long_len();  // Should be 89
+
+    // Test special characters in strings
+    quote_len: u16 = QUOTE.len;  // "Say \"Hello\"" -> 11 chars
+    backslash_len: u16 = BACKSLASH.len;  // "Path\\File" -> 9 chars
+
+    // Test zero-length iteration (should not enter loop)
+    i: u16 = 0 as u16;
+    iterations: u16 = 0 as u16;
+    loop {
+        if i >= EMPTY.len { break; }
+        iterations = iterations + 1 as u16;
+        i = i + 1 as u16;
+    }
+    // iterations should be 0
+}

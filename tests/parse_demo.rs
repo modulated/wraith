@@ -1,11 +1,11 @@
-//! Test parsing demo.wr file
+//! Test parsing example files
 
 use std::fs;
 use wraith::{Parser, lex};
 
 #[test]
 fn test_parse_demo_file() {
-    let source = fs::read_to_string("tests/demo.wr").expect("failed to read demo.wr");
+    let source = fs::read_to_string("examples/via.wr").expect("failed to read example file");
 
     let tokens = lex(&source).expect("lexer error");
     println!("Tokens: {:?}", tokens);

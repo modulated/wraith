@@ -203,7 +203,8 @@ fn function_call() {
 #[test]
 fn inline_function() {
     let asm = compile_success(r#"
-        inline fn add(a: u8, b: u8) -> u8 {
+        #[inline]
+        fn add(a: u8, b: u8) -> u8 {
             return a + b;
         }
         fn main() {
@@ -229,16 +230,15 @@ fn string_literal() {
         }
     "#);
 
-    // String layout: JMP, label, length (2 bytes), data, skip label, load address
-    assert_asm_contains(&asm, "JMP");
+    // String layout: label in DATA section, length (2 bytes), data, load address in code
     assert_asm_contains(&asm, "str_");
     assert_asm_contains(&asm, ".BYTE $05, $00"); // Length 5
     assert_asm_contains(&asm, "$48"); // 'H'
     assert_asm_contains(&asm, "LDA #<str_");
     assert_asm_contains(&asm, "LDX #>str_");
 
-    assert_asm_order(&asm, "JMP", ".BYTE $05");
-    assert_asm_order(&asm, ".BYTE $05", "LDA #<str_");
+    // Code comes before data section
+    assert_asm_order(&asm, "main:", "str_0:");
 }
 
 #[test]
@@ -349,4 +349,68 @@ fn nested_expressions() {
 
     // Should have folded to 60 (0x3C)
     assert_asm_contains(&asm, "LDA");
+}
+
+// ============================================================================
+// Memory Layout Capacity Tests
+// ============================================================================
+
+#[test]
+fn many_local_variables() {
+    // Test expanded variable capacity: $40-$7F = 64 bytes
+    // This test would fail with old 16-byte limit ($40-$4F)
+    let asm = compile_success(r#"
+        fn main() {
+            v01: u8 = 1;
+            v02: u8 = 2;
+            v03: u8 = 3;
+            v04: u8 = 4;
+            v05: u8 = 5;
+            v06: u8 = 6;
+            v07: u8 = 7;
+            v08: u8 = 8;
+            v09: u8 = 9;
+            v10: u8 = 10;
+            v11: u8 = 11;
+            v12: u8 = 12;
+            v13: u8 = 13;
+            v14: u8 = 14;
+            v15: u8 = 15;
+            v16: u8 = 16;
+            v17: u8 = 17;
+            v18: u8 = 18;
+            v19: u8 = 19;
+            v20: u8 = 20;
+            result: u8 = v20;
+        }
+    "#);
+
+    // Verify the function compiled successfully
+    assert_asm_contains(&asm, "main:");
+    assert_asm_contains(&asm, "RTS");
+}
+
+#[test]
+fn multiple_array_variables() {
+    // Arrays need 2 bytes per pointer
+    // Old layout: 16 bytes = ~8 arrays max
+    // New layout: 64 bytes = ~32 arrays max
+    let asm = compile_success(r#"
+        fn main() {
+            arr1: [u8; 3] = [1, 2, 3];
+            arr2: [u8; 3] = [4, 5, 6];
+            arr3: [u8; 3] = [7, 8, 9];
+            arr4: [u8; 3] = [10, 11, 12];
+            arr5: [u8; 3] = [13, 14, 15];
+            arr6: [u8; 3] = [16, 17, 18];
+            arr7: [u8; 3] = [19, 20, 21];
+            arr8: [u8; 3] = [22, 23, 24];
+            arr9: [u8; 3] = [25, 26, 27];
+            arr10: [u8; 3] = [28, 29, 30];
+        }
+    "#);
+
+    // Verify successful compilation with 10 arrays (20 bytes)
+    assert_asm_contains(&asm, "main:");
+    assert_asm_contains(&asm, "RTS");
 }

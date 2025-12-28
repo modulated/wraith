@@ -1,0 +1,99 @@
+// Test string iteration patterns
+// Demonstrates common string iteration use cases
+
+/// Sum all bytes in a string (simple iteration example)
+fn sum_bytes(s: str) -> u16 {
+    sum: u16 = 0 as u16;
+    i: u16 = 0 as u16;
+    loop {
+        if i >= s.len { break; }
+        sum = sum + (s[i as u8] as u16);
+        i = i + 1 as u16;
+    }
+    return sum;
+}
+
+/// Find the first occurrence of a character in a string
+/// Returns the index or 0xFFFF if not found
+fn find_char(s: str, ch: u8) -> u16 {
+    i: u16 = 0 as u16;
+    loop {
+        if i >= s.len { return 0xFFFF; }
+        if s[i as u8] == ch { return i; }
+        i = i + 1 as u16;
+    }
+}
+
+/// Count occurrences of a character in a string
+fn count_char(s: str, ch: u8) -> u16 {
+    count: u16 = 0 as u16;
+    i: u16 = 0 as u16;
+    loop {
+        if i >= s.len { break; }
+        if s[i as u8] == ch {
+            count = count + 1 as u16;
+        }
+        i = i + 1 as u16;
+    }
+    return count;
+}
+
+/// Compare two strings for equality
+fn str_eq(a: str, b: str) -> bool {
+    // Different lengths means not equal
+    if a.len != b.len { return false; }
+
+    i: u16 = 0 as u16;
+    loop {
+        if i >= a.len { break; }
+        if a[i as u8] != b[i as u8] { return false; }
+        i = i + 1 as u16;
+    }
+    return true;
+}
+
+/// Check if a string starts with a given character
+fn starts_with_char(s: str, ch: u8) -> bool {
+    if s.len == (0 as u16) { return false; }
+    return s[0] == ch;
+}
+
+/// Check if a string ends with a given character
+fn ends_with_char(s: str, ch: u8) -> bool {
+    if s.len == (0 as u16) { return false; }
+    last_idx: u16 = s.len - (1 as u16);
+    return s[last_idx as u8] == ch;
+}
+
+fn main() {
+    test1: str = "Hello";
+    test2: str = "Hello";
+    test3: str = "World";
+
+    // Test sum_bytes
+    sum: u16 = sum_bytes("ABC");  // 'A'(65) + 'B'(66) + 'C'(67) = 198
+
+    // Test find_char
+    pos1: u16 = find_char("Hello", 0x65);  // 'e' = 0x65, should be 1
+    pos2: u16 = find_char("Hello", 0x6F);  // 'o' = 0x6F, should be 4
+    pos3: u16 = find_char("Hello", 0x78);  // 'x' = 0x78, should be 0xFFFF (not found)
+
+    // Test count_char
+    count1: u16 = count_char("Mississippi", 0x73);  // 's' = 0x73, should be 4
+    count2: u16 = count_char("Mississippi", 0x69);  // 'i' = 0x69, should be 4
+    count3: u16 = count_char("Mississippi", 0x70);  // 'p' = 0x70, should be 2
+
+    // Test str_eq
+    eq1: bool = str_eq(test1, test2);  // Should be true
+    eq2: bool = str_eq(test1, test3);  // Should be false
+    eq3: bool = str_eq("Test", "Test");  // Should be true
+    eq4: bool = str_eq("Test", "test");  // Should be false (case sensitive)
+
+    // Test starts_with_char
+    starts1: bool = starts_with_char("Hello", 0x48);  // 'H' = 0x48, should be true
+    starts2: bool = starts_with_char("Hello", 0x68);  // 'h' = 0x68, should be false
+
+    // Test ends_with_char
+    ends1: bool = ends_with_char("Hello", 0x6F);  // 'o' = 0x6F, should be true
+    ends2: bool = ends_with_char("Hello", 0x48);  // 'H' = 0x48, should be false
+}

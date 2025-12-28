@@ -11,9 +11,10 @@
 ///
 /// After calling this function, the CPU will respond to IRQ interrupts.
 /// Note: NMI interrupts are always enabled and cannot be disabled.
-inline fn enable_interrupts() {
+#[inline]
+fn enable_interrupts() {
     asm {
-        "CLI"
+        "CLI",
     }
 }
 
@@ -24,9 +25,10 @@ inline fn enable_interrupts() {
 /// After calling this function, the CPU will ignore IRQ interrupts.
 /// Use this for critical sections that must not be interrupted.
 /// Note: NMI interrupts cannot be disabled and will still occur.
-inline fn disable_interrupts() {
+#[inline]
+fn disable_interrupts() {
     asm {
-        "SEI"
+        "SEI",
     }
 }
 
@@ -40,9 +42,10 @@ inline fn disable_interrupts() {
 ///
 /// Used before addition operations to ensure no carry-in.
 /// The compiler normally handles this automatically for additions.
-inline fn clear_carry() {
+#[inline]
+fn clear_carry() {
     asm {
-        "CLC"
+        "CLC",
     }
 }
 
@@ -53,9 +56,10 @@ inline fn clear_carry() {
 /// Used before subtraction operations to ensure no borrow.
 /// The compiler normally handles this automatically for subtractions.
 /// Can also be used for manual multi-byte arithmetic.
-inline fn set_carry() {
+#[inline]
+fn set_carry() {
     asm {
-        "SEC"
+        "SEC",
     }
 }
 
@@ -70,9 +74,10 @@ inline fn set_carry() {
 /// Switches the CPU to binary arithmetic mode (the default).
 /// In binary mode, ADC and SBC perform normal binary addition/subtraction.
 /// Most programs should run in binary mode.
-inline fn clear_decimal() {
+#[inline]
+fn clear_decimal() {
     asm {
-        "CLD"
+        "CLD",
     }
 }
 
@@ -84,9 +89,10 @@ inline fn clear_decimal() {
 /// In BCD mode, ADC and SBC treat values as packed BCD digits (0-9).
 /// Useful for calculations that need to display decimal results.
 /// Example: 0x09 + 0x01 = 0x10 (not 0x0A)
-inline fn set_decimal() {
+#[inline]
+fn set_decimal() {
     asm {
-        "SED"
+        "SED",
     }
 }
 
@@ -100,9 +106,10 @@ inline fn set_decimal() {
 ///
 /// Clears the overflow (V) flag in the processor status register.
 /// The overflow flag is set by ADC/SBC for signed arithmetic overflow.
-inline fn clear_overflow() {
+#[inline]
+fn clear_overflow() {
     asm {
-        "CLV"
+        "CLV",
     }
 }
 
@@ -114,9 +121,10 @@ inline fn clear_overflow() {
 /// - Timing delays
 /// - Code alignment
 /// - Placeholder for future instructions
-inline fn nop() {
+#[inline]
+fn nop() {
     asm {
-        "NOP"
+        "NOP",
     }
 }
 
@@ -132,26 +140,96 @@ inline fn nop() {
 ///
 /// Used for debugging or implementing system calls.
 /// Note: Most debuggers/emulators treat BRK as a breakpoint.
-inline fn brk() {
+#[inline]
+fn brk() {
     asm {
-        "BRK"
+        "BRK",
     }
 }
 
 // ============================================================================
-// Wait for Interrupt (undocumented on NMOS 6502, but useful concept)
+// Stack Pointer Control
 // ============================================================================
 
-/// Halt execution until an interrupt occurs
+/// Set the stack pointer to a specific value
+/// Maps to: LDX #value; TXS
+/// Cycles: 4 (2 for LDX, 2 for TXS)
 ///
-/// This creates a simple busy-wait loop that can be interrupted.
-/// More efficient than a pure busy loop as it signals the intent.
-/// On actual hardware, consider using a WDM or STP instruction if available
-/// (65C02/65816), but for NMOS 6502 we use a tight loop.
-inline fn wait_for_interrupt() {
+/// Sets the stack pointer to the given value.
+/// The 6502 stack lives in page 1 ($0100-$01FF).
+/// Common usage: set_stack_pointer(0xFF) to initialize SP to top of stack ($01FF)
+///
+/// Example:
+/// ```
+/// set_stack_pointer(0xFF);  // Stack pointer now at $01FF (top of stack)
+/// ```
+
+#[inline]
+fn set_stack_pointer(value: u8) {
     asm {
-        "CLI"
-        "wfi_loop:"
-        "JMP wfi_loop"
+        "LDX {value}",
+        "TXS",
     }
 }
+
+// ============================================================================
+// String Utilities
+// ============================================================================
+//
+// String Type: str
+//   - Type-safe string primitive
+//   - Stored as 2-byte pointer to length-prefixed data in DATA section
+//   - Format in memory: [u16 length LE][bytes...]
+//   - Immutable, static lifetime
+//
+// Operations:
+//   s.len    -> u16 (string length in bytes)
+//   s[i]     -> u8  (byte at index i, no bounds check - programmer's responsibility)
+//
+// Common Patterns:
+
+/// Iterate through all characters
+/// Example:
+/// ```
+/// fn print_string(s: str) {
+///     i: u16 = 0;
+///     loop {
+///         if i >= s.len { break; }
+///         uart_putc(s[i as u8]);
+///         i = i + 1;
+///     }
+/// }
+/// ```
+
+/// Compare two strings
+/// Example:
+/// ```
+/// fn str_eq(a: str, b: str) -> bool {
+///     if a.len != b.len { return false; }
+///     i: u16 = 0;
+///     loop {
+///         if i >= a.len { break; }
+///         if a[i as u8] != b[i as u8] { return false; }
+///         i = i + 1;
+///     }
+///     return true;
+/// }
+/// ```
+
+/// Find character in string
+/// Returns index or 0xFFFF if not found
+/// Example:
+/// ```
+/// fn find_char(s: str, ch: u8) -> u16 {
+///     i: u16 = 0;
+///     loop {
+///         if i >= s.len { return 0xFFFF; }
+///         if s[i as u8] == ch { return i; }
+///         i = i + 1;
+///     }
+/// }
+/// ```
+
+// Note: When using a string literal like "Hello", the compiler:
+//   1. Stores the string data in DATA section with length prefix
+//   2. Returns a pointer (str type) to the data
