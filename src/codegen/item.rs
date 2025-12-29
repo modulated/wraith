@@ -79,7 +79,7 @@ fn generate_function(
 
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
-        let mut temp_emitter = Emitter::new();
+        let mut temp_emitter = Emitter::new(emitter.verbosity);
         // Copy register state and label counter to avoid label conflicts
         temp_emitter.reg_state = emitter.reg_state.clone();
         temp_emitter.label_counter = emitter.label_counter;
@@ -176,6 +176,14 @@ fn generate_function(
     // Location
     emitter.emit_comment(&format!("  Location: ${:04X}", function_addr));
 
+    // Document zero-page usage in verbose mode
+    if emitter.is_verbose() {
+        emitter.emit_comment(&format!("  Temps: $20-${}=available scratch",
+            format!("{:02X}", emitter.memory_layout.param_base - 1)));
+        emitter.emit_comment(&format!("  Params: ${:02X}-$81=parameter area",
+            emitter.memory_layout.param_base));
+    }
+
     // Attributes
     if let Some(metadata) = info.function_metadata.get(name) {
         let mut attrs = Vec::new();
@@ -202,6 +210,9 @@ fn generate_function(
     // Emit interrupt prologue if needed
     if is_interrupt {
         emitter.emit_comment("Interrupt handler prologue - save registers");
+        if emitter.is_verbose() {
+            emitter.emit_comment("Stack: [return_lo, return_hi, P, A, X, Y] (6 bytes pushed)");
+        }
         emitter.emit_inst("PHA", "");
         emitter.emit_inst("TXA", "");
         emitter.emit_inst("PHA", "");
@@ -215,6 +226,9 @@ fn generate_function(
     // Emit epilogue
     if is_interrupt {
         emitter.emit_comment("Interrupt handler epilogue - restore registers");
+        if emitter.is_verbose() {
+            emitter.emit_comment("Restore Y, X, A in reverse order (LIFO)");
+        }
         emitter.emit_inst("PLA", "");
         emitter.emit_inst("TAY", "");
         emitter.emit_inst("PLA", "");

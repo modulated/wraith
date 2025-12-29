@@ -87,6 +87,9 @@ pub fn generate_expr(
                         // String .len access
                         // String is a pointer to length-prefixed data: [u16 length][bytes...]
                         emitter.emit_comment("String .len access");
+                        if emitter.is_verbose() {
+                            emitter.emit_comment("Load 2-byte length prefix (little-endian u16)");
+                        }
 
                         // Get string address in A:X
                         generate_expr(object, emitter, info, string_collector)?;
@@ -157,6 +160,17 @@ fn generate_call(
             function.node, args.len(), if args.len() == 1 { "" } else { "s" }));
     }
 
+    // Document parameter storage in verbose mode
+    if emitter.is_verbose() && !args.is_empty() {
+        emitter.emit_comment(&format!(
+            "Parameters: [${:02X}-${:02X}] = {} arg{}",
+            param_base,
+            param_base + args.len() as u8 - 1,
+            args.len(),
+            if args.len() == 1 { "" } else { "s" }
+        ));
+    }
+
     // Store each argument to its corresponding parameter location
     for (i, arg) in args.iter().enumerate() {
         let param_addr = param_base + i as u8;
@@ -172,6 +186,9 @@ fn generate_call(
     emitter.emit_inst("JSR", &function.node);
 
     // Result is returned in A register (no cleanup needed)
+    if !emitter.is_minimal() {
+        emitter.emit_comment("Returns: A=result_low, X=result_high (if u16)");
+    }
 
     Ok(())
 }
@@ -515,6 +532,26 @@ fn generate_binary(
         // And/Or are handled earlier with short-circuit evaluation
         crate::ast::BinaryOp::And | crate::ast::BinaryOp::Or => {
             unreachable!("And/Or should be handled earlier in generate_binary")
+        }
+    }
+
+    // Add register state comment based on operation type
+    if emitter.is_verbose() {
+        use crate::ast::BinaryOp;
+        match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                emitter.emit_comment("Result: A=result, flags set by operation");
+            }
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                emitter.emit_comment("Result: A=bitwise_result");
+            }
+            BinaryOp::Shl | BinaryOp::Shr => {
+                emitter.emit_comment("Result: A=shifted_value");
+            }
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge => {
+                emitter.emit_comment("Result: A=boolean (0=false, 1=true)");
+            }
+            _ => {}
         }
     }
 
@@ -867,6 +904,10 @@ fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Shift A left by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
 
+    if !emitter.is_minimal() {
+        emitter.emit_comment("Shift left (multiply by power of 2)");
+    }
+
     let loop_label = emitter.next_label("sl");
     let end_label = emitter.next_label("sx");
 
@@ -890,6 +931,10 @@ fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
 fn generate_shift_right(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Shift A right by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
+
+    if !emitter.is_minimal() {
+        emitter.emit_comment("Shift right (divide by power of 2)");
+    }
 
     let loop_label = emitter.next_label("sr");
     let end_label = emitter.next_label("sx");
@@ -1130,6 +1175,9 @@ fn generate_index(
         // 5. Load byte: LDA ($F0),Y
 
         emitter.emit_comment("String indexing: s[i]");
+        if emitter.is_verbose() {
+            emitter.emit_comment("Skip 2-byte length header to access character data");
+        }
 
         // Get string pointer
         generate_expr(object, emitter, info, string_collector)?;
@@ -1137,6 +1185,9 @@ fn generate_index(
         emitter.emit_inst("STX", "$F1");
 
         // Skip length prefix (add 2 to pointer)
+        if emitter.is_verbose() {
+            emitter.emit_comment("Add 2 to pointer to skip length prefix");
+        }
         emitter.emit_inst("LDA", "$F0");
         emitter.emit_inst("CLC", "");
         emitter.emit_inst("ADC", "#$02");
@@ -1162,6 +1213,10 @@ fn generate_index(
     // 2. Generate index into Y register
     // 3. Use absolute indexed addressing: LDA base,Y
 
+    if !emitter.is_minimal() {
+        emitter.emit_comment("Array access: base[index]");
+    }
+
     // Currently only supporting variable arrays
     // For local arrays, we need to get the address where they're stored
     match &object.node {
@@ -1183,6 +1238,10 @@ fn generate_index(
                         return Err(CodegenError::UnsupportedOperation(
                             "array variables must be in zero page for indexing".to_string()
                         ));
+                    }
+
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Use indirect indexed addressing: (ptr),Y");
                     }
 
                     // Generate index expression -> A, then transfer to Y
@@ -1541,6 +1600,9 @@ fn generate_type_cast(
 
                     if matches!(target_prim, PrimitiveType::I16) {
                         // Sign extension: if bit 7 of A is set, X = $FF, else X = $00
+                        if emitter.is_verbose() {
+                            emitter.emit_comment("Sign-extend i8 to i16: replicate sign bit to high byte");
+                        }
                         emitter.emit_inst("TAX", ""); // Save value in X temporarily
                         emitter.emit_inst("AND", "#$80"); // Check sign bit
                         let neg_label = emitter.next_label("sn");
@@ -1561,10 +1623,19 @@ fn generate_type_cast(
                         // Result: A = low byte, X = high byte (but we want X = high byte)
                         // Actually for most operations we just use A, so leave low byte in A
                         emitter.emit_inst("TXA", ""); // A = low byte
+                        if emitter.is_verbose() {
+                            emitter.emit_comment("Result: A=low_byte, X=sign_extended_high_byte");
+                        }
                     } else {
                         // Zero extension: X = 0
+                        if emitter.is_verbose() {
+                            emitter.emit_comment("Zero-extend u8 to u16: high byte = 0");
+                        }
                         emitter.emit_inst("LDX", "#$00");
                         // A already has the low byte
+                        if emitter.is_verbose() {
+                            emitter.emit_comment("Result: A=low_byte, X=$00");
+                        }
                     }
                 }
                 PrimitiveType::U8 | PrimitiveType::I8 => {
@@ -1572,11 +1643,17 @@ fn generate_type_cast(
                     emitter.emit_comment(&format!("Cast to {:?} (truncate)", target_prim));
                     // For u16/i16 -> u8, we just keep A (low byte), discard high byte
                     // A already contains the result
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Result: A=low_byte (high byte discarded)");
+                    }
                 }
                 PrimitiveType::Bool => {
                     // Cast to bool: 0 = false, non-zero = true
                     // Convert to canonical boolean (0 or 1)
                     emitter.emit_comment("Cast to bool");
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Convert to canonical bool: 0=false, 1=true");
+                    }
                     let true_label = emitter.next_label("bt");
                     let end_label = emitter.next_label("bx");
 
@@ -1589,6 +1666,9 @@ fn generate_type_cast(
                     emitter.emit_label(&true_label);
                     emitter.emit_inst("LDA", "#$01");
                     emitter.emit_label(&end_label);
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Result: A=boolean (0 or 1)");
+                    }
                 }
             }
         }

@@ -15,9 +15,13 @@ const RESET: &str = "\x1b[0m";
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
 
-    // Handle flags
-    if args.len() == 2 {
-        match args[1].as_str() {
+    // Parse arguments
+    let mut verbosity = codegen::CommentVerbosity::Normal;
+    let mut input_file: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
             "--version" | "-v" => {
                 println!("Wraith Compiler {}", VERSION);
                 return;
@@ -26,21 +30,52 @@ fn main() {
                 print_usage(&args[0]);
                 return;
             }
-            _ => {}
+            "--comments" | "-c" => {
+                if i + 1 < args.len() {
+                    verbosity = match args[i + 1].as_str() {
+                        "minimal" | "min" => codegen::CommentVerbosity::Minimal,
+                        "normal" => codegen::CommentVerbosity::Normal,
+                        "verbose" | "v" => codegen::CommentVerbosity::Verbose,
+                        other => {
+                            eprintln!("{}Error:{} unknown verbosity level: {}", RED, RESET, other);
+                            eprintln!("       valid options: minimal, normal, verbose");
+                            std::process::exit(1);
+                        }
+                    };
+                    i += 2;
+                } else {
+                    eprintln!("{}Error:{} --comments requires an argument", RED, RESET);
+                    std::process::exit(1);
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                if input_file.is_some() {
+                    eprintln!("{}Error:{} multiple input files not supported", RED, RESET);
+                    std::process::exit(1);
+                }
+                input_file = Some(arg.to_string());
+                i += 1;
+            }
+            unknown => {
+                eprintln!("{}Error:{} unknown option: {}", RED, RESET, unknown);
+                print_usage(&args[0]);
+                std::process::exit(1);
+            }
         }
     }
 
-    if args.len() != 2 {
-        print_usage(&args[0]);
-        std::process::exit(1);
-    }
-
-    let file = &args[1];
+    let file = match input_file {
+        Some(f) => f,
+        None => {
+            print_usage(&args[0]);
+            std::process::exit(1);
+        }
+    };
     let start_time = Instant::now();
 
     // Read source file
     println!("{}{:>12}{} {}", YELLOW, "Compiling", RESET, file);
-    let source = match fs::read_to_string(file) {
+    let source = match fs::read_to_string(&file) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}Error:{} {}: {}", RED, RESET, file, e);
@@ -62,7 +97,7 @@ fn main() {
     let ast = match Parser::parse(&tokens) {
         Ok(ast) => ast,
         Err(e) => {
-            eprintln!("{}", e.format_with_source_and_file(&source, Some(file)));
+            eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));
             std::process::exit(1);
         }
     };
@@ -75,23 +110,23 @@ fn main() {
     }
 
     // Semantic analysis
-    let file_path = PathBuf::from(file);
+    let file_path = PathBuf::from(&file);
     let program_info = match wraith::sema::analyze_with_path(&ast, file_path) {
         Ok(info) => info,
         Err(e) => {
-            eprintln!("{}", e.format_with_source_and_file(&source, Some(file)));
+            eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));
             std::process::exit(1);
         }
     };
 
     // Display warnings
     for warning in &program_info.warnings {
-        eprintln!("{}", warning.format_with_source_and_file(&source, Some(file)));
+        eprintln!("{}", warning.format_with_source_and_file(&source, Some(&file)));
         eprintln!(); // Add blank line between warnings
     }
 
     // Code generation
-    let (code, section_alloc) = match codegen::generate(&ast, &program_info) {
+    let (code, section_alloc) = match codegen::generate(&ast, &program_info, verbosity) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("{}Error:{} {}", RED, RESET, e);
@@ -121,9 +156,11 @@ fn main() {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} <input.wr>", program);
+    eprintln!("Usage: {} [OPTIONS] <input.wr>", program);
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -h, --help       Print this help message");
-    eprintln!("  -v, --version    Print version information");
+    eprintln!("  -h, --help              Print this help message");
+    eprintln!("  -v, --version           Print version information");
+    eprintln!("  -c, --comments LEVEL    Set comment verbosity in generated assembly");
+    eprintln!("                          LEVEL: minimal, normal (default), verbose");
 }

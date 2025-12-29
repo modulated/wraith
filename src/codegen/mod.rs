@@ -1,4 +1,5 @@
 pub mod address_allocator;
+pub mod comment_utils;
 pub mod emitter;
 pub mod expr;
 pub mod item;
@@ -14,6 +15,23 @@ use emitter::Emitter;
 use item::generate_item;
 use section_allocator::SectionAllocator;
 use std::collections::HashMap;
+
+/// Controls the verbosity level of generated assembly comments
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentVerbosity {
+    /// Minimal comments - only function headers and critical info
+    Minimal,
+    /// Normal comments - function headers, operation types, basic context
+    Normal,
+    /// Verbose - full register state, detailed explanations, memory layout
+    Verbose,
+}
+
+impl Default for CommentVerbosity {
+    fn default() -> Self {
+        CommentVerbosity::Normal
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum CodegenError {
@@ -135,11 +153,15 @@ impl StringCollector {
     }
 }
 
-pub fn generate(ast: &SourceFile, program: &ProgramInfo) -> Result<(String, SectionAllocator), CodegenError> {
+pub fn generate(
+    ast: &SourceFile,
+    program: &ProgramInfo,
+    verbosity: CommentVerbosity,
+) -> Result<(String, SectionAllocator), CodegenError> {
     use crate::sema::table::{SymbolKind, SymbolLocation};
     use std::collections::{HashSet, HashMap};
 
-    let mut emitter = Emitter::new();
+    let mut emitter = Emitter::new(verbosity);
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
 

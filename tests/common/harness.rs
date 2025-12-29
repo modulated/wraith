@@ -4,7 +4,7 @@
 //! and handle errors appropriately.
 
 use wraith::ast::SourceFile;
-use wraith::codegen::generate;
+use wraith::codegen::{generate, CommentVerbosity};
 use wraith::lex;
 use wraith::parser::Parser;
 use wraith::sema::{analyze, analyze_with_path, ProgramInfo};
@@ -48,7 +48,7 @@ pub fn compile(source: &str) -> CompileResult {
         .join("\n");
 
     // Code generation
-    match generate(&ast, &program) {
+    match generate(&ast, &program, CommentVerbosity::Normal) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }
@@ -83,7 +83,7 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
         .join("\n");
 
     // Code generation
-    match generate(&ast, &program) {
+    match generate(&ast, &program, CommentVerbosity::Normal) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }

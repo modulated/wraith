@@ -4,6 +4,7 @@
 
 use super::memory_layout::MemoryLayout;
 use super::regstate::{RegisterState, RegisterValue};
+use super::CommentVerbosity;
 
 /// Loop context for break/continue statements
 #[derive(Debug, Clone)]
@@ -33,16 +34,18 @@ pub struct Emitter {
     byte_count: u16,
     /// Track if the last instruction was a terminal instruction (RTS, RTI, or unconditional JMP)
     last_was_terminal: bool,
+    /// Comment verbosity level
+    pub verbosity: CommentVerbosity,
 }
 
 impl Default for Emitter {
     fn default() -> Self {
-        Self::new()
+        Self::new(CommentVerbosity::Normal)
     }
 }
 
 impl Emitter {
-    pub fn new() -> Self {
+    pub fn new(verbosity: CommentVerbosity) -> Self {
         Self {
             output: ".SETCPU \"65C02\"\n\n".to_string(),
             indent: 0,
@@ -55,7 +58,18 @@ impl Emitter {
             inline_label_suffix: None,
             byte_count: 0,
             last_was_terminal: false,
+            verbosity,
         }
+    }
+
+    /// Check if verbosity is set to minimal
+    pub fn is_minimal(&self) -> bool {
+        self.verbosity == CommentVerbosity::Minimal
+    }
+
+    /// Check if verbosity is set to verbose
+    pub fn is_verbose(&self) -> bool {
+        self.verbosity == CommentVerbosity::Verbose
     }
 
     pub fn next_label(&mut self, prefix: &str) -> String {
@@ -93,7 +107,7 @@ impl Emitter {
     }
 
     pub fn emit_comment(&mut self, comment: &str) {
-        self.output.push_str("    ; ");
+        self.output.push_str("; ");
         self.output.push_str(comment);
         self.output.push('\n');
     }

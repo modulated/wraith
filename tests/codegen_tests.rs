@@ -1,4 +1,4 @@
-use wraith::codegen::generate;
+use wraith::codegen::{generate, CommentVerbosity};
 use wraith::lex;
 use wraith::parser::Parser;
 use wraith::sema::analyze;
@@ -43,7 +43,7 @@ fn test_codegen_empty_function() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Verify structure
     assert!(asm.contains("main:"), "Should have main label");
@@ -63,7 +63,7 @@ fn test_codegen_simple_assignment() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should load 42 into A, then store to SCREEN (using symbolic name)
     assert!(asm.contains("SCREEN = $0400"), "Should have address label");
@@ -87,7 +87,7 @@ fn test_codegen_constant_folding() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate constant folded result
     assert!(asm.contains("RESULT = $0400"), "Should have address label");
@@ -115,7 +115,7 @@ fn test_codegen_binary_op() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Verify optimized binary operation sequence:
     // For X + Y where both are addr variables:
@@ -164,7 +164,7 @@ fn test_codegen_control_flow() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     assert!(asm.contains("BEQ"));
     assert!(asm.contains("JMP"));
@@ -188,7 +188,7 @@ fn test_codegen_function_call() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Function call should:
     // 1. Store arguments to zero page argument area (not using hardware stack)
@@ -218,7 +218,7 @@ fn test_codegen_string_literal() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // String should have:
     // 1. String label in DATA section
@@ -249,7 +249,7 @@ fn test_codegen_comparison_eq() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Comparison should:
     // 1. Load operands and compare
@@ -280,7 +280,7 @@ fn test_codegen_logical_and_short_circuit() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Check address labels
     assert!(asm.contains("X = $0401"), "Should have X address label");
@@ -316,7 +316,7 @@ fn test_codegen_multiplication() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Multiplication uses repeated addition:
     // 1. Save multiplicand to X register
@@ -350,7 +350,7 @@ fn test_codegen_division() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Division uses repeated subtraction
     assert!(asm.contains("CPX #$00"), "Should check for division by zero");
@@ -379,7 +379,7 @@ fn test_codegen_shift_operations() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Shift uses iterative ASL
     assert!(asm.contains("LDX $20"), "Should load shift count");
@@ -406,7 +406,7 @@ fn test_codegen_for_loop() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Optimized for loop using X register:
     // 1. Initialize counter in X register (TAX)
@@ -441,7 +441,7 @@ fn test_codegen_unary_operations() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Negation uses two's complement: ~A + 1
     assert!(asm.contains("EOR #$FF"), "Should invert bits");
@@ -471,7 +471,7 @@ fn test_codegen_nested_expressions() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should have both addition and multiplication
     assert!(asm.contains("ADC $20"), "Should have addition");
@@ -502,7 +502,7 @@ fn test_codegen_enum_unit_variant() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum data with tag
     assert!(asm.contains("; Enum variant: Direction::North"), "Should have enum comment");
@@ -530,7 +530,7 @@ fn test_codegen_enum_tuple_variant() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum data with tag and fields
     assert!(asm.contains("; Enum variant: Color::RGB"), "Should have enum comment");
@@ -560,7 +560,7 @@ fn test_codegen_enum_struct_variant() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum data with tag and named fields
     assert!(asm.contains("; Enum variant: Message::Point"), "Should have enum comment");
@@ -599,7 +599,7 @@ fn test_codegen_enum_pattern_matching() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should have match statement structure
     assert!(asm.contains("; Match statement"), "Should have match comment");
@@ -644,7 +644,7 @@ fn test_codegen_enum_multiple_variants() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum with tag 1 (second variant)
     assert!(asm.contains("; Enum variant: Option::Some"), "Should have enum comment");
@@ -674,7 +674,7 @@ fn test_codegen_inline_function() {
     let tokens = lex(source).unwrap();
     let ast = Parser::parse(&tokens).unwrap();
     let program = analyze(&ast).unwrap();
-    let (asm, _) = generate(&ast, &program).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Inline functions are NOT emitted as separate functions
     assert!(!asm.contains("add:"), "Should NOT have add label (inline function)");

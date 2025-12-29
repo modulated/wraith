@@ -191,6 +191,10 @@ pub fn generate_stmt(
 
             // Condition
             generate_expr(condition, emitter, info, string_collector)?;
+
+            if !emitter.is_minimal() {
+                emitter.emit_comment("Branch if condition is false (A == 0)");
+            }
             emitter.emit_inst("CMP", "#$00");
             emitter.emit_inst("BEQ", &else_label);
 
@@ -216,6 +220,10 @@ pub fn generate_stmt(
 
             // Condition
             generate_expr(condition, emitter, info, string_collector)?;
+
+            if !emitter.is_minimal() {
+                emitter.emit_comment("Exit loop if condition is false (A == 0)");
+            }
             emitter.emit_inst("CMP", "#$00");
             emitter.emit_inst("BEQ", &end_label);
 
