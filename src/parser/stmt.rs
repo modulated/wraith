@@ -221,7 +221,19 @@ impl Parser<'_> {
         while !self.check(&Token::RBrace) {
             let pattern = self.parse_pattern()?;
             self.expect(&Token::FatArrow)?;
-            let body = Box::new(self.parse_block()?);
+
+            // Parse body - either a block or a single expression
+            let body = if self.check(&Token::LBrace) {
+                // Full block: { statements }
+                Box::new(self.parse_block()?)
+            } else {
+                // Single expression - wrap in a block
+                let expr_start = self.current_span();
+                let expr = self.parse_expr()?;
+                let expr_span = expr_start.merge(self.previous_span());
+                let expr_stmt = Spanned::new(Stmt::Expr(expr), expr_span);
+                Box::new(Spanned::new(Stmt::block(vec![expr_stmt]), expr_span))
+            };
 
             arms.push(MatchArm { pattern, body });
 

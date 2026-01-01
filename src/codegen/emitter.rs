@@ -150,7 +150,11 @@ impl Emitter {
         self.byte_count += values.len() as u16;
     }
 
-    pub fn finish(self) -> String {
+    pub fn finish(mut self) -> String {
+        // Ensure the file ends with a newline (Unix text file convention)
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
         self.output
     }
 

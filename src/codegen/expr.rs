@@ -7,12 +7,24 @@ use crate::ast::{Expr, Spanned};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 use crate::sema::table::SymbolLocation;
+use crate::sema::types::Type;
 
 /// Check if an expression is "simple" - can be re-evaluated cheaply without side effects
 /// Simple expressions: literals, variables
 /// Complex expressions: function calls, binary ops, array indexing, etc.
 fn is_simple_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_) | Expr::Variable(_))
+}
+
+/// Check if a value is a power of 2, return the shift amount (exponent) if it is
+/// Returns Some(n) where 2^n = val, or None if not a power of 2
+fn is_power_of_2(val: u64) -> Option<u8> {
+    if val == 0 || (val & (val - 1)) != 0 {
+        None
+    } else {
+        // Count trailing zeros to get the exponent
+        Some(val.trailing_zeros() as u8)
+    }
 }
 
 pub fn generate_expr(
@@ -25,9 +37,23 @@ pub fn generate_expr(
     if let Some(const_val) = info.folded_constants.get(&expr.span) {
         match const_val {
             crate::sema::const_eval::ConstValue::Integer(n) => {
-                // Load the constant value directly
-                let val = (*n as u64) & 0xFF; // Truncate to u8 for now
-                emitter.emit_inst("LDA", &format!("#${:02X}", val));
+                // Check if this is a 16-bit type
+                let expr_type = info.resolved_types.get(&expr.span);
+                let is_16bit = expr_type.is_some_and(|ty| matches!(ty,
+                    crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16) |
+                    crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16) |
+                    crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+                ));
+
+                // Load the constant value
+                let val = *n as u64;
+                emitter.emit_inst("LDA", &format!("#${:02X}", val & 0xFF));
+
+                if is_16bit {
+                    // For 16-bit types, also load high byte into Y
+                    emitter.emit_inst("LDY", &format!("#${:02X}", (val >> 8) & 0xFF));
+                }
+
                 return Ok(());
             }
             crate::sema::const_eval::ConstValue::Bool(b) => {
@@ -101,17 +127,13 @@ pub fn generate_expr(
                         // Load length (first 2 bytes) via indirect indexed
                         emitter.emit_inst("LDY", "#$00");
                         emitter.emit_inst("LDA", "($F0),Y"); // Low byte of length
-                        emitter.emit_inst("TAX", "");  // Save low byte in X
+                        emitter.emit_inst("TAX", "");  // Save low byte in X temporarily
                         emitter.emit_inst("INY", "");
                         emitter.emit_inst("LDA", "($F0),Y"); // High byte of length
                         // Result: length in A (high) and X (low)
-                        // Swap them so A has low byte, X has high byte (standard u16 convention)
-                        emitter.emit_inst("PHA", "");  // Save high byte
-                        emitter.emit_inst("TXA", "");  // Get low byte to A
-                        emitter.emit_inst("TAY", "");  // Save low byte in Y
-                        emitter.emit_inst("PLA", "");  // Get high byte back to A
-                        emitter.emit_inst("TAX", "");  // High byte to X
-                        emitter.emit_inst("TYA", "");  // Low byte to A
+                        // Swap them so A has low byte, Y has high byte (standard u16 convention)
+                        emitter.emit_inst("TAY", "");  // High byte to Y
+                        emitter.emit_inst("TXA", "");  // Low byte to A
 
                         Ok(())
                     }
@@ -128,6 +150,172 @@ pub fn generate_expr(
                     "Length access (.len) missing type information (compiler bug)".to_string()
                 ))
             }
+        }
+
+        Expr::U16Low(operand) => {
+            emitter.emit_comment("u16/i16 .low access");
+
+            // Optimize for simple variable access (most common case)
+            if let Expr::Variable(name) = &operand.node {
+                if let Some(sym) = info
+                    .resolved_symbols
+                    .get(&operand.span)
+                    .or_else(|| info.table.lookup(name))
+                {
+                    match sym.location {
+                        SymbolLocation::ZeroPage(addr) => {
+                            emitter.emit_lda_zp(addr);
+                            if emitter.is_verbose() {
+                                emitter
+                                    .emit_comment(&format!("Load low byte from ${:02X}", addr));
+                            }
+                        }
+                        SymbolLocation::Absolute(addr) => {
+                            emitter.emit_lda_abs(addr);
+                            if emitter.is_verbose() {
+                                emitter
+                                    .emit_comment(&format!("Load low byte from ${:04X}", addr));
+                            }
+                        }
+                        _ => {
+                            return Err(CodegenError::UnsupportedOperation(format!(
+                                "Cannot access .low of variable '{}'",
+                                name
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(CodegenError::SymbolNotFound(name.clone()));
+                }
+            } else {
+                // For expressions: evaluate (result in A=low, Y=high), low already in A
+                generate_expr(operand, emitter, info, string_collector)?;
+                if emitter.is_verbose() {
+                    emitter.emit_comment("Expression result: low byte already in A");
+                }
+            }
+
+            Ok(())
+        }
+
+        Expr::U16High(operand) => {
+            emitter.emit_comment("u16/i16 .high access");
+
+            // Optimize for simple variable access
+            if let Expr::Variable(name) = &operand.node {
+                if let Some(sym) = info
+                    .resolved_symbols
+                    .get(&operand.span)
+                    .or_else(|| info.table.lookup(name))
+                {
+                    match sym.location {
+                        SymbolLocation::ZeroPage(addr) => {
+                            emitter.emit_inst("LDA", &format!("${:02X}", addr + 1));
+                            if emitter.is_verbose() {
+                                emitter
+                                    .emit_comment(&format!("Load high byte from ${:02X}", addr + 1));
+                            }
+                        }
+                        SymbolLocation::Absolute(addr) => {
+                            emitter.emit_inst("LDA", &format!("${:04X}", addr + 1));
+                            if emitter.is_verbose() {
+                                emitter
+                                    .emit_comment(&format!("Load high byte from ${:04X}", addr + 1));
+                            }
+                        }
+                        _ => {
+                            return Err(CodegenError::UnsupportedOperation(format!(
+                                "Cannot access .high of variable '{}'",
+                                name
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(CodegenError::SymbolNotFound(name.clone()));
+                }
+            } else {
+                // For expressions: evaluate (result in A=low, Y=high), transfer Y to A
+                generate_expr(operand, emitter, info, string_collector)?;
+                emitter.emit_inst("TYA", "");
+                if emitter.is_verbose() {
+                    emitter.emit_comment("Transfer high byte from Y to A");
+                }
+            }
+
+            Ok(())
+        }
+
+        // CPU status flags - read current processor status
+        Expr::CpuFlagCarry => {
+            emitter.emit_comment("Read carry flag");
+            // Convert carry flag to boolean (0 or 1)
+            let set_label = emitter.next_label("cf");
+            let end_label = emitter.next_label("cx");
+
+            emitter.emit_inst("BCS", &set_label);  // Branch if carry set
+            // Carry clear
+            emitter.emit_inst("LDA", "#$00");
+            emitter.emit_inst("JMP", &end_label);
+            // Carry set
+            emitter.emit_label(&set_label);
+            emitter.emit_inst("LDA", "#$01");
+            emitter.emit_label(&end_label);
+
+            Ok(())
+        }
+
+        Expr::CpuFlagZero => {
+            emitter.emit_comment("Read zero flag");
+            // Convert zero flag to boolean (0 or 1)
+            // Note: We need a value to test. Use a register that's likely unchanged
+            // or better: use PHP (push processor status) and PLA
+            emitter.emit_inst("PHP", "");  // Push processor status
+            emitter.emit_inst("PLA", "");  // Pull to A
+            emitter.emit_inst("AND", "#$02");  // Mask zero flag (bit 1)
+            // Now A = 0 if zero clear, 2 if zero set
+            // Convert 2 to 1
+            let end_label = emitter.next_label("zx");
+            emitter.emit_inst("BEQ", &end_label);  // If zero, A already = 0
+            emitter.emit_inst("LDA", "#$01");
+            emitter.emit_label(&end_label);
+
+            Ok(())
+        }
+
+        Expr::CpuFlagOverflow => {
+            emitter.emit_comment("Read overflow flag");
+            // Convert overflow flag to boolean (0 or 1)
+            let set_label = emitter.next_label("vf");
+            let end_label = emitter.next_label("vx");
+
+            emitter.emit_inst("BVS", &set_label);  // Branch if overflow set
+            // Overflow clear
+            emitter.emit_inst("LDA", "#$00");
+            emitter.emit_inst("JMP", &end_label);
+            // Overflow set
+            emitter.emit_label(&set_label);
+            emitter.emit_inst("LDA", "#$01");
+            emitter.emit_label(&end_label);
+
+            Ok(())
+        }
+
+        Expr::CpuFlagNegative => {
+            emitter.emit_comment("Read negative flag");
+            // Convert negative flag to boolean (0 or 1)
+            let set_label = emitter.next_label("nf");
+            let end_label = emitter.next_label("nx");
+
+            emitter.emit_inst("BMI", &set_label);  // Branch if minus (negative set)
+            // Negative clear
+            emitter.emit_inst("LDA", "#$00");
+            emitter.emit_inst("JMP", &end_label);
+            // Negative set
+            emitter.emit_label(&set_label);
+            emitter.emit_inst("LDA", "#$01");
+            emitter.emit_label(&end_label);
+
+            Ok(())
         }
     }
 }
@@ -172,22 +360,66 @@ fn generate_call(
     }
 
     // Store each argument to its corresponding parameter location
-    for (i, arg) in args.iter().enumerate() {
-        let param_addr = param_base + i as u8;
+    // Track byte offset (16-bit params take 2 bytes)
+    let mut byte_offset = 0u8;
+    for arg in args.iter() {
+        let param_addr = param_base + byte_offset;
 
-        // Generate argument expression (result in A)
+        // Check if this argument is a 16-bit type
+        let arg_type = info.resolved_types.get(&arg.span);
+        let is_16bit = arg_type.is_some_and(|ty| matches!(ty,
+            crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16) |
+            crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16) |
+            crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+        ));
+
+        // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
         generate_expr(arg, emitter, info, string_collector)?;
 
         // Store to parameter location
         emitter.emit_inst("STA", &format!("${:02X}", param_addr));
+        if is_16bit {
+            // For 16-bit types, also store high byte (in Y) to next location
+            emitter.emit_inst("STY", &format!("${:02X}", param_addr + 1));
+            byte_offset += 2; // 16-bit param takes 2 bytes
+        } else {
+            byte_offset += 1; // 8-bit param takes 1 byte
+        }
     }
 
     // Call the function
     emitter.emit_inst("JSR", &function.node);
 
+    // Invalidate register state after function call
+    // (called function may modify any register; only A/Y contain known return value)
+    emitter.reg_state.invalidate_all();
+
     // Result is returned in A register (no cleanup needed)
     if !emitter.is_minimal() {
-        emitter.emit_comment("Returns: A=result_low, X=result_high (if u16)");
+        // Look up the function's return type to generate accurate comment
+        if let Some(sym) = info.table.lookup(&function.node) {
+            if let Type::Function(_, ret_type) = &sym.ty {
+                match ret_type.as_ref() {
+                    Type::Void => {
+                        // No return value
+                    }
+                    Type::Primitive(crate::ast::PrimitiveType::U16) |
+                    Type::Primitive(crate::ast::PrimitiveType::I16) |
+                    Type::Primitive(crate::ast::PrimitiveType::B16) => {
+                        emitter.emit_comment(&format!("Returns: A=result_low, Y=result_high ({})", ret_type.display_name()));
+                    }
+                    ty => {
+                        emitter.emit_comment(&format!("Returns: A=result ({})", ty.display_name()));
+                    }
+                }
+            } else {
+                // Fallback for non-function types
+                emitter.emit_comment("Returns: A=result");
+            }
+        } else {
+            // Fallback if function not in symbol table
+            emitter.emit_comment("Returns: A=result");
+        }
     }
 
     Ok(())
@@ -356,13 +588,13 @@ fn generate_unary(
                     emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
 
                     if addr > 0xFF {
-                        // 16-bit address: load high byte into X
-                        emitter.emit_inst("LDX", &format!("#${:02X}", (addr >> 8) & 0xFF));
-                        emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(((addr >> 8) & 0xFF) as i64));
+                        // 16-bit address: load high byte into Y
+                        emitter.emit_inst("LDY", &format!("#${:02X}", (addr >> 8) & 0xFF));
+                        emitter.reg_state.set_y(crate::codegen::regstate::RegisterValue::Immediate(((addr >> 8) & 0xFF) as i64));
                     } else {
                         // Zero page address: high byte is 0
-                        emitter.emit_inst("LDX", "#$00");
-                        emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(0));
+                        emitter.emit_inst("LDY", "#$00");
+                        emitter.reg_state.set_y(crate::codegen::regstate::RegisterValue::Immediate(0));
                     }
 
                     emitter.reg_state.set_a(crate::codegen::regstate::RegisterValue::Immediate((addr & 0xFF) as i64));
@@ -436,24 +668,112 @@ fn generate_binary(
         _ => {}
     }
 
+    // Check if we're doing 16-bit arithmetic (check before generating expressions)
+    let left_type = info.resolved_types.get(&left.span);
+    let is_u16 = left_type.is_some_and(|ty| matches!(ty,
+        Type::Primitive(crate::ast::PrimitiveType::U16) |
+        Type::Primitive(crate::ast::PrimitiveType::I16) |
+        Type::Primitive(crate::ast::PrimitiveType::B16)
+    ));
+
+    // === STRENGTH REDUCTION OPTIMIZATIONS ===
+    // Transform expensive operations into cheaper equivalents
+
+    // Check if right operand is a literal for optimization
+    if let Expr::Literal(crate::ast::Literal::Integer(val)) = &right.node {
+        let val_u64 = *val as u64;
+
+        match op {
+            // Optimization: x * (power of 2) → x << n
+            crate::ast::BinaryOp::Mul => {
+                if let Some(shift_amount) = is_power_of_2(val_u64) {
+                    if emitter.is_verbose() {
+                        emitter.emit_comment(&format!(
+                            "Strength reduction: x * {} → x << {}",
+                            val_u64, shift_amount
+                        ));
+                    }
+
+                    // Generate left operand
+                    generate_expr(left, emitter, info, string_collector)?;
+
+                    // Store shift amount in temp
+                    let temp_reg = emitter.memory_layout.temp_reg();
+                    emitter.emit_inst("LDA", &format!("#${:02X}", shift_amount));
+                    emitter.emit_sta_zp(temp_reg);
+
+                    // Reload left operand
+                    generate_expr(left, emitter, info, string_collector)?;
+
+                    // Perform shift
+                    generate_shift_left(emitter, is_u16)?;
+                    return Ok(());
+                }
+            }
+
+            // Optimization: x / 256 → x.high (for u16 only)
+            crate::ast::BinaryOp::Div => {
+                if is_u16 && val_u64 == 256 {
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Strength reduction: x / 256 → x.high");
+                    }
+
+                    // Generate left operand (result in A=low, Y=high)
+                    generate_expr(left, emitter, info, string_collector)?;
+
+                    // Move high byte to A
+                    emitter.emit_inst("TYA", "");
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Extract high byte");
+                    }
+                    return Ok(());
+                }
+            }
+
+            // Optimization: x % 256 → x.low (for u16 only)
+            crate::ast::BinaryOp::Mod => {
+                if is_u16 && val_u64 == 256 {
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Strength reduction: x % 256 → x.low");
+                    }
+
+                    // Generate left operand (result in A=low, Y=high)
+                    generate_expr(left, emitter, info, string_collector)?;
+
+                    // Low byte is already in A, just clear Y to indicate u8 result
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Low byte already in A");
+                    }
+                    return Ok(());
+                }
+            }
+
+            _ => {}
+        }
+    }
+
     // Optimization: Avoid stack if left operand is simple (variable or literal)
     let use_stack = !is_simple_expr(&left.node);
 
     if use_stack {
         // Complex left expression: use Y register for temporary storage
         // This is faster than PHA/PLA (2+3=5 cycles vs 3+4=7 cycles)
-        // 1. Generate left operand -> A
+        // 1. Generate left operand -> A (and X if u16)
         generate_expr(left, emitter, info, string_collector)?;
 
         // 2. Save A to Y register
         emitter.emit_inst("TAY", "");
         emitter.reg_state.transfer_a_to_y();
 
-        // 3. Generate right operand -> A
+        // 3. Generate right operand -> A (and X if u16)
         generate_expr(right, emitter, info, string_collector)?;
 
-        // 4. Store right operand in TEMP
-        emitter.emit_sta_zp(emitter.memory_layout.temp_reg());
+        // 4. Store right operand in TEMP (both bytes if u16)
+        let temp_reg = emitter.memory_layout.temp_reg();
+        emitter.emit_sta_zp(temp_reg);
+        if is_u16 {
+            emitter.emit_inst("STY", &format!("${:02X}", temp_reg + 1));
+        }
 
         // 5. Restore left operand from Y -> A
         emitter.emit_inst("TYA", "");
@@ -462,25 +782,71 @@ fn generate_binary(
         // Simple left expression: evaluate right first, store in temp, then eval left
         // This saves PHA/PLA instructions (4 cycles)
 
-        // 1. Generate right operand -> A
+        // 1. Generate right operand -> A (and X if u16)
         generate_expr(right, emitter, info, string_collector)?;
 
-        // 2. Store right operand in TEMP
-        emitter.emit_sta_zp(emitter.memory_layout.temp_reg());
+        // 2. Store right operand in TEMP (both bytes if u16)
+        let temp_reg = emitter.memory_layout.temp_reg();
+        emitter.emit_sta_zp(temp_reg);
+        if is_u16 {
+            emitter.emit_inst("STY", &format!("${:02X}", temp_reg + 1));
+        }
 
-        // 3. Generate left operand -> A (simple, no side effects)
+        // 3. Generate left operand -> A (and X if u16) (simple, no side effects)
         generate_expr(left, emitter, info, string_collector)?;
+    }
+
+    // Check if we're doing BCD arithmetic
+    let is_bcd = left_type.is_some_and(|ty| matches!(ty,
+        crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B8) |
+        crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+    ));
+
+    // For BCD arithmetic, enter decimal mode
+    if is_bcd && matches!(op, crate::ast::BinaryOp::Add | crate::ast::BinaryOp::Sub) {
+        emitter.emit_comment("Enter BCD mode");
+        emitter.emit_inst("SED", "");
     }
 
     // 6. Perform operation
     match op {
         crate::ast::BinaryOp::Add => {
-            emitter.emit_inst("CLC", "");
-            emitter.emit_inst("ADC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+            if is_u16 {
+                // 16-bit addition: add low bytes, then high bytes with carry
+                let temp_low = emitter.memory_layout.temp_reg();
+                let temp_high = temp_low + 1;
+
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("ADC", &format!("${:02X}", temp_low));  // Add low bytes
+                emitter.emit_inst("PHA", "");  // Save low byte result on stack
+                emitter.emit_inst("TYA", "");  // Get left high byte from Y
+                emitter.emit_inst("ADC", &format!("${:02X}", temp_high)); // Add high bytes with carry
+                emitter.emit_inst("TAY", "");  // Store high byte result in Y
+                emitter.emit_inst("PLA", "");  // Restore low byte result to A
+            } else {
+                // 8-bit addition
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("ADC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+            }
         }
         crate::ast::BinaryOp::Sub => {
-            emitter.emit_inst("SEC", "");
-            emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+            if is_u16 {
+                // 16-bit subtraction: sub low bytes, then high bytes with borrow
+                let temp_low = emitter.memory_layout.temp_reg();
+                let temp_high = temp_low + 1;
+
+                emitter.emit_inst("SEC", "");
+                emitter.emit_inst("SBC", &format!("${:02X}", temp_low));  // Subtract low bytes
+                emitter.emit_inst("PHA", "");  // Save low byte result on stack
+                emitter.emit_inst("TYA", "");  // Get left high byte from Y
+                emitter.emit_inst("SBC", &format!("${:02X}", temp_high)); // Subtract high bytes with borrow
+                emitter.emit_inst("TAY", "");  // Store high byte result in Y
+                emitter.emit_inst("PLA", "");  // Restore low byte result to A
+            } else {
+                // 8-bit subtraction
+                emitter.emit_inst("SEC", "");
+                emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+            }
         }
         crate::ast::BinaryOp::BitAnd => {
             emitter.emit_inst("AND", &format!("${:02X}", emitter.memory_layout.temp_reg()));
@@ -492,10 +858,10 @@ fn generate_binary(
             emitter.emit_inst("EOR", &format!("${:02X}", emitter.memory_layout.temp_reg()));
         }
         crate::ast::BinaryOp::Shl => {
-            generate_shift_left(emitter)?;
+            generate_shift_left(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Shr => {
-            generate_shift_right(emitter)?;
+            generate_shift_right(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Mul => {
             generate_multiply(emitter)?;
@@ -535,6 +901,12 @@ fn generate_binary(
         }
     }
 
+    // Exit decimal mode after BCD operations
+    if is_bcd && matches!(op, crate::ast::BinaryOp::Add | crate::ast::BinaryOp::Sub) {
+        emitter.emit_comment("Exit BCD mode");
+        emitter.emit_inst("CLD", "");
+    }
+
     // Add register state comment based on operation type
     if emitter.is_verbose() {
         use crate::ast::BinaryOp;
@@ -570,11 +942,11 @@ fn generate_literal(lit: &crate::ast::Literal, emitter: &mut Emitter, string_col
                 // 8-bit value: load into A only
                 emitter.emit_lda_immediate(*val);
             } else if value <= 0xFFFF {
-                // 16-bit value: load low byte into A, high byte into X
+                // 16-bit value: load low byte into A, high byte into Y
                 emitter.emit_inst("LDA", &format!("#${:02X}", value & 0xFF));
-                emitter.emit_inst("LDX", &format!("#${:02X}", (value >> 8) & 0xFF));
+                emitter.emit_inst("LDY", &format!("#${:02X}", (value >> 8) & 0xFF));
                 emitter.reg_state.set_a(crate::codegen::regstate::RegisterValue::Immediate((value & 0xFF) as i64));
-                emitter.reg_state.set_x(crate::codegen::regstate::RegisterValue::Immediate(((value >> 8) & 0xFF) as i64));
+                emitter.reg_state.set_y(crate::codegen::regstate::RegisterValue::Immediate(((value >> 8) & 0xFF) as i64));
             } else {
                 // Values larger than 16-bit not supported on 6502
                 return Err(CodegenError::UnsupportedOperation(
@@ -722,6 +1094,13 @@ fn generate_variable(
     use crate::sema::table::SymbolKind;
 
     if let Some(sym) = info.resolved_symbols.get(&span) {
+        // Check if this is a u16/i16/b16 variable that needs both bytes loaded
+        let is_u16 = matches!(sym.ty,
+            Type::Primitive(crate::ast::PrimitiveType::U16) |
+            Type::Primitive(crate::ast::PrimitiveType::I16) |
+            Type::Primitive(crate::ast::PrimitiveType::B16)
+        );
+
         match sym.location {
             SymbolLocation::Absolute(_addr) => {
                 // Check if this is an address declaration - use symbolic name
@@ -730,12 +1109,20 @@ fn generate_variable(
                 } else {
                     // Regular variable at absolute address - use numeric
                     emitter.emit_lda_abs(_addr);
+                    // For u16/i16, also load high byte into X
+                    if is_u16 {
+                        emitter.emit_inst("LDX", &format!("${:04X}", _addr + 1));
+                    }
                 }
                 Ok(())
             }
             SymbolLocation::ZeroPage(addr) => {
                 // Use optimized load that skips if value already in A
                 emitter.emit_lda_zp(addr);
+                // For u16/i16, also load high byte into Y
+                if is_u16 {
+                    emitter.emit_inst("LDY", &format!("${:02X}", addr + 1));
+                }
                 Ok(())
             }
             SymbolLocation::None => Err(CodegenError::UnsupportedOperation(format!(
@@ -783,6 +1170,8 @@ fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -803,6 +1192,8 @@ fn generate_compare_ne(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -823,6 +1214,8 @@ fn generate_compare_lt(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -843,6 +1236,8 @@ fn generate_compare_ge(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -870,6 +1265,8 @@ fn generate_compare_gt(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -894,13 +1291,15 @@ fn generate_compare_le(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("LDA", "#$00");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
 // Shift helper functions
 // A contains value to shift, emitter.memory_layout.temp_reg() contains shift amount
 
-fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
+fn generate_shift_left(emitter: &mut Emitter, _is_u16: bool) -> Result<(), CodegenError> {
     // Shift A left by emitter.memory_layout.temp_reg() bits
     // Use X register as loop counter
 
@@ -925,34 +1324,72 @@ fn generate_shift_left(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("BNE", &loop_label);
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
-fn generate_shift_right(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Shift A right by emitter.memory_layout.temp_reg() bits
-    // Use X register as loop counter
+fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    // Shift value right by emitter.memory_layout.temp_reg() bits
+    // For u8: Shift A right
+    // For u16: Shift A (low) and Y (high) right together
 
     if !emitter.is_minimal() {
         emitter.emit_comment("Shift right (divide by power of 2)");
     }
 
-    let loop_label = emitter.next_label("sr");
-    let end_label = emitter.next_label("sx");
+    let temp_reg = emitter.memory_layout.temp_reg();
 
-    // Load shift count into X
-    emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+    if is_u16 {
+        // For u16, optimize common case of >> 8 (just take high byte)
+        // Check if shift count == 8
+        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+        emitter.emit_inst("CPX", "#$08");
+        let not_eight_label = emitter.next_label("sn");
+        let end_label = emitter.next_label("sx");
+        emitter.emit_inst("BNE", &not_eight_label);
 
-    // Check if count is zero
-    emitter.emit_inst("CPX", "#$00");
-    emitter.emit_inst("BEQ", &end_label);
+        // Shift by exactly 8: move high byte to low byte
+        emitter.emit_inst("TYA", ""); // A = high byte
+        emitter.emit_inst("LDY", "#$00"); // Y = 0
+        emitter.emit_inst("JMP", &end_label);
 
-    // Loop: shift right once per iteration
-    emitter.emit_label(&loop_label);
-    emitter.emit_inst("LSR", "A"); // Logical shift right
-    emitter.emit_inst("DEX", "");
-    emitter.emit_inst("BNE", &loop_label);
+        emitter.emit_label(&not_eight_label);
+        // For other shift counts, need multi-byte shift (not yet implemented)
+        // For now, just do single-byte shift as before
+        emitter.emit_inst("CPX", "#$00");
+        emitter.emit_inst("BEQ", &end_label);
 
-    emitter.emit_label(&end_label);
+        let loop_label = emitter.next_label("sr");
+        emitter.emit_label(&loop_label);
+        emitter.emit_inst("LSR", "A");
+        emitter.emit_inst("DEX", "");
+        emitter.emit_inst("BNE", &loop_label);
+
+        emitter.emit_label(&end_label);
+    } else {
+        // u8 shift
+        let loop_label = emitter.next_label("sr");
+        let end_label = emitter.next_label("sx");
+
+        // Load shift count into X
+        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+
+        // Check if count is zero
+        emitter.emit_inst("CPX", "#$00");
+        emitter.emit_inst("BEQ", &end_label);
+
+        // Loop: shift right once per iteration
+        emitter.emit_label(&loop_label);
+        emitter.emit_inst("LSR", "A"); // Logical shift right
+        emitter.emit_inst("DEX", "");
+        emitter.emit_inst("BNE", &loop_label);
+
+        emitter.emit_label(&end_label);
+    }
+
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -992,6 +1429,8 @@ fn generate_logical_and(
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -1032,6 +1471,8 @@ fn generate_logical_or(
     emitter.emit_inst("LDA", "#$01");
 
     emitter.emit_label(&end_label);
+    // Comparison modifies A register - invalidate tracking
+    emitter.mark_a_unknown();
     Ok(())
 }
 
@@ -1584,6 +2025,9 @@ fn generate_type_cast(
 ) -> Result<(), CodegenError> {
     use crate::ast::{PrimitiveType, TypeExpr};
 
+    // Get source type to determine what kind of cast is needed
+    let source_type = info.resolved_types.get(&expr.span);
+
     // Evaluate the source expression
     generate_expr(expr, emitter, info, string_collector)?;
 
@@ -1592,14 +2036,28 @@ fn generate_type_cast(
         TypeExpr::Primitive(target_prim) => {
             match target_prim {
                 PrimitiveType::U16 | PrimitiveType::I16 => {
-                    // Casting to 16-bit: Need to handle high byte
-                    // For u8 -> u16: zero-extend (A has low byte, X should be 0)
-                    // For i8 -> i16: sign-extend (A has low byte, X should be sign-extended)
+                    // Check if source is already 16-bit
+                    let source_is_16bit = source_type.is_some_and(|ty| matches!(ty,
+                        crate::sema::types::Type::Primitive(PrimitiveType::U16) |
+                        crate::sema::types::Type::Primitive(PrimitiveType::I16) |
+                        crate::sema::types::Type::Primitive(PrimitiveType::B16)
+                    ));
+
+                    // If source is already 16-bit, no extension needed (just type change)
+                    if source_is_16bit {
+                        emitter.emit_comment(&format!("Cast to {:?} (no extension needed)", target_prim));
+                        // A and Y already contain the 16-bit value
+                        return Ok(());
+                    }
+
+                    // Casting from 8-bit to 16-bit: Need to handle high byte
+                    // For u8 -> u16: zero-extend (A has low byte, Y should be 0)
+                    // For i8 -> i16: sign-extend (A has low byte, Y should be sign-extended)
 
                     emitter.emit_comment(&format!("Cast to {:?}", target_prim));
 
                     if matches!(target_prim, PrimitiveType::I16) {
-                        // Sign extension: if bit 7 of A is set, X = $FF, else X = $00
+                        // Sign extension: if bit 7 of A is set, Y = $FF, else Y = $00
                         if emitter.is_verbose() {
                             emitter.emit_comment("Sign-extend i8 to i16: replicate sign bit to high byte");
                         }
@@ -1615,26 +2073,21 @@ fn generate_type_cast(
                         emitter.emit_inst("LDA", "#$00"); // Positive: high byte = $00
                         emitter.emit_label(&end_label);
 
-                        // Now A has high byte, X has low byte - swap them
-                        emitter.emit_inst("PHA", ""); // Push high byte
-                        emitter.emit_inst("TXA", ""); // A = low byte
-                        emitter.emit_inst("TAX", ""); // X = low byte
-                        emitter.emit_inst("PLA", ""); // A = high byte (for now)
-                        // Result: A = low byte, X = high byte (but we want X = high byte)
-                        // Actually for most operations we just use A, so leave low byte in A
+                        // Now A has high byte, X has low byte - put high byte in Y
+                        emitter.emit_inst("TAY", ""); // Y = high byte
                         emitter.emit_inst("TXA", ""); // A = low byte
                         if emitter.is_verbose() {
-                            emitter.emit_comment("Result: A=low_byte, X=sign_extended_high_byte");
+                            emitter.emit_comment("Result: A=low_byte, Y=sign_extended_high_byte");
                         }
                     } else {
-                        // Zero extension: X = 0
+                        // Zero extension: Y = 0
                         if emitter.is_verbose() {
                             emitter.emit_comment("Zero-extend u8 to u16: high byte = 0");
                         }
-                        emitter.emit_inst("LDX", "#$00");
+                        emitter.emit_inst("LDY", "#$00");
                         // A already has the low byte
                         if emitter.is_verbose() {
-                            emitter.emit_comment("Result: A=low_byte, X=$00");
+                            emitter.emit_comment("Result: A=low_byte, Y=$00");
                         }
                     }
                 }
@@ -1668,6 +2121,38 @@ fn generate_type_cast(
                     emitter.emit_label(&end_label);
                     if emitter.is_verbose() {
                         emitter.emit_comment("Result: A=boolean (0 or 1)");
+                    }
+                }
+                PrimitiveType::B16 => {
+                    // Check if source is already 16-bit
+                    let source_is_16bit = source_type.is_some_and(|ty| matches!(ty,
+                        crate::sema::types::Type::Primitive(PrimitiveType::U16) |
+                        crate::sema::types::Type::Primitive(PrimitiveType::I16) |
+                        crate::sema::types::Type::Primitive(PrimitiveType::B16)
+                    ));
+
+                    // If source is already 16-bit, no extension needed (just type change)
+                    if source_is_16bit {
+                        emitter.emit_comment("Cast to b16 (no extension needed)");
+                        // A and Y already contain the 16-bit value
+                        return Ok(());
+                    }
+
+                    // Casting from 8-bit to b16: zero-extend
+                    emitter.emit_comment("Cast to b16");
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Zero-extend to b16: high byte = 0");
+                    }
+                    emitter.emit_inst("LDY", "#$00");
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Result: A=low_byte, Y=$00");
+                    }
+                }
+                PrimitiveType::B8 => {
+                    // Casting to b8: truncate (same as u8)
+                    emitter.emit_comment("Cast to b8 (truncate)");
+                    if emitter.is_verbose() {
+                        emitter.emit_comment("Result: A=low_byte (high byte discarded)");
                     }
                 }
             }

@@ -60,6 +60,16 @@ pub enum Token {
     #[token("false")]
     False,
 
+    // === CPU Status Flags (read-only) ===
+    #[token("carry")]
+    Carry,
+    #[token("zero")]
+    Zero,
+    #[token("overflow")]
+    Overflow,
+    #[token("negative")]
+    Negative,
+
     // === Type keywords ===
     #[token("u8")]
     U8,
@@ -73,6 +83,10 @@ pub enum Token {
     Bool,
     #[token("str")]
     Str,
+    #[token("b8")]
+    B8,
+    #[token("b16")]
+    B16,
 
     // === Arithmetic operators ===
     #[token("+")]

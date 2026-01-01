@@ -1,0 +1,40 @@
+addr RESULT_A = 0x6000;
+addr RESULT_B = 0x6001;
+addr RESULT_C = 0x6002;
+addr RESULT_D = 0x6003;
+addr RESULT_E = 0x6004;
+addr RESULT_F = 0x6005;
+
+#[reset]
+fn main() {
+    long: u16 = fib(10);
+    RESULT_A = long.low;
+    RESULT_B = long.high;
+
+    long = fib(14);
+    RESULT_C = long.low;
+    RESULT_D = long.high;
+
+    long = fib(24);
+    RESULT_E = long.low;
+    RESULT_F = long.high;
+
+    asm {
+        "halt: JMP halt"
+    }
+}
+
+fn fib(n: u8) -> u16 {
+    if (n <= 1) {
+        return n as u16;
+    }
+    a: u16 = 0;
+    b: u16 = 1;
+    c: u16 = 0;
+    for i: u8 in 2..=n {
+        c = a + b;
+        a = b;
+        b = c;
+    }
+    return b;
+}

@@ -159,6 +159,10 @@ fn format_token(token: &Token) -> String {
         Token::Const => "keyword 'const'".to_string(),
         Token::True => "keyword 'true'".to_string(),
         Token::False => "keyword 'false'".to_string(),
+        Token::Carry => "keyword 'carry'".to_string(),
+        Token::Zero => "keyword 'zero'".to_string(),
+        Token::Overflow => "keyword 'overflow'".to_string(),
+        Token::Negative => "keyword 'negative'".to_string(),
         Token::As => "keyword 'as'".to_string(),
         Token::Struct => "keyword 'struct'".to_string(),
         Token::Enum => "keyword 'enum'".to_string(),
@@ -175,6 +179,8 @@ fn format_token(token: &Token) -> String {
         Token::I16 => "type 'i16'".to_string(),
         Token::Bool => "type 'bool'".to_string(),
         Token::Str => "type 'str'".to_string(),
+        Token::B8 => "type 'b8'".to_string(),
+        Token::B16 => "type 'b16'".to_string(),
         Token::Comment => "comment".to_string(),
     }
 }

@@ -18,20 +18,17 @@ use std::collections::HashMap;
 
 /// Controls the verbosity level of generated assembly comments
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CommentVerbosity {
     /// Minimal comments - only function headers and critical info
     Minimal,
     /// Normal comments - function headers, operation types, basic context
+    #[default]
     Normal,
     /// Verbose - full register state, detailed explanations, memory layout
     Verbose,
 }
 
-impl Default for CommentVerbosity {
-    fn default() -> Self {
-        CommentVerbosity::Normal
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum CodegenError {
@@ -197,9 +194,17 @@ pub fn generate(
 
     // Generate code for imported items FIRST
     // This ensures that imported functions are defined before they're called
-    emitter.emit_comment("============================================================");
-    emitter.emit_comment("Code from imported modules");
-    emitter.emit_comment("============================================================");
+    // Only emit section header if there are actually imported items to generate
+    let has_imported_code = program.imported_items.iter().any(|item| {
+        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_))
+    });
+
+    if has_imported_code {
+        emitter.emit_comment("============================================================");
+        emitter.emit_comment("Code from imported modules");
+        emitter.emit_comment("============================================================");
+    }
+
     for item in &program.imported_items {
         // Get the item name to check for duplicates
         let item_name = match &item.node {
@@ -229,9 +234,17 @@ pub fn generate(
     }
 
     // Generate code for main module items
-    emitter.emit_comment("============================================================");
-    emitter.emit_comment("Code from main module");
-    emitter.emit_comment("============================================================");
+    // Only emit section header if there are actually main module items to generate
+    let has_main_code = ast.items.iter().any(|item| {
+        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_))
+    });
+
+    if has_main_code {
+        emitter.emit_comment("============================================================");
+        emitter.emit_comment("Code from main module");
+        emitter.emit_comment("============================================================");
+    }
+
     for item in &ast.items {
         // Get the item name to check for duplicates
         let item_name = match &item.node {

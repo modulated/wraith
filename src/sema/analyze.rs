@@ -824,8 +824,11 @@ impl SemanticAnalyzer {
             };
 
             // Register parameters
-            // Allocate parameters in zero page using allocator
-            for param in &func.params {
+            // Parameters are passed via the param region ($80+), not regular variable space
+            // Each parameter gets sequential bytes (16-bit params take 2 bytes)
+            let layout = MemoryLayout::new();
+            let mut byte_offset = 0u8;
+            for param in func.params.iter() {
                 let name = param.name.node.clone();
 
                 // Check for duplicate parameter names
@@ -837,12 +840,22 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                let addr = self.zp_allocator.allocate()?;
+                // Allocate parameter in the param region ($80 + byte_offset)
+                let addr = layout.param_base + byte_offset;
+                if addr > layout.param_end {
+                    return Err(SemaError::OutOfZeroPage {
+                        span: param.name.span,
+                    });
+                }
+
                 let location = SymbolLocation::ZeroPage(addr);
+                let param_type = self.resolve_type(&param.ty.node)?;
+                let param_size = param_type.size();
+
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Variable,
-                    ty: self.resolve_type(&param.ty.node)?,
+                    ty: param_type,
                     location,
                     mutable: false,
                 };
@@ -852,6 +865,9 @@ impl SemanticAnalyzer {
 
                 // Track parameter for unused parameter detection
                 self.declared_parameters.push((name, param.name.span));
+
+                // Advance byte offset by parameter size (16-bit params take 2 bytes)
+                byte_offset += param_size as u8;
             }
 
             // Analyze body
@@ -1112,11 +1128,8 @@ impl SemanticAnalyzer {
                 let init_ty = self.check_expr(init)?;
 
                 // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
-                let types_compatible = declared_ty == init_ty
-                    || (matches!(declared_ty, Type::Primitive(crate::ast::PrimitiveType::U8))
-                        && matches!(init_ty, Type::Primitive(crate::ast::PrimitiveType::Bool)));
-
-                if !types_compatible {
+                // Check if initializer type can be implicitly converted to declared type
+                if !init_ty.is_implicitly_convertible_to(&declared_ty) {
                     return Err(SemaError::TypeMismatch {
                         expected: declared_ty.display_name(),
                         found: init_ty.display_name(),
@@ -1143,8 +1156,13 @@ impl SemanticAnalyzer {
                 }
 
                 // Allocate in zero page using allocator
-                // Arrays need 2 bytes for the pointer
-                let addr = if matches!(declared_ty, Type::Array(_, _)) {
+                // Arrays (pointers) and u16/i16/b16 types need 2 bytes
+                let addr = if matches!(declared_ty,
+                    Type::Array(_, _) |
+                    Type::Primitive(crate::ast::PrimitiveType::U16) |
+                    Type::Primitive(crate::ast::PrimitiveType::I16) |
+                    Type::Primitive(crate::ast::PrimitiveType::B16)
+                ) {
                     self.zp_allocator.allocate_range(2)?
                 } else {
                     self.zp_allocator.allocate()?
@@ -1170,11 +1188,8 @@ impl SemanticAnalyzer {
                 let value_ty = self.check_expr(value)?;
 
                 // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
-                let types_compatible = target_ty == value_ty
-                    || (matches!(target_ty, Type::Primitive(crate::ast::PrimitiveType::U8))
-                        && matches!(value_ty, Type::Primitive(crate::ast::PrimitiveType::Bool)));
-
-                if !types_compatible {
+                // Check if value type can be implicitly converted to target type
+                if !value_ty.is_implicitly_convertible_to(&target_ty) {
                     return Err(SemaError::TypeMismatch {
                         expected: target_ty.display_name(),
                         found: value_ty.display_name(),
@@ -1199,14 +1214,16 @@ impl SemanticAnalyzer {
                     Type::Void
                 };
 
-                if let Some(ret_ty) = &self.current_return_type
-                    && &expr_ty != ret_ty {
+                if let Some(ret_ty) = &self.current_return_type {
+                    // Check if return expression type can be implicitly converted to return type
+                    if !expr_ty.is_implicitly_convertible_to(ret_ty) {
                         return Err(SemaError::ReturnTypeMismatch {
                             expected: ret_ty.display_name(),
                             found: expr_ty.display_name(),
                             span: expr.as_ref().map(|e| e.span).unwrap_or(stmt.span),
                         });
                     }
+                }
             }
             Stmt::If {
                 condition,
@@ -1350,7 +1367,15 @@ impl SemanticAnalyzer {
                 };
 
                 // Allocate storage for loop variable
-                let addr = self.zp_allocator.allocate()?;
+                // u16/i16 types need 2 bytes
+                let addr = if matches!(var_ty,
+                    Type::Primitive(crate::ast::PrimitiveType::U16) |
+                    Type::Primitive(crate::ast::PrimitiveType::I16)
+                ) {
+                    self.zp_allocator.allocate_range(2)?
+                } else {
+                    self.zp_allocator.allocate()?
+                };
                 let info = SymbolInfo {
                     name: var_name.node.clone(),
                     kind: SymbolKind::Variable,
@@ -1563,6 +1588,55 @@ impl SemanticAnalyzer {
                     _ => {}
                 }
 
+                // BCD type validation
+                if let (Type::Primitive(left_prim), Type::Primitive(right_prim)) = (&left_ty, &right_ty)
+                    && (left_prim.is_bcd() || right_prim.is_bcd()) {
+                        // Rule: Both operands must be same BCD type
+                        if left_prim != right_prim {
+                            return Err(SemaError::InvalidBinaryOp {
+                                op: format!("{:?}", op),
+                                left_ty: left_ty.display_name(),
+                                right_ty: right_ty.display_name(),
+                                span: expr.span,
+                            });
+                        }
+
+                        // Only allow Add, Sub, comparisons on BCD
+                        match op {
+                            BinaryOp::Add | BinaryOp::Sub => {}  // Hardware supported
+                            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt |
+                            BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {}  // Comparisons work
+
+                            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                                return Err(SemaError::InvalidBinaryOp {
+                                    op: format!("{:?} (not supported on BCD, convert to binary first)", op),
+                                    left_ty: left_ty.display_name(),
+                                    right_ty: right_ty.display_name(),
+                                    span: expr.span,
+                                });
+                            }
+
+                            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor |
+                            BinaryOp::Shl | BinaryOp::Shr => {
+                                return Err(SemaError::InvalidBinaryOp {
+                                    op: format!("{:?} (bitwise ops not allowed on BCD)", op),
+                                    left_ty: left_ty.display_name(),
+                                    right_ty: right_ty.display_name(),
+                                    span: expr.span,
+                                });
+                            }
+
+                            _ => {
+                                return Err(SemaError::InvalidBinaryOp {
+                                    op: format!("{:?}", op),
+                                    left_ty: left_ty.display_name(),
+                                    right_ty: right_ty.display_name(),
+                                    span: expr.span,
+                                });
+                            }
+                        }
+                    }
+
                 // Special handling for shift operations: allow u16 to be shifted by u8
                 // (shift amounts realistically never exceed 255)
                 let types_compatible = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
@@ -1628,7 +1702,8 @@ impl SemanticAnalyzer {
                 }
                 for (arg, param_ty) in args.iter().zip(param_types.iter()) {
                     let arg_ty = self.check_expr(arg)?;
-                    if &arg_ty != param_ty {
+                    // Check if argument type can be implicitly converted to parameter type
+                    if !arg_ty.is_implicitly_convertible_to(param_ty) {
                         return Err(SemaError::TypeMismatch {
                             expected: param_ty.display_name(),
                             found: arg_ty.display_name(),
@@ -1867,6 +1942,41 @@ impl SemanticAnalyzer {
                         span: slice_expr.span,
                     }),
                 }
+            }
+
+            Expr::U16Low(operand) => {
+                let operand_ty = self.check_expr(operand)?;
+                match &operand_ty {
+                    Type::Primitive(crate::ast::PrimitiveType::U16)
+                    | Type::Primitive(crate::ast::PrimitiveType::I16) => {
+                        Ok(Type::Primitive(crate::ast::PrimitiveType::U8))
+                    }
+                    _ => Err(SemaError::TypeMismatch {
+                        expected: "u16 or i16".to_string(),
+                        found: operand_ty.display_name(),
+                        span: operand.span,
+                    }),
+                }
+            }
+
+            Expr::U16High(operand) => {
+                let operand_ty = self.check_expr(operand)?;
+                match &operand_ty {
+                    Type::Primitive(crate::ast::PrimitiveType::U16)
+                    | Type::Primitive(crate::ast::PrimitiveType::I16) => {
+                        Ok(Type::Primitive(crate::ast::PrimitiveType::U8))
+                    }
+                    _ => Err(SemaError::TypeMismatch {
+                        expected: "u16 or i16".to_string(),
+                        found: operand_ty.display_name(),
+                        span: operand.span,
+                    }),
+                }
+            }
+
+            // CPU status flags - all return bool
+            Expr::CpuFlagCarry | Expr::CpuFlagZero | Expr::CpuFlagOverflow | Expr::CpuFlagNegative => {
+                Ok(Type::Primitive(crate::ast::PrimitiveType::Bool))
             }
         };
 

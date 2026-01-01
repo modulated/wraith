@@ -17,6 +17,8 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
             PrimitiveType::I8 => "i8".to_string(),
             PrimitiveType::I16 => "i16".to_string(),
             PrimitiveType::Bool => "bool".to_string(),
+            PrimitiveType::B8 => "b8".to_string(),
+            PrimitiveType::B16 => "b16".to_string(),
         },
         TypeExpr::Pointer { pointee, mutable } => {
             if *mutable {
@@ -178,8 +180,8 @@ fn generate_function(
 
     // Document zero-page usage in verbose mode
     if emitter.is_verbose() {
-        emitter.emit_comment(&format!("  Temps: $20-${}=available scratch",
-            format!("{:02X}", emitter.memory_layout.param_base - 1)));
+        emitter.emit_comment(&format!("  Temps: $20-${:02X}=available scratch",
+            emitter.memory_layout.param_base - 1));
         emitter.emit_comment(&format!("  Params: ${:02X}-$81=parameter area",
             emitter.memory_layout.param_base));
     }

@@ -15,15 +15,24 @@ pub enum PrimitiveType {
     I16,
     /// Boolean (actually u8: 0 or 1)
     Bool,
+    /// Binary Coded Decimal: 8-bit (0-99, packed two digits)
+    B8,
+    /// Binary Coded Decimal: 16-bit (0-9999, packed four digits)
+    B16,
 }
 
 impl PrimitiveType {
     /// Returns the size in bytes of this primitive type
     pub fn size_bytes(&self) -> usize {
         match self {
-            PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::Bool => 1,
-            PrimitiveType::U16 | PrimitiveType::I16 => 2,
+            PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::Bool | PrimitiveType::B8 => 1,
+            PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 => 2,
         }
+    }
+
+    /// Returns true if this is a BCD type
+    pub fn is_bcd(&self) -> bool {
+        matches!(self, PrimitiveType::B8 | PrimitiveType::B16)
     }
 }
 

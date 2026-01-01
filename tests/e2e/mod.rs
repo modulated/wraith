@@ -9,3 +9,5 @@ mod types;
 mod memory;
 mod interrupts;
 mod operators;
+mod cpu_flags;
+mod bcd;

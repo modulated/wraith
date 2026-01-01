@@ -27,8 +27,41 @@ pub fn generate_stmt(
             mutable: _,
             zero_page: _,
         } => {
-            // Generate initialization expression
-            generate_expr(init, emitter, info, string_collector)?;
+            // Check for shorthand array syntax: [value] expanding to [value, value, ...]
+            // If init is a single-element array and target is a larger array, synthesize an ArrayFill
+            let modified_init;
+            let init_expr = if let Some(sym) = info.resolved_symbols.get(&name.span) {
+                use crate::sema::types::Type;
+
+                // Check if target is an array and init is a single-element array literal
+                if let Type::Array(_, target_size) = &sym.ty {
+                    if let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) = &init.node {
+                        if elements.len() == 1 && *target_size > 1 {
+                            // Shorthand syntax detected! Convert to ArrayFill
+                            emitter.emit_comment(&format!("Expanding [value] to [{} elements]", target_size));
+                            modified_init = crate::ast::Spanned {
+                                node: crate::ast::Expr::Literal(crate::ast::Literal::ArrayFill {
+                                    value: Box::new(elements[0].clone()),
+                                    count: *target_size,
+                                }),
+                                span: init.span,
+                            };
+                            &modified_init
+                        } else {
+                            init
+                        }
+                    } else {
+                        init
+                    }
+                } else {
+                    init
+                }
+            } else {
+                init
+            };
+
+            // Generate initialization expression (result in A, and X if u16)
+            generate_expr(init_expr, emitter, info, string_collector)?;
 
             // Store in variable location
             // Look up by span in resolved_symbols since local vars aren't in global table
@@ -36,8 +69,34 @@ pub fn generate_stmt(
                 use crate::sema::table::SymbolKind;
                 use crate::sema::types::Type;
 
-                // Check if this is an array type (arrays need 2 bytes for pointer)
-                let is_array = matches!(sym.ty, Type::Array(_, _));
+                // Check if we need to zero-extend (u8 -> u16)
+                // Get the init expression type from resolved_types
+                let init_type = info.resolved_types.get(&init.span);
+                let target_type = &sym.ty;
+
+                let needs_zero_extend = if let Some(init_ty) = init_type {
+                    matches!(init_ty, Type::Primitive(crate::ast::PrimitiveType::U8))
+                        && matches!(target_type,
+                            Type::Primitive(crate::ast::PrimitiveType::U16) |
+                            Type::Primitive(crate::ast::PrimitiveType::I16) |
+                            Type::Primitive(crate::ast::PrimitiveType::B16)
+                        )
+                } else {
+                    false
+                };
+
+                // If we need to zero-extend, set Y=0 for the high byte
+                if needs_zero_extend {
+                    emitter.emit_inst("LDY", "#$00");
+                }
+
+                // Check if this is a multi-byte type (arrays, u16, i16, b16)
+                let is_multibyte = matches!(sym.ty,
+                    Type::Array(_, _) |
+                    Type::Primitive(crate::ast::PrimitiveType::U16) |
+                    Type::Primitive(crate::ast::PrimitiveType::I16) |
+                    Type::Primitive(crate::ast::PrimitiveType::B16)
+                );
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
@@ -46,17 +105,17 @@ pub fn generate_stmt(
                             emitter.emit_sta_symbol(&name.node);
                         } else {
                             emitter.emit_sta_abs(addr);
-                            // For arrays, also store high byte (in X)
-                            if is_array {
-                                emitter.emit_inst("STX", &format!("${:04X}", addr + 1));
+                            // For multi-byte types, also store high byte (in Y)
+                            if is_multibyte {
+                                emitter.emit_inst("STY", &format!("${:04X}", addr + 1));
                             }
                         }
                     }
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                         emitter.emit_sta_zp(addr);
-                        // For arrays, also store high byte (in X)
-                        if is_array {
-                            emitter.emit_inst("STX", &format!("${:02X}", addr + 1));
+                        // For multi-byte types, also store high byte (in Y)
+                        if is_multibyte {
+                            emitter.emit_inst("STY", &format!("${:02X}", addr + 1));
                         }
                     }
                     crate::sema::table::SymbolLocation::None => {
@@ -145,6 +204,14 @@ pub fn generate_stmt(
 
                     if let Some(sym) = sym {
                         use crate::sema::table::SymbolKind;
+                        use crate::sema::types::Type;
+
+                        // Check if this is a multi-byte type (u16/i16/b16)
+                        let is_multibyte = matches!(sym.ty,
+                            Type::Primitive(crate::ast::PrimitiveType::U16) |
+                            Type::Primitive(crate::ast::PrimitiveType::I16) |
+                            Type::Primitive(crate::ast::PrimitiveType::B16)
+                        );
 
                         match sym.location {
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
@@ -153,10 +220,18 @@ pub fn generate_stmt(
                                     emitter.emit_sta_symbol(name);
                                 } else {
                                     emitter.emit_sta_abs(addr);
+                                    // For multi-byte types, also store high byte (in Y)
+                                    if is_multibyte {
+                                        emitter.emit_inst("STY", &format!("${:04X}", addr + 1));
+                                    }
                                 }
                             }
                             crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                                 emitter.emit_sta_zp(addr);
+                                // For multi-byte types, also store high byte (in Y)
+                                if is_multibyte {
+                                    emitter.emit_inst("STY", &format!("${:02X}", addr + 1));
+                                }
                             }
                             crate::sema::table::SymbolLocation::None => {
                                 return Err(CodegenError::UnsupportedOperation(format!(
@@ -168,6 +243,16 @@ pub fn generate_stmt(
                     } else {
                         return Err(CodegenError::SymbolNotFound(name.clone()));
                     }
+                }
+                crate::ast::Expr::Index { object, index } => {
+                    generate_index_assignment(
+                        object,
+                        index,
+                        value,
+                        emitter,
+                        info,
+                        string_collector
+                    )?;
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedOperation(
@@ -210,6 +295,9 @@ pub fn generate_stmt(
 
             // End
             emitter.emit_label(&end_label);
+            // Invalidate register state after control flow merge
+            // (we don't know which branch was taken)
+            emitter.reg_state.invalidate_all();
             Ok(())
         }
         Stmt::While { condition, body } => {
@@ -239,6 +327,8 @@ pub fn generate_stmt(
             emitter.emit_inst("JMP", &start_label);
 
             emitter.emit_label(&end_label);
+            // Invalidate register state after loop end
+            emitter.reg_state.invalidate_all();
             Ok(())
         }
         Stmt::Loop { body } => {
@@ -265,17 +355,16 @@ pub fn generate_stmt(
             range,
             body,
         } => {
-            // Optimized for loop using X register for counter
-            // This frees up zero page and is faster (INX vs INC, CPX vs CMP+LDA)
-            let loop_end_temp = emitter.memory_layout.loop_end_temp();
+            // For-loops use X register for the counter (fast increment with INX)
+            // u16 arithmetic uses Y register for high bytes to avoid conflicts
 
+            let loop_end_temp = emitter.memory_layout.loop_end_temp();
             let loop_label = emitter.next_label("fl");
             let end_label = emitter.next_label("fx");
 
-            // Initialize loop variable with range start -> X register
+            // Initialize loop counter with range start
             generate_expr(&range.start, emitter, info, string_collector)?;
-            emitter.emit_inst("TAX", ""); // Transfer A to X (counter in X)
-            emitter.reg_state.transfer_a_to_x();
+            emitter.emit_inst("TAX", ""); // Counter in X register
 
             // Generate end value and store in temp location
             generate_expr(&range.end, emitter, info, string_collector)?;
@@ -284,7 +373,7 @@ pub fn generate_stmt(
             // Loop start
             emitter.emit_label(&loop_label);
 
-            // Check condition: compare X (counter) with end value
+            // Check condition: compare counter with end value
             emitter.emit_inst("CPX", &format!("${:02X}", loop_end_temp));
 
             if range.inclusive {
@@ -301,23 +390,19 @@ pub fn generate_stmt(
             // Push loop context for break/continue
             emitter.push_loop(loop_label.clone(), end_label.clone());
 
-            // Execute body (note: X is used for counter, may need to save/restore if body uses X)
-            // For now, we accept that the body can't use X register
+            // Execute body
             emitter.reg_state.invalidate_all(); // Body might use registers
             generate_stmt(body, emitter, info, string_collector)?;
 
             // Pop loop context
             emitter.pop_loop();
 
-            // Increment counter (X register)
-            emitter.emit_inst("INX", ""); // 2 cycles vs INC zp (5 cycles)
-            emitter.reg_state.modify_x();
+            // Increment counter
+            emitter.emit_inst("INX", "");
 
             emitter.emit_inst("JMP", &loop_label);
             emitter.emit_label(&end_label);
 
-            // After loop, X register is modified
-            emitter.reg_state.modify_x();
             Ok(())
         }
         Stmt::ForEach {
@@ -487,12 +572,137 @@ pub fn generate_stmt(
 
                 emitter.emit_inst(mnemonic, &operand);
             }
+            // Invalidate register state after inline assembly
+            // (we don't know what the assembly does to registers)
+            emitter.reg_state.invalidate_all();
             Ok(())
         }
         Stmt::Match { expr, arms } => {
             generate_match(expr, arms, emitter, info, string_collector)
         }
     }
+}
+
+fn generate_index_assignment(
+    object: &Spanned<crate::ast::Expr>,
+    index: &Spanned<crate::ast::Expr>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use crate::sema::table::{SymbolLocation};
+    use crate::sema::types::Type;
+    use crate::ast::PrimitiveType;
+
+    emitter.emit_comment("Array element assignment");
+
+    // Step 1: Get the element type for the array
+    let object_type = info.resolved_types.get(&object.span)
+        .ok_or_else(|| CodegenError::UnsupportedOperation("Type information not found".to_string()))?;
+
+    let element_type = match object_type {
+        Type::Array(elem_ty, _size) => elem_ty,
+        _ => return Err(CodegenError::UnsupportedOperation(
+            "Can only index arrays".to_string()
+        )),
+    };
+
+    let is_multibyte = matches!(&**element_type,
+        Type::Primitive(PrimitiveType::U16) |
+        Type::Primitive(PrimitiveType::I16) |
+        Type::Primitive(PrimitiveType::B16)
+    );
+
+    // Step 2: Evaluate the value expression
+    emitter.emit_comment("Evaluate value to assign");
+    generate_expr(value, emitter, info, string_collector)?;
+
+    // Step 3: Save value to temp storage
+    emitter.emit_comment("Save value to temp");
+    emitter.emit_inst("STA", "$20");  // Save low byte
+    if is_multibyte {
+        emitter.emit_inst("STY", "$21");  // Save high byte for u16
+    }
+
+    // Step 4: Evaluate index expression
+    emitter.emit_comment("Evaluate index");
+    generate_expr(index, emitter, info, string_collector)?;
+
+    // Step 5: Transfer index to Y register
+    emitter.emit_inst("TAY", "");
+
+    // Step 6: Get array base address
+    // For now, only support simple variable arrays
+    if let Expr::Variable(array_name) = &object.node {
+        let sym = info.resolved_symbols.get(&object.span)
+            .or_else(|| info.table.lookup(array_name))
+            .ok_or_else(|| CodegenError::SymbolNotFound(array_name.clone()))?;
+
+        match sym.location {
+            SymbolLocation::ZeroPage(addr) => {
+                // For u8 arrays: direct indexed addressing
+                if !is_multibyte {
+                    // Restore value
+                    emitter.emit_inst("LDA", "$20");
+                    // Store to array[index]
+                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+                } else {
+                    // For u16 arrays: need to scale index by 2
+                    emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+                    emitter.emit_inst("TYA", "");  // Get index back to A
+                    emitter.emit_inst("ASL", "A");  // Multiply by 2
+                    emitter.emit_inst("TAY", "");  // Back to Y
+
+                    // Restore and store low byte
+                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+
+                    // Store high byte at next position
+                    emitter.emit_inst("INY", "");
+                    emitter.emit_inst("LDA", "$21");
+                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+                }
+            }
+            SymbolLocation::Absolute(addr) if addr < 256 => {
+                let addr_u8 = addr as u8;
+                // For u8 arrays: direct indexed addressing
+                if !is_multibyte {
+                    // Restore value
+                    emitter.emit_inst("LDA", "$20");
+                    // Store to array[index]
+                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
+                } else {
+                    // For u16 arrays: need to scale index by 2
+                    emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+                    emitter.emit_inst("TYA", "");  // Get index back to A
+                    emitter.emit_inst("ASL", "A");  // Multiply by 2
+                    emitter.emit_inst("TAY", "");  // Back to Y
+
+                    // Restore and store low byte
+                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
+
+                    // Store high byte at next position
+                    emitter.emit_inst("INY", "");
+                    emitter.emit_inst("LDA", "$21");
+                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
+                }
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    format!("Array '{}' must be in zero page for indexed assignment", array_name)
+                ))
+            }
+        }
+    } else {
+        return Err(CodegenError::UnsupportedOperation(
+            "Can only assign to array variables, not expressions".to_string()
+        ))
+    }
+
+    Ok(())
 }
 
 fn generate_match(

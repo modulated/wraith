@@ -337,11 +337,18 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
 
 /// Convert optimized lines back to assembly string
 pub fn lines_to_string(lines: &[Line]) -> String {
-    lines
+    let mut result = lines
         .iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+
+    // Ensure the file ends with a newline (Unix text file convention)
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
 }
 
 #[cfg(test)]

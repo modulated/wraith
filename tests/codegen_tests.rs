@@ -415,14 +415,14 @@ fn test_codegen_for_loop() {
     assert!(asm.contains("TAX"), "Should transfer counter to X");
     assert!(asm.contains("fl_"), "Should have loop label");
     assert!(asm.contains("fx_"), "Should have end label");
-    assert!(asm.contains("CPX $21"), "Should compare X with end value");
+    assert!(asm.contains("CPX $22"), "Should compare X with end value");
     assert!(asm.contains("BCS fx_"), "Should exit if counter >= end");
     assert!(asm.contains("INX"), "Should increment X register");
     assert!(asm.contains("JMP fl_"), "Should jump back to start");
 
     // Verify ordering
     assert!(appears_before(&asm, "TAX", "fl_"), "Transfer to X before loop");
-    assert!(appears_before(&asm, "STA $21", "fl_"), "Store end before loop");
+    assert!(appears_before(&asm, "STA $22", "fl_"), "Store end before loop");
     assert!(appears_before(&asm, "fl_", "CPX"), "Loop label before check");
     assert!(appears_before(&asm, "INX", "JMP fl_"), "Increment before jump");
 }

@@ -1,0 +1,155 @@
+//! BCD Score Counter Example
+//!
+//! Demonstrates Binary Coded Decimal (BCD) arithmetic for game scores.
+//! BCD is perfect for scores because each nibble represents a decimal digit,
+//! making it trivial to display on 7-segment displays or convert to ASCII.
+//!
+//! Score format (b16): 0x9999 = 9999 points
+//!   High byte: tens and hundreds digits
+//!   Low byte: ones and tens digits
+//!
+//! The 6502's decimal mode (SED/CLD) handles BCD arithmetic in hardware!
+
+// Memory-mapped display addresses (typical for retro hardware)
+addr SCORE_DISPLAY_LOW  = 0x6000;  // Ones and tens digits
+addr SCORE_DISPLAY_HIGH = 0x6001;  // Hundreds and thousands digits
+addr COMBO_DISPLAY      = 0x6002;  // Combo multiplier
+addr BONUS_DISPLAY      = 0x6003;  // Bonus indicator
+
+#[reset]
+fn main() {
+    // Initialize score to zero
+    score: b16 = 0 as b16;
+    combo: b8 = 1 as b8;
+    update_display(score);
+
+    // Simulate game events
+
+    // Collect 10 coins
+    score = add_points(score, 10 as b16, combo);
+    update_display(score);
+
+    // Hit an enemy (50 points)
+    score = add_points(score, 50 as b16, combo);
+    update_display(score);
+
+    // Activate 2x combo!
+    combo = 2 as b8;
+    COMBO_DISPLAY = combo as u8;
+
+    // Collect power-up with combo (25 points × 2)
+    score = add_points(score, 25 as b16, combo);    
+    update_display(score);
+
+    // Find secret (100 points × 2)
+    score = add_points(score, 100 as b16, combo);
+    update_display(score);
+
+    // Combo ends
+    combo = 1 as b8;
+    COMBO_DISPLAY = combo as u8;
+
+    // Boss defeated! (500 points)
+    score = add_points(score, 500 as b16, combo);
+    update_display(score);
+
+    // Level complete bonus (1000 points)
+    score = level_bonus(score, 1000 as b16);
+    update_display(score);
+
+    // Final score should be: 10 + 50 + (25×2) + (100×2) + 500 + 1000 = 1810
+    // In BCD hex: 0x1810
+
+    asm {
+        "halt: JMP halt"
+    }
+}
+
+// Add points to score with combo multiplier
+// Returns new score
+fn add_points(current_score: b16, base_points: b16, combo: b8) -> b16 {
+    points: b16 = base_points;
+
+    // Apply combo multiplier if active
+    // For 2x combo, add the points twice
+    // (BCD multiplication not supported in hardware)
+    if (combo == (2 as b8)) {
+        // Double the points by adding them to themselves
+        points = points + base_points;
+    }
+
+    // Add to score (in BCD mode, hardware handles decimal arithmetic!)
+    // This will emit: SED, CLC, ADC (low), ADC (high), CLD
+    new_score: b16 = current_score + points;
+
+    return new_score;
+}
+
+// Display current score on memory-mapped display
+fn update_display(score: b16) {
+    // Extract high and low bytes of BCD score
+    // In BCD, each byte already contains two decimal digits!
+    // Cast to u16 to access .low and .high
+    score_bits: u16 = score as u16;
+    SCORE_DISPLAY_LOW = score_bits.low;   // Ones and tens (0x00-0x99)
+    SCORE_DISPLAY_HIGH = score_bits.high; // Hundreds and thousands (0x00-0x99)
+
+    // Example: score = 1234 (0x1234 in BCD)
+    //   SCORE_DISPLAY_LOW  = 0x34 (34 decimal)
+    //   SCORE_DISPLAY_HIGH = 0x12 (12 decimal)
+    //   Display shows: 12 34 = 1234 points!
+}
+
+// Award level complete bonus
+fn level_bonus(current_score: b16, bonus: b16) -> b16 {
+    BONUS_DISPLAY = 1;  // Light up bonus indicator
+
+    // BCD addition in hardware!
+    new_score: b16 = current_score + bonus;
+
+    BONUS_DISPLAY = 0;  // Clear bonus indicator
+
+    return new_score;
+}
+
+// Subtract points (lives lost, penalties, etc.)
+// Returns new score
+fn subtract_points(current_score: b16, penalty: b16) -> b16 {
+    // BCD subtraction also uses hardware (SBC in decimal mode)
+    // This will emit: SED, SEC, SBC (low), SBC (high), CLD
+    new_score: b16 = current_score - penalty;
+    return new_score;
+}
+
+// Compare scores (for high score table)
+fn is_high_score(current_score: b16, previous_high: b16) -> bool {
+    // BCD comparisons work the same as binary
+    // No need for decimal mode here
+    return current_score > previous_high;
+}
+
+// Convert single BCD byte to two ASCII digits
+// This shows how easy BCD-to-display conversion is
+fn bcd_to_ascii(bcd_byte: b8) -> u16 {
+    // Cast to binary for bit manipulation
+    binary: u8 = bcd_byte as u8;
+
+    // High nibble = tens digit
+    tens: u8 = binary >> 4;
+
+    // Low nibble = ones digit
+    ones: u8 = binary & 0x0F;
+
+    // Convert to ASCII ('0' = 0x30)
+    tens_ascii: u8 = tens + 0x30;
+    ones_ascii: u8 = ones + 0x30;
+
+    // Pack into u16 (high byte = tens, low byte = ones)
+    result: u16 = ((tens_ascii as u16) << 8) | (ones_ascii as u16);
+    return result;
+}
+
+#[irq] 
+fn irq() {
+
+}

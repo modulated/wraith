@@ -248,6 +248,33 @@ fn eval_unary_with_env(
     }
 }
 
+/// Convert decimal integer to BCD (Binary Coded Decimal)
+/// Each nibble represents a decimal digit 0-9
+fn decimal_to_bcd(decimal: i64, max_digits: usize) -> Option<i64> {
+    if decimal < 0 {
+        return None; // BCD is unsigned
+    }
+
+    let mut result = 0i64;
+    let mut value = decimal;
+    let max_value = 10i64.pow(max_digits as u32) - 1;
+
+    if value > max_value {
+        return None; // Value too large for BCD range
+    }
+
+    for digit_pos in 0..max_digits {
+        let digit = value % 10;
+        if digit > 9 {
+            return None; // Invalid digit
+        }
+        result |= digit << (digit_pos * 4);
+        value /= 10;
+    }
+
+    Some(result)
+}
+
 /// Apply type cast to a constant value
 fn apply_type_cast(
     value: ConstValue,
@@ -309,6 +336,42 @@ fn apply_type_cast(
                 } else {
                     Err(SemaError::Custom {
                         message: "cannot cast to i16".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::B8 => {
+                // BCD 8-bit: convert decimal to BCD format (0-99)
+                if let Some(n) = value.as_integer() {
+                    if let Some(bcd) = decimal_to_bcd(n, 2) {
+                        Ok(ConstValue::Integer(bcd))
+                    } else {
+                        Err(SemaError::Custom {
+                            message: format!("value {} out of range for b8 (0-99)", n),
+                            span,
+                        })
+                    }
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to b8".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::B16 => {
+                // BCD 16-bit: convert decimal to BCD format (0-9999)
+                if let Some(n) = value.as_integer() {
+                    if let Some(bcd) = decimal_to_bcd(n, 4) {
+                        Ok(ConstValue::Integer(bcd))
+                    } else {
+                        Err(SemaError::Custom {
+                            message: format!("value {} out of range for b16 (0-9999)", n),
+                            span,
+                        })
+                    }
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to b16".to_string(),
                         span,
                     })
                 }

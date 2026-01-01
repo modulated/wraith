@@ -80,8 +80,9 @@ impl MemoryLayout {
     }
 
     /// Get the loop end temp address
+    /// Note: temp_reg uses 2 bytes for u16 operations, so loop_end_temp must be at +2 or higher
     pub fn loop_end_temp(&self) -> u8 {
-        self.temp_storage_start + 0x01
+        self.temp_storage_start + 0x02
     }
 
     /// Get reserved regions for zero page allocator

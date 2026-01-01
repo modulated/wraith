@@ -149,6 +149,30 @@ pub enum Expr {
     /// Slice length access: slice.len
     SliceLen(Box<Spanned<Expr>>),
 
+    /// Low byte access: value.low
+    /// Returns the low byte of a u16/i16 value
+    U16Low(Box<Spanned<Expr>>),
+
+    /// High byte access: value.high
+    /// Returns the high byte of a u16/i16 value
+    U16High(Box<Spanned<Expr>>),
+
+    /// CPU status flag access: carry
+    /// Returns true if carry flag is set
+    CpuFlagCarry,
+
+    /// CPU status flag access: zero
+    /// Returns true if zero flag is set
+    CpuFlagZero,
+
+    /// CPU status flag access: overflow
+    /// Returns true if overflow flag is set
+    CpuFlagOverflow,
+
+    /// CPU status flag access: negative
+    /// Returns true if negative flag is set
+    CpuFlagNegative,
+
     /// Parenthesized expression (for preserving source structure)
     Paren(Box<Spanned<Expr>>),
 }

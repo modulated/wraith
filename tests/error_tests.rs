@@ -135,8 +135,9 @@ fn test_type_error_undefined_function() {
 fn test_type_error_return_type_mismatch() {
     assert_error_contains(
         r#"
-        fn get_number() -> u16 {
-            return 10;  // Returns u8 but function expects u16
+        fn get_number() -> u8 {
+            x: u16 = 1000;
+            return x;  // Returns u16 but function expects u8 (narrowing not allowed)
         }
         fn main() {}
         "#,

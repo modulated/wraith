@@ -58,9 +58,13 @@ impl Parser<'_> {
                 let field_name = self.expect_ident()?;
                 let span = expr.span.merge(self.previous_span());
 
-                // Check for .len on slices
+                // Check for special built-in accessors
                 if field_name.node == "len" {
                     expr = Spanned::new(Expr::SliceLen(Box::new(expr)), span);
+                } else if field_name.node == "low" {
+                    expr = Spanned::new(Expr::U16Low(Box::new(expr)), span);
+                } else if field_name.node == "high" {
+                    expr = Spanned::new(Expr::U16High(Box::new(expr)), span);
                 } else {
                     expr = Spanned::new(
                         Expr::Field {
@@ -163,6 +167,25 @@ impl Parser<'_> {
                 self.advance();
                 Ok(Spanned::new(Expr::bool(false), start))
             }
+
+            // CPU status flags (read-only)
+            Some(Token::Carry) => {
+                self.advance();
+                Ok(Spanned::new(Expr::CpuFlagCarry, start))
+            }
+            Some(Token::Zero) => {
+                self.advance();
+                Ok(Spanned::new(Expr::CpuFlagZero, start))
+            }
+            Some(Token::Overflow) => {
+                self.advance();
+                Ok(Spanned::new(Expr::CpuFlagOverflow, start))
+            }
+            Some(Token::Negative) => {
+                self.advance();
+                Ok(Spanned::new(Expr::CpuFlagNegative, start))
+            }
+
             Some(Token::String(s)) => {
                 self.advance();
                 Ok(Spanned::new(Expr::Literal(Literal::String(s)), start))
@@ -498,6 +521,20 @@ impl Parser<'_> {
                 self.advance();
                 Ok(Spanned::new(
                     TypeExpr::primitive(crate::ast::PrimitiveType::Bool),
+                    start,
+                ))
+            }
+            Some(Token::B8) => {
+                self.advance();
+                Ok(Spanned::new(
+                    TypeExpr::primitive(crate::ast::PrimitiveType::B8),
+                    start,
+                ))
+            }
+            Some(Token::B16) => {
+                self.advance();
+                Ok(Spanned::new(
+                    TypeExpr::primitive(crate::ast::PrimitiveType::B16),
                     start,
                 ))
             }
