@@ -6,7 +6,7 @@ use crate::common::*;
 fn variable_declaration_u8() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 42;
+            let x: u8 = 42;
         }
     "#);
 
@@ -18,7 +18,7 @@ fn variable_declaration_u8() {
 fn variable_declaration_u16() {
     let asm = compile_success(r#"
         fn main() {
-            x: u16 = 1000;
+            let x: u16 = 1000;
         }
     "#);
 
@@ -29,7 +29,7 @@ fn variable_declaration_u16() {
 fn hex_literals() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 0xFF;
+            let x: u8 = 0xFF;
         }
     "#);
 
@@ -40,7 +40,7 @@ fn hex_literals() {
 fn binary_literals() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 0b11110000;
+            let x: u8 = 0b11110000;
         }
     "#);
 
@@ -51,7 +51,7 @@ fn binary_literals() {
 fn mutable_variable() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = 20;
         }
     "#);
@@ -64,7 +64,7 @@ fn mutable_variable() {
 fn arithmetic_addition() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10 + 20;
+            let x: u8 = 10 + 20;
         }
     "#);
 
@@ -76,7 +76,7 @@ fn arithmetic_addition() {
 fn arithmetic_multiplication() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 3 * 4;
+            let x: u8 = 3 * 4;
         }
     "#);
 
@@ -88,7 +88,7 @@ fn arithmetic_multiplication() {
 fn bitwise_and() {
     let asm = compile_success(r#"
         fn main() {
-            result: u8 = 0xFF & 0x0F;
+            let result: u8 = 0xFF & 0x0F;
         }
     "#);
 
@@ -100,7 +100,7 @@ fn bitwise_and() {
 fn bitwise_or() {
     let asm = compile_success(r#"
         fn main() {
-            result: u8 = 0xF0 | 0x0F;
+            let result: u8 = 0xF0 | 0x0F;
         }
     "#);
 
@@ -112,7 +112,7 @@ fn bitwise_or() {
 fn shift_left() {
     let asm = compile_success(r#"
         fn main() {
-            result: u8 = 1 << 4;
+            let result: u8 = 1 << 4;
         }
     "#);
 

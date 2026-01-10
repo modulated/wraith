@@ -1,7 +1,7 @@
 // Test program for fixed-size array support
 // Tests array type declarations, initialization, and access
 
-addr TEST_OUTPUT = 0xC000;
+const TEST_OUTPUT: addr = 0xC000;
 
 fn main() {
     // Fixed-size array variable with zero initializer

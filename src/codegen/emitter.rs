@@ -2,7 +2,7 @@
 //!
 //! Helper for generating formatted 6502 assembly code.
 
-use super::memory_layout::MemoryLayout;
+use super::memory_layout::{MemoryLayout, TempAllocator};
 use super::regstate::{RegisterState, RegisterValue};
 use super::CommentVerbosity;
 
@@ -24,6 +24,8 @@ pub struct Emitter {
     pub memory_layout: MemoryLayout,
     /// Register state tracking for optimization
     pub reg_state: RegisterState,
+    /// Temporary storage allocator for zero-page temps
+    pub temp_alloc: TempAllocator,
     /// Stack of loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
     /// Inline depth tracking (>0 means we're generating inline code)
@@ -36,6 +38,8 @@ pub struct Emitter {
     last_was_terminal: bool,
     /// Comment verbosity level
     pub verbosity: CommentVerbosity,
+    /// Current function being generated (for tail call detection)
+    current_function: Option<String>,
 }
 
 impl Default for Emitter {
@@ -47,18 +51,20 @@ impl Default for Emitter {
 impl Emitter {
     pub fn new(verbosity: CommentVerbosity) -> Self {
         Self {
-            output: ".SETCPU \"65C02\"\n\n".to_string(),
+            output: String::new(),
             indent: 0,
             label_counter: 0,
             match_counter: 0,
             memory_layout: MemoryLayout::new(),
             reg_state: RegisterState::new(),
+            temp_alloc: TempAllocator::new(),
             loop_stack: Vec::new(),
             inline_depth: 0,
             inline_label_suffix: None,
             byte_count: 0,
             last_was_terminal: false,
             verbosity,
+            current_function: None,
         }
     }
 
@@ -308,6 +314,64 @@ impl Emitter {
     }
 
     // ========================================================================
+    // X REGISTER DATA OPERATIONS (use X as temporary data storage)
+    // ========================================================================
+
+    /// Save A to X register (TAX) - useful for preserving A during operations
+    /// Returns true if TAX was emitted, false if A was already in X
+    pub fn emit_tax(&mut self) -> bool {
+        if self.reg_state.a_equals_x() {
+            // A and X already have the same value, skip TAX
+            return false;
+        }
+        self.emit_inst("TAX", "");
+        self.reg_state.transfer_a_to_x();
+        true
+    }
+
+    /// Restore A from X register (TXA)
+    /// Returns true if TXA was emitted, false if X was already in A
+    pub fn emit_txa(&mut self) -> bool {
+        if self.reg_state.a_equals_x() {
+            // A and X already have the same value, skip TXA
+            return false;
+        }
+        self.emit_inst("TXA", "");
+        self.reg_state.transfer_x_to_a();
+        true
+    }
+
+    /// Load immediate value into X
+    pub fn emit_ldx_immediate(&mut self, value: u8) {
+        let reg_val = RegisterValue::Immediate(value as i64);
+        if !self.reg_state.x_contains(&reg_val) {
+            self.emit_inst("LDX", &format!("#${:02X}", value));
+            self.reg_state.set_x(reg_val);
+        }
+    }
+
+    /// Load from zero page into X
+    pub fn emit_ldx_zp(&mut self, addr: u8) {
+        let reg_val = RegisterValue::ZeroPage(addr);
+        if !self.reg_state.x_contains(&reg_val) {
+            self.emit_inst("LDX", &format!("${:02X}", addr));
+            self.reg_state.set_x(reg_val);
+        }
+    }
+
+    /// Store X to zero page
+    pub fn emit_stx_zp(&mut self, addr: u8) {
+        self.emit_inst("STX", &format!("${:02X}", addr));
+        self.reg_state.invalidate_zero_page(addr);
+        self.reg_state.set_x(RegisterValue::ZeroPage(addr));
+    }
+
+    /// Mark that X register contains an unknown value
+    pub fn mark_x_unknown(&mut self) {
+        self.reg_state.modify_x();
+    }
+
+    // ========================================================================
     // LOOP CONTEXT MANAGEMENT (for break/continue)
     // ========================================================================
 
@@ -371,5 +435,107 @@ impl Emitter {
     /// Get the current inline label suffix (if inlining)
     pub fn inline_label_suffix(&self) -> Option<usize> {
         self.inline_label_suffix
+    }
+
+    // ========================================================================
+    // DATA EMISSION METHODS (for const arrays)
+    // ========================================================================
+
+    /// Emit a label for data (no formatting, just the label)
+    pub fn emit_data_label(&mut self, name: &str) {
+        self.output.push_str(name);
+        self.output.push_str(":\n");
+    }
+
+    /// Emit a data directive (.BYTE, .RES, etc.)
+    pub fn emit_data_directive(&mut self, directive: &str) {
+        self.output.push_str("    ");
+        self.output.push_str(directive);
+        self.output.push('\n');
+    }
+
+    /// Emit .ORG directive for data placement
+    pub fn emit_data_org(&mut self, address: u16) {
+        self.output.push_str(&format!(".ORG ${:04X}\n", address));
+    }
+
+    // ========================================================================
+    // TAIL CALL OPTIMIZATION SUPPORT
+    // ========================================================================
+
+    /// Set the current function being generated (for tail call detection)
+    pub fn set_current_function(&mut self, name: String) {
+        self.current_function = Some(name);
+    }
+
+    /// Clear the current function context
+    pub fn clear_current_function(&mut self) {
+        self.current_function = None;
+    }
+
+    /// Get the current function name (if any)
+    pub fn current_function(&self) -> Option<&str> {
+        self.current_function.as_deref()
+    }
+
+    /// Get the loop restart label for tail recursive functions
+    pub fn tail_call_loop_label(&self) -> Option<String> {
+        self.current_function.as_ref().map(|name| format!("{}_loop_start", name))
+    }
+
+    // ========================================================================
+    // SOFTWARE STACK FOR PARAMETER PRESERVATION IN RECURSION
+    // ========================================================================
+
+    /// Push parameter area ($80-$87, 8 bytes) to software stack
+    /// Stack grows upward from $0200, pointer at $FF (zero-page)
+    /// After push, $FF is incremented by 8
+    pub fn push_params(&mut self) {
+        let param_base = self.memory_layout.param_base;
+
+        // X will be used as index for the push loop
+        // Load stack pointer into X
+        self.emit_inst("LDX", "$FF");
+
+        // Push all 8 parameter bytes
+        for i in 0..8u8 {
+            self.emit_inst("LDA", &format!("${:02X}", param_base + i));
+            self.emit_inst("STA", "$0200,X");
+            if i < 7 {
+                self.emit_inst("INX", "");
+            }
+        }
+
+        // Increment stack pointer by 8
+        self.emit_inst("INX", "");  // One more to point to next free spot
+        self.emit_inst("STX", "$FF");
+
+        // Invalidate register state after stack operations
+        self.reg_state.invalidate_all();
+    }
+
+    /// Pop parameter area from software stack back to $80-$87
+    /// Decrements stack pointer by 8, then loads 8 bytes
+    pub fn pop_params(&mut self) {
+        let param_base = self.memory_layout.param_base;
+
+        // Decrement stack pointer by 8
+        self.emit_inst("LDX", "$FF");
+        for _ in 0..8 {
+            self.emit_inst("DEX", "");
+        }
+        self.emit_inst("STX", "$FF");
+
+        // Pop all 8 parameter bytes
+        for i in 0..8u8 {
+            self.emit_inst("LDA", "$0200,X");
+            self.emit_inst("STA", &format!("${:02X}", param_base + i));
+            if i < 7 {
+                self.emit_inst("INX", "");
+            }
+        }
+
+        // Invalidate register state after stack operations
+        self.reg_state.invalidate_all();
     }
 }

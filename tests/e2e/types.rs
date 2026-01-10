@@ -6,7 +6,7 @@ use crate::common::*;
 fn array_literal() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 3] = [1, 2, 3];
+            let data: [u8; 3] = [1, 2, 3];
         }
     "#);
 
@@ -19,7 +19,7 @@ fn array_literal() {
 fn array_fill() {
     let asm = compile_success(r#"
         fn main() {
-            buffer: [u8; 5] = [0; 5];
+            let buffer: [u8; 5] = [0; 5];
         }
     "#);
 
@@ -48,7 +48,7 @@ fn struct_initialization() {
             u8 y,
         }
         fn main() {
-            p: Point = Point { x: 10, y: 20 };
+            let p: Point = Point { x: 10, y: 20 };
         }
     "#);
 
@@ -66,7 +66,7 @@ fn enum_definition() {
             West,
         }
         fn main() {
-            d: Direction = Direction::North;
+            let d: Direction = Direction::North;
         }
     "#);
 
@@ -82,8 +82,8 @@ fn enum_definition() {
 fn array_index_constant() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [10, 20, 30, 40, 50];
-            x: u8 = data[2];
+            let data: [u8; 5] = [10, 20, 30, 40, 50];
+            let x: u8 = data[2];
         }
     "#);
 
@@ -96,9 +96,9 @@ fn array_index_constant() {
 fn array_index_variable() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [1, 2, 3, 4, 5];
-            idx: u8 = 2;
-            val: u8 = data[idx];
+            let data: [u8; 5] = [1, 2, 3, 4, 5];
+            let idx: u8 = 2;
+            let val: u8 = data[idx];
         }
     "#);
 
@@ -111,7 +111,7 @@ fn array_index_variable() {
 fn array_index_write() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [0, 0, 0, 0, 0];
+            let data: [u8; 5] = [0, 0, 0, 0, 0];
             data[2] = 42;
         }
     "#);
@@ -125,9 +125,9 @@ fn array_index_write() {
 fn array_index_bounds() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 3] = [1, 2, 3];
-            first: u8 = data[0];
-            last: u8 = data[2];
+            let data: [u8; 3] = [1, 2, 3];
+            let first: u8 = data[0];
+            let last: u8 = data[2];
         }
     "#);
 
@@ -140,8 +140,8 @@ fn array_index_bounds() {
 fn array_index_u16_elements() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 3] = [100, 200, 50];
-            val: u8 = data[1];
+            let data: [u8; 3] = [100, 200, 50];
+            let val: u8 = data[1];
         }
     "#);
 
@@ -161,8 +161,8 @@ fn struct_field_read() {
             u8 y,
         }
         fn main() {
-            p: Point = Point { x: 10, y: 20 };
-            val: u8 = p.x;
+            let p: Point = Point { x: 10, y: 20 };
+            let val: u8 = p.x;
         }
     "#);
 
@@ -180,7 +180,7 @@ fn struct_field_write() {
             u8 y,
         }
         fn main() {
-            p: Point = Point { x: 0, y: 0 };
+            let p: Point = Point { x: 0, y: 0 };
             p.y = 42;
         }
     "#);
@@ -199,10 +199,10 @@ fn struct_multiple_field_access() {
             u8 b,
         }
         fn main() {
-            color: RGB = RGB { r: 255, g: 128, b: 64 };
-            red: u8 = color.r;
-            green: u8 = color.g;
-            blue: u8 = color.b;
+            let color: RGB = RGB { r: 255, g: 128, b: 64 };
+            let red: u8 = color.r;
+            let green: u8 = color.g;
+            let blue: u8 = color.b;
         }
     "#);
 
@@ -223,11 +223,11 @@ fn nested_struct_field_access() {
             u8 other,
         }
         fn main() {
-            obj: Outer = Outer {
+            let obj: Outer = Outer {
                 inner: Inner { value: 42 },
                 other: 10
             };
-            x: u8 = obj.inner.value;
+            let x: u8 = obj.inner.value;
         }
     "#);
 
@@ -244,8 +244,8 @@ fn struct_field_u16() {
             u8 flags,
         }
         fn main() {
-            d: Data = Data { value: 0x1234, flags: 0xFF };
-            a: u16 = d.value;
+            let d: Data = Data { value: 0x1234, flags: 0xFF };
+            let a: u16 = d.value;
         }
     "#);
 
@@ -263,9 +263,9 @@ fn struct_field_u16() {
 fn i8_basic_operations() {
     let asm = compile_success(r#"
         fn main() {
-            x: i8 = 10 as i8;
-            y: i8 = 20 as i8;
-            z: i8 = x + y;
+            let x: i8 = 10 as i8;
+            let y: i8 = 20 as i8;
+            let z: i8 = x + y;
         }
     "#);
 
@@ -279,8 +279,8 @@ fn i8_basic_operations() {
 fn i8_negative_values() {
     let asm = compile_success(r#"
         fn main() {
-            x: i8 = -5;
-            y: i8 = -10;
+            let x: i8 = -5;
+            let y: i8 = -10;
         }
     "#);
 
@@ -295,9 +295,9 @@ fn i8_negative_values() {
 fn i16_basic_operations() {
     let asm = compile_success(r#"
         fn main() {
-            x: i16 = 100;
-            y: i16 = 200;
-            z: i16 = x + y;
+            let x: i16 = 100;
+            let y: i16 = 200;
+            let z: i16 = x + y;
         }
     "#);
 
@@ -311,8 +311,8 @@ fn i16_basic_operations() {
 fn i8_to_i16_cast() {
     let asm = compile_success(r#"
         fn main() {
-            x: i8 = -5;
-            y: i16 = x as i16;
+            let x: i8 = -5;
+            let y: i16 = x as i16;
         }
     "#);
 
@@ -325,10 +325,10 @@ fn i8_to_i16_cast() {
 fn signed_unsigned_cast() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 255;
-            y: i8 = x as i8;
-            z: u8 = 127;
-            w: i8 = z as i8;
+            let x: u8 = 255;
+            let y: i8 = x as i8;
+            let z: u8 = 127;
+            let w: i8 = z as i8;
         }
     "#);
 
@@ -345,7 +345,7 @@ fn signed_unsigned_cast() {
 fn array_write_constant_index() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [0, 0, 0, 0, 0];
+            let data: [u8; 5] = [0, 0, 0, 0, 0];
             data[2] = 42;
         }
     "#);
@@ -359,8 +359,8 @@ fn array_write_constant_index() {
 fn array_write_variable_index() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [1, 2, 3, 4, 5];
-            idx: u8 = 3;
+            let data: [u8; 5] = [1, 2, 3, 4, 5];
+            let idx: u8 = 3;
             data[idx] = 99;
         }
     "#);
@@ -373,8 +373,8 @@ fn array_write_variable_index() {
 fn array_write_expression_index() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 10] = [0; 10];
-            i: u8 = 2;
+            let data: [u8; 10] = [0; 10];
+            let i: u8 = 2;
             data[i + 1] = 42;
         }
     "#);
@@ -389,7 +389,7 @@ fn array_write_expression_index() {
 fn array_write_in_loop() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [0; 5];
+            let data: [u8; 5] = [0; 5];
             for i: u8 in 0..5 {
                 data[i] = i;
             }
@@ -404,9 +404,9 @@ fn array_write_in_loop() {
 fn array_write_complex_value() {
     let asm = compile_success(r#"
         fn main() {
-            data: [u8; 5] = [0; 5];
-            a: u8 = 10;
-            b: u8 = 20;
+            let data: [u8; 5] = [0; 5];
+            let a: u8 = 10;
+            let b: u8 = 20;
             data[1] = a + b;
         }
     "#);
@@ -425,7 +425,7 @@ fn array_write_complex_value() {
 fn shorthand_array_u8_basic() {
     let asm = compile_success(r#"
         fn main() {
-            buffer: [u8; 5] = [0xFF];
+            let buffer: [u8; 5] = [0xFF];
         }
     "#);
 
@@ -438,7 +438,7 @@ fn shorthand_array_u8_basic() {
 fn shorthand_array_zero_fill() {
     let asm = compile_success(r#"
         fn main() {
-            buffer: [u8; 10] = [0];
+            let buffer: [u8; 10] = [0];
         }
     "#);
 
@@ -450,9 +450,9 @@ fn shorthand_array_zero_fill() {
 fn shorthand_array_different_sizes() {
     let asm = compile_success(r#"
         fn main() {
-            small: [u8; 3] = [42];
-            medium: [u8; 8] = [99];
-            large: [u8; 16] = [0x55];
+            let small: [u8; 3] = [42];
+            let medium: [u8; 8] = [99];
+            let large: [u8; 16] = [0x55];
         }
     "#);
 
@@ -467,9 +467,9 @@ fn shorthand_array_different_sizes() {
 fn shorthand_array_expression_value() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
-            y: u8 = 20;
-            buffer: [u8; 4] = [x + y];
+            let x: u8 = 10;
+            let y: u8 = 20;
+            let buffer: [u8; 4] = [x + y];
         }
     "#);
 
@@ -483,7 +483,7 @@ fn shorthand_array_expression_value() {
 fn shorthand_array_u16_elements() {
     let asm = compile_success(r#"
         fn main() {
-            buffer: [u16; 3] = [0x1234];
+            let buffer: [u16; 3] = [0x1234];
         }
     "#);
 
@@ -497,13 +497,13 @@ fn shorthand_array_u16_elements() {
 fn shorthand_vs_explicit_array() {
     let asm1 = compile_success(r#"
         fn main() {
-            a: [u8; 4] = [7];
+            let a: [u8; 4] = [7];
         }
     "#);
 
     let asm2 = compile_success(r#"
         fn main() {
-            a: [u8; 4] = [7, 7, 7, 7];
+            let a: [u8; 4] = [7, 7, 7, 7];
         }
     "#);
 
@@ -516,7 +516,7 @@ fn shorthand_vs_explicit_array() {
 fn shorthand_array_with_bool() {
     let asm = compile_success(r#"
         fn main() {
-            flags: [u8; 5] = [true];
+            let flags: [u8; 5] = [true];
         }
     "#);
 
@@ -528,7 +528,7 @@ fn shorthand_array_with_bool() {
 fn shorthand_array_size_one_no_expand() {
     let asm = compile_success(r#"
         fn main() {
-            single: [u8; 1] = [42];
+            let single: [u8; 1] = [42];
         }
     "#);
 

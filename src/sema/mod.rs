@@ -126,6 +126,18 @@ pub enum SemaError {
         ty: String,
         span: Span,
     },
+
+    /// Cannot read from write-only address
+    WriteOnlyRead {
+        name: String,
+        span: Span,
+    },
+
+    /// Cannot write to read-only address
+    ReadOnlyWrite {
+        name: String,
+        span: Span,
+    },
 }
 
 impl SemaError {
@@ -214,6 +226,14 @@ impl SemaError {
             SemaError::ConstantOverflow { value, ty, span } => {
                 let msg = format!("constant value {} does not fit in type {}", value, ty);
                 format!("error: constant overflow\n{}", span.format_error_context(source, filename, &msg))
+            }
+            SemaError::WriteOnlyRead { name, span } => {
+                let msg = format!("cannot read from write-only address '{}'", name);
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+            }
+            SemaError::ReadOnlyWrite { name, span } => {
+                let msg = format!("cannot write to read-only address '{}'", name);
+                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
             }
         }
     }
@@ -334,6 +354,20 @@ impl std::fmt::Display for SemaError {
                     span.start, span.end, value, ty
                 )
             }
+            SemaError::WriteOnlyRead { name, span } => {
+                write!(
+                    f,
+                    "cannot read from write-only address '{}' at {}..{}",
+                    name, span.start, span.end
+                )
+            }
+            SemaError::ReadOnlyWrite { name, span } => {
+                write!(
+                    f,
+                    "cannot write to read-only address '{}' at {}..{}",
+                    name, span.start, span.end
+                )
+            }
         }
     }
 }
@@ -366,9 +400,29 @@ pub enum Warning {
         span: Span,
     },
 
+    /// Unused function
+    UnusedFunction {
+        name: String,
+        span: Span,
+    },
+
     /// Non-exhaustive match (missing enum variants)
     NonExhaustiveMatch {
         missing_patterns: Vec<String>,
+        span: Span,
+    },
+
+    /// Constant with non-uppercase name
+    NonUppercaseConstant {
+        name: String,
+        span: Span,
+    },
+
+    /// Function parameters exceed available zero-page space
+    ParameterOverflow {
+        function_name: String,
+        bytes_used: u8,
+        bytes_available: u8,
         span: Span,
     },
 }
@@ -389,9 +443,21 @@ impl Warning {
             Warning::UnusedParameter { name, span } => {
                 (format!("unused parameter: `{}`", name), span)
             }
+            Warning::UnusedFunction { name, span } => {
+                (format!("unused function: `{}`", name), span)
+            }
             Warning::NonExhaustiveMatch { missing_patterns, span } => {
                 let patterns = missing_patterns.join("`, `");
                 (format!("non-exhaustive match, missing: `{}`", patterns), span)
+            }
+            Warning::NonUppercaseConstant { name, span } => {
+                (format!("constant `{}` should have an uppercase name", name), span)
+            }
+            Warning::ParameterOverflow { function_name, bytes_used, bytes_available, span } => {
+                (format!(
+                    "function `{}` parameters use {} bytes, exceeds available {} bytes",
+                    function_name, bytes_used, bytes_available
+                ), span)
             }
         };
 
@@ -405,7 +471,7 @@ impl Warning {
 
 use crate::ast::{FnParam, Span, Spanned, Stmt};
 use crate::sema::table::SymbolInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct FunctionMetadata {
@@ -418,6 +484,18 @@ pub struct FunctionMetadata {
     /// For inline functions, store resolved symbols for parameters
     /// This allows inline expansion across module boundaries
     pub inline_param_symbols: Option<HashMap<Span, SymbolInfo>>,
+    /// Whether this function has tail recursive calls
+    pub has_tail_recursion: bool,
+    /// Total bytes used by function parameters in zero page
+    /// Used for optimized parameter save/restore in recursive calls
+    pub param_bytes_used: u8,
+}
+
+/// Tail call information for a function
+#[derive(Debug, Clone, Default)]
+pub struct TailCallInfo {
+    /// Set of return statement spans that contain tail recursive calls
+    pub tail_recursive_returns: HashSet<Span>,
 }
 
 pub struct ProgramInfo {
@@ -435,6 +513,10 @@ pub struct ProgramInfo {
     pub imported_items: Vec<Spanned<crate::ast::Item>>,
     /// Compiler warnings collected during analysis
     pub warnings: Vec<Warning>,
+    /// Statements identified as unreachable for dead code elimination
+    pub unreachable_stmts: HashSet<Span>,
+    /// Tail call information for all functions
+    pub tail_call_info: HashMap<String, TailCallInfo>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

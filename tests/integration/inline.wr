@@ -1,4 +1,4 @@
-addr OUT = 0x1000;
+const OUT: addr = 0x1000;
 
 fn main() {
     OUT = add(3, 4);

@@ -16,12 +16,18 @@ use crate::lexer::{SpannedToken, Token};
 pub struct Parser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
+    /// Collected parse errors for multi-error reporting
+    errors: Vec<ParseError>,
 }
 
 impl<'a> Parser<'a> {
     /// Create a new parser
     pub fn new(tokens: &'a [SpannedToken]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            errors: Vec::new(),
+        }
     }
 
     /// Parse a complete source file
@@ -114,6 +120,48 @@ impl<'a> Parser<'a> {
             Span::default()
         }
     }
+
+    // === Error Recovery ===
+
+    /// Get current parser position
+    fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// Record a parse error and continue parsing
+    fn record_error(&mut self, error: ParseError) {
+        self.errors.push(error);
+    }
+
+    /// Synchronize parser state after an error by skipping to a recovery point
+    /// Recovery points are: semicolons, closing braces, function keywords
+    fn synchronize(&mut self) {
+        while let Some(tok) = self.peek() {
+            match tok {
+                // Statement terminators
+                Token::Semi => {
+                    self.advance();
+                    return;
+                }
+                // Block/scope boundaries
+                Token::RBrace => {
+                    return; // Don't consume the closing brace
+                }
+                // Top-level item starts (including Let and Zp to prevent cascading errors)
+                Token::Fn | Token::Struct | Token::Enum | Token::Const | Token::Addr | Token::Let | Token::Zp => {
+                    return; // Don't consume, let item parser handle it
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    /// Check if we have collected any errors
+    fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -167,8 +215,8 @@ mod tests {
     fn test_parse_variable_decl() {
         let source = r#"
             fn main() {
-                x: u8 = 42;
-                zp fast: u8 = 0;
+                let x: u8 = 42;
+                zp let fast: u8 = 0;
             }
         "#;
         let file = parse(source).expect("parse error");
@@ -207,7 +255,7 @@ mod tests {
     fn test_parse_binary_expr() {
         let source = r#"
             fn test() {
-                x: u8 = 1 + 2 * 3;
+                let x: u8 = 1 + 2 * 3;
             }
         "#;
         let file = parse(source).expect("parse error");
@@ -217,7 +265,7 @@ mod tests {
     #[test]
     fn test_parse_static() {
         let source = r#"
-            addr SCREEN = 0x0400;
+            const SCREEN: addr = 0x0400;
         "#;
         let file = parse(source).expect("parse error");
         assert_eq!(file.items.len(), 1);

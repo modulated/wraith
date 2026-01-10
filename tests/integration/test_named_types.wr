@@ -1,7 +1,7 @@
 // Test program for named type resolution
 // Tests struct and enum types with proper size calculation
 
-addr TEST_OUTPUT = 0xC000;
+const TEST_OUTPUT: addr = 0xC000;
 
 // Simple struct
 struct Point {

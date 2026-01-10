@@ -1,0 +1,26 @@
+// Syntax demonstration for Wraith language
+
+// Constants must be declared with 'const' and use uppercase names
+const MAX_VALUE: u8 = 255;
+const SCREEN_START: addr = 0x0400;
+
+// Lowercase constant names will generate a warning
+const lowercaseConst: u8 = 42;  // WARNING: constant name should be uppercase
+
+fn main() {
+    // Local variables must be declared with 'let'
+    let x: u8 = 10;
+    let y: u16 = 1000;
+
+    // Zero-page variables also use 'let'
+    zp let fast: u8 = 0;
+
+    // Array initialization
+    let data: [u8; 5] = [1, 2, 3, 4, 5];
+
+    // Assignment
+    x = x + 5;
+
+    // Memory-mapped I/O addresses are constants with type 'addr'
+    SCREEN_START = x;
+}

@@ -23,7 +23,7 @@ fn function_call_with_args() {
             return a + b;
         }
         fn main() {
-            result: u8 = add(5, 10);
+            let result: u8 = add(5, 10);
         }
     "#);
 
@@ -38,7 +38,7 @@ fn function_return_value() {
             return 42;
         }
         fn main() {
-            x: u8 = get_value();
+            let x: u8 = get_value();
         }
     "#);
 

@@ -538,6 +538,13 @@ impl Parser<'_> {
                     start,
                 ))
             }
+            Some(Token::Addr) => {
+                self.advance();
+                Ok(Spanned::new(
+                    TypeExpr::primitive(crate::ast::PrimitiveType::Addr),
+                    start,
+                ))
+            }
             Some(Token::Str) => {
                 self.advance();
                 // Use named type that semantic analyzer will recognize

@@ -19,11 +19,11 @@ use test_harness::*;
 
 #[test]
 fn test_variable_declaration_u8() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 42;
+            let x: u8 = 42;
             OUT = x;
         }
         "#,
@@ -33,11 +33,11 @@ fn test_variable_declaration_u8() {
 
 #[test]
 fn test_variable_declaration_u16() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u16 = 0x1234;
+            let x: u16 = 0x1234;
             OUT = x as u8;
         }
         "#,
@@ -47,12 +47,12 @@ fn test_variable_declaration_u16() {
 
 #[test]
 fn test_hex_literals() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0xC000;
+        const OUT: addr = 0xC000;
         fn main() {
-            a: u8 = 0xFF;
-            b: u16 = 0xFA00;
+            let a: u8 = 0xFF;
+            let b: u16 = 0xFA00;
             OUT = a;
         }
         "#,
@@ -62,11 +62,11 @@ fn test_hex_literals() {
 
 #[test]
 fn test_binary_literals() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            flags: u8 = 0b11010010;
+            let flags: u8 = 0b11010010;
             OUT = flags;
         }
         "#,
@@ -76,11 +76,11 @@ fn test_binary_literals() {
 
 #[test]
 fn test_mutable_variable() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = 20;
             OUT = x;
         }
@@ -96,11 +96,11 @@ fn test_mutable_variable() {
 
 #[test]
 fn test_arithmetic_addition() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 10 + 20;
+            let x: u8 = 10 + 20;
             OUT = x;
         }
         "#,
@@ -111,12 +111,12 @@ fn test_arithmetic_addition() {
 
 #[test]
 fn test_arithmetic_multiplication() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 5;
-            y: u8 = x * 3;
+            let x: u8 = 5;
+            let y: u8 = x * 3;
             OUT = y;
         }
         "#,
@@ -127,11 +127,11 @@ fn test_arithmetic_multiplication() {
 
 #[test]
 fn test_bitwise_and() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 0xFF & 0x0F;
+            let x: u8 = 0xFF & 0x0F;
             OUT = x;
         }
         "#,
@@ -142,11 +142,11 @@ fn test_bitwise_and() {
 
 #[test]
 fn test_bitwise_or() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 0xF0 | 0x0F;
+            let x: u8 = 0xF0 | 0x0F;
             OUT = x;
         }
         "#,
@@ -157,11 +157,11 @@ fn test_bitwise_or() {
 
 #[test]
 fn test_shift_left() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 1 << 4;
+            let x: u8 = 1 << 4;
             OUT = x;
         }
         "#,
@@ -176,11 +176,11 @@ fn test_shift_left() {
 
 #[test]
 fn test_if_statement() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             if x == 10 {
                 OUT = 0xFF;
             }
@@ -193,11 +193,11 @@ fn test_if_statement() {
 
 #[test]
 fn test_if_else() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             if x == 10 {
                 OUT = 0xFF;
             } else {
@@ -212,11 +212,11 @@ fn test_if_else() {
 
 #[test]
 fn test_while_loop() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            i: u8 = 0;
+            let i: u8 = 0;
             while i < 10 {
                 i = i + 1;
             }
@@ -230,11 +230,11 @@ fn test_while_loop() {
 
 #[test]
 fn test_for_range_loop() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            sum: u8 = 0;
+            let sum: u8 = 0;
             for i in 0..10 {
                 sum = sum + i;
             }
@@ -251,9 +251,9 @@ fn test_for_range_loop() {
 
 #[test]
 fn test_function_call_no_args() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn helper() {
             OUT = 42;
         }
@@ -267,9 +267,9 @@ fn test_function_call_no_args() {
 
 #[test]
 fn test_function_call_with_args() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn add(a: u8, b: u8) {
             OUT = a + b;
         }
@@ -283,14 +283,14 @@ fn test_function_call_with_args() {
 
 #[test]
 fn test_function_return_value() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn get_value() -> u8 {
             return 42;
         }
         fn main() {
-            x: u8 = get_value();
+            let x: u8 = get_value();
             OUT = x;
         }
         "#,
@@ -305,10 +305,10 @@ fn test_function_return_value() {
 
 #[test]
 fn test_array_literal() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
         fn main() {
-            data: [u8; 3] = [1, 2, 3];
+            let data: [u8; 3] = [1, 2, 3];
         }
         "#,
     );
@@ -319,10 +319,10 @@ fn test_array_literal() {
 
 #[test]
 fn test_array_fill() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
         fn main() {
-            buffer: [u8; 5] = [0; 5];
+            let buffer: [u8; 5] = [0; 5];
         }
         "#,
     );
@@ -336,7 +336,7 @@ fn test_array_fill() {
 
 #[test]
 fn test_struct_definition() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
         struct Point {
             u8 x,
@@ -350,15 +350,15 @@ fn test_struct_definition() {
 
 #[test]
 fn test_struct_initialization() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
         struct Point {
             u8 x,
             u8 y
         }
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         fn main() {
-            p: Point = Point { x: 10, y: 20 };
+            let p: Point = Point { x: 10, y: 20 };
         }
         "#,
     );
@@ -367,7 +367,7 @@ fn test_struct_initialization() {
 
 #[test]
 fn test_enum_definition() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
         enum Status {
             Idle,
@@ -386,9 +386,9 @@ fn test_enum_definition() {
 
 #[test]
 fn test_address_declaration() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr SCREEN = 0xC000;
+        const SCREEN: addr = 0xC000;
         fn main() {
             SCREEN = 42;
         }
@@ -400,10 +400,10 @@ fn test_address_declaration() {
 
 #[test]
 fn test_constant_address_expression() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr BASE = 0xC000;
-        addr SCREEN = BASE + 0x100;
+        const BASE: addr = 0xC000;
+        const SCREEN: addr = BASE + 0x100;
         fn main() {
             SCREEN = 42;
         }
@@ -419,9 +419,9 @@ fn test_constant_address_expression() {
 
 #[test]
 fn test_nmi_handler() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         #[nmi]
         fn nmi_handler() {
             OUT = 0xFF;
@@ -444,9 +444,9 @@ fn test_nmi_handler() {
 
 #[test]
 fn test_irq_handler() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         #[irq]
         fn irq_handler() {
             OUT = 0x42;
@@ -462,7 +462,7 @@ fn test_irq_handler() {
 
 #[test]
 fn test_reset_handler() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
         #[reset]
         fn start() {
@@ -476,9 +476,9 @@ fn test_reset_handler() {
 
 #[test]
 fn test_all_interrupt_vectors() {
-    let asm = assert_compiles(
+    let asm = compile_success(
         r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         #[nmi]
         fn nmi_handler() {
             OUT = 1;

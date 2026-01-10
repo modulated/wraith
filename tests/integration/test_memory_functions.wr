@@ -2,9 +2,9 @@
 // This demonstrates memcpy, memset, and memcmp functionality
 
 // Memory-mapped test regions
-addr TEST_SRC = 0xC000;   // Source buffer for memcpy test
-addr TEST_DEST = 0xC100;  // Destination buffer for memcpy test
-addr TEST_BUF = 0xC200;   // Buffer for memset test
+const TEST_SRC: addr = 0xC000;   // Source buffer for memcpy test
+const TEST_DEST: addr = 0xC100;  // Destination buffer for memcpy test
+const TEST_BUF: addr = 0xC200;   // Buffer for memset test
 
 // Import memory functions from std library
 import {memcpy, memset, memcmp} from "std.wr";

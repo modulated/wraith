@@ -4,12 +4,6 @@
 # Each section has a name, start address, and end address
 
 [[sections]]
-name = "STDLIB"
-start = 0xC000
-end = 0xCFFF
-description = "Standard library functions (4KB)"
-
-[[sections]]
 name = "CODE"
 start = 0x8000
 end = 0xBFFF

@@ -12,7 +12,7 @@ use crate::common::*;
 fn warn_unused_local_variable() {
     let result = compile(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
         }
     "#);
 
@@ -28,9 +28,9 @@ fn warn_unused_local_variable() {
 #[test]
 fn no_warn_when_variable_used() {
     let result = compile(r#"
-        addr OUT = 0x6000;
+        const OUT: addr = 0x6000;
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             OUT = x;
         }
     "#);
@@ -47,9 +47,9 @@ fn no_warn_when_variable_used() {
 fn warn_multiple_unused_variables() {
     let result = compile(r#"
         fn main() {
-            x: u8 = 10;
-            y: u8 = 20;
-            z: u8 = 30;
+            let x: u8 = 10;
+            let y: u8 = 20;
+            let z: u8 = 30;
         }
     "#);
 
@@ -111,7 +111,7 @@ fn no_warn_when_parameter_used() {
             return x + 1;
         }
         fn main() {
-            y: u8 = add(10);
+            let y: u8 = add(10);
         }
     "#);
 
@@ -132,7 +132,7 @@ fn warn_unreachable_after_return() {
     let result = compile(r#"
         fn foo() -> u8 {
             return 42;
-            x: u8 = 10;
+            let x: u8 = 10;
         }
         fn main() {}
     "#);
@@ -151,7 +151,7 @@ fn warn_unreachable_after_break() {
         fn main() {
             for i: u8 in 0..10 {
                 break;
-                x: u8 = 10;
+                let x: u8 = 10;
             }
         }
     "#);
@@ -170,7 +170,7 @@ fn warn_unreachable_after_continue() {
         fn main() {
             for i: u8 in 0..10 {
                 continue;
-                x: u8 = 10;
+                let x: u8 = 10;
             }
         }
     "#);
@@ -196,9 +196,9 @@ fn warn_non_exhaustive_match() {
             Blue,
         }
         fn main() {
-            c: Color = Color::Red;
+            let c: Color = Color::Red;
             match c {
-                Color::Red => { x: u8 = 1; }
+                Color::Red => { let x: u8 = 1; }
             }
         }
     "#);
@@ -221,10 +221,10 @@ fn no_warn_exhaustive_match() {
             Green,
         }
         fn main() {
-            c: Color = Color::Red;
+            let c: Color = Color::Red;
             match c {
-                Color::Red => { x: u8 = 1; }
-                Color::Green => { x: u8 = 2; }
+                Color::Red => { let x: u8 = 1; }
+                Color::Green => { let x: u8 = 2; }
             }
         }
     "#);
@@ -246,10 +246,10 @@ fn no_warn_match_with_wildcard() {
             Blue,
         }
         fn main() {
-            c: Color = Color::Red;
+            let c: Color = Color::Red;
             match c {
-                Color::Red => { x: u8 = 1; }
-                _ => { x: u8 = 0; }
+                Color::Red => { let x: u8 = 1; }
+                _ => { let x: u8 = 0; }
             }
         }
     "#);
@@ -272,7 +272,7 @@ fn warn_unused_import() {
         import {LED, BUTTON} from "addresses.wr";
         fn main() {
             // Only use LED, not BUTTON
-            x: u8 = LED;
+            let x: u8 = LED;
         }
     "#, "tests/integration/addresses.wr");
 
@@ -285,5 +285,120 @@ fn warn_unused_import() {
         CompileResult::ParseError(e) => panic!("Parse error: {}", e),
         CompileResult::SemaError(e) => panic!("Semantic error: {}", e),
         CompileResult::CodegenError(e) => panic!("Codegen error: {}", e),
+    }
+}
+
+// ============================================================================
+// Unused Function Warnings
+// ============================================================================
+
+#[test]
+fn test_warn_unused_function() {
+    let result = compile(r#"
+        fn unused_helper() {
+            // This function is never called
+        }
+
+        #[reset]
+        fn main() {
+            // main does not call unused_helper
+        }
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(warnings.contains("unused function"), "Should warn about unused function");
+            assert!(warnings.contains("unused_helper"), "Should mention function name 'unused_helper'");
+        }
+        _ => panic!("Expected successful compilation with warnings"),
+    }
+}
+
+#[test]
+fn test_no_warn_when_function_called() {
+    let result = compile(r#"
+        fn helper() -> u8 {
+            return 42;
+        }
+
+        #[reset]
+        fn main() {
+            let x: u8 = helper();
+        }
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("unused function"), "Should not warn when function is called");
+        }
+        _ => panic!("Expected successful compilation"),
+    }
+}
+
+#[test]
+fn test_no_warn_main_function() {
+    let result = compile(r#"
+        #[reset]
+        fn main() {
+            // Entry point - should never warn even if not explicitly called
+        }
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("unused function"), "Should not warn about main function");
+        }
+        _ => panic!("Expected successful compilation"),
+    }
+}
+
+#[test]
+fn test_no_warn_interrupt_handlers() {
+    let result = compile(r#"
+        #[irq]
+        fn irq_handler() {
+            // IRQ handler - called by hardware
+        }
+
+        #[nmi]
+        fn nmi_handler() {
+            // NMI handler - called by hardware
+        }
+
+        #[reset]
+        fn main() {
+            // Don't call handlers from code
+        }
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("irq_handler"), "Should not warn about IRQ handler");
+            assert!(!warnings.contains("nmi_handler"), "Should not warn about NMI handler");
+        }
+        _ => panic!("Expected successful compilation"),
+    }
+}
+
+#[test]
+fn test_no_warn_inline_functions() {
+    let result = compile(r#"
+        #[inline]
+        fn inline_helper(x: u8) -> u8 {
+            return x + 1;
+        }
+
+        #[reset]
+        fn main() {
+            // Inline functions may be used from other modules
+            // Don't warn even if not called in this file
+        }
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("inline_helper"), "Should not warn about inline function");
+        }
+        _ => panic!("Expected successful compilation"),
     }
 }

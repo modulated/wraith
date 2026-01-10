@@ -69,17 +69,52 @@ pub(super) fn generate_call(
         ));
     }
 
-    // Store each argument to its corresponding parameter location
-    // Track byte offset (16-bit params take 2 bytes)
-    let mut byte_offset = 0u8;
-    for arg in args.iter() {
-        let param_addr = param_base + byte_offset;
+    // Get function parameter types from symbol table
+    let param_types = if let Some(sym) = info.table.lookup(&function.node) {
+        if let crate::sema::types::Type::Function(params, _) = &sym.ty {
+            params.clone()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
-        // Check if this argument is a 16-bit type
-        let arg_type = info.resolved_types.get(&arg.span);
-        let is_16bit = arg_type.is_some_and(|ty| {
+    // STEP 1: Evaluate all arguments into TEMPORARY storage first
+    // This prevents recursive calls from overwriting parameters that are still needed
+    //
+    // CRITICAL: We CANNOT use temp_storage_start ($20) because evaluating
+    // expressions (especially binary operations) uses $20 as TEMP register!
+    // This would overwrite previously evaluated arguments.
+    // Use the arg temp pool ($F4-$FE) managed by TempAllocator.
+
+    // Calculate total bytes needed for all arguments
+    let mut total_bytes = 0u8;
+    for (i, _arg) in args.iter().enumerate() {
+        let is_16bit = param_types.get(i).is_some_and(|param_ty| {
             matches!(
-                ty,
+                param_ty,
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+            )
+        });
+        total_bytes += if is_16bit { 2 } else { 1 };
+    }
+
+    // Allocate temp storage for all arguments at once
+    let temp_base = emitter.temp_alloc.alloc_arg(total_bytes).unwrap_or(0xF4);
+    let mut temp_offset = 0u8;
+    let mut arg_info = Vec::new(); // Track argument sizes and temp locations
+
+    for (i, arg) in args.iter().enumerate() {
+        let temp_addr = temp_base + temp_offset;
+
+        // Check if this PARAMETER (not argument) is a 16-bit type
+        // This is critical for correct code generation when passing smaller types to larger parameters
+        let is_16bit = param_types.get(i).is_some_and(|param_ty| {
+            matches!(
+                param_ty,
                 crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
                     | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
                     | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
@@ -89,18 +124,62 @@ pub(super) fn generate_call(
         // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
         generate_expr(arg, emitter, info, string_collector)?;
 
-        // Store to parameter location
-        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
+        // Check if argument type is 8-bit but parameter is 16-bit (implicit cast)
+        let arg_type = info.resolved_types.get(&arg.span);
+        let arg_is_8bit = arg_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U8)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I8)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B8)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::Bool)
+            )
+        });
+
+        // Store to TEMPORARY location
+        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
         if is_16bit {
-            // For 16-bit types, also store high byte (in Y) to next location
-            emitter.emit_inst("STY", &format!("${:02X}", param_addr + 1));
-            byte_offset += 2; // 16-bit param takes 2 bytes
+            // For 16-bit parameters
+            if arg_is_8bit {
+                // Argument is 8-bit but parameter is 16-bit: zero-extend
+                emitter.emit_inst("LDY", "#$00");
+            }
+            // Store high byte (in Y) to next location
+            emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+            temp_offset += 2;
         } else {
-            byte_offset += 1; // 8-bit param takes 1 byte
+            temp_offset += 1;
+        }
+
+        arg_info.push((temp_addr, is_16bit));
+    }
+
+    // STEP 2: Copy arguments from temporary storage to parameter locations
+    // (No parameter save here - caller's responsibility if needed)
+    let mut byte_offset = 0u8;
+    for (temp_addr, is_16bit) in arg_info.iter() {
+        let param_addr = param_base + byte_offset;
+
+        // Copy from temp to param location
+        emitter.emit_inst("LDA", &format!("${:02X}", temp_addr));
+        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
+
+        if *is_16bit {
+            // For 16-bit types, also copy high byte
+            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + 1));
+            emitter.emit_inst("STA", &format!("${:02X}", param_addr + 1));
+            byte_offset += 2;
+        } else {
+            byte_offset += 1;
         }
     }
 
-    // Call the function
+    // Free the temp storage after copying to parameters
+    if total_bytes > 0 {
+        emitter.temp_alloc.free_arg(temp_base, total_bytes);
+    }
+
+    // STEP 3: Call the function
     emitter.emit_inst("JSR", &function.node);
 
     // Invalidate register state after function call
@@ -250,6 +329,8 @@ fn generate_inline_call(
             resolved_types: info.resolved_types.clone(),
             imported_items: info.imported_items.clone(),
             warnings: info.warnings.clone(),
+            unreachable_stmts: info.unreachable_stmts.clone(),
+            tail_call_info: info.tail_call_info.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;
@@ -267,4 +348,107 @@ fn generate_inline_call(
     emitter.pop_inline();
 
     result
+}
+
+/// Generate parameter updates for tail recursive calls
+///
+/// This is similar to generate_call but WITHOUT the JSR instruction.
+/// It evaluates arguments and updates parameter locations in place,
+/// allowing a JMP back to the function start for tail call optimization.
+pub fn generate_tail_recursive_update(
+    _function: &Spanned<String>,
+    args: &[Spanned<Expr>],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    let param_base = emitter.memory_layout.param_base;
+
+    // STEP 1: Evaluate all arguments into TEMPORARY storage
+    // This prevents arguments from overwriting parameters they depend on
+    // Example: fib(n-1, acc*n) - both args need current n value
+    //
+    // CRITICAL: We CANNOT use temp_storage_start ($20) because evaluating
+    // expressions (especially binary operations) uses $20 as TEMP register!
+    // This would overwrite previously evaluated arguments.
+    // Use the arg temp pool ($F4-$FE) managed by TempAllocator.
+
+    // Calculate total bytes needed for all arguments
+    let mut total_bytes = 0u8;
+    for arg in args.iter() {
+        let arg_type = info.resolved_types.get(&arg.span);
+        let is_16bit = arg_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+            )
+        });
+        total_bytes += if is_16bit { 2 } else { 1 };
+    }
+
+    // Allocate temp storage for all arguments at once
+    let temp_base = emitter.temp_alloc.alloc_arg(total_bytes).unwrap_or(0xF4);
+    let mut temp_offset = 0u8;
+    let mut arg_info = Vec::new();
+
+    for arg in args.iter() {
+        let temp_addr = temp_base + temp_offset;
+
+        // Check if this argument is a 16-bit type
+        let arg_type = info.resolved_types.get(&arg.span);
+        let is_16bit = arg_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+            )
+        });
+
+        // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
+        generate_expr(arg, emitter, info, string_collector)?;
+
+        // Store to TEMPORARY location
+        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+        if is_16bit {
+            // For 16-bit types, also store high byte (in Y) to next location
+            emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+            temp_offset += 2;
+        } else {
+            temp_offset += 1;
+        }
+
+        arg_info.push((temp_addr, is_16bit));
+    }
+
+    // STEP 2: Copy arguments from temporary storage to parameter locations
+    // Now we can safely update all parameters without conflicts
+    let mut byte_offset = 0u8;
+    for (temp_addr, is_16bit) in arg_info.iter() {
+        let param_addr = param_base + byte_offset;
+
+        // Copy from temp to param location
+        emitter.emit_inst("LDA", &format!("${:02X}", temp_addr));
+        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
+
+        if *is_16bit {
+            // For 16-bit types, also copy high byte
+            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + 1));
+            emitter.emit_inst("STA", &format!("${:02X}", param_addr + 1));
+            byte_offset += 2;
+        } else {
+            byte_offset += 1;
+        }
+    }
+
+    // Free the temp storage after copying to parameters
+    if total_bytes > 0 {
+        emitter.temp_alloc.free_arg(temp_base, total_bytes);
+    }
+
+    // NOTE: No JSR instruction - caller will emit JMP to loop label
+
+    Ok(())
 }

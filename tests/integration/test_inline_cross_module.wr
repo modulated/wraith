@@ -2,7 +2,7 @@
 
 import { add_two, multiply_by_two } from "test_inline_import_lib.wr";
 
-addr TEST_OUTPUT = 0x6000;
+const TEST_OUTPUT: addr = 0x6000;
 
 fn main() {
     // Test inline function with two parameters (this was the bug!)

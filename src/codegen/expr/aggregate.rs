@@ -7,9 +7,9 @@
 //! - Struct field access
 //! - Enum variant construction
 
-use crate::ast::{Expr, Literal, Spanned};
+use crate::Spanned;
+use crate::ast::{Expr};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
-use crate::sema::table::SymbolLocation;
 use crate::sema::ProgramInfo;
 
 // Import generate_expr from parent module for recursive calls

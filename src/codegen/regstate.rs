@@ -70,9 +70,34 @@ impl RegisterState {
         &self.a_reg == value
     }
 
+    /// Check if X register contains a specific value
+    pub fn x_contains(&self, value: &RegisterValue) -> bool {
+        &self.x_reg == value
+    }
+
+    /// Check if Y register contains a specific value
+    pub fn y_contains(&self, value: &RegisterValue) -> bool {
+        &self.y_reg == value
+    }
+
     /// Check if we know what's in A register
     pub fn a_is_known(&self) -> bool {
         !matches!(self.a_reg, RegisterValue::Unknown)
+    }
+
+    /// Check if we know what's in X register
+    pub fn x_is_known(&self) -> bool {
+        !matches!(self.x_reg, RegisterValue::Unknown)
+    }
+
+    /// Check if we know what's in Y register
+    pub fn y_is_known(&self) -> bool {
+        !matches!(self.y_reg, RegisterValue::Unknown)
+    }
+
+    /// Check if A and X contain the same value (can skip TAX/TXA)
+    pub fn a_equals_x(&self) -> bool {
+        self.a_is_known() && self.a_reg == self.x_reg
     }
 
     /// Invalidate all register contents that reference a memory location

@@ -13,7 +13,7 @@ fn type_mismatch_assignment() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = 300;
         }
         "#,
@@ -26,9 +26,9 @@ fn invalid_operation() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 10;
-            y: u16 = 20;
-            z: u8 = x + y;
+            let x: u8 = 10;
+            let y: u16 = 20;
+            let z: u8 = x + y;
         }
         "#,
         "type",
@@ -70,7 +70,7 @@ fn undefined_variable() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = y;
+            let x: u8 = y;
         }
         "#,
         "undefined",
@@ -230,7 +230,7 @@ fn integer_overflow_in_const() {
 fn invalid_address_range() {
     assert_error_contains(
         r#"
-        addr INVALID = 0x10000;
+        const INVALID: addr = 0x10000;
         fn main() {}
         "#,
         "address",
@@ -271,7 +271,7 @@ fn const_cannot_be_modified() {
 fn addr_instruction_conflict() {
     assert_error_contains(
         r#"
-        addr ORA = 0x6500;
+        const ORA: addr = 0x6500;
         fn main() {}
         "#,
         "conflicts with instruction mnemonic",
@@ -329,10 +329,10 @@ fn enum_instruction_conflict() {
 
 #[test]
 fn case_insensitive_instruction_conflict() {
-    // Should catch lowercase 'ora' as well
+    // Should catch lowercase 'ora' as well (even though constants should be uppercase)
     assert_error_contains(
         r#"
-        addr ora = 0x6500;
+        const ora: addr = 0x6500;
         fn main() {}
         "#,
         "conflicts with instruction mnemonic",
@@ -368,7 +368,7 @@ fn regular_variable_can_be_reassigned() {
     let _asm = compile_success(
         r#"
         fn main() {
-            counter: u8 = 0;
+            let counter: u8 = 0;
             counter = counter + 1;
         }
         "#,
@@ -381,7 +381,7 @@ fn error_has_source_context() {
     let result = compile(
         r#"
         fn main() {
-            x: u8 = y;
+            let x: u8 = y;
         }
         "#,
     );

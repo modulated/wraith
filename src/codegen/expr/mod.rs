@@ -5,8 +5,8 @@
 
 use crate::ast::{Expr, Spanned};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
-use crate::sema::table::SymbolLocation;
 use crate::sema::ProgramInfo;
+use crate::sema::table::SymbolLocation;
 
 // Submodules
 mod aggregate;
@@ -28,6 +28,9 @@ use compare::{
 };
 use literal::{generate_literal, generate_variable};
 use unary::generate_unary;
+
+// Re-export for use in other codegen modules
+pub use call::generate_tail_recursive_update;
 
 pub fn generate_expr(
     expr: &Spanned<Expr>,

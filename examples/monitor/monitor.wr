@@ -30,11 +30,11 @@ const CMD_BUFFER: u16 = 0x0200;
 const CMD_MAX_LEN: u8 = 64;
 
 // Temporary storage for parsed values
-addr TEMP_ADDR_LO = 0x00F0;  // 16-bit temporary address (low byte)
-addr TEMP_ADDR_HI = 0x00F1;  // 16-bit temporary address (high byte)
-addr TEMP_VAL = 0x00F2;       // 8-bit temporary value
-addr TEMP_ADDR2_LO = 0x00F3; // Second address for range commands (low byte)
-addr TEMP_ADDR2_HI = 0x00F4; // Second address for range commands (high byte)
+const TEMP_ADDR_LO: addr = 0x00F0;  // 16-bit temporary address (low byte)
+const TEMP_ADDR_HI: addr = 0x00F1;  // 16-bit temporary address (high byte)
+const TEMP_VAL: addr = 0x00F2;       // 8-bit temporary value
+const TEMP_ADDR2_LO: addr = 0x00F3; // Second address for range commands (low byte)
+const TEMP_ADDR2_HI: addr = 0x00F4; // Second address for range commands (high byte)
 
 // ============================================================================
 // Helper Functions for 16-bit Temp Storage

@@ -54,7 +54,7 @@ fn test_codegen_empty_function() {
 #[test]
 fn test_codegen_simple_assignment() {
     let source = r#"
-        addr SCREEN = 0x0400;
+        const SCREEN: addr = 0x0400;
         fn main() {
             SCREEN = 42;
         }
@@ -78,7 +78,7 @@ fn test_codegen_simple_assignment() {
 #[test]
 fn test_codegen_constant_folding() {
     let source = r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 10 + 20;  // Should fold to 30 (0x1E)
         }
@@ -102,9 +102,9 @@ fn test_codegen_constant_folding() {
 #[test]
 fn test_codegen_binary_op() {
     let source = r#"
-        addr SCREEN = 0x0400;
-        addr X = 0x0401;
-        addr Y = 0x0402;
+        const SCREEN: addr = 0x0400;
+        const X: addr = 0x0401;
+        const Y: addr = 0x0402;
         fn main() {
             X = 10;
             Y = 20;
@@ -238,8 +238,8 @@ fn test_codegen_string_literal() {
 #[test]
 fn test_codegen_comparison_eq() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
         fn main() {
             X = 5;
             RESULT = X == 5;
@@ -267,9 +267,9 @@ fn test_codegen_comparison_eq() {
 #[test]
 fn test_codegen_logical_and_short_circuit() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
-        addr Y = 0x0402;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
+        const Y: addr = 0x0402;
         fn main() {
             X = 0;
             Y = 1;
@@ -303,9 +303,9 @@ fn test_codegen_logical_and_short_circuit() {
 #[test]
 fn test_codegen_multiplication() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
-        addr Y = 0x0402;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
+        const Y: addr = 0x0402;
         fn main() {
             X = 5;
             Y = 3;
@@ -318,28 +318,29 @@ fn test_codegen_multiplication() {
     let program = analyze(&ast).unwrap();
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
-    // Multiplication uses repeated addition:
-    // 1. Save multiplicand to X register
+    // Multiplication uses shift-and-add algorithm:
+    // 1. Save multiplicand to memory
     // 2. Initialize result to 0
-    // 3. Loop: add multiplicand to result
-    assert!(asm.contains("TAX"), "Should save multiplicand to X");
-    assert!(asm.contains("TAY"), "Should save multiplier to Y");
-    assert!(asm.contains("ml_"), "Should have multiply loop");
-    assert!(asm.contains("TXA"), "Should load multiplicand");
-    assert!(asm.contains("DEY"), "Should decrement counter");
+    // 3. Loop 8 times: check multiplier bit, add if set, shift both values
+    assert!(asm.contains("LDX #$08"), "Should initialize loop counter to 8");
+    assert!(asm.contains("ml_"), "Should have multiply loop label");
+    assert!(asm.contains("LSR"), "Should shift multiplier right");
+    assert!(asm.contains("BCC"), "Should branch if bit clear (skip add)");
+    assert!(asm.contains("ASL"), "Should shift multiplicand left");
+    assert!(asm.contains("DEX"), "Should decrement loop counter");
     assert!(asm.contains("BNE ml_"), "Should loop until done");
 
     // Verify ordering
-    assert!(appears_before(&asm, "TAX", "ml_"), "Setup before loop");
+    assert!(appears_before(&asm, "LDX #$08", "ml_"), "Setup before loop");
     assert!(appears_before(&asm, "ml_", "BNE ml_"), "Loop label before branch");
 }
 
 #[test]
 fn test_codegen_division() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
-        addr Y = 0x0402;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
+        const Y: addr = 0x0402;
         fn main() {
             X = 10;
             Y = 3;
@@ -368,8 +369,8 @@ fn test_codegen_division() {
 #[test]
 fn test_codegen_shift_operations() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
         fn main() {
             X = 8;
             RESULT = X << 2;
@@ -430,8 +431,8 @@ fn test_codegen_for_loop() {
 #[test]
 fn test_codegen_unary_operations() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
         fn main() {
             X = 5;
             RESULT = -X;
@@ -456,10 +457,10 @@ fn test_codegen_unary_operations() {
 #[test]
 fn test_codegen_nested_expressions() {
     let source = r#"
-        addr RESULT = 0x0400;
-        addr A = 0x0401;
-        addr B = 0x0402;
-        addr C = 0x0403;
+        const RESULT: addr = 0x0400;
+        const A: addr = 0x0401;
+        const B: addr = 0x0402;
+        const C: addr = 0x0403;
         fn main() {
             A = 5;
             B = 3;
@@ -579,7 +580,7 @@ fn test_codegen_enum_pattern_matching() {
             Error,
         }
 
-        addr RESULT = 0x0401;
+        const RESULT: addr = 0x0401;
 
         fn main() {
             match Status::On {
@@ -666,8 +667,8 @@ fn test_codegen_inline_function() {
         }
 
         fn main() {
-            result: u8 = add(5, 3);
-            other: u8 = regular_fn(result);
+            let result: u8 = add(5, 3);
+            let other: u8 = regular_fn(result);
         }
     "#;
 
@@ -701,4 +702,102 @@ fn test_codegen_inline_function() {
     assert!(main_section.contains("LDA #$05"), "Should load immediate 5");
     assert!(main_section.contains("LDA #$03"), "Should load immediate 3");
     assert!(main_section.contains("ADC"), "Should have ADC instruction from inlined add");
+}
+
+#[test]
+fn test_codegen_recursive_function() {
+    let source = r#"
+        fn fib(n: u8) -> u16 {
+            if (n <= 1) {
+                return n as u16;
+            }
+            return fib(n - 1) + fib(n - 2);
+        }
+
+        fn main() {
+            let result: u16 = fib(4);
+        }
+    "#;
+
+    let tokens = lex(source).unwrap();
+    let ast = Parser::parse(&tokens).unwrap();
+    let program = analyze(&ast).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
+
+    // Recursive functions must save/restore parameter area to prevent
+    // nested calls from overwriting the caller's parameters
+
+    // Should have fib function
+    assert!(asm.contains("fib:"), "Should have fib function label");
+
+    // Should have recursive calls to fib
+    assert!(asm.contains("JSR fib"), "Should have JSR to fib");
+
+    // Critical: Parameters must be preserved across recursive calls
+    // Parameters are now saved using software stack (push/pop to $0200+ using $FF pointer)
+    let fib_start = asm.find("fib:").unwrap();
+    let fib_section = &asm[fib_start..];
+
+    // Check if parameters are saved using software stack
+    // Push saves to $0200,X where X is loaded from $FF (stack pointer)
+    let push_count = fib_section.matches("STA $0200,X").count();
+    assert!(push_count >= 1, "Should push parameters to software stack (found {})", push_count);
+
+    // Must also restore parameters before evaluating right operand
+    // Pop loads from $0200,X and stores back to $80+
+    let pop_count = fib_section.matches("LDA $0200,X").count();
+    assert!(pop_count >= 1, "Should pop parameters from software stack (found {})", pop_count);
+}
+
+#[test]
+fn test_codegen_tail_call_optimization() {
+    let source = r#"
+        fn factorial(n: u8, acc: u16) -> u16 {
+            if n == 0 {
+                return acc;
+            }
+            return factorial(n - 1, acc * (n as u16));
+        }
+
+        fn main() {
+            let result: u16 = factorial(5, 1);
+        }
+    "#;
+
+    let tokens = lex(source).unwrap();
+    let ast = Parser::parse(&tokens).unwrap();
+    let program = analyze(&ast).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
+
+    // Tail recursive functions should have loop restart label
+    assert!(asm.contains("factorial_loop_start:"), "Should have loop restart label");
+
+    // Should have tail call optimization comment
+    assert!(asm.contains("Tail recursive function - loop optimization enabled"),
+        "Should have tail recursion comment");
+
+    // Should optimize tail call to JMP instead of JSR
+    assert!(asm.contains("JMP factorial_loop_start"),
+        "Should have JMP to loop start for tail recursive call");
+
+    // The tail call should not use JSR factorial inside the factorial function
+    // (JSR from main calling factorial is fine and expected)
+    let factorial_start = asm.find("factorial:").unwrap();
+
+    // Find where the factorial function ends (next function starts with "; Function: ")
+    let next_function = asm[factorial_start..]
+        .find("\n; Function: ")
+        .map(|pos| factorial_start + pos)
+        .unwrap_or(asm.len());
+
+    let factorial_section = &asm[factorial_start..next_function];
+
+    // Count JSR factorial calls within the factorial function
+    // Should be 0 (the tail call is converted to JMP)
+    let jsr_count = factorial_section.matches("JSR factorial").count();
+    assert_eq!(jsr_count, 0,
+        "Tail recursive call should not use JSR (found {} JSR calls)", jsr_count);
+
+    // Verify the function has a normal RTS for the base case
+    assert!(factorial_section.contains("RTS"), "Should still have RTS for base case return");
 }

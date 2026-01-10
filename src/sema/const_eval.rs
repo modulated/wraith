@@ -376,6 +376,17 @@ fn apply_type_cast(
                     })
                 }
             }
+            PrimitiveType::Addr => {
+                // Address type: treat as 16-bit unsigned
+                if let Some(n) = value.as_integer() {
+                    Ok(ConstValue::Integer((n as u16) as i64))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to addr".to_string(),
+                        span,
+                    })
+                }
+            }
         },
         TypeExpr::Pointer { .. } => {
             // Pointer casts: treat as integer value

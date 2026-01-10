@@ -12,8 +12,8 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Variable declaration with modifiers: zp name: type = expr;
-            Some(Token::Zp) => self.parse_var_decl(),
+            // Variable declaration: let name: type = expr; or zp let name: type = expr;
+            Some(Token::Let) | Some(Token::Zp) => self.parse_var_decl(),
 
             // Control flow
             Some(Token::If) => self.parse_if_stmt(),
@@ -44,22 +44,12 @@ impl Parser<'_> {
             // Block
             Some(Token::LBrace) => self.parse_block(),
 
-            // Identifier - could be variable declaration (name: type = ...) or expression/assignment
-            Some(Token::Ident(_)) => {
-                // Lookahead to check if this is a variable declaration
-                if self.peek_ahead(1) == Some(&Token::Colon) {
-                    self.parse_var_decl()
-                } else {
-                    self.parse_expr_or_assign_stmt()
-                }
-            }
-
-            // Expression statement or assignment
+            // Expression statement or assignment (no more implicit variable declarations)
             _ => self.parse_expr_or_assign_stmt(),
         }
     }
 
-    /// Parse variable declaration: name: type = expr; or mut name: type = expr;
+    /// Parse variable declaration: let name: type = expr; or zp let name: type = expr;
     fn parse_var_decl(&mut self) -> ParseResult<Spanned<Stmt>> {
         let start = self.current_span();
 
@@ -69,19 +59,22 @@ impl Parser<'_> {
             self.advance();
         }
 
+        // Require 'let' keyword for variable declarations
+        self.expect(&Token::Let)?;
+
         // Variables are mutable by default
         let mutable = true;
 
         // Parse name
         let name = self.expect_ident()?;
 
-        // Expect colon
+        // Expect colon for type annotation (required)
         self.expect(&Token::Colon)?;
 
-        // Parse type
+        // Parse type (required)
         let ty = self.parse_type()?;
 
-        // Parse initializer
+        // Parse initializer (required)
         self.expect(&Token::Eq)?;
         let init = self.parse_expr()?;
         self.expect(&Token::Semi)?;

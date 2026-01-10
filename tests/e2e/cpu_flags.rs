@@ -10,8 +10,8 @@ use crate::common::*;
 fn carry_flag_in_addition() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 255;
-            y: u8 = x + 1;
+            let x: u8 = 255;
+            let y: u8 = x + 1;
         }
     "#);
 
@@ -24,8 +24,8 @@ fn carry_flag_in_addition() {
 fn carry_flag_in_subtraction() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
-            y: u8 = x - 5;
+            let x: u8 = 10;
+            let y: u8 = x - 5;
         }
     "#);
 
@@ -38,9 +38,9 @@ fn carry_flag_in_subtraction() {
 fn zero_flag_in_equality() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 5;
+            let x: u8 = 5;
             if x == 5 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -54,9 +54,9 @@ fn zero_flag_in_equality() {
 fn carry_flag_read_as_bool() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 255;
-            y: u8 = x + 1;
-            flag: u8 = carry as u8;
+            let x: u8 = 255;
+            let y: u8 = x + 1;
+            let flag: u8 = carry as u8;
         }
     "#);
 
@@ -69,9 +69,9 @@ fn carry_flag_read_as_bool() {
 fn zero_flag_read_as_bool() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 5;
-            y: u8 = x - 5;
-            flag: u8 = zero as u8;
+            let x: u8 = 5;
+            let y: u8 = x - 5;
+            let flag: u8 = zero as u8;
         }
     "#);
 
@@ -84,9 +84,9 @@ fn zero_flag_read_as_bool() {
 fn u16_carry_propagation() {
     let asm = compile_success(r#"
         fn main() {
-            x: u16 = 0xFFFF;
-            one: u16 = 1;
-            y: u16 = x + one;
+            let x: u16 = 0xFFFF;
+            let one: u16 = 1;
+            let y: u16 = x + one;
         }
     "#);
 

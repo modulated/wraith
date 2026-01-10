@@ -41,7 +41,7 @@ pub(super) fn generate_type_cast(
     match &target_type.node {
         TypeExpr::Primitive(target_prim) => {
             match target_prim {
-                PrimitiveType::U16 | PrimitiveType::I16 => {
+                PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::Addr => {
                     // Check if source is already 16-bit
                     let source_is_16bit = source_type.is_some_and(|ty| {
                         matches!(

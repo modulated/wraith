@@ -192,11 +192,56 @@ pub fn generate(
     // Track which items have been emitted to avoid duplicates
     let mut emitted_items: HashSet<String> = HashSet::new();
 
+    // Emit const arrays to DATA section FIRST
+    // This separates read-only data from code
+    let has_const_arrays = ast.items.iter().chain(&program.imported_items).any(|item| {
+        if let crate::ast::Item::Static(s) = &item.node {
+            !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
+        } else {
+            false
+        }
+    });
+
+    if has_const_arrays {
+        emitter.emit_comment("============================================================");
+        emitter.emit_comment("Data Section (Const Arrays)");
+        emitter.emit_comment("============================================================");
+
+        // Emit .ORG for DATA section (default location $C000)
+        // TODO: Make this configurable via wraith.toml
+        emitter.emit_data_org(0xC000);
+        emitter.emit_raw("");
+
+        // Emit const arrays from imported modules first
+        for item in &program.imported_items {
+            if let crate::ast::Item::Static(s) = &item.node
+                && !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. }) {
+                    let name = s.name.node.clone();
+                    if emitted_items.insert(name) {
+                        generate_item(item, &mut emitter, program, &mut section_alloc, &mut string_collector)?;
+                    }
+                }
+        }
+
+        // Emit const arrays from main module
+        for item in &ast.items {
+            if let crate::ast::Item::Static(s) = &item.node
+                && !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. }) {
+                    let name = s.name.node.clone();
+                    if emitted_items.insert(name) {
+                        generate_item(item, &mut emitter, program, &mut section_alloc, &mut string_collector)?;
+                    }
+                }
+        }
+
+        emitter.emit_raw("");
+    }
+
     // Generate code for imported items FIRST
     // This ensures that imported functions are defined before they're called
     // Only emit section header if there are actually imported items to generate
     let has_imported_code = program.imported_items.iter().any(|item| {
-        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_))
+        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_) | crate::ast::Item::Static(_))
     });
 
     if has_imported_code {
@@ -236,7 +281,7 @@ pub fn generate(
     // Generate code for main module items
     // Only emit section header if there are actually main module items to generate
     let has_main_code = ast.items.iter().any(|item| {
-        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_))
+        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_) | crate::ast::Item::Static(_))
     });
 
     if has_main_code {

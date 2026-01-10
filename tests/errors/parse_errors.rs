@@ -9,7 +9,7 @@ fn missing_semicolon() {
     assert_parse_error(
         r#"
         fn main() {
-            x: u8 = 10
+            let x: u8 = 10
         }
         "#,
     );

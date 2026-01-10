@@ -5,7 +5,7 @@ use crate::common::*;
 #[test]
 fn nmi_handler() {
     let asm = compile_success(r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         #[nmi]
         fn nmi_handler() {
             OUT = 0xFF;
@@ -30,7 +30,7 @@ fn nmi_handler() {
 #[test]
 fn irq_handler() {
     let asm = compile_success(r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         #[irq]
         fn irq_handler() {
             OUT = 0x42;
@@ -60,7 +60,7 @@ fn reset_handler() {
 #[test]
 fn all_interrupt_vectors() {
     let asm = compile_success(r#"
-        addr OUT = 0x400;
+        const OUT: addr = 0x400;
         #[nmi]
         fn nmi_handler() {
             OUT = 1;

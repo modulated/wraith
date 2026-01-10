@@ -1,0 +1,24 @@
+// Const Array Demonstration
+// Shows how const arrays emit to DATA section
+
+const OUT: addr = 0x6000;
+
+// Lookup table: squares of 0-15
+const SQUARES: [u8; 16] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225];
+
+// Zero-filled buffer (should use .RES optimization)
+const BUFFER: [u8; 256] = [0; 256];
+
+// Small data array
+const PATTERN: [u8; 8] = [0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+
+#[reset]
+fn main() {
+    // Read from lookup table
+    let square_of_5: u8 = SQUARES[5];  // Should be 25
+    OUT = square_of_5;
+
+    // Read from pattern
+    let first_byte: u8 = PATTERN[0];  // Should be 0xFF
+    OUT = first_byte;
+}

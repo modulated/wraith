@@ -13,6 +13,12 @@ pub fn generate_stmt(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    // Dead code elimination: skip unreachable statements
+    if info.unreachable_stmts.contains(&stmt.span) {
+        emitter.emit_comment("Unreachable code eliminated");
+        return Ok(());
+    }
+
     match &stmt.node {
         Stmt::Block(stmts) => {
             for s in stmts {
@@ -132,12 +138,57 @@ pub fn generate_stmt(
         }
         Stmt::Return(expr) => {
             if let Some(e) = expr {
-                generate_expr(e, emitter, info, string_collector)?;
-            }
-            // Only emit RTS if we're not in an inline context
-            // When inlining, the return value is already in A and we just continue
-            if !emitter.is_inlining() {
-                emitter.emit_inst("RTS", "");
+                // Check if this is a tail recursive call
+                // Pattern: return func(...) where func is the current function
+                let is_tail_recursive = if let crate::ast::Expr::Call { function, .. } = &e.node {
+                    // Check if calling the same function we're currently in
+                    emitter.current_function()
+                        .map(|current_fn| current_fn == function.node.as_str())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if is_tail_recursive {
+                    // Tail recursive call optimization: convert to loop
+                    // Generate the call expression which will:
+                    // 1. Evaluate arguments
+                    // 2. Store them to parameter locations
+                    // 3. Call the function with JSR
+                    // But we'll intercept this and generate different code
+
+                    // For now, extract the function call and generate optimized code
+                    if let crate::ast::Expr::Call { function, args } = &e.node {
+                        emitter.emit_comment(&format!("Tail recursive call to {} - optimized to loop", function.node));
+
+                        // Evaluate arguments and store to parameter locations
+                        // This is similar to what generate_call does, but without JSR
+                        crate::codegen::expr::generate_tail_recursive_update(function, args, emitter, info, string_collector)?;
+
+                        // Jump back to function start instead of JSR
+                        if let Some(loop_label) = emitter.tail_call_loop_label() {
+                            emitter.emit_inst("JMP", &loop_label);
+                        } else {
+                            // Fallback: this shouldn't happen if tail call detection worked
+                            return Err(CodegenError::UnsupportedOperation(
+                                "Tail recursive call without loop label".to_string()
+                            ));
+                        }
+                    }
+                } else {
+                    // Normal return with value
+                    generate_expr(e, emitter, info, string_collector)?;
+
+                    // Only emit RTS if we're not in an inline context
+                    if !emitter.is_inlining() {
+                        emitter.emit_inst("RTS", "");
+                    }
+                }
+            } else {
+                // Return with no value
+                if !emitter.is_inlining() {
+                    emitter.emit_inst("RTS", "");
+                }
             }
             Ok(())
         }
@@ -350,60 +401,77 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::For {
-            var_name: _,
+            var_name,
             var_type: _,
             range,
             body,
         } => {
-            // For-loops use X register for the counter (fast increment with INX)
-            // u16 arithmetic uses Y register for high bytes to avoid conflicts
+            // Check if loop can be unrolled (constant bounds, small count)
+            let start_const = info.folded_constants.get(&range.start.span);
+            let end_const = info.folded_constants.get(&range.end.span);
 
-            let loop_end_temp = emitter.memory_layout.loop_end_temp();
-            let loop_label = emitter.next_label("fl");
-            let end_label = emitter.next_label("fx");
+            // Threshold for unrolling: 8 iterations or fewer
+            const UNROLL_THRESHOLD: i64 = 8;
 
-            // Initialize loop counter with range start
-            generate_expr(&range.start, emitter, info, string_collector)?;
-            emitter.emit_inst("TAX", ""); // Counter in X register
+            if let (Some(crate::sema::const_eval::ConstValue::Integer(start)),
+                    Some(crate::sema::const_eval::ConstValue::Integer(end))) = (start_const, end_const) {
+                // Calculate iteration count
+                let count = if range.inclusive {
+                    end - start + 1
+                } else {
+                    end - start
+                };
 
-            // Generate end value and store in temp location
-            generate_expr(&range.end, emitter, info, string_collector)?;
-            emitter.emit_inst("STA", &format!("${:02X}", loop_end_temp));
+                if count > 0 && count <= UNROLL_THRESHOLD {
+                    // LOOP UNROLLING: Generate inline code for small constant loops
+                    emitter.emit_comment(&format!(
+                        "Loop unrolled: {} iteration{}",
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    ));
 
-            // Loop start
-            emitter.emit_label(&loop_label);
+                    // Use first variable slot for loop variable (same as normal loops)
+                    // This matches the allocation strategy in semantic analysis
+                    let loop_var_addr = emitter.memory_layout.variable_alloc_start;
 
-            // Check condition: compare counter with end value
-            emitter.emit_inst("CPX", &format!("${:02X}", loop_end_temp));
+                    // Create end label for break statements
+                    let end_label = emitter.next_label("ux");
 
-            if range.inclusive {
-                // If counter > end, exit
-                let continue_label = emitter.next_label("fc");
-                emitter.emit_inst("BEQ", &continue_label); // Equal is ok for inclusive
-                emitter.emit_inst("BCS", &end_label); // Counter > end, exit
-                emitter.emit_label(&continue_label);
-            } else {
-                // If counter >= end, exit
-                emitter.emit_inst("BCS", &end_label);
+                    // Generate body for each iteration with loop variable set
+                    for i in 0..count {
+                        let iter_val = start + i;
+
+                        // Set loop variable to current iteration value
+                        emitter.emit_comment(&format!("{} = {}", var_name.node, iter_val));
+                        emitter.emit_inst("LDA", &format!("#${:02X}", iter_val as u8));
+                        emitter.emit_inst("STA", &format!("${:02X}", loop_var_addr));
+
+                        // Create iteration label for continue statements
+                        let iter_label = emitter.next_label("ui");
+
+                        // Push loop context so break/continue work
+                        emitter.push_loop(iter_label.clone(), end_label.clone());
+
+                        // Execute body
+                        emitter.reg_state.invalidate_all();
+                        generate_stmt(body, emitter, info, string_collector)?;
+
+                        // Pop loop context
+                        emitter.pop_loop();
+
+                        // Emit iteration label for continue
+                        emitter.emit_label(&iter_label);
+                    }
+
+                    // Emit end label for break
+                    emitter.emit_label(&end_label);
+
+                    return Ok(());
+                }
             }
 
-            // Push loop context for break/continue
-            emitter.push_loop(loop_label.clone(), end_label.clone());
-
-            // Execute body
-            emitter.reg_state.invalidate_all(); // Body might use registers
-            generate_stmt(body, emitter, info, string_collector)?;
-
-            // Pop loop context
-            emitter.pop_loop();
-
-            // Increment counter
-            emitter.emit_inst("INX", "");
-
-            emitter.emit_inst("JMP", &loop_label);
-            emitter.emit_label(&end_label);
-
-            Ok(())
+            // NORMAL LOOP: Generate standard loop code
+            generate_normal_loop(var_name, range, body, emitter, info, string_collector)
         }
         Stmt::ForEach {
             var_name,
@@ -1005,4 +1073,92 @@ fn uniquify_asm_labels(line: &str, suffix: usize) -> String {
     } else {
         line.to_string()
     }
+}
+
+/// Generate a normal (non-unrolled) for loop
+fn generate_normal_loop(
+    var_name: &Spanned<String>,
+    range: &crate::ast::Range,
+    body: &Spanned<Stmt>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    // For-loops use X register for the counter (fast increment with INX)
+    // u16 arithmetic uses Y register for high bytes to avoid conflicts
+
+    let loop_end_temp = emitter.memory_layout.loop_end_temp();
+    let loop_label = emitter.next_label("fl");
+    let end_label = emitter.next_label("fx");
+
+    // Initialize loop counter with range start
+    generate_expr(&range.start, emitter, info, string_collector)?;
+    emitter.emit_inst("TAX", ""); // Counter in X register
+
+    // Generate end value and store in temp location
+    generate_expr(&range.end, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", &format!("${:02X}", loop_end_temp));
+
+    // Store X (loop counter) to the loop variable location
+    if let Some(sym) = info.resolved_symbols.get(&body.span)
+        .or_else(|| info.table.lookup(&var_name.node)) {
+        match sym.location {
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                emitter.emit_inst("STX", &format!("${:02X}", addr));
+            }
+            crate::sema::table::SymbolLocation::Absolute(addr) => {
+                emitter.emit_inst("STX", &format!("${:04X}", addr));
+            }
+            _ => {}
+        }
+    }
+
+    // Loop start
+    emitter.emit_label(&loop_label);
+
+    // Check condition: compare counter with end value
+    emitter.emit_inst("CPX", &format!("${:02X}", loop_end_temp));
+
+    if range.inclusive {
+        // If counter > end, exit
+        let continue_label = emitter.next_label("fc");
+        emitter.emit_inst("BEQ", &continue_label); // Equal is ok for inclusive
+        emitter.emit_inst("BCS", &end_label); // Counter > end, exit
+        emitter.emit_label(&continue_label);
+    } else {
+        // If counter >= end, exit
+        emitter.emit_inst("BCS", &end_label);
+    }
+
+    // Push loop context for break/continue
+    emitter.push_loop(loop_label.clone(), end_label.clone());
+
+    // Execute body
+    emitter.reg_state.invalidate_all(); // Body might use registers
+    generate_stmt(body, emitter, info, string_collector)?;
+
+    // Pop loop context
+    emitter.pop_loop();
+
+    // Increment counter
+    emitter.emit_inst("INX", "");
+
+    // Update loop variable with new counter value
+    if let Some(sym) = info.resolved_symbols.get(&body.span)
+        .or_else(|| info.table.lookup(&var_name.node)) {
+        match sym.location {
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                emitter.emit_inst("STX", &format!("${:02X}", addr));
+            }
+            crate::sema::table::SymbolLocation::Absolute(addr) => {
+                emitter.emit_inst("STX", &format!("${:04X}", addr));
+            }
+            _ => {}
+        }
+    }
+
+    emitter.emit_inst("JMP", &loop_label);
+    emitter.emit_label(&end_label);
+
+    Ok(())
 }

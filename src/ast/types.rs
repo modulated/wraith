@@ -19,6 +19,8 @@ pub enum PrimitiveType {
     B8,
     /// Binary Coded Decimal: 16-bit (0-9999, packed four digits)
     B16,
+    /// Memory-mapped I/O address (16-bit)
+    Addr,
 }
 
 impl PrimitiveType {
@@ -26,7 +28,7 @@ impl PrimitiveType {
     pub fn size_bytes(&self) -> usize {
         match self {
             PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::Bool | PrimitiveType::B8 => 1,
-            PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 => 2,
+            PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 | PrimitiveType::Addr => 2,
         }
     }
 

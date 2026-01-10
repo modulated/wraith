@@ -15,9 +15,9 @@ import {
 } from "intrinsics.wr";
 
 // Memory-mapped I/O
-addr CONTROL_PORT = 0x6000;
-addr STATUS_PORT = 0x6001;
-addr DATA_PORT = 0x6002;
+const CONTROL_PORT: addr = 0x6000;
+const STATUS_PORT: addr = 0x6001;
+const DATA_PORT: addr = 0x6002;
 
 /// Example: Critical section using interrupt disable/enable
 fn critical_section_example() {

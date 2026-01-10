@@ -35,6 +35,8 @@ pub enum Token {
     Continue,
     #[token("const")]
     Const,
+    #[token("let")]
+    Let,
     #[token("zp")]
     Zp,
     #[token("as")]

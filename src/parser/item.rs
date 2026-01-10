@@ -2,7 +2,7 @@
 
 use crate::ast::{
     AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Import, Item,
-    SourceFile, Spanned, Static, Struct, StructAttribute, StructField,
+    SourceFile, Spanned, Static, Struct, StructAttribute, StructField, TypeExpr,
 };
 use crate::lexer::Token;
 
@@ -15,7 +15,39 @@ impl Parser<'_> {
         let mut items = Vec::new();
 
         while self.peek().is_some() {
-            items.push(self.parse_item()?);
+            let pos_before = self.position();
+
+            match self.parse_item() {
+                Ok(item) => items.push(item),
+                Err(err) => {
+                    // Record error
+                    self.record_error(err);
+
+                    // Ensure we make progress to avoid infinite loops
+                    if self.position() == pos_before {
+                        // Parser didn't advance, manually skip to next potential item start
+                        self.synchronize();
+
+                        // If still stuck, forcefully advance one token
+                        if self.position() == pos_before && self.peek().is_some() {
+                            self.advance();
+                        }
+                    } else {
+                        // Parser did advance, just synchronize
+                        self.synchronize();
+                    }
+
+                    // If at EOF after synchronization, stop
+                    if self.peek().is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If we collected any errors, return them all
+        if self.has_errors() {
+            return Err(ParseError::multiple(self.errors.clone()));
         }
 
         Ok(SourceFile::with_items(items))
@@ -44,12 +76,6 @@ impl Parser<'_> {
                 Ok(Spanned::new(Item::Function(Box::new(func)), span))
             }
 
-            Some(Token::Addr) => {
-                let a = self.parse_address_decl()?;
-                let span = start.merge(self.previous_span());
-                Ok(Spanned::new(Item::Address(a), span))
-            }
-
             Some(Token::Struct) => {
                 let s = self.parse_struct(attributes)?;
                 let span = start.merge(self.previous_span());
@@ -62,51 +88,84 @@ impl Parser<'_> {
                 Ok(Spanned::new(Item::Enum(e), span))
             }
 
-            // Static/const: type name = value;
-            Some(Token::Const)
-            | Some(Token::Zp)
-            | Some(Token::U8)
-            | Some(Token::I8)
-            | Some(Token::U16)
-            | Some(Token::I16)
-            | Some(Token::Bool)
-            | Some(Token::Star)
-            | Some(Token::LBracket) => {
-                let s = self.parse_static()?;
+            // Static/const/address: const NAME: [read|write] type = value;
+            Some(Token::Const) => {
+                self.expect(&Token::Const)?;
+                let name = self.expect_ident()?;
+                self.expect(&Token::Colon)?;
+
+                // Check for optional access modifier (read/write) before type
+                let access = if self.check(&Token::Read) {
+                    self.advance();
+                    AccessMode::Read
+                } else if self.check(&Token::Write) {
+                    self.advance();
+                    AccessMode::Write
+                } else {
+                    AccessMode::ReadWrite
+                };
+
+                let ty = self.parse_type()?;
+                self.expect(&Token::Eq)?;
+                let init = self.parse_expr()?;
+                self.expect(&Token::Semi)?;
+
                 let span = start.merge(self.previous_span());
-                Ok(Spanned::new(Item::Static(s), span))
+
+                // Check if this is an address declaration (type is addr)
+                if matches!(ty.node, TypeExpr::Primitive(crate::ast::PrimitiveType::Addr)) {
+                    Ok(Spanned::new(Item::Address(AddressDecl {
+                        name,
+                        address: init,
+                        access,
+                    }), span))
+                } else {
+                    // Access modifiers are only valid for addr types
+                    if access != AccessMode::ReadWrite {
+                        return Err(ParseError::custom(
+                            ty.span,
+                            "access modifiers (read/write) are only valid for addr types".to_string(),
+                        ));
+                    }
+                    Ok(Spanned::new(Item::Static(Static {
+                        name,
+                        ty,
+                        init,
+                        mutable: false,
+                        zero_page: false,
+                    }), span))
+                }
+            }
+
+            // Detect 'let' at global scope and provide helpful error message
+            Some(Token::Let) => {
+                let err_span = self.current_span();
+                // Advance past 'let'
+                self.advance();
+
+                // Consume tokens until we find a semicolon to prevent cascading errors
+                loop {
+                    match self.peek() {
+                        Some(Token::Semi) => {
+                            self.advance(); // consume the semicolon
+                            break;
+                        }
+                        None => break, // EOF
+                        _ => self.advance(), // keep consuming
+                    }
+                }
+
+                Err(ParseError::custom_detailed(
+                    err_span,
+                    "cannot use 'let' at global scope",
+                    Some("Note: 'let' is only for local variables inside functions".to_string()),
+                    Some("Help: Use 'const' for global constants and addresses.".to_string()),
+                ))
             }
 
             Some(tok) => Err(ParseError::unexpected_token(start, "item", Some(tok))),
             None => Err(ParseError::unexpected_eof(start, "item")),
         }
-    }
-
-    /// Parse memory-mapped I/O address declaration
-    fn parse_address_decl(&mut self) -> ParseResult<AddressDecl> {
-        self.expect(&Token::Addr)?;
-
-        let access = if self.check(&Token::Read) {
-            self.advance();
-            AccessMode::Read
-        } else if self.check(&Token::Write) {
-            self.advance();
-            AccessMode::Write
-        } else {
-            AccessMode::ReadWrite
-        };
-
-        let name = self.expect_ident()?;
-
-        self.expect(&Token::Eq)?;
-        let address = self.parse_expr()?;
-        self.expect(&Token::Semi)?;
-
-        Ok(AddressDecl {
-            name,
-            address,
-            access,
-        })
     }
 
     /// Parse import statement: import {sym1, sym2} from 'path.wr';
@@ -401,42 +460,5 @@ impl Parser<'_> {
         self.expect(&Token::RBrace)?;
 
         Ok(Enum { name, variants })
-    }
-
-    /// Parse a static/const declaration
-    /// Syntax: const NAME: type = value;  (immutable, compile-time constant)
-    ///         NAME: type = value;         (mutable, runtime storage)
-    ///         zp NAME: type = value;      (mutable, zero-page storage)
-    fn parse_static(&mut self) -> ParseResult<Static> {
-        let zero_page = self.check(&Token::Zp);
-        if zero_page {
-            self.advance();
-        }
-
-        // Check for const keyword (makes it immutable, compile-time constant)
-        let is_const = self.check(&Token::Const);
-        if is_const {
-            self.advance();
-        }
-
-        // Mutable by default, unless const is specified
-        let mutable = !is_const;
-
-        // Rust-like syntax: NAME: type = value
-        let name = self.expect_ident()?;
-        self.expect(&Token::Colon)?;
-        let ty = self.parse_type()?;
-
-        self.expect(&Token::Eq)?;
-        let init = self.parse_expr()?;
-        self.expect(&Token::Semi)?;
-
-        Ok(Static {
-            name,
-            ty,
-            init,
-            mutable,
-            zero_page,
-        })
     }
 }

@@ -7,15 +7,17 @@
 //!
 //! ```text
 //! $00-$1F (32 bytes): System reserved
-//! $20-$2F (16 bytes): Temporary storage for codegen
-//!   $20: Primary temp register (binary ops)
-//!   $21: Loop end temp
-//!   $22-$23: Arithmetic/enum operations
-//! $30-$3F (16 bytes): Pointer operations scratch space
-//!   $30-$31: Indirect addressing operations
+//! $20-$3F (32 bytes): Temporary storage for codegen (managed by TempAllocator)
+//!   $20-$21: Primary temp register (binary ops, u16)
+//!   $22-$23: Secondary temp (arithmetic/enum)
+//!   $24-$2F: General temp pool
+//!   $30-$3F: Pointer operations / overflow temp
 //! $40-$7F (64 bytes): Variable allocation space
 //! $80-$BF (64 bytes): Function parameter passing region
-//! $C0-$FF (64 bytes): Available for future use
+//! $C0-$EF (48 bytes): Extended variable space
+//! $F0-$F3 (4 bytes):  Binary op left operand save
+//! $F4-$FE (11 bytes): Function argument evaluation temp
+//! $FF:                Software stack pointer
 //! ```
 
 /// Memory layout configuration for 6502 code generation
@@ -104,4 +106,157 @@ impl MemoryLayout {
     pub fn param_space(&self) -> u8 {
         self.param_end - self.param_base + 1
     }
+}
+
+/// Temporary storage allocator for codegen
+///
+/// Manages allocation of temporary zero-page locations to prevent conflicts
+/// between different codegen phases (binary ops, function calls, etc.)
+///
+/// # Regions Managed
+/// - Primary temp pool: $20-$3F (32 bytes)
+/// - High temp pool: $F0-$F3 (4 bytes) - for binary op saves
+/// - Arg temp pool: $F4-$FE (11 bytes) - for function arguments
+#[derive(Debug, Clone)]
+pub struct TempAllocator {
+    /// Bitmap for $20-$3F (32 bytes, bit per byte)
+    primary_pool: u32,
+    /// Bitmap for $F0-$F3 (4 bytes)
+    high_pool: u8,
+    /// Bitmap for $F4-$FE (11 bytes)
+    arg_pool: u16,
+}
+
+impl Default for TempAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TempAllocator {
+    /// Base addresses for each pool
+    pub const PRIMARY_BASE: u8 = 0x20;
+    pub const PRIMARY_SIZE: u8 = 32;
+    pub const HIGH_BASE: u8 = 0xF0;
+    pub const HIGH_SIZE: u8 = 4;
+    pub const ARG_BASE: u8 = 0xF4;
+    pub const ARG_SIZE: u8 = 11;
+
+    pub fn new() -> Self {
+        Self {
+            primary_pool: 0,
+            high_pool: 0,
+            arg_pool: 0,
+        }
+    }
+
+    /// Allocate `size` consecutive bytes from the primary temp pool ($20-$3F)
+    /// Returns the starting address, or None if no space available
+    pub fn alloc_primary(&mut self, size: u8) -> Option<u8> {
+        Self::alloc_from_pool(&mut self.primary_pool, Self::PRIMARY_BASE, Self::PRIMARY_SIZE, size)
+    }
+
+    /// Free previously allocated bytes in the primary pool
+    pub fn free_primary(&mut self, addr: u8, size: u8) {
+        Self::free_from_pool(&mut self.primary_pool, Self::PRIMARY_BASE, addr, size);
+    }
+
+    /// Allocate from high temp pool ($F0-$F3) - typically for binary op left operand
+    pub fn alloc_high(&mut self, size: u8) -> Option<u8> {
+        let mut pool = self.high_pool as u32;
+        let result = Self::alloc_from_pool(&mut pool, Self::HIGH_BASE, Self::HIGH_SIZE, size);
+        self.high_pool = pool as u8;
+        result
+    }
+
+    /// Free previously allocated bytes in the high pool
+    pub fn free_high(&mut self, addr: u8, size: u8) {
+        let mut pool = self.high_pool as u32;
+        Self::free_from_pool(&mut pool, Self::HIGH_BASE, addr, size);
+        self.high_pool = pool as u8;
+    }
+
+    /// Allocate from arg temp pool ($F4-$FE) - for function argument evaluation
+    pub fn alloc_arg(&mut self, size: u8) -> Option<u8> {
+        let mut pool = self.arg_pool as u32;
+        let result = Self::alloc_from_pool(&mut pool, Self::ARG_BASE, Self::ARG_SIZE, size);
+        self.arg_pool = pool as u16;
+        result
+    }
+
+    /// Free previously allocated bytes in the arg pool
+    pub fn free_arg(&mut self, addr: u8, size: u8) {
+        let mut pool = self.arg_pool as u32;
+        Self::free_from_pool(&mut pool, Self::ARG_BASE, addr, size);
+        self.arg_pool = pool as u16;
+    }
+
+    /// Reset all allocations (call at function boundaries)
+    pub fn reset(&mut self) {
+        self.primary_pool = 0;
+        self.high_pool = 0;
+        self.arg_pool = 0;
+    }
+
+    /// Check if a specific address range is free in primary pool
+    pub fn is_primary_free(&self, addr: u8, size: u8) -> bool {
+        if addr < Self::PRIMARY_BASE || addr + size > Self::PRIMARY_BASE + Self::PRIMARY_SIZE {
+            return false;
+        }
+        let offset = addr - Self::PRIMARY_BASE;
+        let mask = ((1u32 << size) - 1) << offset;
+        (self.primary_pool & mask) == 0
+    }
+
+    /// Internal: allocate from a bitmap pool (static to avoid borrow issues)
+    fn alloc_from_pool(pool: &mut u32, base: u8, pool_size: u8, size: u8) -> Option<u8> {
+        if size == 0 || size > pool_size {
+            return None;
+        }
+
+        // Find first fit: look for `size` consecutive zero bits
+        let mask = (1u32 << size) - 1;
+        for offset in 0..=(pool_size - size) {
+            let shifted_mask = mask << offset;
+            if (*pool & shifted_mask) == 0 {
+                // Found free space, mark as allocated
+                *pool |= shifted_mask;
+                return Some(base + offset);
+            }
+        }
+        None
+    }
+
+    /// Internal: free from a bitmap pool (static to avoid borrow issues)
+    fn free_from_pool(pool: &mut u32, base: u8, addr: u8, size: u8) {
+        if addr < base {
+            return;
+        }
+        let offset = addr - base;
+        let mask = ((1u32 << size) - 1) << offset;
+        *pool &= !mask;
+    }
+
+    /// Get allocation statistics for debugging
+    pub fn stats(&self) -> TempAllocStats {
+        TempAllocStats {
+            primary_used: self.primary_pool.count_ones() as u8,
+            primary_total: Self::PRIMARY_SIZE,
+            high_used: self.high_pool.count_ones() as u8,
+            high_total: Self::HIGH_SIZE,
+            arg_used: self.arg_pool.count_ones() as u8,
+            arg_total: Self::ARG_SIZE,
+        }
+    }
+}
+
+/// Statistics about temp allocation usage
+#[derive(Debug, Clone)]
+pub struct TempAllocStats {
+    pub primary_used: u8,
+    pub primary_total: u8,
+    pub high_used: u8,
+    pub high_total: u8,
+    pub arg_used: u8,
+    pub arg_total: u8,
 }

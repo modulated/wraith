@@ -18,7 +18,7 @@ fn test_parse_error_missing_semicolon() {
     assert_fails_at(
         r#"
         fn main() {
-            x: u8 = 10
+            let x: u8 = 10
         }
         "#,
         "parse",
@@ -30,7 +30,7 @@ fn test_parse_error_unclosed_brace() {
     assert_fails_at(
         r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
         "#,
         "parse",
     );
@@ -70,7 +70,7 @@ fn test_type_error_mismatch_assignment() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = 300;  // 300 doesn't fit in u8, will be inferred as u16
         }
         "#,
@@ -83,9 +83,9 @@ fn test_type_error_invalid_operation() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 10;
-            y: bool = true;
-            z: u8 = x + y;  // Can't add u8 and bool
+            let x: u8 = 10;
+            let y: bool = true;
+            let z: u8 = x + y;  // Can't add u8 and bool
         }
         "#,
         "invalid binary operation",
@@ -100,7 +100,7 @@ fn test_type_error_function_arity() {
             return a + b;
         }
         fn main() {
-            x: u8 = add(10);  // Missing second argument
+            let x: u8 = add(10);  // Missing second argument
         }
         "#,
         "expected 2",
@@ -112,7 +112,7 @@ fn test_type_error_undefined_variable() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = undefined_var;
+            let x: u8 = undefined_var;
         }
         "#,
         "undefined",
@@ -136,7 +136,7 @@ fn test_type_error_return_type_mismatch() {
     assert_error_contains(
         r#"
         fn get_number() -> u8 {
-            x: u16 = 1000;
+            let x: u16 = 1000;
             return x;  // Returns u16 but function expects u8 (narrowing not allowed)
         }
         fn main() {}
@@ -190,7 +190,7 @@ fn test_semantic_error_integer_overflow() {
     assert_error_contains(
         r#"
         fn main() {
-            x: u8 = 70000;  // Way too large for u16 even
+            let x: u8 = 70000;  // Way too large for u16 even
         }
         "#,
         "too large",
@@ -201,7 +201,7 @@ fn test_semantic_error_integer_overflow() {
 fn test_semantic_error_invalid_address_range() {
     assert_error_contains(
         r#"
-        addr INVALID = 0x10000;  // > 0xFFFF
+        const INVALID: addr = 0x10000;  // > 0xFFFF
         fn main() {}
         "#,
         "out of range",
@@ -216,7 +216,7 @@ fn test_semantic_error_invalid_address_range() {
 fn test_error_has_source_context() {
     let source = r#"
         fn main() {
-            x: u8 = y;  // undefined variable
+            let x: u8 = y;  // undefined variable
         }
     "#;
 
@@ -285,10 +285,10 @@ fn test_const_cannot_be_modified() {
 #[test]
 fn test_mut_variable_can_be_reassigned() {
     // Variables declared with 'mut' can be reassigned
-    let _asm = assert_compiles(
+    let _asm = compile_success(
         r#"
         fn main() {
-            counter: u8 = 0;
+            let counter: u8 = 0;
             counter = counter + 1;  // Works because variable is declared with 'mut'
         }
         "#,

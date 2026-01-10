@@ -1,0 +1,42 @@
+// Dead Code Elimination Demonstration
+// Shows how the compiler eliminates unreachable code
+
+const OUT: addr = 0x6000;
+
+#[reset]
+fn main() {
+    // Reachable code
+    OUT = 1;
+
+    // Early return makes everything after unreachable
+    return;
+
+    // DEAD CODE: Never executed, eliminated by compiler
+    OUT = 2;
+    OUT = 3;
+    let x: u8 = 10;
+    OUT = x;
+}
+
+#[inline]
+fn with_break() {
+    for i: u8 in 0..10 {
+        if i == 5 {
+            break;
+            // DEAD CODE: After break
+            OUT = i;
+        }
+    }
+}
+
+#[inline]
+fn with_continue() {
+    for i: u8 in 0..10 {
+        if i == 5 {
+            continue;
+            // DEAD CODE: After continue
+            OUT = i;
+        }
+        OUT = i + 1;
+    }
+}

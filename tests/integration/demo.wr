@@ -1,6 +1,6 @@
 // Demo Wraith program
 
-addr SCREEN = 0x0400;
+const SCREEN: addr = 0x0400;
 
 fn main() {
     x: u8 = 42;

@@ -1,0 +1,43 @@
+// Test program for 16-bit multiplication
+// Tests various multiplication cases to verify correctness
+
+const RESULT_2x3_LO: addr = 0x6000;      // 2 * 3 = 6
+const RESULT_2x3_HI: addr = 0x6001;
+const RESULT_10x20_LO: addr = 0x6002;    // 10 * 20 = 200
+const RESULT_10x20_HI: addr = 0x6003;
+const RESULT_100x50_LO: addr = 0x6004;   // 100 * 50 = 5000
+const RESULT_100x50_HI: addr = 0x6005;
+const RESULT_255x2_LO: addr = 0x6006;    // 255 * 2 = 510
+const RESULT_255x2_HI: addr = 0x6007;
+const RESULT_120x6_LO: addr = 0x6008;    // 120 * 6 = 720
+const RESULT_120x6_HI: addr = 0x6009;
+
+#[reset]
+fn main() {
+    // Test 1: Small numbers (2 * 3 = 6 = 0x0006)
+    let r1: u16 = (2 as u16) * (3 as u16);
+    RESULT_2x3_LO = r1.low;
+    RESULT_2x3_HI = r1.high;
+
+    // Test 2: Moderate numbers (10 * 20 = 200 = 0x00C8)
+    let r2: u16 = (10 as u16) * (20 as u16);
+    RESULT_10x20_LO = r2.low;
+    RESULT_10x20_HI = r2.high;
+
+    // Test 3: Larger numbers (100 * 50 = 5000 = 0x1388)
+    let r3: u16 = (100 as u16) * (50 as u16);
+    RESULT_100x50_LO = r3.low;
+    RESULT_100x50_HI = r3.high;
+
+    // Test 4: Overflow in u8 (255 * 2 = 510 = 0x01FE)
+    let r4: u16 = (255 as u16) * (2 as u16);
+    RESULT_255x2_LO = r4.low;
+    RESULT_255x2_HI = r4.high;
+
+    // Test 5: Factorial case (120 * 6 = 720 = 0x02D0)
+    let r5: u16 = (120 as u16) * (6 as u16);
+    RESULT_120x6_LO = r5.low;
+    RESULT_120x6_HI = r5.high;
+
+    loop {}
+}

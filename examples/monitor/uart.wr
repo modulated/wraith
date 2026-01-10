@@ -9,20 +9,20 @@
 const UART_BASE: u16 = 0xE000;
 
 // UART registers (DLAB = 0)
-addr UART_RBR = UART_BASE + 0x00;  // Receiver Buffer Register (read)
-addr UART_THR = UART_BASE + 0x00;  // Transmitter Holding Register (write)
-addr UART_IER = UART_BASE + 0x01;  // Interrupt Enable Register
-addr UART_IIR = UART_BASE + 0x02;  // Interrupt Identification Register (read)
-addr UART_FCR = UART_BASE + 0x02;  // FIFO Control Register (write)
-addr UART_LCR = UART_BASE + 0x03;  // Line Control Register
-addr UART_MCR = UART_BASE + 0x04;  // Modem Control Register
-addr UART_LSR = UART_BASE + 0x05;  // Line Status Register
-addr UART_MSR = UART_BASE + 0x06;  // Modem Status Register
-addr UART_SCR = UART_BASE + 0x07;  // Scratch Register
+const UART_RBR: addr = UART_BASE + 0x00;  // Receiver Buffer Register (read)
+const UART_THR: addr = UART_BASE + 0x00;  // Transmitter Holding Register (write)
+const UART_IER: addr = UART_BASE + 0x01;  // Interrupt Enable Register
+const UART_IIR: addr = UART_BASE + 0x02;  // Interrupt Identification Register (read)
+const UART_FCR: addr = UART_BASE + 0x02;  // FIFO Control Register (write)
+const UART_LCR: addr = UART_BASE + 0x03;  // Line Control Register
+const UART_MCR: addr = UART_BASE + 0x04;  // Modem Control Register
+const UART_LSR: addr = UART_BASE + 0x05;  // Line Status Register
+const UART_MSR: addr = UART_BASE + 0x06;  // Modem Status Register
+const UART_SCR: addr = UART_BASE + 0x07;  // Scratch Register
 
 // UART registers (DLAB = 1) - for baud rate divisor
-addr UART_DLL = UART_BASE + 0x00;  // Divisor Latch Low
-addr UART_DLM = UART_BASE + 0x01;  // Divisor Latch High
+const UART_DLL: addr = UART_BASE + 0x00;  // Divisor Latch Low
+const UART_DLM: addr = UART_BASE + 0x01;  // Divisor Latch High
 
 // UART Line Status Register bits
 const UART_LSR_DR: u8   = 0x01;  // Data Ready

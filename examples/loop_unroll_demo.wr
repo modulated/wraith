@@ -1,0 +1,28 @@
+// Loop Unrolling Demonstration
+// Shows the difference between unrolled and normal loops
+
+const OUT1: addr = 0x6000;
+const OUT2: addr = 0x6001;
+const OUT3: addr = 0x6002;
+
+#[org(0x8000)]
+fn main() {
+    // UNROLLED: Small constant loop (3 iterations)
+    // Compiler generates inline code, no branches
+    for i: u8 in 0..3 {
+        OUT1 = i;
+    }
+
+    // NORMAL: Large constant loop (20 iterations)
+    // Uses traditional loop with branches
+    for j: u8 in 0..20 {
+        OUT2 = j;
+    }
+
+    // NORMAL: Non-constant bounds
+    // Must use traditional loop
+    let n: u8 = 5;
+    for k: u8 in 0..n {
+        OUT3 = k;
+    }
+}

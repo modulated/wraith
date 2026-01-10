@@ -12,7 +12,7 @@
 
 // Memory-mapped display addresses (typical for retro hardware)
 addr SCORE_DISPLAY_LOW  = 0x6000;  // Ones and tens digits
-addr SCORE_DISPLAY_HIGH = 0x6001;  // Hundreds and thousands digits
+const SCORE_DISPLAY_HIGH: addr = 0x6001;  // Hundreds and thousands digits
 addr COMBO_DISPLAY      = 0x6002;  // Combo multiplier
 addr BONUS_DISPLAY      = 0x6003;  // Bonus indicator
 

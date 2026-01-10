@@ -3,3 +3,4 @@
 # Generated assembly and object files
 *.asm
 *.o
+*.bin

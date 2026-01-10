@@ -9,8 +9,8 @@
 const VIA_BASE: u16 = 0xE010;
 
 // VIA registers
-addr VIA_PORTB = VIA_BASE + 0x00;  // Port B data
-addr VIA_PORTA = VIA_BASE + 0x01;  // Port A data
+const VIA_PORTB: addr = VIA_BASE + 0x00;  // Port B data
+const VIA_PORTA: addr = VIA_BASE + 0x01;  // Port A data
 addr VIA_DDRB  = VIA_BASE + 0x02;  // Data Direction Register B
 addr VIA_DDRA  = VIA_BASE + 0x03;  // Data Direction Register A
 addr VIA_T1CL  = VIA_BASE + 0x04;  // Timer 1 Counter Low
@@ -24,6 +24,6 @@ addr VIA_ACR   = VIA_BASE + 0x0B;  // Auxiliary Control Register
 addr VIA_PCR   = VIA_BASE + 0x0C;  // Peripheral Control Register
 addr VIA_IFR   = VIA_BASE + 0x0D;  // Interrupt Flag Register
 addr VIA_IER   = VIA_BASE + 0x0E;  // Interrupt Enable Register
-addr VIA_PORTA_NH = VIA_BASE + 0x0F;  // Port A (no handshake)
+const VIA_PORTA_NH: addr = VIA_BASE + 0x0F;  // Port A (no handshake)
 
 // VIA driver functions can be added here as needed

@@ -58,6 +58,7 @@ impl Type {
                 PrimitiveType::Bool => "bool".to_string(),
                 PrimitiveType::B8 => "b8".to_string(),
                 PrimitiveType::B16 => "b16".to_string(),
+                PrimitiveType::Addr => "addr".to_string(),
             },
             Type::Pointer(inner, mutable) => {
                 if *mutable {

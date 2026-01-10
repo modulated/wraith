@@ -9,7 +9,7 @@ fn my_min(a: u8, b: u8) -> u8 {
     }
 }
 
-addr TEST_OUTPUT = 0x6000;
+const TEST_OUTPUT: addr = 0x6000;
 
 fn main() {
     TEST_OUTPUT = my_min(10, 20);

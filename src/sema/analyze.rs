@@ -40,6 +40,16 @@ pub struct SemanticAnalyzer {
     declared_parameters: Vec<(String, Span)>,
     /// Track imported symbols (name -> span) for unused import detection
     imported_symbols: Vec<(String, Span)>,
+    /// Track declared functions (name -> span) for unused function detection
+    declared_functions: Vec<(String, Span)>,
+    /// Track function calls for unused function detection
+    called_functions: HashSet<String>,
+    /// Track unreachable statements for dead code elimination
+    unreachable_stmts: HashSet<Span>,
+    /// Memory layout configuration for parameter space checking
+    memory_layout: MemoryLayout,
+    /// True when checking an assignment target (not reading a value)
+    checking_assignment_target: bool,
 }
 
 /// Zero page memory allocator
@@ -144,6 +154,11 @@ impl SemanticAnalyzer {
             declared_variables: Vec::new(),
             declared_parameters: Vec::new(),
             imported_symbols: Vec::new(),
+            declared_functions: Vec::new(),
+            called_functions: HashSet::new(),
+            unreachable_stmts: HashSet::new(),
+            memory_layout: MemoryLayout::new(),
+            checking_assignment_target: false,
         }
     }
 
@@ -169,6 +184,11 @@ impl SemanticAnalyzer {
             declared_variables: Vec::new(),
             declared_parameters: Vec::new(),
             imported_symbols: Vec::new(),
+            declared_functions: Vec::new(),
+            called_functions: HashSet::new(),
+            unreachable_stmts: HashSet::new(),
+            memory_layout: MemoryLayout::new(),
+            checking_assignment_target: false,
         }
     }
 
@@ -219,8 +239,12 @@ impl SemanticAnalyzer {
             return Err(self.errors[0].clone());
         }
 
-        // Check for unused imports after all analysis is complete
+        // Check for unused imports and functions after all analysis is complete
         self.check_unused_imports();
+        self.check_unused_functions();
+
+        // Analyze tail calls after all other analysis is complete
+        let tail_call_info = self.analyze_tail_calls(source);
 
         Ok(ProgramInfo {
             table: self.table.clone(),
@@ -231,6 +255,8 @@ impl SemanticAnalyzer {
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),
             warnings: self.warnings.clone(),
+            unreachable_stmts: self.unreachable_stmts.clone(),
+            tail_call_info,
         })
     }
 
@@ -269,6 +295,7 @@ impl SemanticAnalyzer {
                     ty: self.resolve_function_type(func)?,
                     location: SymbolLocation::Absolute(0),
                     mutable: false,
+                    access_mode: None,
                 };
                 self.table.insert(name.clone(), info);
 
@@ -296,8 +323,30 @@ impl SemanticAnalyzer {
                     (None, None)
                 };
 
+                // Calculate total bytes used by parameters
+                let param_bytes_used: u8 = func.params.iter()
+                    .map(|p| {
+                        if let Ok(ty) = self.resolve_type(&p.ty.node) {
+                            self.type_size(&ty) as u8
+                        } else {
+                            1 // Default to 1 byte if type resolution fails
+                        }
+                    })
+                    .sum();
+
+                // Warn if parameters exceed available space (64 bytes: $80-$BF)
+                let param_space = self.memory_layout.param_space();
+                if param_bytes_used > param_space {
+                    self.warnings.push(Warning::ParameterOverflow {
+                        function_name: name.clone(),
+                        bytes_used: param_bytes_used,
+                        bytes_available: param_space,
+                        span: func.name.span,
+                    });
+                }
+
                 self.function_metadata.insert(
-                    name,
+                    name.clone(),
                     FunctionMetadata {
                         org_address,
                         section,
@@ -305,8 +354,29 @@ impl SemanticAnalyzer {
                         inline_body,
                         inline_params,
                         inline_param_symbols: None, // Will be populated in second pass
+                        has_tail_recursion: false,  // Will be populated by tail call analysis
+                        param_bytes_used,
                     },
                 );
+
+                // Track function declarations for unused function detection
+                // Skip special functions that should never be warned about:
+                // - reset (main/entry point)
+                // - irq (interrupt handler)
+                // - nmi (NMI handler)
+                // - inline (may be called from other modules)
+                let is_special = func.attributes.iter().any(|attr| {
+                    matches!(attr,
+                        crate::ast::FnAttribute::Reset |
+                        crate::ast::FnAttribute::Irq |
+                        crate::ast::FnAttribute::Nmi |
+                        crate::ast::FnAttribute::Inline
+                    )
+                });
+
+                if !is_special {
+                    self.declared_functions.push((name, func.name.span));
+                }
             }
             Item::Static(stat) => {
                 let name = stat.name.node.clone();
@@ -334,6 +404,14 @@ impl SemanticAnalyzer {
                         name: name.clone(),
                         span: stat.name.span,
                         previous_span: None,
+                    });
+                }
+
+                // Warn if constant name is not all uppercase (per language spec)
+                if !stat.mutable && !is_uppercase_name(&name) {
+                    self.warnings.push(Warning::NonUppercaseConstant {
+                        name: name.clone(),
+                        span: stat.name.span,
                     });
                 }
 
@@ -385,6 +463,7 @@ impl SemanticAnalyzer {
                     ty: declared_ty,
                     location: SymbolLocation::Absolute(0),
                     mutable: stat.mutable,
+                    access_mode: None,
                 };
                 self.table.insert(name, info);
             }
@@ -446,7 +525,9 @@ impl SemanticAnalyzer {
                     kind: SymbolKind::Address,
                     ty: Type::Primitive(crate::ast::PrimitiveType::U8),
                     location: SymbolLocation::Absolute(address),
-                    mutable: true,
+                    // Write and ReadWrite can be written to; Read cannot
+                    mutable: matches!(addr.access, crate::ast::AccessMode::Write | crate::ast::AccessMode::ReadWrite),
+                    access_mode: Some(addr.access),
                 };
                 self.table.insert(name, info);
             }
@@ -663,6 +744,7 @@ impl SemanticAnalyzer {
                 ty: Type::Named(name),
                 location: SymbolLocation::None,
                 mutable: false,
+                access_mode: None,
             },
         );
 
@@ -791,6 +873,7 @@ impl SemanticAnalyzer {
                 ty: Type::Named(name),
                 location: SymbolLocation::None,
                 mutable: false,
+                access_mode: None,
             },
         );
 
@@ -858,6 +941,7 @@ impl SemanticAnalyzer {
                     ty: param_type,
                     location,
                     mutable: false,
+                    access_mode: None,
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Add to resolved_symbols so codegen (especially inline asm) can find it
@@ -979,6 +1063,18 @@ impl SemanticAnalyzer {
         }
     }
 
+    fn check_unused_functions(&mut self) {
+        // Check which declared functions were never called
+        for (func_name, func_span) in &self.declared_functions {
+            if !self.called_functions.contains(func_name) {
+                self.warnings.push(Warning::UnusedFunction {
+                    name: func_name.clone(),
+                    span: *func_span,
+                });
+            }
+        }
+    }
+
     /// Check if a match statement exhaustively covers all enum variants
     fn check_match_exhaustiveness(
         &mut self,
@@ -1060,6 +1156,7 @@ impl SemanticAnalyzer {
                                             ty: field_ty.clone(),
                                             location: SymbolLocation::ZeroPage(addr),
                                             mutable: false,
+                                            access_mode: None,
                                         };
                                         self.table.insert(binding.name.node.clone(), info);
                                     }
@@ -1080,6 +1177,7 @@ impl SemanticAnalyzer {
                     ty: match_ty.clone(),
                     location: SymbolLocation::ZeroPage(addr),
                     mutable: false,
+                    access_mode: None,
                 };
                 self.table.insert(name.clone(), info);
             }
@@ -1105,6 +1203,8 @@ impl SemanticAnalyzer {
                         self.warnings.push(Warning::UnreachableCode {
                             span: s.span,
                         });
+                        // Track for dead code elimination in codegen
+                        self.unreachable_stmts.insert(s.span);
                         // Continue analyzing (don't skip) to find other errors/warnings
                     }
 
@@ -1175,6 +1275,7 @@ impl SemanticAnalyzer {
                     ty: declared_ty,
                     location,
                     mutable: *mutable,
+                    access_mode: None,
                 };
                 self.table.insert(name.node.clone(), info.clone());
                 // Also add to resolved_symbols so codegen can find it
@@ -1184,7 +1285,10 @@ impl SemanticAnalyzer {
                 self.declared_variables.push((name.node.clone(), name.span));
             }
             Stmt::Assign { target, value } => {
+                // Set flag to indicate we're checking assignment target (not reading value)
+                self.checking_assignment_target = true;
                 let target_ty = self.check_expr(target)?;
+                self.checking_assignment_target = false;
                 let value_ty = self.check_expr(value)?;
 
                 // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
@@ -1197,15 +1301,25 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // Check mutability
+                // Check mutability and access mode
                 if let Expr::Variable(name) = &target.node
-                    && let Some(info) = self.table.lookup(name)
-                        && !info.mutable {
+                    && let Some(info) = self.table.lookup(name) {
+                        // Check for writing to read-only address
+                        if info.kind == SymbolKind::Address
+                            && let Some(crate::ast::AccessMode::Read) = info.access_mode {
+                                return Err(SemaError::ReadOnlyWrite {
+                                    name: name.clone(),
+                                    span: target.span,
+                                });
+                            }
+                        // Check general mutability
+                        if !info.mutable {
                             return Err(SemaError::ImmutableAssignment {
                                 symbol: name.clone(),
                                 span: target.span,
                             });
                         }
+                    }
             }
             Stmt::Return(expr) => {
                 let expr_ty = if let Some(e) = expr {
@@ -1310,6 +1424,7 @@ impl SemanticAnalyzer {
                     ty: var_ty,
                     location: SymbolLocation::ZeroPage(addr),
                     mutable: true,
+                    access_mode: None,
                 };
                 self.table.insert(var_name.node.clone(), info);
 
@@ -1382,6 +1497,7 @@ impl SemanticAnalyzer {
                     ty: var_ty,
                     location: SymbolLocation::ZeroPage(addr),
                     mutable: true,
+                    access_mode: None,
                 };
                 self.table.insert(var_name.node.clone(), info.clone());
                 // Add to resolved_symbols so codegen can find it
@@ -1550,6 +1666,15 @@ impl SemanticAnalyzer {
                     });
                 };
 
+                // Check for reading from write-only address (skip if this is an assignment target)
+                if !self.checking_assignment_target && info.kind == SymbolKind::Address
+                    && let Some(crate::ast::AccessMode::Write) = info.access_mode {
+                        return Err(SemaError::WriteOnlyRead {
+                            name: name.clone(),
+                            span: expr.span,
+                        });
+                    }
+
                 self.resolved_symbols.insert(expr.span, info.clone());
 
                 // Mark variable as used (for unused variable/parameter warnings)
@@ -1673,6 +1798,9 @@ impl SemanticAnalyzer {
                 // Mark function as used (for unused variable/import warnings)
                 self.used_variables.insert(function.node.clone());
                 self.all_used_symbols.insert(function.node.clone());
+
+                // Track function call for unused function detection
+                self.called_functions.insert(function.node.clone());
 
                 // Verify function signature: check that it's a function and get param/return types
                 let (param_types, ret_type) = if let Some(info) = self.table.lookup(&function.node)
@@ -2037,4 +2165,107 @@ impl SemanticAnalyzer {
 
         Ok(Type::Function(param_types, Box::new(return_type)))
     }
+
+    // ========================================================================
+    // TAIL CALL OPTIMIZATION - Detection Pass
+    // ========================================================================
+
+    /// Analyze all functions for tail recursive calls
+    /// This pass runs after all other analysis is complete
+    fn analyze_tail_calls(&mut self, source: &SourceFile) -> HashMap<String, crate::sema::TailCallInfo> {
+        let mut tail_call_info = HashMap::new();
+
+        for item in &source.items {
+            if let Item::Function(func) = &item.node {
+                let func_name = func.name.node.clone();
+                let info = self.detect_tail_recursion(&func_name, &func.body);
+
+                // Update function metadata if tail recursion detected
+                if !info.tail_recursive_returns.is_empty()
+                    && let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+                        metadata.has_tail_recursion = true;
+                    }
+
+                tail_call_info.insert(func_name, info);
+            }
+        }
+
+        tail_call_info
+    }
+
+    /// Detect tail recursive calls in a function body
+    fn detect_tail_recursion(&self, func_name: &str, body: &Spanned<Stmt>) -> crate::sema::TailCallInfo {
+        let mut tail_recursive_returns = HashSet::new();
+        self.find_tail_recursive_returns(func_name, body, &mut tail_recursive_returns);
+
+        crate::sema::TailCallInfo {
+            tail_recursive_returns,
+        }
+    }
+
+    /// Recursively find return statements with tail recursive calls
+    fn find_tail_recursive_returns(
+        &self,
+        func_name: &str,
+        stmt: &Spanned<Stmt>,
+        tail_recursive_returns: &mut HashSet<Span>,
+    ) {
+        match &stmt.node {
+            Stmt::Return(Some(expr)) => {
+                // Check if this is a direct call to the same function
+                if let Expr::Call { function, .. } = &expr.node
+                    && function.node == func_name {
+                        // This is a tail recursive call!
+                        tail_recursive_returns.insert(stmt.span);
+                    }
+            }
+
+            // Recurse into block statements
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.find_tail_recursive_returns(func_name, s, tail_recursive_returns);
+                }
+            }
+
+            // Recurse into if/else (both branches must be checked)
+            Stmt::If { then_branch, else_branch, .. } => {
+                self.find_tail_recursive_returns(func_name, then_branch, tail_recursive_returns);
+                if let Some(alt) = else_branch {
+                    self.find_tail_recursive_returns(func_name, alt, tail_recursive_returns);
+                }
+            }
+
+            // Recurse into while loops
+            Stmt::While { body, .. } => {
+                self.find_tail_recursive_returns(func_name, body, tail_recursive_returns);
+            }
+
+            // Recurse into loop
+            Stmt::Loop { body } => {
+                self.find_tail_recursive_returns(func_name, body, tail_recursive_returns);
+            }
+
+            // Recurse into for loops
+            Stmt::For { body, .. } => {
+                self.find_tail_recursive_returns(func_name, body, tail_recursive_returns);
+            }
+
+            // Recurse into match arms
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    self.find_tail_recursive_returns(func_name, &arm.body, tail_recursive_returns);
+                }
+            }
+
+            _ => {
+                // Other statements (VarDecl, Assignment, etc.) don't contain returns
+            }
+        }
+    }
+}
+
+/// Check if a name is all uppercase (allowing underscores and digits)
+/// Used to enforce constant naming conventions
+fn is_uppercase_name(name: &str) -> bool {
+    name.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
 }

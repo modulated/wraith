@@ -1,6 +1,6 @@
 // Test hexadecimal and binary literals
 
-addr TEST_OUTPUT = 0xC000;
+const TEST_OUTPUT: addr = 0xC000;
 
 fn main() {
     // Hex literals for u8

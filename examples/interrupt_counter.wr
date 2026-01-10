@@ -1,0 +1,22 @@
+import {nop} from "intrinsics.wr";
+const SCORE: addr = 0x6000;
+
+#[reset]
+fn main() {
+    asm{
+        "CLI"
+    }
+    loop {
+        nop();
+    }    
+}
+
+#[irq]
+fn add() {
+    SCORE += 1;
+}
+
+#[nmi]
+fn sub() {
+    SCORE -= 1;
+}

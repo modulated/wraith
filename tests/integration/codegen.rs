@@ -21,7 +21,7 @@ fn empty_function() {
 #[test]
 fn simple_assignment() {
     let asm = compile_success(r#"
-        addr SCREEN = 0x0400;
+        const SCREEN: addr = 0x0400;
         fn main() {
             SCREEN = 42;
         }
@@ -36,7 +36,7 @@ fn simple_assignment() {
 #[test]
 fn constant_folding() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 10 + 20;
         }
@@ -56,9 +56,9 @@ fn constant_folding() {
 fn binary_operations() {
     let asm = compile_success(r#"
         fn main() {
-            a: u8 = 10;
-            b: u8 = 5;
-            x: u8 = a + b;
+            let a: u8 = 10;
+            let b: u8 = 5;
+            let x: u8 = a + b;
         }
     "#);
 
@@ -69,7 +69,7 @@ fn binary_operations() {
 #[test]
 fn multiplication() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 3 * 4;
         }
@@ -82,7 +82,7 @@ fn multiplication() {
 #[test]
 fn division() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 12 / 3;
         }
@@ -95,7 +95,7 @@ fn division() {
 #[test]
 fn shift_operations() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 8 << 1;
         }
@@ -108,7 +108,7 @@ fn shift_operations() {
 #[test]
 fn unary_operations() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = -10;
         }
@@ -127,7 +127,7 @@ fn control_flow_if() {
     let asm = compile_success(r#"
         fn main() {
             if true {
-                x: u8 = 10;
+                let x: u8 = 10;
             }
         }
     "#);
@@ -138,8 +138,8 @@ fn control_flow_if() {
 #[test]
 fn comparison_eq() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
-        addr X = 0x0401;
+        const RESULT: addr = 0x0400;
+        const X: addr = 0x0401;
         fn main() {
             X = 5;
             RESULT = X == 5;
@@ -154,10 +154,10 @@ fn comparison_eq() {
 fn logical_and_short_circuit() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
-            y: u8 = 20;
+            let x: u8 = 10;
+            let y: u8 = 20;
             if x == 10 && y == 20 {
-                z: u8 = 30;
+                let z: u8 = 30;
             }
         }
     "#);
@@ -171,7 +171,7 @@ fn for_loop() {
     let asm = compile_success(r#"
         fn main() {
             for i: u8 in 0..10 {
-                x: u8 = i;
+                let x: u8 = i;
             }
         }
     "#);
@@ -192,7 +192,7 @@ fn function_call() {
             return 42;
         }
         fn main() {
-            x: u8 = foo();
+            let x: u8 = foo();
         }
     "#);
 
@@ -208,7 +208,7 @@ fn inline_function() {
             return a + b;
         }
         fn main() {
-            result: u8 = add(5, 10);
+            let result: u8 = add(5, 10);
         }
     "#);
 
@@ -249,7 +249,7 @@ fn enum_unit_variant() {
             South,
         }
         fn main() {
-            d: Direction = Direction::North;
+            let d: Direction = Direction::North;
         }
     "#);
 
@@ -305,10 +305,10 @@ fn enum_pattern_matching() {
             South,
         }
         fn main() {
-            d: Direction = Direction::North;
+            let d: Direction = Direction::North;
             match d {
-                Direction::North => { x: u8 = 1; }
-                Direction::South => { x: u8 = 2; }
+                Direction::North => { let x: u8 = 1; }
+                Direction::South => { let x: u8 = 2; }
             }
         }
     "#);
@@ -326,7 +326,7 @@ fn enum_multiple_variants() {
             Some(u8),
         }
         fn main() {
-            opt: Option = Option::Some(42);
+            let opt: Option = Option::Some(42);
         }
     "#);
 
@@ -343,7 +343,7 @@ fn enum_multiple_variants() {
 fn nested_expressions() {
     let asm = compile_success(r#"
         fn main() {
-            result: u8 = (10 + 20) * 2;
+            let result: u8 = (10 + 20) * 2;
         }
     "#);
 
@@ -361,27 +361,27 @@ fn many_local_variables() {
     // This test would fail with old 16-byte limit ($40-$4F)
     let asm = compile_success(r#"
         fn main() {
-            v01: u8 = 1;
-            v02: u8 = 2;
-            v03: u8 = 3;
-            v04: u8 = 4;
-            v05: u8 = 5;
-            v06: u8 = 6;
-            v07: u8 = 7;
-            v08: u8 = 8;
-            v09: u8 = 9;
-            v10: u8 = 10;
-            v11: u8 = 11;
-            v12: u8 = 12;
-            v13: u8 = 13;
-            v14: u8 = 14;
-            v15: u8 = 15;
-            v16: u8 = 16;
-            v17: u8 = 17;
-            v18: u8 = 18;
-            v19: u8 = 19;
-            v20: u8 = 20;
-            result: u8 = v20;
+            let v01: u8 = 1;
+            let v02: u8 = 2;
+            let v03: u8 = 3;
+            let v04: u8 = 4;
+            let v05: u8 = 5;
+            let v06: u8 = 6;
+            let v07: u8 = 7;
+            let v08: u8 = 8;
+            let v09: u8 = 9;
+            let v10: u8 = 10;
+            let v11: u8 = 11;
+            let v12: u8 = 12;
+            let v13: u8 = 13;
+            let v14: u8 = 14;
+            let v15: u8 = 15;
+            let v16: u8 = 16;
+            let v17: u8 = 17;
+            let v18: u8 = 18;
+            let v19: u8 = 19;
+            let v20: u8 = 20;
+            let result: u8 = v20;
         }
     "#);
 
@@ -397,20 +397,379 @@ fn multiple_array_variables() {
     // New layout: 64 bytes = ~32 arrays max
     let asm = compile_success(r#"
         fn main() {
-            arr1: [u8; 3] = [1, 2, 3];
-            arr2: [u8; 3] = [4, 5, 6];
-            arr3: [u8; 3] = [7, 8, 9];
-            arr4: [u8; 3] = [10, 11, 12];
-            arr5: [u8; 3] = [13, 14, 15];
-            arr6: [u8; 3] = [16, 17, 18];
-            arr7: [u8; 3] = [19, 20, 21];
-            arr8: [u8; 3] = [22, 23, 24];
-            arr9: [u8; 3] = [25, 26, 27];
-            arr10: [u8; 3] = [28, 29, 30];
+            let arr1: [u8; 3] = [1, 2, 3];
+            let arr2: [u8; 3] = [4, 5, 6];
+            let arr3: [u8; 3] = [7, 8, 9];
+            let arr4: [u8; 3] = [10, 11, 12];
+            let arr5: [u8; 3] = [13, 14, 15];
+            let arr6: [u8; 3] = [16, 17, 18];
+            let arr7: [u8; 3] = [19, 20, 21];
+            let arr8: [u8; 3] = [22, 23, 24];
+            let arr9: [u8; 3] = [25, 26, 27];
+            let arr10: [u8; 3] = [28, 29, 30];
         }
     "#);
 
     // Verify successful compilation with 10 arrays (20 bytes)
     assert_asm_contains(&asm, "main:");
     assert_asm_contains(&asm, "RTS");
+}
+
+#[test]
+fn loop_unrolling_small_constant_loop() {
+    let asm = compile_success(r#"
+        const DATA: addr = 0x6000;
+        fn main() {
+            for i: u8 in 0..3 {
+                DATA = i;
+            }
+        }
+    "#);
+
+    // Verify loop was unrolled (should have "Loop unrolled" comment)
+    assert_asm_contains(&asm, "Loop unrolled");
+
+    // Should NOT have loop labels (fl, fx) or branch instructions for this simple loop
+    assert!(!asm.contains("fl_"), "Expected loop to be unrolled, not use loop labels");
+    assert!(!asm.contains("BCS"), "Expected loop to be unrolled, not use conditional branches");
+
+    // Should have inline assignments for i = 0, i = 1, i = 2
+    assert_asm_contains(&asm, "i = 0");
+    assert_asm_contains(&asm, "i = 1");
+    assert_asm_contains(&asm, "i = 2");
+}
+
+#[test]
+fn loop_unrolling_single_iteration() {
+    let asm = compile_success(r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            for i: u8 in 5..6 {
+                OUT = i;
+            }
+        }
+    "#);
+
+    // Single iteration loop should be unrolled
+    assert_asm_contains(&asm, "Loop unrolled: 1 iteration");
+    assert_asm_contains(&asm, "i = 5");
+}
+
+#[test]
+fn loop_unrolling_inclusive_range() {
+    let asm = compile_success(r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            for i: u8 in 0..=2 {
+                OUT = i;
+            }
+        }
+    "#);
+
+    // Inclusive range 0..=2 should unroll to 3 iterations
+    assert_asm_contains(&asm, "Loop unrolled: 3 iterations");
+}
+
+#[test]
+fn no_loop_unrolling_large_count() {
+    let asm = compile_success(r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            for i: u8 in 0..20 {
+                OUT = i;
+            }
+        }
+    "#);
+
+    // Large loop (20 iterations) should NOT be unrolled
+    assert!(!asm.contains("Loop unrolled"), "Large loops should not be unrolled");
+
+    // Should use normal loop with labels and branches
+    assert_asm_contains(&asm, "fl_");
+}
+
+#[test]
+fn no_loop_unrolling_non_constant() {
+    let asm = compile_success(r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            let n: u8 = 5;
+            for i: u8 in 0..n {
+                OUT = i;
+            }
+        }
+    "#);
+
+    // Variable range end should NOT be unrolled
+    assert!(!asm.contains("Loop unrolled"), "Non-constant ranges should not be unrolled");
+}
+
+// ============================================================
+// Dead Code Elimination Tests
+// ============================================================
+
+#[test]
+fn dead_code_after_return() {
+    let asm = compile_success(r#"
+        fn main() {
+            let x: u8 = 1;
+            return;
+            let y: u8 = 2;  // Unreachable
+        }
+    "#);
+
+    // Should contain comment about eliminated code
+    assert_asm_contains(&asm, "Unreachable code eliminated");
+    // Should NOT generate the dead assignment
+    assert!(!asm.contains("LDA #$02"), "Dead code should not generate assembly");
+}
+
+#[test]
+fn dead_code_after_break() {
+    let asm = compile_success(r#"
+        fn main() {
+            for i: u8 in 0..20 {
+                if i == 5 {
+                    break;
+                    let x: u8 = 10;  // Unreachable
+                }
+            }
+        }
+    "#);
+
+    // Should eliminate unreachable code after break
+    assert_asm_contains(&asm, "Unreachable code eliminated");
+}
+
+#[test]
+fn dead_code_after_continue() {
+    let asm = compile_success(r#"
+        fn main() {
+            for i: u8 in 0..20 {
+                if i == 5 {
+                    continue;
+                    let x: u8 = 10;  // Unreachable
+                }
+            }
+        }
+    "#);
+
+    // Should eliminate unreachable code after continue
+    assert_asm_contains(&asm, "Unreachable code eliminated");
+}
+
+#[test]
+fn multiple_dead_statements() {
+    let asm = compile_success(r#"
+        fn main() {
+            return;
+            let x: u8 = 1;   // Unreachable
+            let y: u8 = 2;   // Unreachable
+            let z: u8 = 3;   // Unreachable
+        }
+    "#);
+
+    // Should have multiple elimination comments
+    let count = asm.matches("Unreachable code eliminated").count();
+    assert!(count >= 3, "Expected at least 3 unreachable code eliminations, got {}", count);
+}
+
+// ============================================================
+// Constant Array Optimization Tests
+// ============================================================
+
+#[test]
+fn zero_array_small_no_optimization() {
+    let asm = compile_success(r#"
+        fn main() {
+            let buf: [u8; 8] = [0; 8];
+        }
+    "#);
+
+    // Small arrays (< 16 bytes) should NOT be optimized
+    assert!(!asm.contains(".RES"), "Small zero arrays should not use .RES");
+    assert!(!asm.contains("Zero-filled array optimized"), "Small arrays should not be optimized");
+}
+
+#[test]
+fn zero_array_large_optimized() {
+    let asm = compile_success(r#"
+        fn main() {
+            let buf: [u8; 32] = [0; 32];
+        }
+    "#);
+
+    // Large zero arrays (>= 16 bytes) should be optimized
+    assert_asm_contains(&asm, ".RES 32");
+    assert_asm_contains(&asm, "Zero-filled array optimized: 32 bytes");
+}
+
+#[test]
+fn zero_array_threshold_optimized() {
+    let asm = compile_success(r#"
+        fn main() {
+            let buf: [u8; 16] = [0; 16];
+        }
+    "#);
+
+    // Exactly 16 bytes should be optimized
+    assert_asm_contains(&asm, ".RES 16");
+    assert_asm_contains(&asm, "Zero-filled array optimized");
+}
+
+#[test]
+fn non_zero_array_not_optimized() {
+    let asm = compile_success(r#"
+        fn main() {
+            let buf: [u8; 32] = [5; 32];
+        }
+    "#);
+
+    // Non-zero arrays should NOT be optimized (no .RES)
+    assert!(!asm.contains(".RES"), "Non-zero arrays should not use .RES");
+    // Should emit individual bytes
+    assert_asm_contains(&asm, ".BYTE");
+}
+
+#[test]
+fn very_large_zero_array() {
+    let asm = compile_success(r#"
+        fn main() {
+            let buf: [u8; 256] = [0; 256];
+        }
+    "#);
+
+    // Very large zero arrays should be optimized
+    assert_asm_contains(&asm, ".RES 256");
+    assert_asm_contains(&asm, "Zero-filled array optimized: 256 bytes");
+    // Should NOT have hundreds of .BYTE directives
+    let byte_count = asm.matches(".BYTE $00").count();
+    assert!(byte_count < 10, "Optimized arrays should have very few .BYTE directives, found {}", byte_count);
+}
+
+// ============================================================================
+// Const Arrays (ROM Data)
+// ============================================================================
+
+#[test]
+fn const_array_lookup_table() {
+    let asm = compile_success(r#"
+        const LUT: [u8; 16] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225];
+
+        fn main() {
+            let x: u8 = LUT[5];
+        }
+    "#);
+
+    // Should emit data section header
+    assert_asm_contains(&asm, "Data Section (Const Arrays)");
+
+    // Should emit .ORG for DATA section (default $C000)
+    assert_asm_contains(&asm, ".ORG $C000");
+
+    // Should emit const array label and data
+    assert_asm_contains(&asm, "LUT:");
+    assert_asm_contains(&asm, ".BYTE $00, $01, $04, $09, $10, $19, $24, $31, $40, $51, $64, $79, $90, $A9, $C4, $E1");
+
+    // Data should come before code
+    assert_asm_order(&asm, "Data Section (Const Arrays)", "Code from main module");
+}
+
+#[test]
+fn const_array_zero_filled() {
+    let asm = compile_success(r#"
+        const BUFFER: [u8; 256] = [0; 256];
+
+        fn main() {
+            let x: u8 = BUFFER[0];
+        }
+    "#);
+
+    // Should use .RES optimization for large zero-filled arrays
+    assert_asm_contains(&asm, "BUFFER:");
+    assert_asm_contains(&asm, ".RES 256");
+
+    // Should be in DATA section
+    assert_asm_contains(&asm, "Data Section (Const Arrays)");
+}
+
+#[test]
+fn const_array_sprite_data() {
+    let asm = compile_success(r#"
+        const SPRITE: [u8; 8] = [0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+
+        fn main() {
+            let x: u8 = SPRITE[0];
+        }
+    "#);
+
+    // Should emit sprite data as bytes
+    assert_asm_contains(&asm, "SPRITE:");
+    assert_asm_contains(&asm, ".BYTE $FF, $00, $FF, $00, $FF, $00, $FF, $00");
+}
+
+#[test]
+fn const_array_small_zero_fill() {
+    let asm = compile_success(r#"
+        const SMALL: [u8; 8] = [0; 8];
+
+        fn main() {
+            let x: u8 = SMALL[0];
+        }
+    "#);
+
+    // Small zero-filled arrays (< 16 bytes) should use .BYTE
+    assert_asm_contains(&asm, "SMALL:");
+    assert_asm_contains(&asm, ".BYTE");
+
+    // Should NOT use .RES for small arrays
+    assert!(!asm.contains(".RES 8"), "Small arrays should not use .RES optimization");
+}
+
+#[test]
+fn multiple_const_arrays() {
+    let asm = compile_success(r#"
+        const FIRST: [u8; 4] = [1, 2, 3, 4];
+        const SECOND: [u8; 4] = [5, 6, 7, 8];
+
+        fn main() {
+            let a: u8 = FIRST[0];
+            let b: u8 = SECOND[0];
+        }
+    "#);
+
+    // Should emit both arrays
+    assert_asm_contains(&asm, "FIRST:");
+    assert_asm_contains(&asm, ".BYTE $01, $02, $03, $04");
+    assert_asm_contains(&asm, "SECOND:");
+    assert_asm_contains(&asm, ".BYTE $05, $06, $07, $08");
+
+    // Both should be in DATA section
+    assert_asm_order(&asm, "FIRST:", "SECOND:");
+}
+
+#[test]
+fn const_array_separated_from_code() {
+    let asm = compile_success(r#"
+        const DATA: [u8; 4] = [1, 2, 3, 4];
+
+        fn helper() {
+            let x: u8 = 10;
+        }
+
+        fn main() {
+            helper();
+        }
+    "#);
+
+    // Data section should come before code section
+    assert_asm_order(&asm, "Data Section (Const Arrays)", "Code from main module");
+
+    // DATA array should be in data section, not mixed with code
+    let data_pos = asm.find("DATA:").expect("DATA label not found");
+    let helper_pos = asm.find("helper:").expect("helper label not found");
+    let main_pos = asm.find("main:").expect("main label not found");
+
+    assert!(data_pos < helper_pos, "DATA should come before helper function");
+    assert!(data_pos < main_pos, "DATA should come before main function");
 }

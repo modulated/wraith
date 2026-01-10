@@ -12,7 +12,7 @@ use crate::common::*;
 fn compound_add_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x += 5;
         }
     "#);
@@ -24,7 +24,7 @@ fn compound_add_assign() {
 fn compound_sub_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x -= 3;
         }
     "#);
@@ -36,7 +36,7 @@ fn compound_sub_assign() {
 fn compound_mul_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x *= 2;
         }
     "#);
@@ -49,7 +49,7 @@ fn compound_mul_assign() {
 fn compound_div_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x /= 2;
         }
     "#);
@@ -62,7 +62,7 @@ fn compound_div_assign() {
 fn compound_bitwise_and_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 0xFF;
+            let x: u8 = 0xFF;
             x &= 0x0F;
         }
     "#);
@@ -74,7 +74,7 @@ fn compound_bitwise_and_assign() {
 fn compound_bitwise_or_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 0x0F;
+            let x: u8 = 0x0F;
             x |= 0xF0;
         }
     "#);
@@ -86,7 +86,7 @@ fn compound_bitwise_or_assign() {
 fn compound_bitwise_xor_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 0xFF;
+            let x: u8 = 0xFF;
             x ^= 0xAA;
         }
     "#);
@@ -98,7 +98,7 @@ fn compound_bitwise_xor_assign() {
 fn compound_shift_left_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 1;
+            let x: u8 = 1;
             x <<= 3;
         }
     "#);
@@ -110,7 +110,7 @@ fn compound_shift_left_assign() {
 fn compound_shift_right_assign() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 8;
+            let x: u8 = 8;
             x >>= 2;
         }
     "#);
@@ -126,7 +126,7 @@ fn compound_shift_right_assign() {
 fn increment_variable() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x += 1;
         }
     "#);
@@ -139,7 +139,7 @@ fn increment_variable() {
 fn decrement_variable() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x -= 1;
         }
     "#);
@@ -155,7 +155,7 @@ fn decrement_variable() {
 #[test]
 fn bitwise_and() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 0xFF & 0x0F;
         }
@@ -168,7 +168,7 @@ fn bitwise_and() {
 #[test]
 fn bitwise_or() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 0x0F | 0xF0;
         }
@@ -181,7 +181,7 @@ fn bitwise_or() {
 #[test]
 fn bitwise_xor() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 0xFF ^ 0xAA;
         }
@@ -194,7 +194,7 @@ fn bitwise_xor() {
 #[test]
 fn bitwise_not() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = ~0x0F;
         }
@@ -213,7 +213,7 @@ fn logical_and() {
     let asm = compile_success(r#"
         fn main() {
             if true && false {
-                x: u8 = 1;
+                let x: u8 = 1;
             }
         }
     "#);
@@ -227,7 +227,7 @@ fn logical_or() {
     let asm = compile_success(r#"
         fn main() {
             if true || false {
-                x: u8 = 1;
+                let x: u8 = 1;
             }
         }
     "#);
@@ -241,7 +241,7 @@ fn logical_not() {
     let asm = compile_success(r#"
         fn main() {
             if !false {
-                x: u8 = 1;
+                let x: u8 = 1;
             }
         }
     "#);
@@ -257,9 +257,9 @@ fn logical_not() {
 fn comparison_equal() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 5;
+            let x: u8 = 5;
             if x == 5 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -272,9 +272,9 @@ fn comparison_equal() {
 fn comparison_not_equal() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 5;
+            let x: u8 = 5;
             if x != 5 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -287,9 +287,9 @@ fn comparison_not_equal() {
 fn comparison_less_than() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 5;
+            let x: u8 = 5;
             if x < 10 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -302,9 +302,9 @@ fn comparison_less_than() {
 fn comparison_greater_than() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             if x > 5 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -316,9 +316,9 @@ fn comparison_greater_than() {
 fn comparison_less_equal() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 5;
+            let x: u8 = 5;
             if x <= 10 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -330,9 +330,9 @@ fn comparison_less_equal() {
 fn comparison_greater_equal() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             if x >= 5 {
-                y: u8 = 1;
+                let y: u8 = 1;
             }
         }
     "#);
@@ -347,7 +347,7 @@ fn comparison_greater_equal() {
 #[test]
 fn shift_left() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 1 << 3;
         }
@@ -360,7 +360,7 @@ fn shift_left() {
 #[test]
 fn shift_right() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 16 >> 2;
         }
@@ -374,7 +374,7 @@ fn shift_right() {
 fn shift_left_variable() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 4;
+            let x: u8 = 4;
             x = x << 1;
         }
     "#);
@@ -386,7 +386,7 @@ fn shift_left_variable() {
 fn shift_right_variable() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 8;
+            let x: u8 = 8;
             x = x >> 1;
         }
     "#);

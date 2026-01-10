@@ -8,15 +8,15 @@
 const UART_BASE: u16 = 0xE000;
 const BAUD_9600: u16 = 12;  // Divisor for 1.8432MHz crystal
 
-addr UART_RBR = 0xE000;  // Receiver Buffer Register
-addr UART_THR = 0xE000;  // Transmitter Holding Register
-addr UART_IER = 0xE001;  // Interrupt Enable Register
-addr UART_LCR = 0xE003;  // Line Control Register
-addr UART_MCR = 0xE004;  // Modem Control Register
-addr UART_LSR = 0xE005;  // Line Status Register
-addr UART_FCR = 0xE002;  // FIFO Control Register
-addr UART_DLL = 0xE000;  // Divisor Latch Low
-addr UART_DLM = 0xE001;  // Divisor Latch High
+const UART_RBR: addr = 0xE000;  // Receiver Buffer Register
+const UART_THR: addr = 0xE000;  // Transmitter Holding Register
+const UART_IER: addr = 0xE001;  // Interrupt Enable Register
+const UART_LCR: addr = 0xE003;  // Line Control Register
+const UART_MCR: addr = 0xE004;  // Modem Control Register
+const UART_LSR: addr = 0xE005;  // Line Status Register
+const UART_FCR: addr = 0xE002;  // FIFO Control Register
+const UART_DLL: addr = 0xE000;  // Divisor Latch Low
+const UART_DLM: addr = 0xE001;  // Divisor Latch High
 
 const UART_LSR_DR: u8   = 0x01;  // Data Ready
 const UART_LSR_THRE: u8 = 0x20;  // Transmitter Holding Register Empty
@@ -36,11 +36,11 @@ const ASCII_BS: u8 = 0x08;
 const CMD_BUFFER: u16 = 0x0200;
 const CMD_MAX_LEN: u8 = 64;
 
-addr TEMP_ADDR_LO = 0x00F0;
-addr TEMP_ADDR_HI = 0x00F1;
-addr TEMP_VAL = 0x00F2;
-addr TEMP_ADDR2_LO = 0x00F3;
-addr TEMP_ADDR2_HI = 0x00F4;
+const TEMP_ADDR_LO: addr = 0x00F0;
+const TEMP_ADDR_HI: addr = 0x00F1;
+const TEMP_VAL: addr = 0x00F2;
+const TEMP_ADDR2_LO: addr = 0x00F3;
+const TEMP_ADDR2_HI: addr = 0x00F4;
 
 // ============================================================================
 // String Constants using str type

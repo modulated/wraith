@@ -1,6 +1,6 @@
 // Test new variable declaration syntax: name: type = value
 
-addr TEST_OUTPUT = 0xC000;
+const TEST_OUTPUT: addr = 0xC000;
 
 fn main() {
     // New consistent syntax

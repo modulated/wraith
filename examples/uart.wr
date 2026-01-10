@@ -5,17 +5,17 @@
 // HARDWARE ADDRESSES - Memory-mapped I/O registers
 // ============================================================================
 
-addr UART_BASE = 0x7F00;
+const UART_BASE: addr = 0x7F00;
 
-addr UART_RBR = UART_BASE + 0;  // Receiver Buffer (read, DLAB=0)
-addr UART_THR = UART_BASE + 0;  // Transmitter Holding (write, DLAB=0)
-addr UART_DLL = UART_BASE + 0;  // Divisor Latch Low (DLAB=1)
-addr UART_DLM = UART_BASE + 1;  // Divisor Latch High (DLAB=1)
-addr UART_IER = UART_BASE + 1;  // Interrupt Enable (DLAB=0)
-addr UART_FCR = UART_BASE + 2;  // FIFO Control (write)
-addr UART_LCR = UART_BASE + 3;  // Line Control
-addr UART_MCR = UART_BASE + 4;  // Modem Control
-addr UART_LSR = UART_BASE + 5;  // Line Status
+const UART_RBR: addr = UART_BASE + 0;  // Receiver Buffer (read, DLAB=0)
+const UART_THR: addr = UART_BASE + 0;  // Transmitter Holding (write, DLAB=0)
+const UART_DLL: addr = UART_BASE + 0;  // Divisor Latch Low (DLAB=1)
+const UART_DLM: addr = UART_BASE + 1;  // Divisor Latch High (DLAB=1)
+const UART_IER: addr = UART_BASE + 1;  // Interrupt Enable (DLAB=0)
+const UART_FCR: addr = UART_BASE + 2;  // FIFO Control (write)
+const UART_LCR: addr = UART_BASE + 3;  // Line Control
+const UART_MCR: addr = UART_BASE + 4;  // Modem Control
+const UART_LSR: addr = UART_BASE + 5;  // Line Status
 
 // ============================================================================
 // CONFIGURATION CONSTANTS - Register values and bit masks

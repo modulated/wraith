@@ -7,15 +7,15 @@ const RESULT_F: addr = 0x6005;
 
 #[reset]
 fn main() {
-    let long: u16 = fib(10);
+    let long: u16 = fib(0);
     RESULT_A = long.low;
     RESULT_B = long.high;
 
-    long = fib(14);
+    long = fib(1);
     RESULT_C = long.low;
     RESULT_D = long.high;
 
-    long = fib(24);
+    long = fib(4);
     RESULT_E = long.low;
     RESULT_F = long.high;
 
@@ -28,13 +28,6 @@ fn fib(n: u8) -> u16 {
     if (n <= 1) {
         return n as u16;
     }
-    let a: u16 = 0;
-    let b: u16 = 1;
-    let c: u16 = 0;
-    for i: u8 in 2..=n {
-        c = a + b;
-        a = b;
-        b = c;
-    }
-    return b;
+    
+    return fib(n - 1) + fib(n - 2);
 }

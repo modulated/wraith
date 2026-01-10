@@ -26,6 +26,14 @@ pub enum ParseErrorKind {
     InvalidType(String),
     /// Custom error message
     Custom(String),
+    /// Custom error with prefix (note) and suffix (help text)
+    CustomDetailed {
+        prefix: Option<String>,
+        message: String,
+        suffix: Option<String>,
+    },
+    /// Multiple parse errors
+    Multiple(Vec<ParseError>),
 }
 
 impl ParseError {
@@ -55,6 +63,30 @@ impl ParseError {
         }
     }
 
+    pub fn custom_detailed(
+        span: Span,
+        message: impl Into<String>,
+        prefix: Option<String>,
+        suffix: Option<String>,
+    ) -> Self {
+        Self {
+            span,
+            kind: ParseErrorKind::CustomDetailed {
+                prefix,
+                message: message.into(),
+                suffix,
+            },
+        }
+    }
+
+    pub fn multiple(errors: Vec<ParseError>) -> Self {
+        let span = errors.first().map(|e| e.span).unwrap_or_default();
+        Self {
+            span,
+            kind: ParseErrorKind::Multiple(errors),
+        }
+    }
+
     /// Format error with source code context showing the actual line and error marker
     pub fn format_with_source(&self, source: &str) -> String {
         self.format_with_source_and_file(source, None)
@@ -62,33 +94,68 @@ impl ParseError {
 
     /// Format error with source code context and filename
     pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
-        let (error_type, message) = match &self.kind {
-            ParseErrorKind::UnexpectedToken { expected, found } => {
-                let found_str = match found {
-                    Some(tok) => format_token(tok),
-                    None => "end of file".to_string(),
-                };
-                ("error", format!("expected {}, found {}", expected, found_str))
-            }
-            ParseErrorKind::UnexpectedEof { expected } => {
-                ("error", format!("unexpected end of file, expected {}", expected))
-            }
-            ParseErrorKind::InvalidInteger(s) => {
-                ("error", format!("invalid integer: {}", s))
-            }
-            ParseErrorKind::InvalidType(s) => {
-                ("error", format!("invalid type: {}", s))
-            }
-            ParseErrorKind::Custom(msg) => {
-                ("error", msg.clone())
-            }
-        };
+        match &self.kind {
+            ParseErrorKind::CustomDetailed { prefix, message, suffix } => {
+                // Format: {prefix}\n{context}\n{suffix}
+                let mut result = String::new();
 
-        format!("{}: {}\n{}",
-            error_type,
-            message,
-            self.span.format_error_context(source, filename, &message)
-        )
+                if let Some(pre) = prefix {
+                    result.push_str(pre);
+                    result.push('\n');
+                }
+
+                result.push_str(&self.span.format_error_context(source, filename, message));
+
+                if let Some(suf) = suffix {
+                    result.push('\n');
+                    result.push_str(suf);
+                }
+
+                result
+            }
+            ParseErrorKind::Multiple(errors) => {
+                // Format all errors
+                let mut result = String::new();
+                for (i, err) in errors.iter().enumerate() {
+                    if i > 0 {
+                        result.push_str("\n\n");
+                    }
+                    result.push_str(&err.format_with_source_and_file(source, filename));
+                }
+                result
+            }
+            _ => {
+                // Standard error formatting for other variants
+                let (error_type, message) = match &self.kind {
+                    ParseErrorKind::UnexpectedToken { expected, found } => {
+                        let found_str = match found {
+                            Some(tok) => format_token(tok),
+                            None => "end of file".to_string(),
+                        };
+                        ("error", format!("expected {}, found {}", expected, found_str))
+                    }
+                    ParseErrorKind::UnexpectedEof { expected } => {
+                        ("error", format!("unexpected end of file, expected {}", expected))
+                    }
+                    ParseErrorKind::InvalidInteger(s) => {
+                        ("error", format!("invalid integer: {}", s))
+                    }
+                    ParseErrorKind::InvalidType(s) => {
+                        ("error", format!("invalid type: {}", s))
+                    }
+                    ParseErrorKind::Custom(msg) => {
+                        ("error", msg.clone())
+                    }
+                    _ => unreachable!(),
+                };
+
+                format!("{}: {}\n{}",
+                    error_type,
+                    message,
+                    self.span.format_error_context(source, filename, &message)
+                )
+            }
+        }
     }
 }
 
@@ -157,6 +224,7 @@ fn format_token(token: &Token) -> String {
         Token::Break => "keyword 'break'".to_string(),
         Token::Continue => "keyword 'continue'".to_string(),
         Token::Const => "keyword 'const'".to_string(),
+        Token::Let => "keyword 'let'".to_string(),
         Token::True => "keyword 'true'".to_string(),
         Token::False => "keyword 'false'".to_string(),
         Token::Carry => "keyword 'carry'".to_string(),
@@ -210,6 +278,16 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorKind::Custom(msg) => {
                 write!(f, "{} at {}..{}", msg, self.span.start, self.span.end)
+            }
+            ParseErrorKind::CustomDetailed { message, .. } => {
+                write!(f, "{} at {}..{}", message, self.span.start, self.span.end)
+            }
+            ParseErrorKind::Multiple(errors) => {
+                write!(f, "{} parse errors:", errors.len())?;
+                for err in errors {
+                    write!(f, "\n  {}", err)?;
+                }
+                Ok(())
             }
         }
     }

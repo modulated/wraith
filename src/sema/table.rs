@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::ast::AccessMode;
 use super::types::Type;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +30,8 @@ pub struct SymbolInfo {
     pub ty: Type,
     pub location: SymbolLocation,
     pub mutable: bool,
+    /// Access mode for address declarations (read-only, write-only, or read-write)
+    pub access_mode: Option<AccessMode>,
 }
 
 #[derive(Debug, Clone)]

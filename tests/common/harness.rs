@@ -134,10 +134,6 @@ pub fn analyze_only(source: &str) -> Result<ProgramInfo, String> {
     Ok(program)
 }
 
-// Legacy alias for backward compatibility with old test files
-#[allow(unused_imports)]
-pub use compile_success as assert_compiles;
-
 /// Assert that source fails to compile with specific error phase
 pub fn assert_fails_at(source: &str, expected_phase: &str) {
     match compile(source) {

@@ -11,9 +11,9 @@ use crate::common::*;
 #[test]
 fn eliminate_redundant_load() {
     let asm = compile_success(r#"
-        addr OUT = 0x6000;
+        const OUT: addr = 0x6000;
         fn main() {
-            x: u8 = 42;
+            let x: u8 = 42;
             OUT = x;
             OUT = x;  // Should reuse loaded value
         }
@@ -33,7 +33,7 @@ fn eliminate_redundant_load() {
 fn eliminate_redundant_store() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = 20;  // First store should be eliminated
         }
     "#);
@@ -50,9 +50,9 @@ fn eliminate_redundant_store() {
 #[test]
 fn eliminate_load_after_store() {
     let asm = compile_success(r#"
-        addr OUT = 0x6000;
+        const OUT: addr = 0x6000;
         fn main() {
-            x: u8 = 42;
+            let x: u8 = 42;
             // Store then load same location
             OUT = x;
         }
@@ -70,7 +70,7 @@ fn eliminate_load_after_store() {
 fn eliminate_dead_store() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = 20;
             x = 30;
         }
@@ -89,7 +89,7 @@ fn eliminate_dead_store() {
 fn eliminate_nop_operations() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 0;
+            let x: u8 = 0;
             x = x + 0;  // Adding zero is a NOP
         }
     "#);
@@ -103,8 +103,8 @@ fn eliminate_nop_operations() {
 fn eliminate_multiply_by_one() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
-            y: u8 = x * 1;  // Multiply by 1 is a NOP
+            let x: u8 = 10;
+            let y: u8 = x * 1;  // Multiply by 1 is a NOP
         }
     "#);
 
@@ -120,9 +120,9 @@ fn eliminate_multiply_by_one() {
 fn eliminate_redundant_tax_txa() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
-            y: u8 = x;
-            z: u8 = y;
+            let x: u8 = 10;
+            let y: u8 = x;
+            let z: u8 = y;
         }
     "#);
 
@@ -137,7 +137,7 @@ fn eliminate_redundant_tax_txa() {
 #[test]
 fn constant_folding_arithmetic() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = (10 + 20) * 2;
         }
@@ -152,7 +152,7 @@ fn constant_folding_arithmetic() {
 #[test]
 fn constant_folding_bitwise() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = (0xFF & 0x0F) | 0x80;
         }
@@ -167,7 +167,7 @@ fn constant_folding_bitwise() {
 #[test]
 fn constant_folding_shifts() {
     let asm = compile_success(r#"
-        addr RESULT = 0x0400;
+        const RESULT: addr = 0x0400;
         fn main() {
             RESULT = (1 << 4) >> 1;
         }
@@ -186,10 +186,10 @@ fn constant_folding_shifts() {
 #[test]
 fn multiple_optimizations() {
     let asm = compile_success(r#"
-        addr OUT1 = 0x6000;
-        addr OUT2 = 0x6001;
+        const OUT1: addr = 0x6000;
+        const OUT2: addr = 0x6001;
         fn main() {
-            x: u8 = 10 + 5;  // Constant fold
+            let x: u8 = 10 + 5;  // Constant fold
             OUT1 = x;
             OUT2 = x;  // Eliminate redundant load
             x = x + 0;  // Eliminate NOP
@@ -205,11 +205,11 @@ fn multiple_optimizations() {
 #[test]
 fn optimization_preserves_correctness() {
     let asm = compile_success(r#"
-        addr OUT = 0x6000;
+        const OUT: addr = 0x6000;
         fn main() {
-            a: u8 = 10;
-            b: u8 = 20;
-            c: u8 = a + b;
+            let a: u8 = 10;
+            let b: u8 = 20;
+            let c: u8 = a + b;
             OUT = c;
         }
     "#);
@@ -227,7 +227,7 @@ fn optimization_preserves_correctness() {
 fn inc_optimization() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = x + 1;
         }
     "#);
@@ -241,7 +241,7 @@ fn inc_optimization() {
 fn dec_optimization() {
     let asm = compile_success(r#"
         fn main() {
-            x: u8 = 10;
+            let x: u8 = 10;
             x = x - 1;
         }
     "#);
@@ -258,7 +258,7 @@ fn dec_optimization() {
 #[test]
 fn loop_counter_optimization() {
     let asm = compile_success(r#"
-        addr OUT = 0x6000;
+        const OUT: addr = 0x6000;
         fn main() {
             for i: u8 in 0..10 {
                 OUT = i;
@@ -278,9 +278,9 @@ fn loop_counter_optimization() {
 #[test]
 fn optimization_reduces_size() {
     let optimized = compile_success(r#"
-        addr OUT = 0x6000;
+        const OUT: addr = 0x6000;
         fn main() {
-            x: u8 = 10 + 20;
+            let x: u8 = 10 + 20;
             OUT = x;
         }
     "#);

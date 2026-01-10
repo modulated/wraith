@@ -1,0 +1,55 @@
+// Tail-Recursive Factorial Example
+// Demonstrates tail call optimization converting recursion to loops
+
+const RESULT_0_LO: addr = 0x6000;  // factorial(0) = 1
+const RESULT_0_HI: addr = 0x6001;
+const RESULT_1_LO: addr = 0x6002;  // factorial(1) = 1
+const RESULT_1_HI: addr = 0x6003;
+const RESULT_5_LO: addr = 0x6004;  // factorial(5) = 120
+const RESULT_5_HI: addr = 0x6005;
+const RESULT_7_LO: addr = 0x6006;  // factorial(7) = 5040
+const RESULT_7_HI: addr = 0x6007;
+
+#[reset]
+fn main() {
+    // Test factorial(0) = 1
+    let result: u16 = factorial(0, 1);
+    RESULT_0_LO = result.low;
+    RESULT_0_HI = result.high;
+
+    // Test factorial(1) = 1
+    result = factorial(1, 1);
+    RESULT_1_LO = result.low;
+    RESULT_1_HI = result.high;
+
+    // Test factorial(5) = 120
+    result = factorial(5, 1);
+    RESULT_5_LO = result.low;
+    RESULT_5_HI = result.high;
+
+    // Test factorial(7) = 5040 (0x13B0)
+    result = factorial(7, 1);
+    RESULT_7_LO = result.low;
+    RESULT_7_HI = result.high;
+
+    asm {
+        "halt: JMP halt"
+    }
+}
+
+// Tail-recursive factorial with accumulator
+// This function should be optimized to use JMP instead of JSR
+//
+// Expected results:
+//   factorial(0, 1) = 1
+//   factorial(1, 1) = 1
+//   factorial(5, 1) = 120
+//   factorial(7, 1) = 5040
+fn factorial(n: u8, acc: u16) -> u16 {
+    if n == 0 {
+        return acc;
+    }
+
+    // Tail recursive call - should generate JMP, not JSR
+    return factorial(n - 1, acc * (n as u16));
+}

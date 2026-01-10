@@ -15,7 +15,7 @@ mod tests {
 
     #[test]
     fn test_harness_compile_success() {
-        let asm = assert_compiles("fn main() {}");
+        let asm = compile_success("fn main() {}");
         assert!(asm.contains("main:"));
         assert!(asm.contains("RTS"));
     }
@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn test_harness_asm_contains() {
-        let asm = assert_compiles("addr X = 0x400; fn main() { X = 42; }");
+        let asm = compile_success("const X: addr = 0x400; fn main() { X = 42; }");
         assert_asm_contains(&asm, "X = $0400");
         assert_asm_contains(&asm, "LDA #$2A");
         assert_asm_contains(&asm, "STA X");
@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn test_harness_asm_order() {
-        let asm = assert_compiles("addr X = 0x400; fn main() { X = 42; }");
+        let asm = compile_success("const X: addr = 0x400; fn main() { X = 42; }");
         assert_asm_order(&asm, "LDA #$2A", "STA X");
     }
 }

@@ -1,5 +1,5 @@
-addr LED = 0xD020;
-addr BORDER = 0xD021;
+const LED: addr = 0xD020;
+const BORDER: addr = 0xD021;
 
 #[org(0x8000)]
 fn main() {

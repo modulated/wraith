@@ -6,7 +6,7 @@
 //! - BCD mode handling (SED/CLD)
 //! - Helper functions for multiply, divide, modulo
 
-use crate::ast::{BinaryOp, Expr, Spanned};
+use crate::ast::{Expr, Spanned};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::types::Type;
 use crate::sema::ProgramInfo;
@@ -133,17 +133,49 @@ pub(super) fn generate_binary(
     // Optimization: Avoid stack if left operand is simple (variable or literal)
     let use_stack = !is_simple_expr(&left.node);
 
+    // Allocate temp storage for u16 left operand save (if needed)
+    let left_save_addr = if use_stack && is_u16 {
+        emitter.temp_alloc.alloc_high(2)
+    } else {
+        None
+    };
+
     if use_stack {
-        // Complex left expression: use Y register for temporary storage
-        // This is faster than PHA/PLA (2+3=5 cycles vs 3+4=7 cycles)
-        // 1. Generate left operand -> A (and X if u16)
+        // Complex left expression: must save to memory for u16, or can use Y for u8
+        // For u16: BOTH bytes must be saved since right expr may overwrite A and Y
+
+        // CRITICAL: If left is a function call, it may corrupt the parameter area.
+        // We need to save parameters so the right operand can still evaluate correctly.
+        // Use software stack to handle nested recursive calls properly.
+        let needs_param_save = matches!(left.node, Expr::Call { .. });
+
+        if needs_param_save {
+            // Push parameters to software stack (handles recursion correctly)
+            emitter.push_params();
+        }
+
+        // 1. Generate left operand -> A (and Y if u16)
         generate_expr(left, emitter, info, string_collector)?;
 
-        // 2. Save A to Y register
-        emitter.emit_inst("TAY", "");
-        emitter.reg_state.transfer_a_to_y();
+        if is_u16 {
+            // 2a. For u16: Save BOTH bytes to allocated temp storage
+            let save_addr = left_save_addr.unwrap_or(0xF2); // Fallback to hardcoded if alloc failed
+            emitter.emit_inst("STA", &format!("${:02X}", save_addr));
+            emitter.emit_inst("STY", &format!("${:02X}", save_addr + 1));
+        } else {
+            // 2b. For u8: Save A to Y register (faster)
+            emitter.emit_inst("TAY", "");
+            emitter.reg_state.transfer_a_to_y();
+        }
 
-        // 3. Generate right operand -> A (and X if u16)
+        // Restore parameters before evaluating right operand
+        if needs_param_save {
+            // Pop parameters from software stack
+            emitter.pop_params();
+        }
+
+        // 3. Generate right operand -> A (and Y if u16)
+        // WARNING: This may overwrite ALL registers (e.g., function calls)
         generate_expr(right, emitter, info, string_collector)?;
 
         // 4. Store right operand in TEMP (both bytes if u16)
@@ -153,9 +185,22 @@ pub(super) fn generate_binary(
             emitter.emit_inst("STY", &format!("${:02X}", temp_reg + 1));
         }
 
-        // 5. Restore left operand from Y -> A
-        emitter.emit_inst("TYA", "");
-        emitter.reg_state.transfer_y_to_a();
+        // 5. Restore left operand
+        if is_u16 {
+            // 5a. For u16: Load BOTH bytes from allocated temp storage
+            let save_addr = left_save_addr.unwrap_or(0xF2);
+            emitter.emit_inst("LDA", &format!("${:02X}", save_addr));
+            emitter.emit_inst("LDY", &format!("${:02X}", save_addr + 1));
+            emitter.reg_state.invalidate_all();
+            // Free the temp storage
+            if left_save_addr.is_some() {
+                emitter.temp_alloc.free_high(save_addr, 2);
+            }
+        } else {
+            // 5b. For u8: Transfer from Y -> A
+            emitter.emit_inst("TYA", "");
+            emitter.reg_state.transfer_y_to_a();
+        }
     } else {
         // Simple left expression: evaluate right first, store in temp, then eval left
         // This saves PHA/PLA instructions (4 cycles)
@@ -186,6 +231,10 @@ pub(super) fn generate_binary(
         emitter.emit_inst("SED", "");
     }
 
+    // Reserve temp_reg area ($20-$21) in allocator so helpers don't conflict
+    // The right operand is stored there and must not be overwritten
+    let temp_reserve = emitter.temp_alloc.alloc_primary(2);
+
     // 6. Perform operation
     match op {
         crate::ast::BinaryOp::Add => {
@@ -206,6 +255,8 @@ pub(super) fn generate_binary(
                 emitter.emit_inst("CLC", "");
                 emitter.emit_inst("ADC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
             }
+            // Arithmetic modifies A, invalidate register tracking
+            emitter.mark_a_unknown();
         }
         crate::ast::BinaryOp::Sub => {
             if is_u16 {
@@ -225,6 +276,8 @@ pub(super) fn generate_binary(
                 emitter.emit_inst("SEC", "");
                 emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
             }
+            // Arithmetic modifies A, invalidate register tracking
+            emitter.mark_a_unknown();
         }
         crate::ast::BinaryOp::BitAnd => {
             emitter.emit_inst("AND", &format!("${:02X}", emitter.memory_layout.temp_reg()));
@@ -242,7 +295,7 @@ pub(super) fn generate_binary(
             generate_shift_right(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Mul => {
-            generate_multiply(emitter)?;
+            generate_multiply(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Div => {
             generate_divide(emitter)?;
@@ -303,6 +356,11 @@ pub(super) fn generate_binary(
             }
             _ => {}
         }
+    }
+
+    // Free the temp_reg reservation
+    if let Some(addr) = temp_reserve {
+        emitter.temp_alloc.free_primary(addr, 2);
     }
 
     Ok(())
@@ -407,41 +465,152 @@ fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), Codeg
 // Arithmetic helper functions for multiply, divide, modulo
 // These require software implementation on 6502
 
-fn generate_multiply(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Multiply A * TEMP using repeated addition
-    // Result in A (will overflow for results > 255)
-    const RESULT_REG: u8 = 0x22;
+fn generate_multiply(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    if is_u16 {
+        generate_multiply_u16(emitter)
+    } else {
+        generate_multiply_u8(emitter)
+    }
+}
+
+fn generate_multiply_u8(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Multiply u8 * u8 -> u8 using shift-and-add algorithm
+    // Input: Left operand in A, Right operand in TEMP ($20)
+    // Output: Result in A
+    //
+    // Algorithm:
+    //   result = 0
+    //   multiplicand = A (saved to high pool)
+    //   multiplier = TEMP ($20)
+    //   for 8 iterations:
+    //     if (multiplier & 1): result += multiplicand
+    //     multiplicand <<= 1
+    //     multiplier >>= 1
+
+    // Allocate temp storage
+    let multiplicand = emitter.temp_alloc.alloc_high(1).unwrap_or(0xF0);
+    let result_addr = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x22);
+    let temp = emitter.memory_layout.temp_reg();
 
     let loop_label = emitter.next_label("ml");
-    let end_label = emitter.next_label("mx");
+    let skip_add = emitter.next_label("ms");
 
-    // Save multiplicand (A) to X
-    emitter.emit_inst("TAX", "");
+    // Save multiplicand to memory
+    emitter.emit_inst("STA", &format!("${:02X}", multiplicand));
 
-    // Initialize result to 0
+    // Initialize result = 0
     emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("STA", &format!("${:02X}", RESULT_REG));
+    emitter.emit_inst("STA", &format!("${:02X}", result_addr));
 
-    // Check if multiplier is zero
-    emitter.emit_inst("LDA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("CMP", "#$00");
-    emitter.emit_inst("BEQ", &end_label);
+    // Initialize loop counter (8 bits)
+    emitter.emit_inst("LDX", "#$08");
 
-    // Store multiplier count in Y
-    emitter.emit_inst("TAY", "");
-
-    // Loop: add X to result Y times
+    // Loop for each bit
     emitter.emit_label(&loop_label);
-    emitter.emit_inst("TXA", ""); // Load multiplicand
+
+    // Check if multiplier bit 0 is set
+    emitter.emit_inst("LDA", &format!("${:02X}", temp));
+    emitter.emit_inst("LSR", "");  // Shift right, bit 0 -> carry
+    emitter.emit_inst("STA", &format!("${:02X}", temp));  // Save shifted multiplier
+    emitter.emit_inst("BCC", &skip_add);  // If bit was 0, skip addition
+
+    // Add multiplicand to result
+    emitter.emit_inst("LDA", &format!("${:02X}", result_addr));
     emitter.emit_inst("CLC", "");
-    emitter.emit_inst("ADC", &format!("${:02X}", RESULT_REG));
-    emitter.emit_inst("STA", &format!("${:02X}", RESULT_REG));
-    emitter.emit_inst("DEY", "");
+    emitter.emit_inst("ADC", &format!("${:02X}", multiplicand));
+    emitter.emit_inst("STA", &format!("${:02X}", result_addr));
+
+    emitter.emit_label(&skip_add);
+
+    // Shift multiplicand left
+    emitter.emit_inst("ASL", &format!("${:02X}", multiplicand));
+
+    // Decrement counter and loop
+    emitter.emit_inst("DEX", "");
     emitter.emit_inst("BNE", &loop_label);
 
     // Load result into A
-    emitter.emit_label(&end_label);
-    emitter.emit_inst("LDA", &format!("${:02X}", RESULT_REG));
+    emitter.emit_inst("LDA", &format!("${:02X}", result_addr));
+
+    // Free temp storage
+    emitter.temp_alloc.free_high(multiplicand, 1);
+    emitter.temp_alloc.free_primary(result_addr, 1);
+
+    Ok(())
+}
+
+fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Multiply u16 * u16 -> u16 using shift-and-add algorithm
+    // Input: Left operand in A:Y, Right operand in TEMP:TEMP+1 ($20:$21)
+    // Output: Result in A:Y
+    //
+    // Algorithm:
+    //   result = 0 (16-bit)
+    //   multiplicand = A:Y (saved to high pool)
+    //   multiplier = TEMP:TEMP+1 ($20:$21)
+    //   for 16 iterations:
+    //     if (multiplier & 1): result += multiplicand (16-bit)
+    //     multiplicand <<= 1 (16-bit)
+    //     multiplier >>= 1 (16-bit)
+
+    // Allocate temp storage
+    let multiplicand_lo = emitter.temp_alloc.alloc_high(2).unwrap_or(0xF0);
+    let multiplicand_hi = multiplicand_lo + 1;
+    let result_lo = emitter.temp_alloc.alloc_primary(2).unwrap_or(0x22);
+    let result_hi = result_lo + 1;
+    let temp = emitter.memory_layout.temp_reg();
+    let temp_lo = temp;
+    let temp_hi = temp + 1;
+
+    let loop_label = emitter.next_label("ml");
+    let skip_add = emitter.next_label("ms");
+
+    // Save multiplicand to memory
+    emitter.emit_inst("STA", &format!("${:02X}", multiplicand_lo));
+    emitter.emit_inst("STY", &format!("${:02X}", multiplicand_hi));
+
+    // Initialize result = 0
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("STA", &format!("${:02X}", result_lo));
+    emitter.emit_inst("STA", &format!("${:02X}", result_hi));
+
+    // Initialize loop counter (16 bits)
+    emitter.emit_inst("LDX", "#$10");
+
+    // Loop for each bit
+    emitter.emit_label(&loop_label);
+
+    // Check if multiplier bit 0 is set
+    emitter.emit_inst("LSR", &format!("${:02X}", temp_hi));  // Shift high byte right
+    emitter.emit_inst("ROR", &format!("${:02X}", temp_lo));  // Rotate low byte right (with carry)
+    emitter.emit_inst("BCC", &skip_add);  // If bit was 0, skip addition
+
+    // Add multiplicand to result (16-bit addition)
+    emitter.emit_inst("LDA", &format!("${:02X}", result_lo));
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", &format!("${:02X}", multiplicand_lo));
+    emitter.emit_inst("STA", &format!("${:02X}", result_lo));
+    emitter.emit_inst("LDA", &format!("${:02X}", result_hi));
+    emitter.emit_inst("ADC", &format!("${:02X}", multiplicand_hi));
+    emitter.emit_inst("STA", &format!("${:02X}", result_hi));
+
+    emitter.emit_label(&skip_add);
+
+    // Shift multiplicand left (16-bit)
+    emitter.emit_inst("ASL", &format!("${:02X}", multiplicand_lo));  // Shift low byte left
+    emitter.emit_inst("ROL", &format!("${:02X}", multiplicand_hi));  // Rotate high byte left (with carry)
+
+    // Decrement counter and loop
+    emitter.emit_inst("DEX", "");
+    emitter.emit_inst("BNE", &loop_label);
+
+    // Load result into A:Y
+    emitter.emit_inst("LDA", &format!("${:02X}", result_lo));
+    emitter.emit_inst("LDY", &format!("${:02X}", result_hi));
+
+    // Free temp storage
+    emitter.temp_alloc.free_high(multiplicand_lo, 2);
+    emitter.temp_alloc.free_primary(result_lo, 2);
 
     Ok(())
 }
@@ -449,8 +618,10 @@ fn generate_multiply(emitter: &mut Emitter) -> Result<(), CodegenError> {
 fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Divide A / TEMP using repeated subtraction
     // Result (quotient) in A
-    const QUOTIENT_REG: u8 = 0x22;
-    const DIVIDEND_REG: u8 = 0x23;
+
+    // Allocate temp storage
+    let quotient_addr = emitter.temp_alloc.alloc_primary(2).unwrap_or(0x22);
+    let dividend_addr = quotient_addr + 1;
 
     let loop_label = emitter.next_label("dl");
     let end_label = emitter.next_label("dx");
@@ -462,28 +633,31 @@ fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // Initialize quotient to 0
     emitter.emit_inst("LDX", "#$00");
-    emitter.emit_inst("STX", &format!("${:02X}", QUOTIENT_REG));
+    emitter.emit_inst("STX", &format!("${:02X}", quotient_addr));
 
     // Store dividend
-    emitter.emit_inst("STA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("STA", &format!("${:02X}", dividend_addr));
 
     // Loop: subtract divisor from dividend until dividend < divisor
     emitter.emit_label(&loop_label);
-    emitter.emit_inst("LDA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("LDA", &format!("${:02X}", dividend_addr));
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCC", &end_label); // If dividend < divisor, done
 
     // Subtract divisor
     emitter.emit_inst("SEC", "");
     emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("STA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("STA", &format!("${:02X}", dividend_addr));
 
     // Increment quotient
-    emitter.emit_inst("INC", &format!("${:02X}", QUOTIENT_REG));
+    emitter.emit_inst("INC", &format!("${:02X}", quotient_addr));
     emitter.emit_inst("JMP", &loop_label);
 
     emitter.emit_label(&end_label);
-    emitter.emit_inst("LDA", &format!("${:02X}", QUOTIENT_REG));
+    emitter.emit_inst("LDA", &format!("${:02X}", quotient_addr));
+
+    // Free temp storage
+    emitter.temp_alloc.free_primary(quotient_addr, 2);
 
     Ok(())
 }
@@ -491,7 +665,9 @@ fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
 fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Modulo A % TEMP using repeated subtraction
     // Result (remainder) in A
-    const DIVIDEND_REG: u8 = 0x23;
+
+    // Allocate temp storage
+    let dividend_addr = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x23);
 
     let loop_label = emitter.next_label("md");
     let end_label = emitter.next_label("mx");
@@ -502,22 +678,25 @@ fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("BEQ", &end_label); // Result undefined, leave A as-is
 
     // Store dividend
-    emitter.emit_inst("STA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("STA", &format!("${:02X}", dividend_addr));
 
     // Loop: subtract divisor from dividend until dividend < divisor
     emitter.emit_label(&loop_label);
-    emitter.emit_inst("LDA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("LDA", &format!("${:02X}", dividend_addr));
     emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("BCC", &end_label); // If dividend < divisor, done (A has remainder)
 
     // Subtract divisor
     emitter.emit_inst("SEC", "");
     emitter.emit_inst("SBC", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("STA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("STA", &format!("${:02X}", dividend_addr));
     emitter.emit_inst("JMP", &loop_label);
 
     emitter.emit_label(&end_label);
-    emitter.emit_inst("LDA", &format!("${:02X}", DIVIDEND_REG));
+    emitter.emit_inst("LDA", &format!("${:02X}", dividend_addr));
+
+    // Free temp storage
+    emitter.temp_alloc.free_primary(dividend_addr, 1);
 
     Ok(())
 }

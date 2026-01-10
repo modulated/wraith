@@ -7,29 +7,29 @@
 // HARDWARE ADDRESSES - Memory-mapped I/O registers
 // ============================================================================
 
-addr VIA_BASE = 0x6500;
+const VIA_BASE: addr = 0x6500;
 
 // Port registers (read/write)
-addr IRB  = VIA_BASE + 0x0;  // Output Register B / Input Register B
-addr IRA  = VIA_BASE + 0x1;  // Output Register A / Input Register A
-addr DDRB = VIA_BASE + 0x2;  // Data Direction Register B
-addr DDRA = VIA_BASE + 0x3;  // Data Direction Register A
+const IRB: addr = VIA_BASE + 0x0;  // Output Register B / Input Register B
+const IRA: addr = VIA_BASE + 0x1;  // Output Register A / Input Register A
+const DDRB: addr = VIA_BASE + 0x2;  // Data Direction Register B
+const DDRA: addr = VIA_BASE + 0x3;  // Data Direction Register A
 
 // Timer registers
-addr T1CL = VIA_BASE + 0x4;  // Timer 1 Low-Order Latches/Counter
-addr T1CH = VIA_BASE + 0x5;  // Timer 1 High-Order Counter
-addr T1LL = VIA_BASE + 0x6;  // Timer 1 Low-Order Latches
-addr T1LH = VIA_BASE + 0x7;  // Timer 1 High-Order Latches
-addr T2CL = VIA_BASE + 0x8;  // Timer 2 Low-Order Latches/Counter
-addr T2CH = VIA_BASE + 0x9;  // Timer 2 High-Order Counter
+const T1CL: addr = VIA_BASE + 0x4;  // Timer 1 Low-Order Latches/Counter
+const T1CH: addr = VIA_BASE + 0x5;  // Timer 1 High-Order Counter
+const T1LL: addr = VIA_BASE + 0x6;  // Timer 1 Low-Order Latches
+const T1LH: addr = VIA_BASE + 0x7;  // Timer 1 High-Order Latches
+const T2CL: addr = VIA_BASE + 0x8;  // Timer 2 Low-Order Latches/Counter
+const T2CH: addr = VIA_BASE + 0x9;  // Timer 2 High-Order Counter
 
 // Control and status registers
-addr SR  = VIA_BASE + 0xA;   // Shift Register
-addr ACR = VIA_BASE + 0xB;   // Auxiliary Control Register
-addr PCR = VIA_BASE + 0xC;   // Peripheral Control Register
-addr IFR = VIA_BASE + 0xD;   // Interrupt Flag Register
-addr IER = VIA_BASE + 0xE;   // Interrupt Enable Register
-addr ORA_NH = VIA_BASE + 0xF; // ORA No Handshake
+const SR: addr = VIA_BASE + 0xA;   // Shift Register
+const ACR: addr = VIA_BASE + 0xB;   // Auxiliary Control Register
+const PCR: addr = VIA_BASE + 0xC;   // Peripheral Control Register
+const IFR: addr = VIA_BASE + 0xD;   // Interrupt Flag Register
+const IER: addr = VIA_BASE + 0xE;   // Interrupt Enable Register
+const ORA_NH: addr = VIA_BASE + 0xF; // ORA No Handshake
 
 // ============================================================================
 // BIT MASKS - Common bit patterns for configuration
@@ -131,8 +131,8 @@ fn disable_timer1_interrupt() {
 // EXAMPLE USAGE
 // ============================================================================
 
-addr OUT = 0x6000;
-addr OUT2 = 0x6001;
+const OUT: addr = 0x6000;
+const OUT2: addr = 0x6001;
 
 #[org(0x8000)]
 fn main() {

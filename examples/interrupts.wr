@@ -11,9 +11,9 @@
 import { enable_interrupts } from "intrinsics.wr";
 
 // Memory-mapped I/O addresses
-addr STATUS_LED = 0x6000;
-addr IRQ_COUNTER = 0x6001;
-addr NMI_FLAG = 0x6002;
+const STATUS_LED: addr = 0x6000;
+const IRQ_COUNTER: addr = 0x6001;
+const NMI_FLAG: addr = 0x6002;
 
 // Constants for LED states
 const LED_OFF: u8 = 0b00000000;

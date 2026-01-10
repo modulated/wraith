@@ -11,9 +11,9 @@ fn bcd_type_mismatch_error() {
     assert_error_contains(
         r#"
         fn test() {
-            x: b8 = 42;
-            y: u8 = 10;
-            z: b8 = x + y;  // ERROR: cannot mix b8 and u8
+            let x: b8 = 42;
+            let y: u8 = 10;
+            let z: b8 = x + y;  // ERROR: cannot mix b8 and u8
         }
         "#,
         "type",
@@ -24,9 +24,9 @@ fn bcd_type_mismatch_error() {
 fn bcd_explicit_cast_allowed() {
     let asm = compile_success(r#"
         fn test() {
-            x: b8 = 42 as b8;
-            y: u8 = 10;
-            z: b8 = x + (y as b8);  // OK
+            let x: b8 = 42 as b8;
+            let y: u8 = 10;
+            let z: b8 = x + (y as b8);  // OK
         }
     "#);
     assert_asm_contains(&asm, "SED");
@@ -38,8 +38,8 @@ fn bcd_mul_not_allowed() {
     assert_error_contains(
         r#"
         fn test() {
-            x: b8 = 10 as b8;
-            y: b8 = x * (2 as b8);  // ERROR
+            let x: b8 = 10 as b8;
+            let y: b8 = x * (2 as b8);  // ERROR
         }
         "#,
         "BCD",
@@ -51,8 +51,8 @@ fn bcd_bitwise_not_allowed() {
     assert_error_contains(
         r#"
         fn test() {
-            x: b8 = 10 as b8;
-            y: b8 = x & (0xFF as b8);  // ERROR
+            let x: b8 = 10 as b8;
+            let y: b8 = x & (0xFF as b8);  // ERROR
         }
         "#,
         "BCD",
@@ -126,8 +126,8 @@ fn bcd_comparison_no_sed() {
 fn bcd_variable_declaration() {
     let asm = compile_success(r#"
         fn test() {
-            score: b8 = 99 as b8;
-            high_score: b16 = 9999 as b16;
+            let score: b8 = 99 as b8;
+            let high_score: b16 = 9999 as b16;
         }
     "#);
 
@@ -144,8 +144,8 @@ fn bcd_variable_declaration() {
 fn bcd_cast_to_binary() {
     let asm = compile_success(r#"
         fn test() {
-            x: b8 = 42 as b8;
-            y: u8 = x as u8;
+            let x: b8 = 42 as b8;
+            let y: u8 = x as u8;
         }
     "#);
 
@@ -157,8 +157,8 @@ fn bcd_cast_to_binary() {
 fn binary_cast_to_bcd() {
     let asm = compile_success(r#"
         fn test() {
-            x: u8 = 99;
-            y: b8 = x as b8;
+            let x: u8 = 99;
+            let y: b8 = x as b8;
         }
     "#);
 
@@ -170,8 +170,8 @@ fn binary_cast_to_bcd() {
 fn b8_to_b16_cast() {
     let asm = compile_success(r#"
         fn test() {
-            x: b8 = 42 as b8;
-            y: b16 = x as b16;
+            let x: b8 = 42 as b8;
+            let y: b16 = x as b16;
         }
     "#);
 
@@ -187,8 +187,8 @@ fn b8_to_b16_cast() {
 fn bcd_multiple_operations() {
     let asm = compile_success(r#"
         fn calc(a: b8, b: b8, c: b8) -> b8 {
-            temp: b8 = a + b;
-            result: b8 = temp - c;
+            let temp: b8 = a + b;
+            let result: b8 = temp - c;
             return result;
         }
     "#);

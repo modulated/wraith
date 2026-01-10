@@ -1,6 +1,6 @@
 // Test improved assembly comments
 
-addr SCREEN = 0x0400;
+const SCREEN: addr = 0x0400;
 
 #[inline]
 fn add(a: u8, b: u8) -> u8 {

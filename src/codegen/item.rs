@@ -19,6 +19,7 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
             PrimitiveType::Bool => "bool".to_string(),
             PrimitiveType::B8 => "b8".to_string(),
             PrimitiveType::B16 => "b16".to_string(),
+            PrimitiveType::Addr => "addr".to_string(),
         },
         TypeExpr::Pointer { pointee, mutable } => {
             if *mutable {
@@ -50,7 +51,7 @@ pub fn generate_item(
 ) -> Result<(), CodegenError> {
     match &item.node {
         Item::Function(func) => generate_function(func, emitter, info, section_alloc, string_collector),
-        Item::Static(stat) => generate_static(stat, emitter, info),
+        Item::Static(stat) => generate_static(stat, emitter, info, string_collector),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
     }
@@ -202,6 +203,27 @@ fn generate_function(
 
     emitter.emit_label(name);
 
+    // Initialize software stack pointer for reset handler
+    let is_reset = func.attributes.iter().any(|attr| matches!(attr, FnAttribute::Reset));
+    if is_reset {
+        emitter.emit_comment("Initialize software stack pointer for parameter preservation");
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("STA", "$FF");  // Stack pointer at $FF, stack at $0200-$02FF
+    }
+
+    // Set current function context for tail call detection
+    emitter.set_current_function(name.clone());
+
+    // Check if function has tail recursion - if so, emit loop restart label
+    let has_tail_recursion = info.function_metadata.get(name)
+        .map(|m| m.has_tail_recursion)
+        .unwrap_or(false);
+
+    if has_tail_recursion {
+        emitter.emit_comment("Tail recursive function - loop optimization enabled");
+        emitter.emit_label(&format!("{}_loop_start", name));
+    }
+
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
     let is_interrupt = func.attributes.iter().any(|attr| matches!(
@@ -224,6 +246,9 @@ fn generate_function(
 
     // Body
     generate_stmt(&func.body, emitter, info, string_collector)?;
+
+    // Clear current function context
+    emitter.clear_current_function();
 
     // Emit epilogue
     if is_interrupt {
@@ -253,10 +278,16 @@ fn generate_static(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    // Skip code generation for const (non-mutable statics)
-    // They are compile-time constants that get folded into the code
+    // Handle const arrays specially - they need to emit data
     if !stat.mutable {
+        // Check if this is a const array - if so, emit it to data section
+        if matches!(stat.ty.node, TypeExpr::Array { .. }) {
+            return emit_const_array(stat, emitter, info, string_collector);
+        }
+        // Skip code generation for other const (non-mutable) statics
+        // They are compile-time constants that get folded into the code
         return Ok(());
     }
 
@@ -348,4 +379,124 @@ fn generate_address(
     }
 
     Ok(())
+}
+
+/// Emit a const array to the data section
+fn emit_const_array(
+    stat: &crate::ast::Static,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    _string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    let name = &stat.name.node;
+
+    emitter.emit_comment(&format!("Const array: {}", name));
+
+    // Emit data label
+    emitter.emit_data_label(name);
+
+    // Emit array data based on initialization expression
+    match &stat.init.node {
+        crate::ast::Expr::Literal(crate::ast::Literal::ArrayFill { value, count }) => {
+            emit_array_fill_data(value, *count, emitter, info)?;
+        }
+        crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) => {
+            emit_array_literal_data(elements, emitter, info)?;
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "Const arrays must have literal initializers".to_string()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Emit data for an array fill literal ([value; count])
+fn emit_array_fill_data(
+    value: &Spanned<crate::ast::Expr>,
+    count: usize,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    // Evaluate the fill value as a constant
+    let val = if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &value.node {
+        *n
+    } else if let Some(const_val) = info.folded_constants.get(&value.span) {
+        if let crate::sema::const_eval::ConstValue::Integer(n) = const_val {
+            *n
+        } else {
+            return Err(CodegenError::UnsupportedOperation(
+                "Array fill value must be an integer".to_string()
+            ));
+        }
+    } else {
+        return Err(CodegenError::UnsupportedOperation(
+            "Array fill value must be a constant".to_string()
+        ));
+    };
+
+    // Zero-fill optimization: use .RES directive for zeros
+    if val == 0 && count >= 16 {
+        emitter.emit_data_directive(&format!(".RES {}", count));
+    } else {
+        // Emit individual bytes
+        emit_repeated_bytes(val as u8, count, emitter);
+    }
+
+    Ok(())
+}
+
+/// Emit data for an array literal ([1, 2, 3, ...])
+fn emit_array_literal_data(
+    elements: &[Spanned<crate::ast::Expr>],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    let mut bytes = Vec::new();
+
+    // Collect all bytes
+    for elem in elements {
+        let val = if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &elem.node {
+            *n
+        } else if let Some(const_val) = info.folded_constants.get(&elem.span) {
+            if let crate::sema::const_eval::ConstValue::Integer(n) = const_val {
+                *n
+            } else {
+                return Err(CodegenError::UnsupportedOperation(
+                    "Array elements must be integers".to_string()
+                ));
+            }
+        } else {
+            return Err(CodegenError::UnsupportedOperation(
+                "Array elements must be constants".to_string()
+            ));
+        };
+        bytes.push(val as u8);
+    }
+
+    // Emit as .BYTE directives (max 16 per line for readability)
+    for chunk in bytes.chunks(16) {
+        let byte_str = chunk.iter()
+            .map(|b| format!("${:02X}", b))
+            .collect::<Vec<_>>()
+            .join(", ");
+        emitter.emit_data_directive(&format!(".BYTE {}", byte_str));
+    }
+
+    Ok(())
+}
+
+/// Emit repeated bytes for array fill with non-zero value
+fn emit_repeated_bytes(val: u8, count: usize, emitter: &mut Emitter) {
+    // Emit as .BYTE directives (max 16 per line)
+    let bytes = vec![val; count];
+    for chunk in bytes.chunks(16) {
+        let byte_str = chunk.iter()
+            .map(|b| format!("${:02X}", b))
+            .collect::<Vec<_>>()
+            .join(", ");
+        emitter.emit_data_directive(&format!(".BYTE {}", byte_str));
+    }
 }

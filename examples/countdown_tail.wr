@@ -1,0 +1,40 @@
+// Tail-Recursive Countdown Example
+// Demonstrates tail call optimization with side effects (writing to memory)
+
+const OUTPUT_BASE: addr = 0x6000;
+
+#[reset]
+fn main() {
+    // Count down from 10 to 0, writing each value to memory
+    // Should write: 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 at 0x6000-0x600A
+    countdown(10, 0);
+
+    asm {
+        "halt: JMP halt"
+    }
+}
+
+// Tail-recursive countdown that writes each value to memory
+//
+// This function demonstrates:
+//   1. Tail recursion with side effects
+//   2. Using pointer arithmetic for indexed writes
+//   3. Efficient conversion to loop (no stack growth)
+//
+// Parameters:
+//   n: value to count down from
+//   offset: current position in output buffer
+fn countdown(n: u8, offset: u8) {
+    // Store n at OUTPUT_BASE[offset] using inline assembly
+    // This demonstrates tail recursion with side effects
+    asm {
+        "LDA $80\nLDX $81\nSTA $6000,X"
+    }
+
+    // Base case: done when n reaches 0
+    if n != 0 {
+        // Tail recursive call - should generate JMP, not JSR
+        // Count down n, advance output position
+        return countdown(n - 1, offset + 1);
+    }
+}

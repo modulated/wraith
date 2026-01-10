@@ -70,7 +70,6 @@ impl Config {
     pub fn default_6502() -> Self {
         Self {
             sections: vec![
-                Section::new("STDLIB", 0xC000, 0xCFFF), // 4KB for standard library
                 Section::new("CODE", 0x8000, 0xBFFF),   // 16KB for user code
                 Section::new("DATA", 0xD000, 0xEFFF),   // 8KB for constants/data
             ],
@@ -137,7 +136,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.sections.len(), 3);
+        assert_eq!(config.sections.len(), 2);
         assert_eq!(config.default_section, "CODE");
     }
 

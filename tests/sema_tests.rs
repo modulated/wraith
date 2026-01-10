@@ -6,10 +6,10 @@ use wraith::sema::table::SymbolKind;
 #[test]
 fn test_analyze_simple_program() {
     let source = r#"
-        addr SCREEN = 0x0400;
+        const SCREEN: addr = 0x0400;
 
         fn main() {
-            x: u8 = 42;
+            let x: u8 = 42;
         }
     "#;
 

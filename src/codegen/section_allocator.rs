@@ -62,7 +62,9 @@ impl SectionAllocator {
         let addr = section.start + *offset;
 
         // Check if allocation would overflow section
-        if addr + size - 1 > section.end {
+        // Use u32 arithmetic to avoid overflow on large allocations
+        let end_addr = addr as u32 + size as u32 - 1;
+        if end_addr > section.end as u32 {
             return Err(format!(
                 "Section '{}' overflow: tried to allocate {} bytes at ${:04X}, but section ends at ${:04X}",
                 section_name, size, addr, section.end
@@ -186,13 +188,6 @@ mod tests {
     fn test_section_allocation() {
         let mut alloc = SectionAllocator::default();
 
-        // Allocate in STDLIB section (0xC000-0xCFFF)
-        let addr1 = alloc.allocate("STDLIB", 100).unwrap();
-        assert_eq!(addr1, 0xC000);
-
-        let addr2 = alloc.allocate("STDLIB", 50).unwrap();
-        assert_eq!(addr2, 0xC064); // 0xC000 + 100
-
         // Allocate in CODE section (0x8000-0xBFFF)
         let addr3 = alloc.allocate("CODE", 200).unwrap();
         assert_eq!(addr3, 0x8000);
@@ -202,8 +197,8 @@ mod tests {
     fn test_section_overflow() {
         let mut alloc = SectionAllocator::default();
 
-        // STDLIB is 0xC000-0xCFFF (4096 bytes)
-        let result = alloc.allocate("STDLIB", 5000);
+        // CODE is 0x8000-0xBFFF (16384 bytes)
+        let result = alloc.allocate("CODE", 50000);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("overflow"));
     }
@@ -212,11 +207,11 @@ mod tests {
     fn test_remaining_space() {
         let mut alloc = SectionAllocator::default();
 
-        let initial = alloc.remaining("STDLIB").unwrap();
-        assert_eq!(initial, 4096); // 0x1000
+        let initial = alloc.remaining("CODE").unwrap();
+        assert_eq!(initial, 16384); // 0x4000 (16KB)
 
-        alloc.allocate("STDLIB", 1000).unwrap();
-        let after = alloc.remaining("STDLIB").unwrap();
-        assert_eq!(after, 4096 - 1000);
+        alloc.allocate("CODE", 1000).unwrap();
+        let after = alloc.remaining("CODE").unwrap();
+        assert_eq!(after, 16384 - 1000);
     }
 }
