@@ -41,7 +41,7 @@ pub(super) fn generate_type_cast(
     match &target_type.node {
         TypeExpr::Primitive(target_prim) => {
             match target_prim {
-                PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::Addr => {
+                PrimitiveType::U16 | PrimitiveType::I16 => {
                     // Check if source is already 16-bit
                     let source_is_16bit = source_type.is_some_and(|ty| {
                         matches!(
@@ -104,6 +104,12 @@ pub(super) fn generate_type_cast(
                             emitter.emit_comment("Result: A=low_byte, Y=$00");
                         }
                     }
+                }
+                PrimitiveType::Addr => {
+                    // addr type cannot be used as a cast target - it's only for declarations
+                    return Err(CodegenError::UnsupportedOperation(
+                        "cannot cast to addr type (addr is only for memory-mapped I/O declarations)".to_string()
+                    ));
                 }
                 PrimitiveType::U8 | PrimitiveType::I8 => {
                     // Casting to 8-bit: Just truncate (A already has the value)

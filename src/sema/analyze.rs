@@ -710,6 +710,15 @@ impl SemanticAnalyzer {
             }
 
             let field_type = self.resolve_type(&field.ty.node)?;
+
+            // Check for invalid addr usage in struct fields
+            if matches!(field_type, Type::Primitive(crate::ast::PrimitiveType::Addr)) {
+                return Err(SemaError::InvalidAddrUsage {
+                    context: "struct fields".to_string(),
+                    span: field.ty.span,
+                });
+            }
+
             let size = self.type_size(&field_type);
 
             fields.push(FieldInfo {
@@ -787,13 +796,23 @@ impl SemanticAnalyzer {
                     (var_name.node.clone(), VariantData::Unit, tag)
                 }
                 EnumVariant::Tuple { name: var_name, fields: field_types } => {
-                    let types: Result<Vec<Type>, SemaError> = field_types
-                        .iter()
-                        .map(|ty| self.resolve_type(&ty.node))
-                        .collect();
+                    let mut types = Vec::new();
+                    for ty in field_types {
+                        let resolved_ty = self.resolve_type(&ty.node)?;
+
+                        // Check for invalid addr usage in enum tuple variant fields
+                        if matches!(resolved_ty, Type::Primitive(crate::ast::PrimitiveType::Addr)) {
+                            return Err(SemaError::InvalidAddrUsage {
+                                context: "enum variant fields".to_string(),
+                                span: ty.span,
+                            });
+                        }
+
+                        types.push(resolved_ty);
+                    }
                     let tag = next_tag;
                     next_tag += 1;
-                    (var_name.node.clone(), VariantData::Tuple(types?), tag)
+                    (var_name.node.clone(), VariantData::Tuple(types), tag)
                 }
                 EnumVariant::Struct { name: var_name, fields } => {
                     let mut variant_fields = Vec::new();
@@ -801,6 +820,15 @@ impl SemanticAnalyzer {
 
                     for field in fields {
                         let field_type = self.resolve_type(&field.ty.node)?;
+
+                        // Check for invalid addr usage in enum struct variant fields
+                        if matches!(field_type, Type::Primitive(crate::ast::PrimitiveType::Addr)) {
+                            return Err(SemaError::InvalidAddrUsage {
+                                context: "enum variant fields".to_string(),
+                                span: field.ty.span,
+                            });
+                        }
+
                         let size = self.type_size(&field_type);
 
                         variant_fields.push(FieldInfo {
@@ -893,7 +921,17 @@ impl SemanticAnalyzer {
 
             // Set current return type for checking return statements
             let return_type = if let Some(ret) = &func.return_type {
-                self.resolve_type(&ret.node)?
+                let ty = self.resolve_type(&ret.node)?;
+
+                // Check for invalid addr usage in function return types
+                if matches!(ty, Type::Primitive(crate::ast::PrimitiveType::Addr)) {
+                    return Err(SemaError::InvalidAddrUsage {
+                        context: "function return types".to_string(),
+                        span: ret.span,
+                    });
+                }
+
+                ty
             } else {
                 Type::Void
             };
@@ -933,6 +971,15 @@ impl SemanticAnalyzer {
 
                 let location = SymbolLocation::ZeroPage(addr);
                 let param_type = self.resolve_type(&param.ty.node)?;
+
+                // Check for invalid addr usage in function parameters
+                if matches!(param_type, Type::Primitive(crate::ast::PrimitiveType::Addr)) {
+                    return Err(SemaError::InvalidAddrUsage {
+                        context: "function parameters".to_string(),
+                        span: param.ty.span,
+                    });
+                }
+
                 let param_size = param_type.size();
 
                 let info = SymbolInfo {
@@ -1225,6 +1272,15 @@ impl SemanticAnalyzer {
                 zero_page: _,
             } => {
                 let declared_ty = self.resolve_type(&ty.node)?;
+
+                // Check for invalid addr usage in variable declarations
+                if matches!(declared_ty, Type::Primitive(crate::ast::PrimitiveType::Addr)) {
+                    return Err(SemaError::InvalidAddrUsage {
+                        context: "variable declarations".to_string(),
+                        span: ty.span,
+                    });
+                }
+
                 let init_ty = self.check_expr(init)?;
 
                 // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)

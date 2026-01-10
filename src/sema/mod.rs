@@ -138,6 +138,12 @@ pub enum SemaError {
         name: String,
         span: Span,
     },
+
+    /// addr type can only be used in const declarations
+    InvalidAddrUsage {
+        context: String,
+        span: Span,
+    },
 }
 
 impl SemaError {
@@ -234,6 +240,10 @@ impl SemaError {
             SemaError::ReadOnlyWrite { name, span } => {
                 let msg = format!("cannot write to read-only address '{}'", name);
                 format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+            }
+            SemaError::InvalidAddrUsage { context, span } => {
+                let msg = format!("addr type can only be used in const declarations, not {}", context);
+                format!("error: invalid addr usage\n{}", span.format_error_context(source, filename, &msg))
             }
         }
     }
@@ -366,6 +376,13 @@ impl std::fmt::Display for SemaError {
                     f,
                     "cannot write to read-only address '{}' at {}..{}",
                     name, span.start, span.end
+                )
+            }
+            SemaError::InvalidAddrUsage { context, span } => {
+                write!(
+                    f,
+                    "invalid addr usage at {}..{}: addr type can only be used in const declarations, not {}",
+                    span.start, span.end, context
                 )
             }
         }

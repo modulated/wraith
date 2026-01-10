@@ -97,3 +97,80 @@ fn access_modifier_only_for_addr() {
     "#);
 }
 
+#[test]
+fn addr_cannot_be_variable() {
+    // addr type can only be used in const declarations, not variables
+    assert_sema_error(r#"
+        fn main() {
+            let x: addr = 0x42;
+        }
+    "#);
+}
+
+#[test]
+fn addr_cannot_be_parameter() {
+    // addr type can only be used in const declarations, not function parameters
+    assert_sema_error(r#"
+        fn test_func(port: addr) {}
+        fn main() {}
+    "#);
+}
+
+#[test]
+fn addr_cannot_be_return_type() {
+    // addr type can only be used in const declarations, not return types
+    assert_sema_error(r#"
+        fn get_port() -> addr {
+            return 0x42;
+        }
+        fn main() {}
+    "#);
+}
+
+#[test]
+fn addr_cannot_be_struct_field() {
+    // addr type can only be used in const declarations, not struct fields
+    assert_sema_error(r#"
+        struct Device {
+            addr port,
+        }
+        fn main() {}
+    "#);
+}
+
+#[test]
+fn addr_cannot_be_enum_tuple_variant() {
+    // addr type can only be used in const declarations, not enum tuple variants
+    assert_sema_error(r#"
+        enum IO {
+            Port(addr),
+        }
+        fn main() {}
+    "#);
+}
+
+#[test]
+fn addr_cannot_be_enum_struct_variant() {
+    // addr type can only be used in const declarations, not enum struct variants
+    assert_sema_error(r#"
+        enum IO {
+            Port { addr address },
+        }
+        fn main() {}
+    "#);
+}
+
+#[test]
+fn addr_size_is_one_byte() {
+    // addr should store u8 values (1 byte), not u16
+    let asm = compile_success(r#"
+        const PORT: addr = 0x6000;
+        fn main() {
+            PORT = 0xFF;  // Single byte write
+        }
+    "#);
+    assert_asm_contains(&asm, "STA PORT");
+    // Should NOT contain STY (which would indicate 2-byte storage)
+    assert!(!asm.contains("STY $6001"));
+}
+
