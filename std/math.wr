@@ -331,3 +331,175 @@ fn swap_nibbles(value: u8) -> u8 {
         "ADC #$80",
     }
 }
+
+// ============================================================================
+// 16-bit Arithmetic Operations
+// ============================================================================
+
+/// Multiply two 16-bit unsigned integers
+/// Algorithm: Shift-and-add method (optimized for 6502)
+/// Cycles: ~800-1000 (depends on number of set bits in multiplier)
+/// Returns: a * b (lower 16 bits if result overflows)
+/// Note: Uses zero page $20-$27 for temporary storage
+///
+/// Memory map (parameters):
+/// $80-$81: parameter a (multiplicand)
+/// $82-$83: parameter b (multiplier)
+///
+/// Memory map (working):
+/// $20-$21: multiplicand (shifted left each iteration)
+/// $22-$23: result accumulator
+/// $24-$25: multiplier (shifted right each iteration)
+/// $26: loop counter (16 iterations)
+fn mul16(a: u16, b: u16) -> u16 {
+    asm {
+        // Initialize result to 0
+        "LDA #$00",
+        "STA $22",
+        "STA $23",
+
+        // Load multiplicand from parameter a ($80-$81) into $20-$21
+        "LDA $80",      // a.low
+        "STA $20",
+        "LDA $81",      // a.high
+        "STA $21",
+
+        // Load multiplier from parameter b ($82-$83) into $24-$25
+        "LDA $82",      // b.low
+        "STA $24",
+        "LDA $83",      // b.high
+        "STA $25",
+
+        // Initialize loop counter to 16
+        "LDX #$10",
+        "STX $26",
+
+        "mul16_loop:",
+        // Check if LSB of multiplier is set
+        "LDA $24",
+        "LSR A",
+        "BCC mul16_skip_add",
+
+        // Add multiplicand to result
+        "CLC",
+        "LDA $22",
+        "ADC $20",
+        "STA $22",
+        "LDA $23",
+        "ADC $21",
+        "STA $23",
+
+        "mul16_skip_add:",
+        // Shift multiplier right by 1
+        "LSR $25",
+        "ROR $24",
+
+        // Shift multiplicand left by 1
+        "ASL $20",
+        "ROL $21",
+
+        // Decrement counter and loop if not zero
+        "DEC $26",
+        "BNE mul16_loop",
+
+        // Load result into A (low) and Y (high) per u16 return convention
+        "LDA $22",
+        "LDY $23",
+    }
+}
+
+/// Divide two 16-bit unsigned integers
+/// Algorithm: Non-restoring division (optimized for 6502)
+/// Cycles: ~1200-1400 (16 iterations of shift-subtract)
+/// Returns: a / b (quotient), or 0xFFFF if b == 0
+/// Note: Uses zero page $20-$27 for temporary storage
+///
+/// Memory map (parameters):
+/// $80-$81: parameter a (dividend)
+/// $82-$83: parameter b (divisor)
+///
+/// Memory map (working):
+/// $20-$21: dividend/remainder (modified during division)
+/// $22-$23: divisor
+/// $24-$25: quotient (result)
+/// $26: loop counter (16 iterations)
+/// $27: temp for division by zero check
+fn div16(a: u16, b: u16) -> u16 {
+    asm {
+        // Check for division by zero (b == 0)
+        "LDA $82",      // b.low
+        "ORA $83",      // OR with b.high
+        "BNE div16_not_zero",
+        // Return 0xFFFF for division by zero
+        "LDA #$FF",
+        "TAY",
+        "JMP div16_done",
+
+        "div16_not_zero:",
+        // Initialize quotient to 0
+        "LDA #$00",
+        "STA $24",
+        "STA $25",
+
+        // Load dividend from parameter a ($80-$81) into $20-$21
+        "LDA $80",      // a.low
+        "STA $20",
+        "LDA $81",      // a.high
+        "STA $21",
+
+        // Load divisor from parameter b ($82-$83) into $22-$23
+        "LDA $82",      // b.low
+        "STA $22",
+        "LDA $83",      // b.high
+        "STA $23",
+
+        // Initialize loop counter to 16
+        "LDX #$10",
+        "STX $26",
+
+        "div16_loop:",
+        // Shift quotient left by 1 (make room for new bit)
+        "ASL $24",
+        "ROL $25",
+
+        // Shift remainder left by 1
+        "ASL $20",
+        "ROL $21",
+
+        // Compare remainder with divisor
+        // First compare high bytes
+        "LDA $21",
+        "CMP $23",
+        "BCC div16_skip_sub",  // remainder.high < divisor.high, skip
+        "BNE div16_do_sub",    // remainder.high > divisor.high, do subtract
+
+        // High bytes equal, compare low bytes
+        "LDA $20",
+        "CMP $22",
+        "BCC div16_skip_sub",  // remainder.low < divisor.low, skip
+
+        "div16_do_sub:",
+        // Subtract divisor from remainder
+        "SEC",
+        "LDA $20",
+        "SBC $22",
+        "STA $20",
+        "LDA $21",
+        "SBC $23",
+        "STA $21",
+
+        // Set bit 0 of quotient
+        "INC $24",
+
+        "div16_skip_sub:",
+        // Decrement counter and loop if not zero
+        "DEC $26",
+        "BNE div16_loop",
+
+        // Load quotient into A (low) and Y (high) per u16 return convention
+        "LDA $24",
+        "LDY $25",
+
+        "div16_done:",
+    }
+}

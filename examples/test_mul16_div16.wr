@@ -1,0 +1,58 @@
+// Test mul16 and div16 functions from math.wr stdlib
+import { mul16, div16 } from "../std/math.wr";
+
+// Output addresses for test results
+const RESULT_1_LO: addr = 0x6000;  // mul16(10, 20) = 200
+const RESULT_1_HI: addr = 0x6001;
+const RESULT_2_LO: addr = 0x6002;  // mul16(100, 200) = 20000
+const RESULT_2_HI: addr = 0x6003;
+const RESULT_3_LO: addr = 0x6004;  // mul16(255, 255) = 65025
+const RESULT_3_HI: addr = 0x6005;
+const RESULT_4_LO: addr = 0x6006;  // div16(200, 10) = 20
+const RESULT_4_HI: addr = 0x6007;
+const RESULT_5_LO: addr = 0x6008;  // div16(20000, 100) = 200
+const RESULT_5_HI: addr = 0x6009;
+const RESULT_6_LO: addr = 0x600A;  // div16(1000, 0) = 0xFFFF (error)
+const RESULT_6_HI: addr = 0x600B;
+const RESULT_7_LO: addr = 0x600C;  // div16(17, 3) = 5 (17/3 = 5 remainder 2)
+const RESULT_7_HI: addr = 0x600D;
+
+#[reset]
+fn main() {
+    // Test 1: mul16(10, 20) = 200 = 0x00C8
+    let result1: u16 = mul16(10, 20);
+    RESULT_1_LO = result1.low;
+    RESULT_1_HI = result1.high;
+
+    // Test 2: mul16(100, 200) = 20000 = 0x4E20
+    let result2: u16 = mul16(100, 200);
+    RESULT_2_LO = result2.low;
+    RESULT_2_HI = result2.high;
+
+    // Test 3: mul16(255, 255) = 65025 = 0xFE01
+    let result3: u16 = mul16(255, 255);
+    RESULT_3_LO = result3.low;
+    RESULT_3_HI = result3.high;
+
+    // Test 4: div16(200, 10) = 20 = 0x0014
+    let result4: u16 = div16(200, 10);
+    RESULT_4_LO = result4.low;
+    RESULT_4_HI = result4.high;
+
+    // Test 5: div16(20000, 100) = 200 = 0x00C8
+    let result5: u16 = div16(20000, 100);
+    RESULT_5_LO = result5.low;
+    RESULT_5_HI = result5.high;
+
+    // Test 6: div16(1000, 0) = 0xFFFF (division by zero error)
+    let result6: u16 = div16(1000, 0);
+    RESULT_6_LO = result6.low;
+    RESULT_6_HI = result6.high;
+
+    // Test 7: div16(17, 3) = 5 (integer division, truncates)
+    let result7: u16 = div16(17, 3);
+    RESULT_7_LO = result7.low;
+    RESULT_7_HI = result7.high;
+
+    loop { }
+}

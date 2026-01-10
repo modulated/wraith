@@ -40,6 +40,10 @@ pub struct Emitter {
     pub verbosity: CommentVerbosity,
     /// Current function being generated (for tail call detection)
     current_function: Option<String>,
+    /// Track if mul16 stdlib function is needed
+    pub needs_mul16: bool,
+    /// Track if div16 stdlib function is needed
+    pub needs_div16: bool,
 }
 
 impl Default for Emitter {
@@ -65,6 +69,8 @@ impl Emitter {
             last_was_terminal: false,
             verbosity,
             current_function: None,
+            needs_mul16: false,
+            needs_div16: false,
         }
     }
 

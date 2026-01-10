@@ -150,6 +150,131 @@ impl StringCollector {
     }
 }
 
+/// Emit stdlib math functions (mul16, div16) if they were used
+fn emit_stdlib_math_functions(
+    emitter: &mut Emitter,
+    section_alloc: &mut SectionAllocator,
+) -> Result<(), CodegenError> {
+    if !emitter.needs_mul16 && !emitter.needs_div16 {
+        return Ok(()); // Nothing to emit
+    }
+
+    emitter.emit_comment("============================================================");
+    emitter.emit_comment("Standard Library Math Functions");
+    emitter.emit_comment("Automatically included for u16 multiplication and division");
+    emitter.emit_comment("============================================================");
+
+    if emitter.needs_mul16 {
+        let org_addr = section_alloc.allocate("CODE", 74)
+            .map_err(|e| CodegenError::SectionError(e))?;
+        emitter.emit_org(org_addr);
+        emitter.emit_comment("Function: mul16");
+        emitter.emit_comment("  Params: a: u16, b: u16");
+        emitter.emit_comment("  Returns: u16");
+        emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
+        emitter.emit_label("mul16");
+
+        // Emit mul16 implementation (from std/math.wr)
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    STA $22");
+        emitter.emit_raw("    STA $23");
+        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    STA $20");
+        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    STA $21");
+        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    STA $24");
+        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    STA $25");
+        emitter.emit_raw("    LDX #$10");
+        emitter.emit_raw("    STX $26");
+        emitter.emit_raw("    mul16_loop:");
+        emitter.emit_raw("    LDA $24");
+        emitter.emit_raw("    LSR A");
+        emitter.emit_raw("    BCC mul16_skip_add");
+        emitter.emit_raw("    CLC");
+        emitter.emit_raw("    LDA $22");
+        emitter.emit_raw("    ADC $20");
+        emitter.emit_raw("    STA $22");
+        emitter.emit_raw("    LDA $23");
+        emitter.emit_raw("    ADC $21");
+        emitter.emit_raw("    STA $23");
+        emitter.emit_raw("    mul16_skip_add:");
+        emitter.emit_raw("    LSR $25");
+        emitter.emit_raw("    ROR $24");
+        emitter.emit_raw("    ASL $20");
+        emitter.emit_raw("    ROL $21");
+        emitter.emit_raw("    DEC $26");
+        emitter.emit_raw("    BNE mul16_loop");
+        emitter.emit_raw("    LDA $22");
+        emitter.emit_raw("    LDY $23");
+        emitter.emit_raw("    RTS");
+    }
+
+    if emitter.needs_div16 {
+        let org_addr = section_alloc.allocate("CODE", 96)
+            .map_err(|e| CodegenError::SectionError(e))?;
+        emitter.emit_org(org_addr);
+        emitter.emit_comment("Function: div16");
+        emitter.emit_comment("  Params: a: u16, b: u16");
+        emitter.emit_comment("  Returns: u16");
+        emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
+        emitter.emit_label("div16");
+
+        // Emit div16 implementation (from std/math.wr)
+        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    ORA $83");
+        emitter.emit_raw("    BNE div16_not_zero");
+        emitter.emit_raw("    LDA #$FF");
+        emitter.emit_raw("    TAY");
+        emitter.emit_raw("    JMP div16_done");
+        emitter.emit_raw("    div16_not_zero:");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    STA $24");
+        emitter.emit_raw("    STA $25");
+        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    STA $20");
+        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    STA $21");
+        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    STA $22");
+        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    STA $23");
+        emitter.emit_raw("    LDX #$10");
+        emitter.emit_raw("    STX $26");
+        emitter.emit_raw("    div16_loop:");
+        emitter.emit_raw("    ASL $24");
+        emitter.emit_raw("    ROL $25");
+        emitter.emit_raw("    ASL $20");
+        emitter.emit_raw("    ROL $21");
+        emitter.emit_raw("    LDA $21");
+        emitter.emit_raw("    CMP $23");
+        emitter.emit_raw("    BCC div16_skip_sub");
+        emitter.emit_raw("    BNE div16_do_sub");
+        emitter.emit_raw("    LDA $20");
+        emitter.emit_raw("    CMP $22");
+        emitter.emit_raw("    BCC div16_skip_sub");
+        emitter.emit_raw("    div16_do_sub:");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA $20");
+        emitter.emit_raw("    SBC $22");
+        emitter.emit_raw("    STA $20");
+        emitter.emit_raw("    LDA $21");
+        emitter.emit_raw("    SBC $23");
+        emitter.emit_raw("    STA $21");
+        emitter.emit_raw("    INC $24");
+        emitter.emit_raw("    div16_skip_sub:");
+        emitter.emit_raw("    DEC $26");
+        emitter.emit_raw("    BNE div16_loop");
+        emitter.emit_raw("    LDA $24");
+        emitter.emit_raw("    LDY $25");
+        emitter.emit_raw("    div16_done:");
+        emitter.emit_raw("    RTS");
+    }
+
+    Ok(())
+}
+
 pub fn generate(
     ast: &SourceFile,
     program: &ProgramInfo,
@@ -341,6 +466,9 @@ pub fn generate(
 
     // Emit collected string literals to DATA section
     string_collector.emit_strings(&mut emitter, &mut section_alloc)?;
+
+    // Emit stdlib math functions if needed
+    emit_stdlib_math_functions(&mut emitter, &mut section_alloc)?;
 
     // Generate interrupt vector table
     generate_interrupt_vectors(ast, &mut emitter)?;

@@ -298,7 +298,7 @@ pub(super) fn generate_binary(
             generate_multiply(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Div => {
-            generate_divide(emitter)?;
+            generate_divide(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Mod => {
             generate_modulo(emitter)?;
@@ -540,83 +540,45 @@ fn generate_multiply_u8(emitter: &mut Emitter) -> Result<(), CodegenError> {
 }
 
 fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Multiply u16 * u16 -> u16 using shift-and-add algorithm
+    // For u16 * u16, call the stdlib mul16 function
     // Input: Left operand in A:Y, Right operand in TEMP:TEMP+1 ($20:$21)
     // Output: Result in A:Y
-    //
-    // Algorithm:
-    //   result = 0 (16-bit)
-    //   multiplicand = A:Y (saved to high pool)
-    //   multiplier = TEMP:TEMP+1 ($20:$21)
-    //   for 16 iterations:
-    //     if (multiplier & 1): result += multiplicand (16-bit)
-    //     multiplicand <<= 1 (16-bit)
-    //     multiplier >>= 1 (16-bit)
 
-    // Allocate temp storage
-    let multiplicand_lo = emitter.temp_alloc.alloc_high(2).unwrap_or(0xF0);
-    let multiplicand_hi = multiplicand_lo + 1;
-    let result_lo = emitter.temp_alloc.alloc_primary(2).unwrap_or(0x22);
-    let result_hi = result_lo + 1;
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib mul16 for u16 multiplication");
+    }
+
+    // Mark that we need mul16 function
+    emitter.needs_mul16 = true;
+
+    // mul16 expects parameters at $80-$83
+    // Store left operand (A:Y) to $80-$81
+    emitter.emit_inst("STA", "$80");  // Store low byte
+    emitter.emit_inst("STY", "$81");  // Store high byte
+
+    // Store right operand (TEMP:TEMP+1) to $82-$83
     let temp = emitter.memory_layout.temp_reg();
-    let temp_lo = temp;
-    let temp_hi = temp + 1;
+    emitter.emit_inst("LDA", &format!("${:02X}", temp));      // Load right.low
+    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1));  // Load right.high
+    emitter.emit_inst("STA", "$83");
 
-    let loop_label = emitter.next_label("ml");
-    let skip_add = emitter.next_label("ms");
+    // Call mul16
+    emitter.emit_inst("JSR", "mul16");
 
-    // Save multiplicand to memory
-    emitter.emit_inst("STA", &format!("${:02X}", multiplicand_lo));
-    emitter.emit_inst("STY", &format!("${:02X}", multiplicand_hi));
-
-    // Initialize result = 0
-    emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("STA", &format!("${:02X}", result_lo));
-    emitter.emit_inst("STA", &format!("${:02X}", result_hi));
-
-    // Initialize loop counter (16 bits)
-    emitter.emit_inst("LDX", "#$10");
-
-    // Loop for each bit
-    emitter.emit_label(&loop_label);
-
-    // Check if multiplier bit 0 is set
-    emitter.emit_inst("LSR", &format!("${:02X}", temp_hi));  // Shift high byte right
-    emitter.emit_inst("ROR", &format!("${:02X}", temp_lo));  // Rotate low byte right (with carry)
-    emitter.emit_inst("BCC", &skip_add);  // If bit was 0, skip addition
-
-    // Add multiplicand to result (16-bit addition)
-    emitter.emit_inst("LDA", &format!("${:02X}", result_lo));
-    emitter.emit_inst("CLC", "");
-    emitter.emit_inst("ADC", &format!("${:02X}", multiplicand_lo));
-    emitter.emit_inst("STA", &format!("${:02X}", result_lo));
-    emitter.emit_inst("LDA", &format!("${:02X}", result_hi));
-    emitter.emit_inst("ADC", &format!("${:02X}", multiplicand_hi));
-    emitter.emit_inst("STA", &format!("${:02X}", result_hi));
-
-    emitter.emit_label(&skip_add);
-
-    // Shift multiplicand left (16-bit)
-    emitter.emit_inst("ASL", &format!("${:02X}", multiplicand_lo));  // Shift low byte left
-    emitter.emit_inst("ROL", &format!("${:02X}", multiplicand_hi));  // Rotate high byte left (with carry)
-
-    // Decrement counter and loop
-    emitter.emit_inst("DEX", "");
-    emitter.emit_inst("BNE", &loop_label);
-
-    // Load result into A:Y
-    emitter.emit_inst("LDA", &format!("${:02X}", result_lo));
-    emitter.emit_inst("LDY", &format!("${:02X}", result_hi));
-
-    // Free temp storage
-    emitter.temp_alloc.free_high(multiplicand_lo, 2);
-    emitter.temp_alloc.free_primary(result_lo, 2);
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=result_low, Y=result_high (u16)");
+    }
 
     Ok(())
 }
 
-fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Divide A / TEMP using repeated subtraction
+fn generate_divide(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    if is_u16 {
+        return generate_divide_u16(emitter);
+    }
+
+    // Divide u8 A / TEMP using repeated subtraction
     // Result (quotient) in A
 
     // Allocate temp storage
@@ -658,6 +620,40 @@ fn generate_divide(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // Free temp storage
     emitter.temp_alloc.free_primary(quotient_addr, 2);
+
+    Ok(())
+}
+
+fn generate_divide_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // For u16 / u16, call the stdlib div16 function
+    // Input: Left operand in A:Y, Right operand in TEMP:TEMP+1 ($20:$21)
+    // Output: Result in A:Y
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib div16 for u16 division");
+    }
+
+    // Mark that we need div16 function
+    emitter.needs_div16 = true;
+
+    // div16 expects parameters at $80-$83
+    // Store left operand (A:Y) to $80-$81
+    emitter.emit_inst("STA", "$80");  // Store low byte
+    emitter.emit_inst("STY", "$81");  // Store high byte
+
+    // Store right operand (TEMP:TEMP+1) to $82-$83
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("LDA", &format!("${:02X}", temp));      // Load right.low
+    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1));  // Load right.high
+    emitter.emit_inst("STA", "$83");
+
+    // Call div16
+    emitter.emit_inst("JSR", "div16");
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=quotient_low, Y=quotient_high (u16)");
+    }
 
     Ok(())
 }
