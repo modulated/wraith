@@ -144,6 +144,13 @@ pub enum SemaError {
         context: String,
         span: Span,
     },
+
+    /// Array index out of bounds (compile-time check)
+    ArrayIndexOutOfBounds {
+        index: i64,
+        array_size: usize,
+        span: Span,
+    },
 }
 
 impl SemaError {
@@ -244,6 +251,13 @@ impl SemaError {
             SemaError::InvalidAddrUsage { context, span } => {
                 let msg = format!("addr type can only be used in const declarations, not {}", context);
                 format!("error: invalid addr usage\n{}", span.format_error_context(source, filename, &msg))
+            }
+            SemaError::ArrayIndexOutOfBounds { index, array_size, span } => {
+                let msg = format!(
+                    "array index {} is out of bounds for array of length {}",
+                    index, array_size
+                );
+                format!("error: array index out of bounds\n{}", span.format_error_context(source, filename, &msg))
             }
         }
     }
@@ -383,6 +397,13 @@ impl std::fmt::Display for SemaError {
                     f,
                     "invalid addr usage at {}..{}: addr type can only be used in const declarations, not {}",
                     span.start, span.end, context
+                )
+            }
+            SemaError::ArrayIndexOutOfBounds { index, array_size, span } => {
+                write!(
+                    f,
+                    "array index out of bounds at {}..{}: index {} is out of bounds for array of length {}",
+                    span.start, span.end, index, array_size
                 )
             }
         }

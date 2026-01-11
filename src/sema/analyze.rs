@@ -2093,7 +2093,33 @@ impl SemanticAnalyzer {
 
                 // Extract element type from array or string type
                 match &object_ty {
-                    Type::Array(element_ty, _size) => {
+                    Type::Array(element_ty, array_size) => {
+                        // COMPILE-TIME BOUNDS CHECK
+                        // Try to evaluate index as a constant expression
+                        if let Ok(const_val) = eval_const_expr_with_env(index, &self.const_env)
+                            && let Some(index_value) = const_val.as_integer() {
+                                // Check for negative indices (only possible with i8)
+                                if index_value < 0 {
+                                    return Err(SemaError::ArrayIndexOutOfBounds {
+                                        index: index_value,
+                                        array_size: *array_size,
+                                        span: index.span,
+                                    });
+                                }
+
+                                // Check if index >= array_size
+                                let index_usize = index_value as usize;
+                                if index_usize >= *array_size {
+                                    return Err(SemaError::ArrayIndexOutOfBounds {
+                                        index: index_value,
+                                        array_size: *array_size,
+                                        span: index.span,
+                                    });
+                                }
+                                // Index is valid at compile-time
+                            }
+                        // If evaluation fails or not an integer, index is not constant - skip check
+
                         // Return the element type
                         Ok((**element_ty).clone())
                     }

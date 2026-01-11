@@ -264,6 +264,176 @@ fn const_cannot_be_modified() {
 }
 
 // ============================================================================
+// Array Bounds Checking
+// ============================================================================
+
+#[test]
+fn array_index_in_bounds_zero() {
+    // Valid: accessing first element
+    let _asm = compile_success(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [1, 2, 3, 4, 5];
+            let x: u8 = arr[0];
+        }
+        "#,
+    );
+}
+
+#[test]
+fn array_index_in_bounds_last() {
+    // Valid: accessing last element (size - 1)
+    let _asm = compile_success(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [1, 2, 3, 4, 5];
+            let x: u8 = arr[4];
+        }
+        "#,
+    );
+}
+
+#[test]
+fn array_index_equals_size() {
+    // Error: index 5 on array[5] (valid indices are 0-4)
+    assert_error_contains(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            let x: u8 = arr[5];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_index_greater_than_size() {
+    // Error: index 10 on array[5]
+    assert_error_contains(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            let x: u8 = arr[10];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_index_const_expression() {
+    // Error: const IDX = 10, array size 5
+    assert_error_contains(
+        r#"
+        const IDX: u8 = 10;
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            let x: u8 = arr[IDX];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_index_arithmetic_valid() {
+    // Valid: 2 + 2 = 4, which is < 5
+    let _asm = compile_success(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            let x: u8 = arr[2 + 2];
+        }
+        "#,
+    );
+}
+
+#[test]
+fn array_index_arithmetic_invalid() {
+    // Error: 3 * 4 = 12, which is >= 5
+    assert_error_contains(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            let x: u8 = arr[3 * 4];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_index_variable_not_checked() {
+    // Valid: variable index is not checked at compile time
+    let _asm = compile_success(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            let i: u8 = 10;
+            let x: u8 = arr[i];
+        }
+        "#,
+    );
+}
+
+#[test]
+fn array_index_zero_length_array() {
+    // Error: cannot index into zero-length array
+    assert_error_contains(
+        r#"
+        fn main() {
+            let empty: [u8; 0] = [];
+            let x: u8 = empty[0];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_index_multidimensional() {
+    // Error: inner array bounds violation
+    assert_error_contains(
+        r#"
+        fn main() {
+            let matrix: [[u8; 5]; 10] = [[0; 5]; 10];
+            let x: u8 = matrix[2][7];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_index_multidimensional_outer() {
+    // Error: outer array bounds violation
+    assert_error_contains(
+        r#"
+        fn main() {
+            let matrix: [[u8; 5]; 10] = [[0; 5]; 10];
+            let x: u8 = matrix[12][2];
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+#[test]
+fn array_assignment_index_bounds() {
+    // Error: bounds checking should also apply to assignment
+    assert_error_contains(
+        r#"
+        fn main() {
+            let arr: [u8; 5] = [0; 5];
+            arr[10] = 42;
+        }
+        "#,
+        "out of bounds",
+    );
+}
+
+// ============================================================================
 // Instruction Conflicts
 // ============================================================================
 
