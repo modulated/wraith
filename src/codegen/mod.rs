@@ -166,108 +166,140 @@ fn emit_stdlib_math_functions(
 
     if emitter.needs_mul16 {
         let org_addr = section_alloc.allocate("CODE", 74)
-            .map_err(|e| CodegenError::SectionError(e))?;
+            .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mul16");
-        emitter.emit_comment("  Params: a: u16, b: u16");
-        emitter.emit_comment("  Returns: u16");
+        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Returns: u16 in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("mul16");
 
-        // Emit mul16 implementation (from std/math.wr)
+        // Emit mul16 implementation
+        // Memory layout: $D0-$D1 multiplicand, $D2-$D3 result,
+        //               $D4-$D5 multiplier, $D6 loop counter
         emitter.emit_raw("    LDA #$00");
-        emitter.emit_raw("    STA $22");
-        emitter.emit_raw("    STA $23");
+        emitter.emit_raw("    STA $D2");  // result_low at $D2
+        emitter.emit_raw("    STA $D3");  // result_high at $D3
         emitter.emit_raw("    LDA $80");
-        emitter.emit_raw("    STA $20");
+        emitter.emit_raw("    STA $D0");  // param_a_low at $D0
         emitter.emit_raw("    LDA $81");
-        emitter.emit_raw("    STA $21");
+        emitter.emit_raw("    STA $D1");  // param_a_high at $D1
         emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    STA $24");
+        emitter.emit_raw("    STA $D4");  // param_b_low at $D4
         emitter.emit_raw("    LDA $83");
-        emitter.emit_raw("    STA $25");
+        emitter.emit_raw("    STA $D5");  // param_b_high at $D5
         emitter.emit_raw("    LDX #$10");
-        emitter.emit_raw("    STX $26");
+        emitter.emit_raw("    STX $D6");  // loop_counter at $D6
         emitter.emit_raw("    mul16_loop:");
-        emitter.emit_raw("    LDA $24");
+        emitter.emit_raw("    LDA $D4");
         emitter.emit_raw("    LSR A");
         emitter.emit_raw("    BCC mul16_skip_add");
         emitter.emit_raw("    CLC");
-        emitter.emit_raw("    LDA $22");
-        emitter.emit_raw("    ADC $20");
-        emitter.emit_raw("    STA $22");
-        emitter.emit_raw("    LDA $23");
-        emitter.emit_raw("    ADC $21");
-        emitter.emit_raw("    STA $23");
+        emitter.emit_raw("    LDA $D2");
+        emitter.emit_raw("    ADC $D0");
+        emitter.emit_raw("    STA $D2");
+        emitter.emit_raw("    LDA $D3");
+        emitter.emit_raw("    ADC $D1");
+        emitter.emit_raw("    STA $D3");
         emitter.emit_raw("    mul16_skip_add:");
-        emitter.emit_raw("    LSR $25");
-        emitter.emit_raw("    ROR $24");
-        emitter.emit_raw("    ASL $20");
-        emitter.emit_raw("    ROL $21");
-        emitter.emit_raw("    DEC $26");
+        emitter.emit_raw("    LSR $D5");
+        emitter.emit_raw("    ROR $D4");
+        emitter.emit_raw("    ASL $D0");
+        emitter.emit_raw("    ROL $D1");
+        emitter.emit_raw("    DEC $D6");
         emitter.emit_raw("    BNE mul16_loop");
-        emitter.emit_raw("    LDA $22");
-        emitter.emit_raw("    LDY $23");
+        emitter.emit_raw("    LDA $D2");
+        emitter.emit_raw("    LDY $D3");
         emitter.emit_raw("    RTS");
     }
 
     if emitter.needs_div16 {
-        let org_addr = section_alloc.allocate("CODE", 96)
-            .map_err(|e| CodegenError::SectionError(e))?;
+        let org_addr = section_alloc.allocate("CODE", 110)
+            .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: div16");
-        emitter.emit_comment("  Params: a: u16, b: u16");
-        emitter.emit_comment("  Returns: u16");
+        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Returns: u16 in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("div16");
 
-        // Emit div16 implementation (from std/math.wr)
+        // Emit div16 implementation using proper remainder register
+        // Memory layout: $D0-$D1 dividend, $D2-$D3 divisor, $D4-$D5 quotient,
+        //               $D6-$D7 remainder, $D8 loop counter
+
+        // Zero check - return 0xFFFF for division by zero
         emitter.emit_raw("    LDA $82");
         emitter.emit_raw("    ORA $83");
         emitter.emit_raw("    BNE div16_not_zero");
         emitter.emit_raw("    LDA #$FF");
         emitter.emit_raw("    TAY");
         emitter.emit_raw("    JMP div16_done");
+
         emitter.emit_raw("    div16_not_zero:");
+        // Initialize quotient and remainder to 0
         emitter.emit_raw("    LDA #$00");
-        emitter.emit_raw("    STA $24");
-        emitter.emit_raw("    STA $25");
+        emitter.emit_raw("    STA $D4");  // quotient_low
+        emitter.emit_raw("    STA $D5");  // quotient_high
+        emitter.emit_raw("    STA $D6");  // remainder_low
+        emitter.emit_raw("    STA $D7");  // remainder_high
+
+        // Copy dividend to working storage
         emitter.emit_raw("    LDA $80");
-        emitter.emit_raw("    STA $20");
+        emitter.emit_raw("    STA $D0");  // dividend_low
         emitter.emit_raw("    LDA $81");
-        emitter.emit_raw("    STA $21");
+        emitter.emit_raw("    STA $D1");  // dividend_high
+
+        // Copy divisor to working storage
         emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    STA $22");
+        emitter.emit_raw("    STA $D2");  // divisor_low
         emitter.emit_raw("    LDA $83");
-        emitter.emit_raw("    STA $23");
-        emitter.emit_raw("    LDX #$10");
-        emitter.emit_raw("    STX $26");
+        emitter.emit_raw("    STA $D3");  // divisor_high
+
+        // Loop counter = 16
+        emitter.emit_raw("    LDA #$10");
+        emitter.emit_raw("    STA $D8");
+
         emitter.emit_raw("    div16_loop:");
-        emitter.emit_raw("    ASL $24");
-        emitter.emit_raw("    ROL $25");
-        emitter.emit_raw("    ASL $20");
-        emitter.emit_raw("    ROL $21");
-        emitter.emit_raw("    LDA $21");
-        emitter.emit_raw("    CMP $23");
-        emitter.emit_raw("    BCC div16_skip_sub");
-        emitter.emit_raw("    BNE div16_do_sub");
-        emitter.emit_raw("    LDA $20");
-        emitter.emit_raw("    CMP $22");
-        emitter.emit_raw("    BCC div16_skip_sub");
-        emitter.emit_raw("    div16_do_sub:");
+        // Shift dividend left, high bit goes into remainder
+        emitter.emit_raw("    ASL $D0");
+        emitter.emit_raw("    ROL $D1");
+        emitter.emit_raw("    ROL $D6");  // Carry from dividend -> remainder
+        emitter.emit_raw("    ROL $D7");
+
+        // Shift quotient left to make room for next bit
+        emitter.emit_raw("    ASL $D4");
+        emitter.emit_raw("    ROL $D5");
+
+        // Compare remainder with divisor (16-bit)
+        emitter.emit_raw("    LDA $D7");  // remainder_high
+        emitter.emit_raw("    CMP $D3");  // divisor_high
+        emitter.emit_raw("    BCC div16_skip");  // remainder < divisor
+        emitter.emit_raw("    BNE div16_sub");   // remainder > divisor
+        // High bytes equal, compare low bytes
+        emitter.emit_raw("    LDA $D6");  // remainder_low
+        emitter.emit_raw("    CMP $D2");  // divisor_low
+        emitter.emit_raw("    BCC div16_skip");  // remainder < divisor
+
+        emitter.emit_raw("    div16_sub:");
+        // remainder -= divisor
         emitter.emit_raw("    SEC");
-        emitter.emit_raw("    LDA $20");
-        emitter.emit_raw("    SBC $22");
-        emitter.emit_raw("    STA $20");
-        emitter.emit_raw("    LDA $21");
-        emitter.emit_raw("    SBC $23");
-        emitter.emit_raw("    STA $21");
-        emitter.emit_raw("    INC $24");
-        emitter.emit_raw("    div16_skip_sub:");
-        emitter.emit_raw("    DEC $26");
+        emitter.emit_raw("    LDA $D6");
+        emitter.emit_raw("    SBC $D2");
+        emitter.emit_raw("    STA $D6");
+        emitter.emit_raw("    LDA $D7");
+        emitter.emit_raw("    SBC $D3");
+        emitter.emit_raw("    STA $D7");
+        // Set quotient bit 0
+        emitter.emit_raw("    INC $D4");
+
+        emitter.emit_raw("    div16_skip:");
+        emitter.emit_raw("    DEC $D8");
         emitter.emit_raw("    BNE div16_loop");
-        emitter.emit_raw("    LDA $24");
-        emitter.emit_raw("    LDY $25");
+
+        // Return quotient in A/Y
+        emitter.emit_raw("    LDA $D4");
+        emitter.emit_raw("    LDY $D5");
+
         emitter.emit_raw("    div16_done:");
         emitter.emit_raw("    RTS");
     }
