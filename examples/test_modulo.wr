@@ -1,0 +1,30 @@
+// Test modulo operator for u8 and u16
+
+const RESULT_U8_1: addr = 0x6000;   // 17 % 5 = 2
+const RESULT_U8_2: addr = 0x6001;   // 100 % 7 = 2
+const RESULT_U16_LOW: addr = 0x6002;  // 20007 % 100 = 7
+const RESULT_U16_HIGH: addr = 0x6003;
+const RESULT_DIV_LOW: addr = 0x6004;  // 20007 / 100 = 200
+const RESULT_DIV_HIGH: addr = 0x6005;
+
+#[reset]
+fn main() {
+    // u8 modulo tests
+    let r1: u8 = 17 % 5;      // 17 = 3*5 + 2, so remainder = 2
+    RESULT_U8_1 = r1;
+
+    let r2: u8 = 100 % 7;     // 100 = 14*7 + 2, so remainder = 2
+    RESULT_U8_2 = r2;
+
+    // u16 modulo test
+    let x: u16 = 20007;
+    let y: u16 = 100;
+    let remainder: u16 = x % y;  // 20007 = 200*100 + 7, so remainder = 7
+    RESULT_U16_LOW = remainder.low;
+    RESULT_U16_HIGH = remainder.high;
+
+    // Also test division to verify both work
+    let quotient: u16 = x / y;   // 20007 / 100 = 200 = 0x00C8
+    RESULT_DIV_LOW = quotient.low;
+    RESULT_DIV_HIGH = quotient.high;
+}

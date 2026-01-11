@@ -44,6 +44,8 @@ pub struct Emitter {
     pub needs_mul16: bool,
     /// Track if div16 stdlib function is needed
     pub needs_div16: bool,
+    /// Track if mod16 stdlib function is needed
+    pub needs_mod16: bool,
 }
 
 impl Default for Emitter {
@@ -71,6 +73,7 @@ impl Emitter {
             current_function: None,
             needs_mul16: false,
             needs_div16: false,
+            needs_mod16: false,
         }
     }
 

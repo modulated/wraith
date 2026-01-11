@@ -301,7 +301,7 @@ pub(super) fn generate_binary(
             generate_divide(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Mod => {
-            generate_modulo(emitter)?;
+            generate_modulo(emitter, is_u16)?;
         }
         // Comparison operations - result is boolean (0 or 1)
         crate::ast::BinaryOp::Eq => {
@@ -658,7 +658,11 @@ fn generate_divide_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     Ok(())
 }
 
-fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
+fn generate_modulo(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    if is_u16 {
+        return generate_modulo_u16(emitter);
+    }
+
     // Modulo A % TEMP using repeated subtraction
     // Result (remainder) in A
 
@@ -693,6 +697,40 @@ fn generate_modulo(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // Free temp storage
     emitter.temp_alloc.free_primary(dividend_addr, 1);
+
+    Ok(())
+}
+
+fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // For u16 % u16, call the stdlib mod16 function
+    // Input: Left operand in A:Y, Right operand in TEMP:TEMP+1 ($20:$21)
+    // Output: Remainder in A:Y
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib mod16 for u16 modulo");
+    }
+
+    // Mark that we need mod16 function
+    emitter.needs_mod16 = true;
+
+    // mod16 expects parameters at $80-$83
+    // Store left operand (A:Y) to $80-$81
+    emitter.emit_inst("STA", "$80");  // Store low byte
+    emitter.emit_inst("STY", "$81");  // Store high byte
+
+    // Store right operand (TEMP:TEMP+1) to $82-$83
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("LDA", &format!("${:02X}", temp));      // Load right.low
+    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1));  // Load right.high
+    emitter.emit_inst("STA", "$83");
+
+    // Call mod16
+    emitter.emit_inst("JSR", "mod16");
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=remainder_low, Y=remainder_high (u16)");
+    }
 
     Ok(())
 }

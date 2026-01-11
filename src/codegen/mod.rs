@@ -155,13 +155,13 @@ fn emit_stdlib_math_functions(
     emitter: &mut Emitter,
     section_alloc: &mut SectionAllocator,
 ) -> Result<(), CodegenError> {
-    if !emitter.needs_mul16 && !emitter.needs_div16 {
+    if !emitter.needs_mul16 && !emitter.needs_div16 && !emitter.needs_mod16 {
         return Ok(()); // Nothing to emit
     }
 
     emitter.emit_comment("============================================================");
     emitter.emit_comment("Standard Library Math Functions");
-    emitter.emit_comment("Automatically included for u16 multiplication and division");
+    emitter.emit_comment("Automatically included for u16 multiplication, division, modulo");
     emitter.emit_comment("============================================================");
 
     if emitter.needs_mul16 {
@@ -301,6 +301,97 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    LDY $D5");
 
         emitter.emit_raw("    div16_done:");
+        emitter.emit_raw("    RTS");
+    }
+
+    if emitter.needs_mod16 {
+        let org_addr = section_alloc.allocate("CODE", 110)
+            .map_err(CodegenError::SectionError)?;
+        emitter.emit_org(org_addr);
+        emitter.emit_comment("Function: mod16");
+        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Returns: u16 remainder in A/Y (low/high)");
+        emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
+        emitter.emit_label("mod16");
+
+        // Emit mod16 implementation - same as div16 but returns remainder
+        // Memory layout: $D0-$D1 dividend, $D2-$D3 divisor, $D4-$D5 quotient,
+        //               $D6-$D7 remainder, $D8 loop counter
+
+        // Zero check - return 0xFFFF for modulo by zero
+        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    ORA $83");
+        emitter.emit_raw("    BNE mod16_not_zero");
+        emitter.emit_raw("    LDA #$FF");
+        emitter.emit_raw("    TAY");
+        emitter.emit_raw("    JMP mod16_done");
+
+        emitter.emit_raw("    mod16_not_zero:");
+        // Initialize quotient and remainder to 0
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    STA $D4");  // quotient_low
+        emitter.emit_raw("    STA $D5");  // quotient_high
+        emitter.emit_raw("    STA $D6");  // remainder_low
+        emitter.emit_raw("    STA $D7");  // remainder_high
+
+        // Copy dividend to working storage
+        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    STA $D0");  // dividend_low
+        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    STA $D1");  // dividend_high
+
+        // Copy divisor to working storage
+        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    STA $D2");  // divisor_low
+        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    STA $D3");  // divisor_high
+
+        // Loop counter = 16
+        emitter.emit_raw("    LDA #$10");
+        emitter.emit_raw("    STA $D8");
+
+        emitter.emit_raw("    mod16_loop:");
+        // Shift dividend left, high bit goes into remainder
+        emitter.emit_raw("    ASL $D0");
+        emitter.emit_raw("    ROL $D1");
+        emitter.emit_raw("    ROL $D6");  // Carry from dividend -> remainder
+        emitter.emit_raw("    ROL $D7");
+
+        // Shift quotient left to make room for next bit
+        emitter.emit_raw("    ASL $D4");
+        emitter.emit_raw("    ROL $D5");
+
+        // Compare remainder with divisor (16-bit)
+        emitter.emit_raw("    LDA $D7");  // remainder_high
+        emitter.emit_raw("    CMP $D3");  // divisor_high
+        emitter.emit_raw("    BCC mod16_skip");  // remainder < divisor
+        emitter.emit_raw("    BNE mod16_sub");   // remainder > divisor
+        // High bytes equal, compare low bytes
+        emitter.emit_raw("    LDA $D6");  // remainder_low
+        emitter.emit_raw("    CMP $D2");  // divisor_low
+        emitter.emit_raw("    BCC mod16_skip");  // remainder < divisor
+
+        emitter.emit_raw("    mod16_sub:");
+        // remainder -= divisor
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA $D6");
+        emitter.emit_raw("    SBC $D2");
+        emitter.emit_raw("    STA $D6");
+        emitter.emit_raw("    LDA $D7");
+        emitter.emit_raw("    SBC $D3");
+        emitter.emit_raw("    STA $D7");
+        // Set quotient bit 0
+        emitter.emit_raw("    INC $D4");
+
+        emitter.emit_raw("    mod16_skip:");
+        emitter.emit_raw("    DEC $D8");
+        emitter.emit_raw("    BNE mod16_loop");
+
+        // Return REMAINDER in A/Y (difference from div16)
+        emitter.emit_raw("    LDA $D6");
+        emitter.emit_raw("    LDY $D7");
+
+        emitter.emit_raw("    mod16_done:");
         emitter.emit_raw("    RTS");
     }
 
