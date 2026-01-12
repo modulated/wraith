@@ -31,6 +31,7 @@ use unary::generate_unary;
 
 // Re-export for use in other codegen modules
 pub use call::generate_tail_recursive_update;
+pub use aggregate::generate_struct_init_runtime;
 
 pub fn generate_expr(
     expr: &Spanned<Expr>,
@@ -103,7 +104,23 @@ pub fn generate_expr(
             generate_type_cast(inner, target_type, emitter, info, string_collector)
         }
         Expr::Index { object, index } => generate_index(object, index, emitter, info, string_collector),
+        Expr::Slice { .. } => {
+            // Slices are only valid as assignment targets, not as expressions
+            Err(CodegenError::UnsupportedOperation(
+                "Slice expressions can only be used as assignment targets".to_string()
+            ))
+        }
         Expr::StructInit { name, fields } => generate_struct_init(name, fields, emitter, info),
+        Expr::AnonStructInit { fields } => {
+            // Look up the resolved struct name from sema
+            let struct_name = info.resolved_struct_names.get(&expr.span)
+                .ok_or_else(|| CodegenError::UnsupportedOperation(
+                    "Anonymous struct init missing resolved name".to_string()
+                ))?;
+            // Create a synthetic Spanned<String> for the struct name
+            let name = crate::ast::Spanned::new(struct_name.clone(), expr.span);
+            generate_struct_init(&name, fields, emitter, info)
+        }
         Expr::Field { object, field } => generate_field_access(object, field, emitter, info),
         Expr::EnumVariant {
             enum_name,

@@ -107,7 +107,7 @@ pub(super) fn generate_index(
 
                     // Generate index expression -> A, then transfer to Y
                     generate_expr(index, emitter, info, string_collector)?;
-                    emitter.emit_inst("TAY", "Transfer index to Y");
+                    emitter.emit_inst("TAY", "");
 
                     // Use indirect indexed addressing: LDA (ptr),Y
                     // The array variable holds a 2-byte pointer in zero page
@@ -118,7 +118,7 @@ pub(super) fn generate_index(
                 crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                     // Array in zero page - use indirect indexed addressing
                     generate_expr(index, emitter, info, string_collector)?;
-                    emitter.emit_inst("TAY", "Transfer index to Y");
+                    emitter.emit_inst("TAY", "");
                     emitter.emit_inst("LDA", &format!("(${:02X}),Y", addr));
                     emitter.reg_state.modify_a();
                     Ok(())

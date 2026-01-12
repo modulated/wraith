@@ -76,16 +76,36 @@ impl Parser<'_> {
                 }
             } else if self.check(&Token::LBracket) {
                 self.advance();
-                let index = self.parse_expr()?;
-                self.expect(&Token::RBracket)?;
-                let span = expr.span.merge(self.previous_span());
-                expr = Spanned::new(
-                    Expr::Index {
-                        object: Box::new(expr),
-                        index: Box::new(index),
-                    },
-                    span,
-                );
+                let first = self.parse_expr()?;
+
+                // Check for slice syntax: arr[start..end] or arr[start..=end]
+                if self.check(&Token::DotDot) || self.check(&Token::DotDotEq) {
+                    let inclusive = self.check(&Token::DotDotEq);
+                    self.advance();
+                    let end = self.parse_expr()?;
+                    self.expect(&Token::RBracket)?;
+                    let span = expr.span.merge(self.previous_span());
+                    expr = Spanned::new(
+                        Expr::Slice {
+                            object: Box::new(expr),
+                            start: Box::new(first),
+                            end: Box::new(end),
+                            inclusive,
+                        },
+                        span,
+                    );
+                } else {
+                    // Normal single index
+                    self.expect(&Token::RBracket)?;
+                    let span = expr.span.merge(self.previous_span());
+                    expr = Spanned::new(
+                        Expr::Index {
+                            object: Box::new(expr),
+                            index: Box::new(first),
+                        },
+                        span,
+                    );
+                }
             } else if self.check(&Token::As) {
                 self.advance();
                 let target_type = self.parse_type()?;
@@ -153,6 +173,25 @@ impl Parser<'_> {
 
             // Array literal
             Some(Token::LBracket) => self.parse_array_literal(),
+
+            // Anonymous struct init: { field: value, ... }
+            // Distinguished from block by lookahead: { ident: ... }
+            Some(Token::LBrace) => {
+                let is_anon_struct = match self.peek_ahead(1) {
+                    Some(Token::RBrace) => false, // Empty block {}
+                    Some(Token::Ident(_)) => {
+                        // Check if ident is followed by colon: { field: ... }
+                        matches!(self.peek_ahead(2), Some(Token::Colon))
+                    }
+                    _ => false,
+                };
+
+                if is_anon_struct {
+                    self.parse_anon_struct_init()
+                } else {
+                    Err(ParseError::unexpected_token(start, "expression", Some(Token::LBrace)))
+                }
+            }
 
             // Literals
             Some(Token::Integer(n)) => {
@@ -331,6 +370,36 @@ impl Parser<'_> {
             },
             span,
         ))
+    }
+
+    /// Parse anonymous struct initialization: { field: value, ... }
+    /// Struct name is inferred from context (e.g., variable type annotation)
+    fn parse_anon_struct_init(&mut self) -> ParseResult<Spanned<Expr>> {
+        let start = self.current_span();
+        self.expect(&Token::LBrace)?;
+
+        let mut fields = Vec::new();
+
+        while !self.check(&Token::RBrace) {
+            let field_name = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let value = self.parse_expr()?;
+
+            fields.push(FieldInit {
+                name: field_name,
+                value,
+            });
+
+            if !self.check(&Token::Comma) {
+                break;
+            }
+            self.advance();
+        }
+
+        self.expect(&Token::RBrace)?;
+        let span = start.merge(self.previous_span());
+
+        Ok(Spanned::new(Expr::AnonStructInit { fields }, span))
     }
 
     /// Parse function call: name(args...)

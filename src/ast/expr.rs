@@ -127,6 +127,14 @@ pub enum Expr {
         index: Box<Spanned<Expr>>,
     },
 
+    /// Array slice: arr[start..end] or arr[start..=end]
+    Slice {
+        object: Box<Spanned<Expr>>,
+        start: Box<Spanned<Expr>>,
+        end: Box<Spanned<Expr>>,
+        inclusive: bool,
+    },
+
     /// Function call: foo(a, b)
     Call {
         function: Spanned<String>,
@@ -136,6 +144,12 @@ pub enum Expr {
     /// Struct construction: Point { x: 10, y: 20 }
     StructInit {
         name: Spanned<String>,
+        fields: Vec<FieldInit>,
+    },
+
+    /// Anonymous struct construction: { x: 10, y: 20 }
+    /// Struct name is inferred from context (e.g., variable type annotation)
+    AnonStructInit {
         fields: Vec<FieldInit>,
     },
 

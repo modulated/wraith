@@ -99,7 +99,10 @@ pub(super) fn generate_call(
                     | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
             )
         });
-        total_bytes += if is_16bit { 2 } else { 1 };
+        // Struct and array parameters take 2 bytes (pointer)
+        let is_struct = param_types.get(i).is_some_and(|param_ty| matches!(param_ty, Type::Named(_)));
+        let is_array = param_types.get(i).is_some_and(|param_ty| matches!(param_ty, Type::Array(_, _)));
+        total_bytes += if is_16bit || is_struct || is_array { 2 } else { 1 };
     }
 
     // Allocate temp storage for all arguments at once
@@ -109,6 +112,12 @@ pub(super) fn generate_call(
 
     for (i, arg) in args.iter().enumerate() {
         let temp_addr = temp_base + temp_offset;
+
+        // Check argument type
+        let arg_type = info.resolved_types.get(&arg.span);
+
+        // Check if this is a struct argument (pass by reference)
+        let is_struct = arg_type.is_some_and(|ty| matches!(ty, Type::Named(_)));
 
         // Check if this PARAMETER (not argument) is a 16-bit type
         // This is critical for correct code generation when passing smaller types to larger parameters
@@ -121,11 +130,57 @@ pub(super) fn generate_call(
             )
         });
 
+        // Check if argument is an array (pass by reference as 2-byte pointer)
+        let is_array = arg_type.is_some_and(|ty| matches!(ty, Type::Array(_, _)));
+        let param_is_array = param_types.get(i).is_some_and(|param_ty| matches!(param_ty, Type::Array(_, _)));
+
+        // For struct arguments, check if the parameter is also a struct (pass-by-reference)
+        let param_is_struct = param_types.get(i).is_some_and(|param_ty| matches!(param_ty, Type::Named(_)));
+
+        // Handle array pass-by-reference (pass the 2-byte pointer stored in ZP variable)
+        if is_array && param_is_array
+            && let crate::ast::Expr::Variable(var_name) = &arg.node
+            && let Some(sym) = info.resolved_symbols.get(&arg.span)
+                .or_else(|| info.table.lookup(var_name))
+            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+        {
+            // Load the 2-byte pointer from the array variable's ZP location
+            emitter.emit_inst("LDA", &format!("${:02X}", addr));      // Low byte
+            emitter.emit_inst("LDY", &format!("${:02X}", addr + 1));  // High byte
+
+            // Store 2-byte pointer to temp
+            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+            emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+            temp_offset += 2;
+            arg_info.push((temp_addr, true)); // 2-byte pointer
+            continue;
+        }
+
+        if is_struct && param_is_struct {
+            // Struct pass-by-reference: pass the 2-byte ZP address
+            // The argument must be a variable (for now)
+            if let crate::ast::Expr::Variable(var_name) = &arg.node
+                && let Some(sym) = info.resolved_symbols.get(&arg.span)
+                    .or_else(|| info.table.lookup(var_name))
+                    && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location {
+                        // Load the ADDRESS of the struct (not its value)
+                        emitter.emit_inst("LDA", &format!("#${:02X}", addr));  // Low byte of address
+                        emitter.emit_inst("LDY", "#$00");  // High byte (ZP, so always 0)
+
+                        // Store 2-byte pointer to temp
+                        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+                        emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+                        temp_offset += 2;
+                        arg_info.push((temp_addr, true)); // 2-byte pointer
+                        continue;
+                    }
+            // If not a simple variable, fall through to normal expression handling
+        }
+
         // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
         generate_expr(arg, emitter, info, string_collector)?;
 
         // Check if argument type is 8-bit but parameter is 16-bit (implicit cast)
-        let arg_type = info.resolved_types.get(&arg.span);
         let arg_is_8bit = arg_type.is_some_and(|ty| {
             matches!(
                 ty,
@@ -331,6 +386,7 @@ fn generate_inline_call(
             warnings: info.warnings.clone(),
             unreachable_stmts: info.unreachable_stmts.clone(),
             tail_call_info: info.tail_call_info.clone(),
+            resolved_struct_names: info.resolved_struct_names.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;

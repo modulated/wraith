@@ -130,6 +130,10 @@ pub fn generate_stmt(
                     Type::Primitive(crate::ast::PrimitiveType::B16)
                 );
 
+                // Arrays store address in A (low) and X (high)
+                // Other u16 types store in A (low) and Y (high)
+                let is_array = matches!(sym.ty, Type::Array(_, _));
+
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
                         // Check if this is an address declaration - use symbolic name
@@ -137,17 +141,19 @@ pub fn generate_stmt(
                             emitter.emit_sta_symbol(&name.node);
                         } else {
                             emitter.emit_sta_abs(addr);
-                            // For multi-byte types, also store high byte (in Y)
+                            // For multi-byte types, also store high byte
                             if is_multibyte {
-                                emitter.emit_inst("STY", &format!("${:04X}", addr + 1));
+                                let hi_inst = if is_array { "STX" } else { "STY" };
+                                emitter.emit_inst(hi_inst, &format!("${:04X}", addr + 1));
                             }
                         }
                     }
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                         emitter.emit_sta_zp(addr);
-                        // For multi-byte types, also store high byte (in Y)
+                        // For multi-byte types, also store high byte
                         if is_multibyte {
-                            emitter.emit_inst("STY", &format!("${:02X}", addr + 1));
+                            let hi_inst = if is_array { "STX" } else { "STY" };
+                            emitter.emit_inst(hi_inst, &format!("${:02X}", addr + 1));
                         }
                     }
                     crate::sema::table::SymbolLocation::None => {
@@ -341,9 +347,21 @@ pub fn generate_stmt(
                         string_collector
                     )?;
                 }
+                crate::ast::Expr::Slice { object, start, end, inclusive } => {
+                    generate_slice_assignment(
+                        object,
+                        start,
+                        end,
+                        *inclusive,
+                        value,
+                        emitter,
+                        info,
+                        string_collector
+                    )?;
+                }
                 _ => {
                     return Err(CodegenError::UnsupportedOperation(
-                        "Only variable, index, and field assignment supported".to_string(),
+                        "Only variable, index, field, and slice assignment supported".to_string(),
                     ))
                 }
             }
@@ -583,8 +601,8 @@ pub fn generate_stmt(
 
             // Load array[X] into A using indirect indexed: LDA (ptr),Y
             // Transfer X to Y for indexing
-            emitter.emit_inst("TXA", "Save counter");
-            emitter.emit_inst("TAY", "Use as index");
+            emitter.emit_inst("TXA", "");
+            emitter.emit_inst("TAY", "");
             emitter.emit_inst("LDA", &format!("(${:02X}),Y", array_base));
 
             // Store the element in the loop variable
@@ -617,7 +635,7 @@ pub fn generate_stmt(
             emitter.pop_loop();
 
             // Increment counter
-            emitter.emit_inst("INX", "Next element");
+            emitter.emit_inst("INX", "");
             emitter.reg_state.modify_x();
 
             emitter.emit_inst("JMP", &loop_label);
@@ -804,6 +822,102 @@ fn generate_index_assignment(
         return Err(CodegenError::UnsupportedOperation(
             "Can only assign to array variables, not expressions".to_string()
         ))
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_slice_assignment(
+    object: &Spanned<crate::ast::Expr>,
+    start: &Spanned<crate::ast::Expr>,
+    end: &Spanned<crate::ast::Expr>,
+    inclusive: bool,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::{Expr, Literal};
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::const_eval::eval_const_expr_with_env;
+
+    emitter.emit_comment("Slice assignment");
+
+    // Get the array variable info
+    let array_name = if let Expr::Variable(name) = &object.node {
+        name
+    } else {
+        return Err(CodegenError::UnsupportedOperation(
+            "Slice assignment only supported on array variables".to_string()
+        ));
+    };
+
+    let sym = info.resolved_symbols.get(&object.span)
+        .or_else(|| info.table.lookup(array_name))
+        .ok_or_else(|| CodegenError::SymbolNotFound(array_name.clone()))?;
+
+    let addr = match sym.location {
+        SymbolLocation::ZeroPage(a) => a,
+        SymbolLocation::Absolute(a) if a < 256 => a as u8,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                format!("Array '{}' must be in zero page for slice assignment", array_name)
+            ));
+        }
+    };
+
+    // Try to evaluate slice bounds as constants
+    let const_env = std::collections::HashMap::new();
+    let start_val = eval_const_expr_with_env(start, &const_env)
+        .ok()
+        .and_then(|v| v.as_integer())
+        .map(|v| v as usize);
+    let end_val = eval_const_expr_with_env(end, &const_env)
+        .ok()
+        .and_then(|v| v.as_integer())
+        .map(|v| v as usize);
+
+    // Get values from RHS (must be an array literal for now)
+    let values = match &value.node {
+        Expr::Literal(Literal::Array(elems)) => elems,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "Slice assignment requires an array literal on the right-hand side".to_string()
+            ));
+        }
+    };
+
+    // If bounds are constant, we can unroll the assignment
+    if let (Some(s), Some(e)) = (start_val, end_val) {
+        let actual_end = if inclusive { e + 1 } else { e };
+        let slice_len = actual_end - s;
+
+        // Verify slice length matches value array length
+        if values.len() != slice_len {
+            return Err(CodegenError::UnsupportedOperation(
+                format!("Slice length ({}) does not match value array length ({})", slice_len, values.len())
+            ));
+        }
+
+        emitter.emit_comment(&format!("Unrolled slice assignment [{}..{}]", s, actual_end));
+
+        // Unroll: generate individual stores for each element
+        for (i, val_expr) in values.iter().enumerate() {
+            let target_index = s + i;
+
+            // Generate the value expression
+            generate_expr(val_expr, emitter, info, string_collector)?;
+
+            // Store to array[target_index] using indirect indexed addressing
+            emitter.emit_inst("LDY", &format!("#${:02X}", target_index));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+        }
+    } else {
+        // Dynamic bounds - not supported yet
+        return Err(CodegenError::UnsupportedOperation(
+            "Slice assignment with non-constant bounds is not yet supported".to_string()
+        ));
     }
 
     Ok(())

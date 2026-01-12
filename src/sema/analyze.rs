@@ -1032,11 +1032,10 @@ impl SemanticAnalyzer {
             }
 
             // Store struct param locals mapping in function metadata
-            if !struct_param_locals.is_empty() {
-                if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+            if !struct_param_locals.is_empty()
+                && let Some(metadata) = self.function_metadata.get_mut(&func_name) {
                     metadata.struct_param_locals = struct_param_locals;
                 }
-            }
 
             // Analyze body
             self.analyze_stmt(&func.body)?;
@@ -1400,14 +1399,47 @@ impl SemanticAnalyzer {
                 self.checking_assignment_target = false;
                 let value_ty = self.check_expr(value)?;
 
-                // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
-                // Check if value type can be implicitly converted to target type
-                if !value_ty.is_implicitly_convertible_to(&target_ty) {
-                    return Err(SemaError::TypeMismatch {
-                        expected: target_ty.display_name(),
-                        found: value_ty.display_name(),
-                        span: value.span,
-                    });
+                // Special handling for slice assignment: arr[start..end] = [values]
+                if let Expr::Slice { object: _, start, end, inclusive } = &target.node {
+                    // For slice assignment, check that RHS is an array with matching length
+                    if let Type::Array(_, rhs_size) = &value_ty {
+                        // Try to evaluate slice bounds as constants
+                        if let (Ok(start_val), Ok(end_val)) = (
+                            eval_const_expr_with_env(start, &self.const_env),
+                            eval_const_expr_with_env(end, &self.const_env)
+                        )
+                            && let (Some(s), Some(e)) = (start_val.as_integer(), end_val.as_integer()) {
+                                let actual_end = if *inclusive { e + 1 } else { e };
+                                let slice_len = (actual_end - s) as usize;
+
+                                if *rhs_size != slice_len {
+                                    return Err(SemaError::Custom {
+                                        message: format!(
+                                            "slice length ({}) does not match array length ({})",
+                                            slice_len, rhs_size
+                                        ),
+                                        span: value.span,
+                                    });
+                                }
+                            }
+                        // If bounds aren't constant, we'll check at runtime (or in codegen)
+                    } else {
+                        return Err(SemaError::TypeMismatch {
+                            expected: "array".to_string(),
+                            found: value_ty.display_name(),
+                            span: value.span,
+                        });
+                    }
+                } else {
+                    // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
+                    // Check if value type can be implicitly converted to target type
+                    if !value_ty.is_implicitly_convertible_to(&target_ty) {
+                        return Err(SemaError::TypeMismatch {
+                            expected: target_ty.display_name(),
+                            found: value_ty.display_name(),
+                            span: value.span,
+                        });
+                    }
                 }
 
                 // Check mutability and access mode
@@ -2220,6 +2252,80 @@ impl SemanticAnalyzer {
                     _ => {
                         Err(SemaError::TypeMismatch {
                             expected: "array or string".to_string(),
+                            found: object_ty.display_name(),
+                            span: object.span,
+                        })
+                    }
+                }
+            }
+            Expr::Slice { object, start, end, inclusive } => {
+                // Type check start bound (must be u8)
+                let start_ty = self.check_expr(start)?;
+                if !matches!(start_ty, Type::Primitive(crate::ast::PrimitiveType::U8 | crate::ast::PrimitiveType::I8)) {
+                    return Err(SemaError::TypeMismatch {
+                        expected: "u8 or i8".to_string(),
+                        found: start_ty.display_name(),
+                        span: start.span,
+                    });
+                }
+
+                // Type check end bound (must be u8)
+                let end_ty = self.check_expr(end)?;
+                if !matches!(end_ty, Type::Primitive(crate::ast::PrimitiveType::U8 | crate::ast::PrimitiveType::I8)) {
+                    return Err(SemaError::TypeMismatch {
+                        expected: "u8 or i8".to_string(),
+                        found: end_ty.display_name(),
+                        span: end.span,
+                    });
+                }
+
+                // Type check the object being sliced
+                let object_ty = self.check_expr(object)?;
+
+                match &object_ty {
+                    Type::Array(_element_ty, array_size) => {
+                        // COMPILE-TIME BOUNDS CHECK
+                        // Try to evaluate both bounds as constant expressions
+                        if let (Ok(start_val), Ok(end_val)) = (
+                            eval_const_expr_with_env(start, &self.const_env),
+                            eval_const_expr_with_env(end, &self.const_env)
+                        )
+                            && let (Some(s), Some(e)) = (start_val.as_integer(), end_val.as_integer()) {
+                                let actual_end = if *inclusive { e + 1 } else { e };
+
+                                // Check for negative indices
+                                if s < 0 {
+                                    return Err(SemaError::ArrayIndexOutOfBounds {
+                                        index: s,
+                                        array_size: *array_size,
+                                        span: start.span,
+                                    });
+                                }
+
+                                // Check if start > end
+                                if s > actual_end {
+                                    return Err(SemaError::Custom {
+                                        message: format!("slice start ({}) is greater than end ({})", s, actual_end),
+                                        span: expr.span,
+                                    });
+                                }
+
+                                // Check if end exceeds array size
+                                if actual_end as usize > *array_size {
+                                    return Err(SemaError::ArrayIndexOutOfBounds {
+                                        index: actual_end - 1,
+                                        array_size: *array_size,
+                                        span: end.span,
+                                    });
+                                }
+                            }
+
+                        // Slices return the same array type (for assignment compatibility)
+                        Ok(object_ty.clone())
+                    }
+                    _ => {
+                        Err(SemaError::TypeMismatch {
+                            expected: "array".to_string(),
                             found: object_ty.display_name(),
                             span: object.span,
                         })

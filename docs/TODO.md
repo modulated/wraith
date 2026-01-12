@@ -2,11 +2,7 @@
 
 ## Arrays
 
--   Struct field assignment (obj.field = value)
 -   Multi-dimensional arrays (arr[i][j] = value)
--   Runtime bounds checking (optional)
--   Array slice assignment (arr[1..3] = [a, b, c])
--   Compile time bounds checking
 
 ## BCD
 

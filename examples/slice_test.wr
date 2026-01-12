@@ -1,0 +1,234 @@
+// Comprehensive test for array slicing, function passing, and ZP storage
+// Tests:
+// 1. Basic slice assignment with exclusive range
+// 2. Slice assignment with inclusive range
+// 3. Passing arrays to functions (pass-by-reference)
+// 4. Modifying arrays inside functions
+// 5. Nested function calls with array parameters
+// 6. Multiple arrays with different slice operations
+
+struct TestResult {
+    passed: u8,
+    failed: u8,
+}
+
+// Output address for test results (simulated I/O)
+const OUTPUT: addr = 0x6000;
+const OUT2: addr = 0x6001;
+
+#[reset]
+fn main() {
+    let result: TestResult = { passed: 0, failed: 0 };
+
+    // Test 1: Basic exclusive slice assignment
+    test_exclusive_slice(result);
+
+    // Test 2: Inclusive slice assignment
+    test_inclusive_slice(result);
+
+    // Test 3: Array passed to function and modified
+    test_array_function_modify(result);
+
+    // Test 4: Nested function calls with array
+    test_nested_calls(result);
+
+    // Test 5: Multiple arrays with slices
+    test_multiple_arrays(result);
+
+    // Write final results
+    OUTPUT = result.passed;
+    OUT2 = result.failed;
+}
+
+fn test_exclusive_slice(result: TestResult) {
+    let data: [u8; 8] = [0; 8];
+
+    // Exclusive range: arr[0..3] sets indices 0, 1, 2
+    data[0..3] = [10, 20, 30];
+
+    // Verify values
+    if data[0] == 10 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if data[1] == 20 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if data[2] == 30 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    // Index 3 should still be 0
+    if data[3] == 0 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+}
+
+fn test_inclusive_slice(result: TestResult) {
+    let data: [u8; 8] = [0; 8];
+
+    // Inclusive range: arr[4..=6] sets indices 4, 5, 6
+    data[4..=6] = [40, 50, 60];
+
+    // Verify values
+    if data[4] == 40 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if data[5] == 50 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if data[6] == 60 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    // Index 7 should still be 0
+    if data[7] == 0 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+}
+
+fn test_array_function_modify(result: TestResult) {
+    let arr: [u8; 4] = [1, 2, 3, 4];
+
+    // Pass array to function that modifies it via slice
+    modify_with_slice(arr);
+
+    // Verify modifications persisted (pass-by-reference)
+    if arr[0] == 100 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if arr[1] == 101 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    // Elements 2,3 should be unchanged
+    if arr[2] == 3 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+}
+
+fn modify_with_slice(arr: [u8; 4]) {
+    // Modify first two elements via slice
+    arr[0..2] = [100, 101];
+}
+
+fn test_nested_calls(result: TestResult) {
+    let data: [u8; 6] = [0; 6];
+
+    // Call outer function which calls inner function
+    outer_modify(data);
+
+    // Verify both modifications happened
+    // outer_modify sets [0..2]
+    if data[0] == 1 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if data[1] == 2 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    // inner_modify sets [3..=4]
+    if data[3] == 3 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if data[4] == 4 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+}
+
+fn outer_modify(arr: [u8; 6]) {
+    // Set first two elements
+    arr[0..2] = [1, 2];
+
+    // Call inner function (tests pointer preservation)
+    inner_modify(arr);
+}
+
+fn inner_modify(arr: [u8; 6]) {
+    // Set elements 3 and 4
+    arr[3..=4] = [3, 4];
+}
+
+fn test_multiple_arrays(result: TestResult) {
+    let a: [u8; 4] = [0; 4];
+    let b: [u8; 4] = [0; 4];
+
+    // Slice assign to both arrays
+    a[0..2] = [11, 12];
+    b[1..3] = [21, 22];
+
+    // Verify array a
+    if a[0] == 11 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if a[1] == 12 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    // Verify array b
+    if b[1] == 21 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if b[2] == 22 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    // Verify arrays don't interfere (a[2] and b[0] should be 0)
+    if a[2] == 0 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+
+    if b[0] == 0 {
+        result.passed += 1;
+    } else {
+        result.failed += 1;
+    }
+}

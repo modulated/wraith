@@ -1,0 +1,15 @@
+// Test slice assignment
+// arr[start..end] = [values]
+
+#[reset]
+fn main() {
+    let data: [u8; 8] = [0; 8];
+
+    // Exclusive range: indices 0, 1, 2
+    data[0..3] = [1, 2, 3];
+
+    // Inclusive range: indices 5, 6, 7
+    data[5..=7] = [5, 6, 7];
+
+    // Result should be: [1, 2, 3, 0, 0, 5, 6, 7]
+}
