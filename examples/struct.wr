@@ -1,0 +1,24 @@
+struct Score {
+    p1: u8,
+    p2: u8,
+}
+
+
+#[reset]
+fn main() {
+    let score: Score = { p1: 0, p2: 0 };
+    increment_1(score);
+    increment_1(score);
+    increment_2(score);
+    increment_1(score);
+    increment_2(score);
+    increment_1(score);
+}
+
+fn increment_1(score: Score) {
+    score.p1 += 1;
+}
+
+fn increment_2(score: Score) {
+    score.p2 += 1;
+}

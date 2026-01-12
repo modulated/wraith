@@ -50,6 +50,10 @@ pub struct SemanticAnalyzer {
     memory_layout: MemoryLayout,
     /// True when checking an assignment target (not reading a value)
     checking_assignment_target: bool,
+    /// Expected type for type inference (e.g., for anonymous struct literals)
+    expected_type: Option<Type>,
+    /// Map from span to resolved struct name for anonymous struct inits
+    resolved_struct_names: HashMap<Span, String>,
 }
 
 /// Zero page memory allocator
@@ -159,6 +163,8 @@ impl SemanticAnalyzer {
             unreachable_stmts: HashSet::new(),
             memory_layout: MemoryLayout::new(),
             checking_assignment_target: false,
+            expected_type: None,
+            resolved_struct_names: HashMap::new(),
         }
     }
 
@@ -189,6 +195,8 @@ impl SemanticAnalyzer {
             unreachable_stmts: HashSet::new(),
             memory_layout: MemoryLayout::new(),
             checking_assignment_target: false,
+            expected_type: None,
+            resolved_struct_names: HashMap::new(),
         }
     }
 
@@ -257,6 +265,7 @@ impl SemanticAnalyzer {
             warnings: self.warnings.clone(),
             unreachable_stmts: self.unreachable_stmts.clone(),
             tail_call_info,
+            resolved_struct_names: self.resolved_struct_names.clone(),
         })
     }
 
@@ -356,6 +365,7 @@ impl SemanticAnalyzer {
                         inline_param_symbols: None, // Will be populated in second pass
                         has_tail_recursion: false,  // Will be populated by tail call analysis
                         param_bytes_used,
+                        struct_param_locals: std::collections::HashMap::new(), // Will be populated during second pass
                     },
                 );
 
@@ -949,6 +959,8 @@ impl SemanticAnalyzer {
             // Each parameter gets sequential bytes (16-bit params take 2 bytes)
             let layout = MemoryLayout::new();
             let mut byte_offset = 0u8;
+            let mut struct_param_locals: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+
             for param in func.params.iter() {
                 let name = param.name.node.clone();
 
@@ -980,7 +992,25 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                let param_size = param_type.size();
+                // Struct parameters are passed by reference (2-byte pointer)
+                // Other types are passed by value
+                let is_struct_param = matches!(param_type, Type::Named(_))
+                    && self.type_registry.get_struct(
+                        if let Type::Named(n) = &param_type { n } else { "" }
+                    ).is_some();
+
+                let param_size = if is_struct_param {
+                    2  // Pointer size for pass-by-reference
+                } else {
+                    param_type.size()
+                };
+
+                // For struct parameters, allocate local storage to copy the pointer
+                // This prevents nested calls from clobbering the struct pointer in param space
+                if is_struct_param {
+                    let local_addr = self.zp_allocator.allocate_range(2)?;
+                    struct_param_locals.insert(name.clone(), local_addr);
+                }
 
                 let info = SymbolInfo {
                     name: name.clone(),
@@ -999,6 +1029,13 @@ impl SemanticAnalyzer {
 
                 // Advance byte offset by parameter size (16-bit params take 2 bytes)
                 byte_offset += param_size as u8;
+            }
+
+            // Store struct param locals mapping in function metadata
+            if !struct_param_locals.is_empty() {
+                if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+                    metadata.struct_param_locals = struct_param_locals;
+                }
             }
 
             // Analyze body
@@ -1281,7 +1318,10 @@ impl SemanticAnalyzer {
                     });
                 }
 
+                // Set expected type context for anonymous struct literals
+                self.expected_type = Some(declared_ty.clone());
                 let init_ty = self.check_expr(init)?;
+                self.expected_type = None;
 
                 // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
                 // Check if initializer type can be implicitly converted to declared type
@@ -1313,13 +1353,26 @@ impl SemanticAnalyzer {
 
                 // Allocate in zero page using allocator
                 // Arrays (pointers) and u16/i16/b16 types need 2 bytes
-                let addr = if matches!(declared_ty,
-                    Type::Array(_, _) |
+                // Named types: structs need their full size, enums need 2 bytes (pointer)
+                let alloc_size = match &declared_ty {
+                    Type::Array(_, _) => 2,  // Pointer
                     Type::Primitive(crate::ast::PrimitiveType::U16) |
                     Type::Primitive(crate::ast::PrimitiveType::I16) |
-                    Type::Primitive(crate::ast::PrimitiveType::B16)
-                ) {
-                    self.zp_allocator.allocate_range(2)?
+                    Type::Primitive(crate::ast::PrimitiveType::B16) => 2,
+                    Type::Named(type_name) => {
+                        // Check if it's a struct (allocate full size) or enum (allocate pointer)
+                        if let Some(struct_def) = self.type_registry.get_struct(type_name) {
+                            struct_def.total_size
+                        } else if self.type_registry.get_enum(type_name).is_some() {
+                            2  // Enums are stored as pointers to their data
+                        } else {
+                            1  // Unknown type, default to 1
+                        }
+                    }
+                    _ => 1,
+                };
+                let addr = if alloc_size > 1 {
+                    self.zp_allocator.allocate_range(alloc_size as u8)?
                 } else {
                     self.zp_allocator.allocate()?
                 };
@@ -1956,6 +2009,43 @@ impl SemanticAnalyzer {
                 }
 
                 Ok(Type::Named(name.node.clone()))
+            }
+            Expr::AnonStructInit { fields } => {
+                // Get expected type from context (set during VarDecl analysis)
+                let struct_name = match &self.expected_type {
+                    Some(Type::Named(name)) => name.clone(),
+                    Some(other_ty) => {
+                        return Err(SemaError::TypeMismatch {
+                            expected: "struct type".to_string(),
+                            found: other_ty.display_name(),
+                            span: expr.span,
+                        });
+                    }
+                    None => {
+                        return Err(SemaError::Custom {
+                            message: "Cannot infer struct type for anonymous struct literal. Use explicit type: StructName { ... }".to_string(),
+                            span: expr.span,
+                        });
+                    }
+                };
+
+                // Verify struct exists
+                if !self.type_registry.structs.contains_key(&struct_name) {
+                    return Err(SemaError::UndefinedSymbol {
+                        name: struct_name.clone(),
+                        span: expr.span,
+                    });
+                }
+
+                // Type check each field value
+                for field in fields {
+                    self.check_expr(&field.value)?;
+                }
+
+                // Store the resolved struct name for codegen
+                self.resolved_struct_names.insert(expr.span, struct_name.clone());
+
+                Ok(Type::Named(struct_name))
             }
             Expr::EnumVariant { enum_name, variant, data } => {
                 // Look up the enum definition

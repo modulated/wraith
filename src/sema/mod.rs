@@ -527,6 +527,9 @@ pub struct FunctionMetadata {
     /// Total bytes used by function parameters in zero page
     /// Used for optimized parameter save/restore in recursive calls
     pub param_bytes_used: u8,
+    /// For struct parameters: maps param name to local ZP address where pointer copy is stored
+    /// This allows nested calls without clobbering the struct pointer in parameter space
+    pub struct_param_locals: HashMap<String, u8>,
 }
 
 /// Tail call information for a function
@@ -555,6 +558,8 @@ pub struct ProgramInfo {
     pub unreachable_stmts: HashSet<Span>,
     /// Tail call information for all functions
     pub tail_call_info: HashMap<String, TailCallInfo>,
+    /// Map of anonymous struct init spans to their resolved struct names
+    pub resolved_struct_names: HashMap<Span, String>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

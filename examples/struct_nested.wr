@@ -1,0 +1,30 @@
+// Test struct pass-by-reference with nested calls
+// This verifies that struct pointers survive nested function calls
+
+struct Score {
+    p1: u8,
+    p2: u8,
+}
+
+#[reset]
+fn main() {
+    let score: Score = { p1: 0, p2: 0 };
+
+    // Call function that makes nested calls
+    increment_with_nested(score);
+
+    // After this, score.p1 should be 1
+}
+
+fn increment_with_nested(score: Score) {
+    // This nested call would clobber $80-$81 without the fix
+    dummy_call();
+
+    // This should still work because we use local pointer copy ($42)
+    score.p1 += 1;
+}
+
+fn dummy_call() {
+    // This function uses the parameter area
+    // Without the fix, it would clobber the struct pointer at $80-$81
+}

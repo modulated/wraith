@@ -224,6 +224,39 @@ fn generate_function(
         emitter.emit_label(&format!("{}_loop_start", name));
     }
 
+    // Copy struct parameter pointers to local storage
+    // This ensures nested calls don't clobber the struct pointer in param space
+    if let Some(metadata) = info.function_metadata.get(name) {
+        if !metadata.struct_param_locals.is_empty() {
+            emitter.emit_comment("Copy struct param pointers to local storage");
+            let param_base = emitter.memory_layout.param_base;
+            let mut param_offset = 0u8;
+
+            // Iterate through params to find struct params and their offsets
+            for param in &func.params {
+                let param_name = &param.name.node;
+                let param_type = info.resolved_types.get(&param.ty.span);
+
+                // Check if this param has a local copy
+                if let Some(&local_addr) = metadata.struct_param_locals.get(param_name) {
+                    let param_addr = param_base + param_offset;
+                    emitter.emit_comment(&format!("Copy '{}' pointer ${:02X} -> ${:02X}", param_name, param_addr, local_addr));
+                    emitter.emit_inst("LDA", &format!("${:02X}", param_addr));
+                    emitter.emit_inst("STA", &format!("${:02X}", local_addr));
+                    emitter.emit_inst("LDA", &format!("${:02X}", param_addr + 1));
+                    emitter.emit_inst("STA", &format!("${:02X}", local_addr + 1));
+                    param_offset += 2; // Struct pointers are 2 bytes
+                } else if let Some(ty) = param_type {
+                    // Non-struct param - advance by its size
+                    param_offset += ty.size() as u8;
+                } else {
+                    // Fallback: assume 1 byte
+                    param_offset += 1;
+                }
+            }
+        }
+    }
+
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
     let is_interrupt = func.attributes.iter().any(|attr| matches!(

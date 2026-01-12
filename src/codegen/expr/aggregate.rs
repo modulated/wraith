@@ -223,6 +223,67 @@ pub(super) fn generate_struct_init(
     Ok(())
 }
 
+/// Generate runtime struct initialization directly to a zero page address.
+/// This stores field values directly to ZP memory instead of creating ROM data.
+/// Returns with A containing the base address (for chained operations).
+pub fn generate_struct_init_runtime(
+    struct_name: &str,
+    fields: &[crate::ast::FieldInit],
+    dest_addr: u8,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    emitter.emit_comment(&format!("Struct init (runtime): {} at ${:02X}", struct_name, dest_addr));
+
+    // Look up the struct definition
+    let struct_def = info.type_registry.get_struct(struct_name)
+        .ok_or_else(|| CodegenError::UnsupportedOperation(
+            format!("struct '{}' not found in type registry", struct_name)
+        ))?;
+
+    // Create a map of field values for quick lookup
+    let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> =
+        fields.iter()
+            .map(|f| (f.name.node.clone(), &f.value))
+            .collect();
+
+    // Initialize each field in order (respecting struct layout)
+    for field_info in &struct_def.fields {
+        let field_addr = dest_addr + field_info.offset as u8;
+
+        if let Some(value_expr) = field_values.get(&field_info.name) {
+            // Generate the field value expression
+            generate_expr(value_expr, emitter, info, string_collector)?;
+
+            // Store to field address
+            let size = field_info.ty.size();
+            if size == 1 {
+                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+            } else if size == 2 {
+                // For u16: A has low byte, Y has high byte
+                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+            } else {
+                return Err(CodegenError::UnsupportedOperation(
+                    format!("struct field type with size {} not yet supported", size)
+                ));
+            }
+        } else {
+            // Field not provided - initialize to zero
+            emitter.emit_inst("LDA", "#$00");
+            for i in 0..field_info.ty.size() {
+                emitter.emit_inst("STA", &format!("${:02X}", field_addr + i as u8));
+            }
+        }
+    }
+
+    // Return base address in A (for use in expressions)
+    emitter.emit_inst("LDA", &format!("#${:02X}", dest_addr));
+
+    Ok(())
+}
+
 pub(super) fn generate_field_access(
     object: &Spanned<crate::ast::Expr>,
     field: &Spanned<String>,
@@ -272,13 +333,34 @@ pub(super) fn generate_field_access(
                     format!("field '{}' not found in struct '{}'", field.node, struct_name)
                 ))?;
 
-            let field_addr = base_addr + field_info.offset as u16;
+            // Check if this is a parameter (pass-by-reference)
+            // Parameters are in the param region ($80-$BF)
+            let param_base = emitter.memory_layout.param_base;
+            let param_end = emitter.memory_layout.param_end;
+            let is_parameter = base_addr >= param_base as u16 && base_addr <= param_end as u16;
 
-            // Load the field value into accumulator
-            if field_addr < 0x100 {
-                emitter.emit_inst("LDA", &format!("${:02X}", field_addr));
+            if is_parameter {
+                // Check if this struct param has a local pointer copy
+                // (prevents clobbering on nested calls)
+                let local_ptr_addr = emitter.current_function()
+                    .and_then(|fn_name| info.function_metadata.get(fn_name))
+                    .and_then(|meta| meta.struct_param_locals.get(var_name))
+                    .copied();
+
+                let ptr_addr = local_ptr_addr.unwrap_or(base_addr as u8);
+
+                // Use indirect indexed addressing: LDA ($ptr),Y
+                let offset = field_info.offset;
+                emitter.emit_inst("LDY", &format!("#${:02X}", offset));
+                emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
             } else {
-                emitter.emit_inst("LDA", &format!("${:04X}", field_addr));
+                // Local struct - direct access
+                let field_addr = base_addr + field_info.offset as u16;
+                if field_addr < 0x100 {
+                    emitter.emit_inst("LDA", &format!("${:02X}", field_addr));
+                } else {
+                    emitter.emit_inst("LDA", &format!("${:04X}", field_addr));
+                }
             }
 
             Ok(())

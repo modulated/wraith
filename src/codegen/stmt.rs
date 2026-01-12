@@ -33,14 +33,49 @@ pub fn generate_stmt(
             mutable: _,
             zero_page: _,
         } => {
-            // Check for shorthand array syntax: [value] expanding to [value, value, ...]
-            // If init is a single-element array and target is a larger array, synthesize an ArrayFill
-            let modified_init;
-            let init_expr = if let Some(sym) = info.resolved_symbols.get(&name.span) {
+            // Look up variable info first
+            if let Some(sym) = info.resolved_symbols.get(&name.span) {
+                use crate::sema::table::SymbolKind;
                 use crate::sema::types::Type;
 
-                // Check if target is an array and init is a single-element array literal
-                if let Type::Array(_, target_size) = &sym.ty {
+                // Check if this is a struct variable initialized with a struct literal
+            // Use runtime initialization for struct literals only (not enum variants)
+            if let Type::Named(struct_name) = &sym.ty {
+                // Only use runtime init if the init expression is a struct literal
+                let is_struct_literal = matches!(
+                    &init.node,
+                    crate::ast::Expr::StructInit { .. } | crate::ast::Expr::AnonStructInit { .. }
+                );
+
+                // Also verify this is actually a struct type (not an enum)
+                let is_struct_type = info.type_registry.get_struct(struct_name).is_some();
+
+                if is_struct_literal && is_struct_type
+                    && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location {
+                        // Get fields from the init expression
+                        let fields = match &init.node {
+                            crate::ast::Expr::StructInit { fields, .. } => fields,
+                            crate::ast::Expr::AnonStructInit { fields } => fields,
+                            _ => unreachable!(),
+                        };
+
+                        // Use runtime struct initialization directly to ZP address
+                        crate::codegen::expr::generate_struct_init_runtime(
+                            struct_name,
+                            fields,
+                            addr,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?;
+                        return Ok(());
+                    }
+            }
+
+                // Check for shorthand array syntax: [value] expanding to [value, value, ...]
+                // If init is a single-element array and target is a larger array, synthesize an ArrayFill
+                let modified_init;
+                let init_expr = if let Type::Array(_, target_size) = &sym.ty {
                     if let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) = &init.node {
                         if elements.len() == 1 && *target_size > 1 {
                             // Shorthand syntax detected! Convert to ArrayFill
@@ -61,19 +96,10 @@ pub fn generate_stmt(
                     }
                 } else {
                     init
-                }
-            } else {
-                init
-            };
+                };
 
-            // Generate initialization expression (result in A, and X if u16)
-            generate_expr(init_expr, emitter, info, string_collector)?;
-
-            // Store in variable location
-            // Look up by span in resolved_symbols since local vars aren't in global table
-            if let Some(sym) = info.resolved_symbols.get(&name.span) {
-                use crate::sema::table::SymbolKind;
-                use crate::sema::types::Type;
+                // Generate initialization expression (result in A, and X if u16)
+                generate_expr(init_expr, emitter, info, string_collector)?;
 
                 // Check if we need to zero-extend (u8 -> u16)
                 // Get the init expression type from resolved_types
@@ -305,9 +331,19 @@ pub fn generate_stmt(
                         string_collector
                     )?;
                 }
+                crate::ast::Expr::Field { object, field } => {
+                    generate_field_assignment(
+                        object,
+                        field,
+                        value,
+                        emitter,
+                        info,
+                        string_collector
+                    )?;
+                }
                 _ => {
                     return Err(CodegenError::UnsupportedOperation(
-                        "Only variable assignment supported".to_string(),
+                        "Only variable, index, and field assignment supported".to_string(),
                     ))
                 }
             }
@@ -771,6 +807,132 @@ fn generate_index_assignment(
     }
 
     Ok(())
+}
+
+fn generate_field_assignment(
+    object: &Spanned<crate::ast::Expr>,
+    field: &Spanned<String>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+    use crate::ast::PrimitiveType;
+
+    // Get the base object (must be a variable for now)
+    if let Expr::Variable(var_name) = &object.node {
+        // Look up the variable
+        let sym = info.resolved_symbols.get(&object.span)
+            .or_else(|| info.table.lookup(var_name))
+            .ok_or_else(|| CodegenError::SymbolNotFound(var_name.clone()))?;
+
+        // Get the base address of the struct
+        let base_addr = match sym.location {
+            SymbolLocation::ZeroPage(addr) => addr as u16,
+            SymbolLocation::Absolute(addr) => addr,
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    format!("Cannot assign to field of variable with location: {:?}", sym.location)
+                ));
+            }
+        };
+
+        // Get the struct type name from the symbol's type
+        let struct_name = if let Type::Named(name) = &sym.ty {
+            name
+        } else {
+            return Err(CodegenError::UnsupportedOperation(
+                format!("variable '{}' is not a struct type", var_name)
+            ));
+        };
+
+        // Look up the struct definition
+        let struct_def = info.type_registry.get_struct(struct_name)
+            .ok_or_else(|| CodegenError::UnsupportedOperation(
+                format!("struct '{}' not found in type registry", struct_name)
+            ))?;
+
+        // Find the field and get its offset
+        let field_info = struct_def.get_field(&field.node)
+            .ok_or_else(|| CodegenError::UnsupportedOperation(
+                format!("field '{}' not found in struct '{}'", field.node, struct_name)
+            ))?;
+
+        // Check if field is multi-byte
+        let is_multibyte = matches!(&field_info.ty,
+            Type::Primitive(PrimitiveType::U16) |
+            Type::Primitive(PrimitiveType::I16) |
+            Type::Primitive(PrimitiveType::B16)
+        );
+
+        emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
+
+        // Check if this is a parameter (pass-by-reference)
+        // Parameters are in the param region ($80-$BF)
+        let param_base = emitter.memory_layout.param_base;
+        let param_end = emitter.memory_layout.param_end;
+        let is_parameter = base_addr >= param_base as u16 && base_addr <= param_end as u16;
+
+        // Generate value expression (result in A, or A/Y for u16)
+        generate_expr(value, emitter, info, string_collector)?;
+
+        if is_parameter {
+            // Check if this struct param has a local pointer copy
+            // (prevents clobbering on nested calls)
+            let local_ptr_addr = emitter.current_function()
+                .and_then(|fn_name| info.function_metadata.get(fn_name))
+                .and_then(|meta| meta.struct_param_locals.get(var_name))
+                .copied();
+
+            let ptr_addr = local_ptr_addr.unwrap_or(base_addr as u8);
+
+            // Use indirect indexed addressing: STA ($ptr),Y
+            // Need to save A first since we'll need Y for the offset
+            let offset = field_info.offset;
+
+            // Save value to temp
+            emitter.emit_inst("STA", "$20");  // Save low byte
+            if is_multibyte {
+                emitter.emit_inst("STY", "$21");  // Save high byte
+            }
+
+            // Set Y to field offset and store via indirect
+            emitter.emit_inst("LDY", &format!("#${:02X}", offset));
+            emitter.emit_inst("LDA", "$20");  // Restore value
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr_addr));
+
+            if is_multibyte {
+                // Store high byte at next offset
+                emitter.emit_inst("INY", "");
+                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr_addr));
+            }
+        } else {
+            // Local struct - direct access
+            let field_addr = base_addr + field_info.offset as u16;
+
+            if field_addr < 0x100 {
+                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                if is_multibyte {
+                    emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+                }
+            } else {
+                emitter.emit_inst("STA", &format!("${:04X}", field_addr));
+                if is_multibyte {
+                    emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
+                }
+            }
+        }
+
+        Ok(())
+    } else {
+        Err(CodegenError::UnsupportedOperation(
+            "Field assignment only supported on variables (not expressions)".to_string()
+        ))
+    }
 }
 
 fn generate_match(
