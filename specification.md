@@ -774,9 +774,141 @@ let dir: Direction = Direction::North;
 
 ### Enums with Data (Tagged Unions)
 
-- [ ] TODO: Document if implemented in language
-- [ ] Add examples of tagged unions if supported
-- [ ] Document memory layout of tagged unions
+Wraith supports enum variants that carry data, allowing you to create tagged unions (also known as sum types or discriminated unions). There are two forms: tuple variants and struct variants.
+
+#### Tuple Variants
+
+Tuple variants carry unnamed fields accessed by position:
+
+```rust
+enum Option {
+    None,
+    Some(u8),
+}
+
+enum Color {
+    RGB(u8, u8, u8),
+}
+
+enum Result {
+    Ok(u16),
+    Err(u8),
+}
+
+// Creating tuple variant instances
+let value: Option = Option::Some(42);
+let red: Color = Color::RGB(255, 0, 0);
+let success: Result = Result::Ok(1000);
+```
+
+**Pattern Matching with Tuple Variants** (⚠️ EXPERIMENTAL - Limited Testing):
+
+```rust
+enum Option {
+    None,
+    Some(u8),
+}
+
+fn unwrap_or_default(opt: Option) -> u8 {
+    match opt {
+        Option::Some(value) => {
+            // 'value' is extracted from the enum
+            return value;
+        }
+        Option::None => {
+            return 0;
+        }
+    }
+}
+```
+
+⚠️ **Status**: Tuple variant pattern matching with data extraction has code generation support but is **experimental and minimally tested**. The implementation exists in the compiler but may have edge cases or bugs. Thorough testing is ongoing.
+
+#### Struct Variants
+
+Struct variants carry named fields:
+
+```rust
+enum Message {
+    Quit,
+    Move { x: u8, y: u8 },
+    Write { text: str },
+    ChangeColor { r: u8, g: u8, b: u8 },
+}
+
+// Creating struct variant instances
+let msg: Message = Message::Move { x: 10, y: 20 };
+let color: Message = Message::ChangeColor { r: 255, g: 128, b: 0 };
+```
+
+**Pattern Matching with Struct Variants** (❌ NOT YET IMPLEMENTED):
+
+```rust
+// This syntax is NOT currently supported:
+match msg {
+    Message::Move { x, y } => {  // ❌ Compilation error
+        // Field extraction not implemented
+    }
+    _ => {}
+}
+```
+
+❌ **Status**: Struct variant pattern matching with field extraction is **not yet implemented**. The compiler will return an error: "Pattern bindings for struct variants not yet implemented". For now, you can only match on struct variants without extracting their fields.
+
+#### Memory Layout
+
+Tagged unions are represented in memory with a discriminant tag followed by field data:
+
+```
+Memory layout for enum variants:
++------+--------+--------+--------+
+| Tag  | Field0 | Field1 | Field2 |
+| (u8) |   ...  |   ...  |   ...  |
++------+--------+--------+--------+
+```
+
+**Example**:
+```rust
+enum Color {
+    RGB(u8, u8, u8),  // Tag 0
+}
+
+// Memory layout of Color::RGB(255, 128, 64):
+// Byte 0: 0x00  (tag for RGB variant)
+// Byte 1: 0xFF  (red = 255)
+// Byte 2: 0x80  (green = 128)
+// Byte 3: 0x40  (blue = 64)
+```
+
+**Important Notes**:
+- The tag is always a `u8` (1 byte)
+- Fields are laid out sequentially after the tag
+- Total size = 1 byte (tag) + sum of field sizes
+- Enum expressions evaluate to a pointer to the enum data (returned in A:X registers)
+- Pattern matching loads the tag byte and compares it to variant discriminants
+
+#### Mixed Variant Types
+
+You can mix unit, tuple, and struct variants in the same enum:
+
+```rust
+enum Input {
+    None,                          // Unit variant (tag only)
+    Key(u8),                       // Tuple variant (tag + 1 byte)
+    MouseClick { x: u8, y: u8 },   // Struct variant (tag + 2 bytes)
+}
+
+let input1: Input = Input::None;
+let input2: Input = Input::Key(65);  // 'A' key
+let input3: Input = Input::MouseClick { x: 100, y: 50 };
+```
+
+#### Current Limitations
+
+1. **Struct variant pattern matching**: Cannot extract fields from struct variants in match arms (planned feature)
+2. **Tuple variant testing**: Pattern matching with data extraction is minimally tested and may have bugs
+3. **Complex nesting**: Deeply nested enums with data may have codegen issues
+4. **Size calculations**: Each variant can have different sizes, making the enum size equal to the largest variant + 1 byte for the tag
 
 ### Default Discriminant Values
 
@@ -865,6 +997,10 @@ let raw: u8 = s as u8;     // Cast to u8: 1
 - [x] Document default discriminant values
 - [x] Add pattern matching with enums
 - [x] Document enum memory representation
+- [x] Document tagged unions (tuple and struct variants)
+- [x] Document memory layout for tagged unions
+- [ ] Complete testing for tuple variant pattern matching (in progress)
+- [ ] Implement struct variant pattern matching (planned)
 
 ---
 
