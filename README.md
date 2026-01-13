@@ -4,19 +4,19 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 
 ## Key Features
 
-- **Direct 6502 Assembly Generation** - Compiles to hand-optimized 6502 assembly code, not a generic bytecode
-- **Opinionated Target** - Designed specifically for 6502 architecture with no abstraction overhead
-- **Low-Level Control** - Memory-mapped I/O, inline assembly, and explicit memory management
-- **No Runtime** - Zero-cost abstractions with no garbage collection or hidden allocations
+- **Direct 6502 Assembly Generation** - Compiles to compiler-optimized 6502 assembly code, not a generic bytecode
+- **Opinionated** - Designed specifically for 6502 architecture with no runtime or abstraciton overhead
+- **Low-Level Control** - Memory-mapped I/O, inline assembly, and explicit memory management if required
 - **Modern Syntax** - Rust-inspired syntax with explicit types and pattern matching
 - **Tail Call Optimization** - Recursive functions optimized to loops when possible
+- **Module System** - No more header files, no more macros
 - **Configurable Memory Sections** - Control code placement for different memory layouts
 
 ## Quick Setup
 
 ### Prerequisites
 - Rust toolchain (cargo)
-- A 6502 assembler (e.g., ca65, DASM, or your preferred assembler)
+- A 6502 assembler (e.g., ca65, DASM, or your preferred 6502 assembler)
 
 ### Build and Run
 
@@ -33,21 +33,6 @@ ca65 your-program.asm -o your-program.o
 ld65 your-program.o -o your-program.bin
 ```
 
-### Example Program
-
-```rust
-#[reset]
-fn main() {
-    let x: u8 = 42;
-    let y: u8 = x + 8;
-
-    // Memory-mapped output
-    let OUTPUT: addr = 0x6000;
-    OUTPUT = y;
-
-    loop { }
-}
-```
 
 ## Documentation
 
@@ -63,10 +48,10 @@ The configuration file defines memory sections where code and data can be placed
 
 ```toml
 [[sections]]
-name = "STDLIB"
+name = "MY_AWESOME_LIBRARY"
 start = 0x8000
 end = 0x8FFF
-description = "Standard library functions (4KB)"
+description = "Custom Library functions (4KB)"
 
 [[sections]]
 name = "CODE"
@@ -86,9 +71,8 @@ default_section = "CODE"
 ### Default Configuration
 
 If no `wraith.toml` is present, the compiler uses these defaults:
-- **STDLIB**: `0x8000-0x8FFF` (4KB) - Standard library
-- **CODE**: `0x9000-0xBFFF` (12KB) - User code (default)
-- **DATA**: `0xC000-0xCFFF` (4KB) - Constants and data
+- **CODE**: `0x8000-0xBFFF` (16KB) - User code (default)
+- **DATA**: `0xD000-0xEFFF` (8KB) - Constants and data
 
 Functions without an explicit `#[org]` or `#[section]` attribute are placed in the default section.
 
@@ -105,6 +89,3 @@ Check the `examples/` directory for sample programs demonstrating:
 
 See [ROADMAP.md](ROADMAP.md) for planned features and development priorities.
 
-## License
-
-[Add license information here]
