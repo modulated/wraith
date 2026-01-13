@@ -69,8 +69,8 @@ fn main() {
 /// Struct definition and usage
 pub const STRUCT_USAGE: &str = r#"
 struct Point {
-    u8 x,
-    u8 y,
+    x: u8,
+    y: u8,
 }
 
 fn main() {

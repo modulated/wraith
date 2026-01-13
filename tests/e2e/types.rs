@@ -30,8 +30,8 @@ fn array_fill() {
 fn struct_definition() {
     let asm = compile_success(r#"
         struct Point {
-            u8 x,
-            u8 y,
+            x: u8,
+            y: u8,
         }
         fn main() {}
     "#);
@@ -44,8 +44,8 @@ fn struct_definition() {
 fn struct_initialization() {
     let asm = compile_success(r#"
         struct Point {
-            u8 x,
-            u8 y,
+            x: u8,
+            y: u8,
         }
         fn main() {
             let p: Point = Point { x: 10, y: 20 };
@@ -157,8 +157,8 @@ fn array_index_u16_elements() {
 fn struct_field_read() {
     let asm = compile_success(r#"
         struct Point {
-            u8 x,
-            u8 y,
+            x: u8,
+            y: u8,
         }
         fn main() {
             let p: Point = Point { x: 10, y: 20 };
@@ -176,8 +176,8 @@ fn struct_field_read() {
 fn struct_field_write() {
     let asm = compile_success(r#"
         struct Point {
-            u8 x,
-            u8 y,
+            x: u8,
+            y: u8,
         }
         fn main() {
             let p: Point = Point { x: 0, y: 0 };
@@ -194,9 +194,9 @@ fn struct_field_write() {
 fn struct_multiple_field_access() {
     let asm = compile_success(r#"
         struct RGB {
-            u8 r,
-            u8 g,
-            u8 b,
+            r: u8,
+            g: u8,
+            b: u8,
         }
         fn main() {
             let color: RGB = RGB { r: 255, g: 128, b: 64 };
@@ -216,11 +216,11 @@ fn struct_multiple_field_access() {
 fn nested_struct_field_access() {
     let asm = compile_success(r#"
         struct Inner {
-            u8 value,
+            value: u8,
         }
         struct Outer {
             Inner inner,
-            u8 other,
+            other: u8,
         }
         fn main() {
             let obj: Outer = Outer {
@@ -240,8 +240,8 @@ fn nested_struct_field_access() {
 fn struct_field_u16() {
     let asm = compile_success(r#"
         struct Data {
-            u16 value,
-            u8 flags,
+            value: u16,
+            flags: u8,
         }
         fn main() {
             let d: Data = Data { value: 0x1234, flags: 0xFF };

@@ -333,8 +333,9 @@ impl Parser<'_> {
         let mut fields = Vec::new();
 
         while !self.check(&Token::RBrace) {
-            let ty = self.parse_type()?;
             let field_name = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let ty = self.parse_type()?;
 
             fields.push(StructField {
                 name: field_name,
@@ -379,13 +380,14 @@ impl Parser<'_> {
             let variant_name = self.expect_ident()?;
 
             let variant = if self.check(&Token::LBrace) {
-                // Struct variant: Variant { type field, ... }
+                // Struct variant: Variant { field: type, ... }
                 self.advance();
                 let mut fields = Vec::new();
 
                 while !self.check(&Token::RBrace) {
-                    let ty = self.parse_type()?;
                     let field_name = self.expect_ident()?;
+                    self.expect(&Token::Colon)?;
+                    let ty = self.parse_type()?;
                     fields.push(StructField {
                         name: field_name,
                         ty,

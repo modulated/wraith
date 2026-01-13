@@ -110,12 +110,12 @@ fn duplicate_struct() {
     assert_error_contains(
         r#"
         struct Point {
-            u8 x,
-            u8 y,
+            x: u8,
+            y: u8,
         }
         struct Point {
-            u8 a,
-            u8 b,
+            a: u8,
+            b: u8,
         }
         fn main() {}
         "#,
@@ -146,9 +146,9 @@ fn duplicate_struct_field() {
     assert_error_contains(
         r#"
         struct Point {
-            u8 x,
-            u8 y,
-            u8 x,
+            x: u8,
+            y: u8,
+            x: u8,
         }
         fn main() {}
         "#,
@@ -475,7 +475,7 @@ fn struct_instruction_conflict() {
     assert_error_contains(
         r#"
         struct AND {
-            u8 x,
+            x: u8,
         }
         fn main() {}
         "#,

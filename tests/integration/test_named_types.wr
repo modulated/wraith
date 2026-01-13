@@ -5,14 +5,14 @@ const TEST_OUTPUT: addr = 0xC000;
 
 // Simple struct
 struct Point {
-    u8 x,
-    u8 y
+    x: u8,
+    y: u8,
 }
 
 // Struct with nested named type
 struct Sprite {
-    Point position,
-    u8 color
+    position: Point,
+    color: u8,
 }
 
 // Enum with variants
@@ -36,7 +36,7 @@ fn main() {
     // 3. Status with size 1
 
     // Create an integer array - just to test compilation
-    buffer: [u8; 6] = [0; 6];
+    let buffer: [u8; 6] = [0; 6];
 
     // Success - named types were registered and sized correctly!
     TEST_OUTPUT = 0xFF;

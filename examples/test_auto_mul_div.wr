@@ -1,18 +1,23 @@
 // Test automatic mul16 and div16 - no imports needed!
 
-const RESULT_MUL: addr = 0x6000;
-const RESULT_DIV: addr = 0x6002;
+const RESULT_MUL_LOW: addr = 0x6000;
+const RESULT_MUL_HIGH: addr = 0x6001;
+const RESULT_DIV_LOW: addr = 0x6002;
+const RESULT_DIV_HIGH: addr = 0x6003;
 
+#[reset]
 fn main() {
     // Just write a * b and the compiler auto-uses mul16!
     let a: u16 = 100;
     let b: u16 = 200;
-    let product: u16 = a * b;  // 20000
-    RESULT_MUL = product.low;
+    let product: u16 = a * b;  // 20000 = 0x4E20
+    RESULT_MUL_LOW = product.low;    // Should be 0x20
+    RESULT_MUL_HIGH = product.high;  // Should be 0x4E
 
     // Just write a / b and the compiler auto-uses div16!
     let dividend: u16 = 20000;
     let divisor: u16 = 100;
-    let quotient: u16 = dividend / divisor;  // 200
-    RESULT_DIV = quotient.low;
+    let quotient: u16 = dividend / divisor;  // 200 = 0x00C8
+    RESULT_DIV_LOW = quotient.low;    // Should be 0xC8
+    RESULT_DIV_HIGH = quotient.high;  // Should be 0x00
 }

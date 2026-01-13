@@ -1,0 +1,15 @@
+// Test compile-time array bounds checking
+
+fn main() {
+    let arr: [u8; 5] = [1, 2, 3, 4, 5];
+
+    // These should compile fine
+    let x: u8 = arr[0];    // First element
+    let y: u8 = arr[4];    // Last element
+    let z: u8 = arr[2 + 2]; // Arithmetic: 2 + 2 = 4
+
+    // This should cause a compile error:
+    // Uncomment to test: let w: u8 = arr[5];  // ERROR: index 5 >= size 5
+    // Uncomment to test: let v: u8 = arr[10]; // ERROR: index 10 >= size 5
+    // Uncomment to test: let u: u8 = arr[2 + 3]; // ERROR: 2 + 3 = 5 >= size 5
+}

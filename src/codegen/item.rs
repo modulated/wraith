@@ -226,8 +226,8 @@ fn generate_function(
 
     // Copy struct parameter pointers to local storage
     // This ensures nested calls don't clobber the struct pointer in param space
-    if let Some(metadata) = info.function_metadata.get(name) {
-        if !metadata.struct_param_locals.is_empty() {
+    if let Some(metadata) = info.function_metadata.get(name)
+        && !metadata.struct_param_locals.is_empty() {
             emitter.emit_comment("Copy struct param pointers to local storage");
             let param_base = emitter.memory_layout.param_base;
             let mut param_offset = 0u8;
@@ -255,7 +255,6 @@ fn generate_function(
                 }
             }
         }
-    }
 
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue

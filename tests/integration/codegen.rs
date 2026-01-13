@@ -284,7 +284,7 @@ fn enum_tuple_variant() {
 fn enum_struct_variant() {
     let asm = compile_success(r#"
         enum Message {
-            Point { u8 x, u8 y },
+            Point { x: u8, y: u8 },
         }
         fn main() {
             Message::Point { x: 10, y: 20 };

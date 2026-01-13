@@ -132,7 +132,7 @@ fn addr_cannot_be_struct_field() {
     // addr type can only be used in const declarations, not struct fields
     assert_sema_error(r#"
         struct Device {
-            addr port,
+            port: addr,
         }
         fn main() {}
     "#);
@@ -154,7 +154,7 @@ fn addr_cannot_be_enum_struct_variant() {
     // addr type can only be used in const declarations, not enum struct variants
     assert_sema_error(r#"
         enum IO {
-            Port { addr address },
+            Port { address: addr },
         }
         fn main() {}
     "#);

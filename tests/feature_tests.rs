@@ -339,8 +339,8 @@ fn test_struct_definition() {
     let asm = compile_success(
         r#"
         struct Point {
-            u8 x,
-            u8 y
+            x: u8,
+            y: u8,
         }
         fn main() {}
         "#,
@@ -353,8 +353,8 @@ fn test_struct_initialization() {
     let asm = compile_success(
         r#"
         struct Point {
-            u8 x,
-            u8 y
+            x: u8,
+            y: u8,
         }
         const OUT: addr = 0x400;
         fn main() {

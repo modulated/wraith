@@ -189,8 +189,8 @@ mod tests {
     fn test_parse_struct() {
         let source = r#"
             struct Point {
-                u8 x,
-                u8 y,
+                x: u8,
+                y: u8,
             }
         "#;
         let file = parse(source).expect("parse error");

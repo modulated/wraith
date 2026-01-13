@@ -550,7 +550,7 @@ fn test_codegen_enum_tuple_variant() {
 fn test_codegen_enum_struct_variant() {
     let source = r#"
         enum Message {
-            Point { u8 x, u8 y },
+            Point { x: u8, y: u8 },
         }
 
         fn main() {

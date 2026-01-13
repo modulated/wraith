@@ -1,11 +1,11 @@
 struct ProgInfo {
-    u8 state,
-    u16 count,    
-};
+    state: u8,
+    count: u16,
+}
 
 #[org(8000)]
 fn main() {
-    ProgInfo p = ProgInfo {
+    let p: ProgInfo = ProgInfo {
         state: 1,
         count: 12
     };
