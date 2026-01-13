@@ -1,0 +1,234 @@
+// Tuple Variant Pattern Matching Example
+//
+// This example demonstrates enum tuple variants with pattern matching.
+// It implements a simple color mixer that takes RGB color commands and
+// outputs the resulting color to memory-mapped display registers.
+//
+// Memory Map:
+// $6000 - RED output register (write color to screen)
+// $6001 - GREEN output register
+// $6002 - BLUE output register
+// $6003 - Status output (0=ready, 1=mixing, 2=error)
+//
+// To run in an emulator:
+// 1. cargo run --release examples/tuple.wr
+// 2. Load the generated .asm into your 6502 emulator
+// 3. Set breakpoints or watch addresses $6000-$6003 to see results
+
+// Memory-mapped I/O for color output
+const RED_OUT: addr = 0x6000;
+const GREEN_OUT: addr = 0x6001;
+const BLUE_OUT: addr = 0x6002;
+const STATUS: addr = 0x6003;
+
+// Color command enum with various tuple variant types
+enum ColorCommand {
+    Off,                           // Turn off display (unit variant)
+    Solid(u8, u8, u8),            // Set solid RGB color (3-field tuple)
+    Red(u8),                       // Set red only (1-field tuple)
+    Green(u8),                     // Set green only (1-field tuple)
+    Blue(u8),                      // Set blue only (1-field tuple)
+    Brightness(u8),                // Set all channels to same value
+    Fade(u16),                     // Fade value (demonstrates u16 extraction)
+}
+
+// Result type for operations
+enum Result {
+    Ok(u8),                        // Success with value
+    Err(u8),                       // Error with code
+}
+
+// Apply a color command to the output registers
+fn apply_color(cmd: ColorCommand) {
+    STATUS = 1;  // Set status to "mixing"
+
+    match cmd {
+        ColorCommand::Solid(r, g, b) => {
+            // Extract all three RGB values
+            RED_OUT = r;
+            GREEN_OUT = g;
+            BLUE_OUT = b;
+        }
+        ColorCommand::Red(value) => {
+            // Extract single red value
+            RED_OUT = value;
+            GREEN_OUT = 0;
+            BLUE_OUT = 0;
+        }
+        ColorCommand::Green(value) => {
+            // Extract single green value
+            RED_OUT = 0;
+            GREEN_OUT = value;
+            BLUE_OUT = 0;
+        }
+        ColorCommand::Blue(value) => {
+            // Extract single blue value
+            RED_OUT = 0;
+            GREEN_OUT = 0;
+            BLUE_OUT = value;
+        }
+        ColorCommand::Brightness(level) => {
+            // Set all channels to same brightness
+            RED_OUT = level;
+            GREEN_OUT = level;
+            BLUE_OUT = level;
+        }
+        ColorCommand::Fade(amount) => {
+            // Extract u16 value and scale to u8
+            // For demo: just use low byte
+            let scaled: u8 = amount as u8;
+            RED_OUT = scaled;
+            GREEN_OUT = scaled;
+            BLUE_OUT = scaled;
+        }
+        ColorCommand::Off => {
+            // Turn everything off
+            RED_OUT = 0;
+            GREEN_OUT = 0;
+            BLUE_OUT = 0;
+        }
+    }
+
+    STATUS = 0;  // Set status back to "ready"
+}
+
+// Validate a color value is in valid range
+fn validate_color(value: u8) -> Result {
+    if value <= 240 {
+        return Result::Ok(value);
+    } else {
+        return Result::Err(1);  // Error code 1: value too high
+    }
+}
+
+// Process a validation result
+fn handle_result(res: Result) -> u8 {
+    match res {
+        Result::Ok(val) => {
+            // Extract the success value
+            return val;
+        }
+        Result::Err(code) => {
+            // Extract the error code
+            STATUS = 2;  // Set status to "error"
+            return 0;    // Return default value
+        }
+    }
+}
+
+// Test function demonstrating various patterns
+fn test_patterns() {
+    // Test 1: Solid color (multi-field tuple)
+    let cmd1: ColorCommand = ColorCommand::Solid(255, 128, 64);
+    apply_color(cmd1);
+
+    // Test 2: Single color channel
+    let cmd2: ColorCommand = ColorCommand::Red(200);
+    apply_color(cmd2);
+
+    // Test 3: Brightness (all same)
+    let cmd3: ColorCommand = ColorCommand::Brightness(100);
+    apply_color(cmd3);
+
+    // Test 4: Fade with u16 value
+    let cmd4: ColorCommand = ColorCommand::Fade(1000);
+    apply_color(cmd4);
+
+    // Test 5: Turn off
+    let cmd5: ColorCommand = ColorCommand::Off;
+    apply_color(cmd5);
+}
+
+// Test validation and result handling
+fn test_validation() {
+    // Valid color value
+    let res1: Result = validate_color(200);
+    let val1: u8 = handle_result(res1);
+    RED_OUT = val1;  // Should be 200
+
+    // Invalid color value
+    let res2: Result = validate_color(250);
+    let val2: u8 = handle_result(res2);
+    GREEN_OUT = val2;  // Should be 0 (error)
+}
+
+// Demonstrate nested matching
+fn demo_nested_match() {
+    let cmd: ColorCommand = ColorCommand::Red(180);
+
+    match cmd {
+        ColorCommand::Red(r) => {
+            // Nested validation
+            let res: Result = validate_color(r);
+            match res {
+                Result::Ok(validated) => {
+                    RED_OUT = validated;
+                }
+                Result::Err(_) => {
+                    RED_OUT = 0;
+                }
+            }
+        }
+        _ => {
+            STATUS = 2;
+        }
+    }
+}
+
+// Animation loop example
+fn animate() {
+    let i: u8 = 0;
+
+    loop {
+        // Create color command based on loop counter
+        let cmd: ColorCommand = ColorCommand::Brightness(i);
+
+        match cmd {
+            ColorCommand::Brightness(level) => {
+                // Extract and apply the brightness level
+                RED_OUT = level;
+                GREEN_OUT = level;
+                BLUE_OUT = level;
+            }
+            _ => {
+                // Shouldn't happen in this loop
+                break;
+            }
+        }
+
+        i = i + 1;
+
+        // Stop after 256 iterations
+        if i == 0 {
+            break;
+        }
+    }
+}
+
+// Main entry point - runs all tests
+#[reset]
+fn main() {
+    // Initialize status
+    STATUS = 0;
+
+    // Run pattern tests
+    test_patterns();
+
+    // Run validation tests
+    test_validation();
+
+    // Run nested matching demo
+    demo_nested_match();
+
+    // Run animation (will take a while)
+    animate();
+
+    // Final state: solid purple
+    let final_color: ColorCommand = ColorCommand::Solid(128, 0, 128);
+    apply_color(final_color);
+
+    // Done - infinite loop
+    loop {
+        // In a real system, this would be a WFI or similar
+    }
+}

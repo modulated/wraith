@@ -12,3 +12,4 @@ mod operators;
 mod cpu_flags;
 mod bcd;
 mod math16;
+mod enums;
