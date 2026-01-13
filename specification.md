@@ -1530,23 +1530,176 @@ import {bar} from "../lib/helper.wr";
 import {memcpy} from "mem.wr";  // Searches stdlib first
 ```
 
+### Circular Import Detection
+
+Wraith detects circular imports at compile time and reports an error:
+
+```rust
+// file: a.wr
+import {b_function} from "b.wr";
+
+fn a_function() {
+    b_function();
+}
+
+// file: b.wr
+import {a_function} from "a.wr";  // ERROR: circular import
+
+fn b_function() {
+    a_function();
+}
+```
+
+**Error Message:**
+```
+error: circular import detected: a.wr -> b.wr -> a.wr
+```
+
+**Solution:** Restructure code to eliminate circular dependencies:
+- Extract shared functionality to a third module
+- Use forward declarations (if available)
+- Reorganize module boundaries
+
+**Example Fix:**
+```rust
+// file: common.wr
+fn shared_function() { }
+
+// file: a.wr
+import {shared_function} from "common.wr";
+
+// file: b.wr
+import {shared_function} from "common.wr";
+```
+
+### Import Order and Dependencies
+
+**Import Processing:**
+1. Imports are processed depth-first
+2. Each file is only processed once (subsequent imports are skipped)
+3. Symbols must be defined before use within a file
+4. No forward declarations - define functions/types before using them
+
+**Import Order Best Practices:**
+```rust
+// Good: Import from most general to most specific
+import {memcpy, memset} from "mem.wr";        // Standard library
+import {helper_fn} from "./utils.wr";         // Local utilities
+import {config} from "./config.wr";           // Local configuration
+```
+
+### Organizing Larger Projects
+
+**Recommended Project Structure:**
+```
+my-project/
+├── wraith.toml              # Memory configuration
+├── main.wr                  # Entry point with #[reset]
+├── lib/                     # Reusable modules
+│   ├── graphics.wr         # Graphics routines
+│   ├── input.wr            # Input handling
+│   └── sound.wr            # Sound routines
+├── game/                    # Game-specific code
+│   ├── player.wr           # Player logic
+│   ├── enemy.wr            # Enemy logic
+│   └── levels.wr           # Level data
+└── data/                    # Constants and tables
+    ├── sprites.wr          # Sprite data
+    └── maps.wr             # Map data
+```
+
+**Example main.wr:**
+```rust
+import {init_graphics, draw_sprite} from "./lib/graphics.wr";
+import {read_input} from "./lib/input.wr";
+import {update_player} from "./game/player.wr";
+
+#[reset]
+fn main() {
+    init_graphics();
+
+    loop {
+        let input: u8 = read_input();
+        update_player(input);
+    }
+}
+```
+
+**Example lib/graphics.wr:**
+```rust
+import {memset} from "mem.wr";  // stdlib import
+
+const SCREEN: addr = 0x0400;
+
+fn init_graphics() {
+    memset(SCREEN as u16, 0x20, 255);
+}
+
+fn draw_sprite(x: u8, y: u8, sprite_id: u8) {
+    // Drawing code
+}
+```
+
+### Module Organization Best Practices
+
+1. **One Responsibility Per Module**
+   - Each `.wr` file should handle one clear area of functionality
+   - Example: `graphics.wr`, `input.wr`, `physics.wr`
+
+2. **Keep Related Code Together**
+   - Group related functions, structs, and constants in the same file
+   - Example: Player struct and update_player() in same file
+
+3. **Minimize Cross-Module Dependencies**
+   - Prefer importing from stdlib over custom modules when possible
+   - Avoid long chains of imports (A imports B imports C...)
+
+4. **Use Clear Naming**
+   - Module names should describe their purpose
+   - Avoid generic names like `utils.wr` or `helpers.wr`
+
+5. **Document Module Purpose**
+   - Add comments at the top of each file explaining its purpose
+   - List major exports
+
+```rust
+// lib/graphics.wr
+// Graphics system for 6502 display
+// Exports: init_graphics(), draw_sprite(), clear_screen()
+
+import {memset} from "mem.wr";
+
+fn init_graphics() { }
+fn draw_sprite(x: u8, y: u8, sprite_id: u8) { }
+fn clear_screen() { }
+```
+
 ### Limitations
 
 These may be changed in future versions:
 
-- No module hierarchy or namespaces (flat file imports only)
-- No pub/private visibility (all symbols in a file are importable)
-- No re-exports
-- No wildcard imports (`import *`)
+- **No module hierarchy or namespaces** - Flat file imports only
+  - Cannot do `graphics::sprite::draw()`
+  - All imports are at file level
+
+- **No pub/private visibility** - All symbols in a file are importable
+  - Planned for Phase 3 with `pub` keyword (see ROADMAP.md)
+  - Currently, all functions/structs/enums are public
+
+- **No re-exports** - Cannot re-export imported symbols
+  - Each module must import directly from the source
+
+- **No wildcard imports** - Cannot use `import * from "module.wr"`
+  - Must explicitly list each symbol to import
 
 ### Completion Status
 
 - [x] Import syntax documented
 - [x] Import resolution documented
 - [x] Limitations documented
-- [ ] Add circular import handling
-- [ ] Document import order dependencies
-- [ ] Add examples of organizing larger projects
+- [x] Add circular import handling
+- [x] Document import order dependencies
+- [x] Add examples of organizing larger projects
 
 ---
 
@@ -2228,21 +2381,133 @@ if result == 0xFFFF {
 
 ## Reserved Keywords
 
-- [ ] TODO: Verify these keywords are correct
+The following **36 keywords** are reserved in Wraith and cannot be used as identifiers:
 
 ```
-addr      asm       bool      break     const     else      enum
-fn        for       from      i8        i16       if        import
-in        inline    loop      match     return    struct    u8
-u16       while     as        true      false     let       b8
-b16       read      write
+addr      as        asm       b8        b16       bool      break
+carry     const     continue  else      enum      false     fn
+for       from      i8        i16       if        import    in
+let       loop      match     negative  overflow  read      return
+str       struct    true      u8        u16       while     write
+zero      zp
 ```
+
+### Keywords by Category
+
+**Control Flow (9 keywords):**
+```
+if        else      while     loop      for
+match     return    break     continue
+```
+
+**Variable Declaration (3 keywords):**
+```
+let       const     zp
+```
+
+**Type Keywords (8 keywords):**
+```
+u8        i8        u16       i16
+b8        b16       bool      str
+```
+
+**Function and Type Declarations (3 keywords):**
+```
+fn        struct    enum
+```
+
+**Module System (2 keywords):**
+```
+import    from
+```
+
+**CPU Status Flags - Read-Only (4 keywords):**
+```
+carry     zero      overflow  negative
+```
+
+**Type Casting and Iteration (2 keywords):**
+```
+as        in
+```
+
+**Memory and I/O (4 keywords):**
+```
+addr      asm       read      write
+```
+
+**Boolean Literals (2 keywords):**
+```
+true      false
+```
+
+### Future Reserved Keywords
+
+The following keywords are planned for future versions (based on ROADMAP.md):
+
+- **`pub`** - Module visibility control (Phase 3)
+  - Will mark functions, structs, enums, and constants as publicly exportable
+  - Example: `pub fn exported_function() { }`
+
+### Keyword Usage Examples
+
+**Type Keywords:**
+```rust
+let count: u8 = 10;         // Unsigned 8-bit
+let delta: i16 = -500;      // Signed 16-bit
+let score: b16 = 1234 as b16;  // BCD 16-bit
+let flag: bool = true;      // Boolean
+```
+
+**Variable Declaration:**
+```rust
+let x: u8 = 42;             // Mutable variable
+const MAX: u8 = 100;        // Compile-time constant
+zp let counter: u8 = 0;     // Zero-page variable (faster access)
+```
+
+**CPU Status Flags:**
+```rust
+fn check_arithmetic() {
+    let result: u8 = add_numbers(250, 10);
+    if carry {
+        // Overflow occurred
+    }
+    if zero {
+        // Result was zero
+    }
+}
+```
+
+**Memory-Mapped I/O:**
+```rust
+let LED: addr = 0x6000;           // Memory-mapped address
+let BUTTON: read addr = 0x6001;   // Read-only address
+let OUTPUT: write addr = 0x6002;  // Write-only address
+```
+
+**Inline Assembly:**
+```rust
+fn custom_operation() {
+    asm {
+        "LDA #$42",
+        "STA $6000"
+    }
+}
+```
+
+### Notes
+
+- All keywords are **case-sensitive** (e.g., `if` is a keyword, but `If` or `IF` are valid identifiers)
+- Keywords cannot be used as variable names, function names, struct names, or any other identifiers
+- There is no mechanism to escape keywords (unlike Rust's `r#` syntax)
+- **Note:** `inline` is NOT a reserved keyword - it appears only in function attributes as `#[inline]`
 
 ### Completion Status
 
-- [ ] Verify complete list of reserved keywords
-- [ ] Document future reserved keywords
-- [ ] Add examples of keyword usage
+- [x] Verify complete list of reserved keywords
+- [x] Document future reserved keywords
+- [x] Add examples of keyword usage
 
 ---
 
@@ -2361,20 +2626,167 @@ if quick_check() || slow_check() {
 
 ## Comments
 
-```rust
-// Single line comment
+Wraith supports three types of comments: single-line comments, multi-line comments, and documentation comments.
 
+### Single-Line Comments
+
+Single-line comments start with `//` and continue to the end of the line:
+
+```rust
+fn calculate() -> u8 {
+    let x: u8 = 42;  // Initialize x to 42
+    // This entire line is a comment
+    return x;
+}
+```
+
+### Multi-Line Comments
+
+Multi-line comments begin with `/*` and end with `*/`. They can span multiple lines:
+
+```rust
 /*
-   Multi-line
-   comment
+   This is a multi-line comment.
+   It can span across multiple lines.
+   Useful for longer explanations or temporarily disabling code blocks.
 */
+fn complex_function() {
+    /* You can also use multi-line comments inline */ let x: u8 = 10;
+}
+```
+
+**Note**: Multi-line comments do **not** nest. The first `*/` closes the comment block:
+
+```rust
+/* This is /* NOT a nested comment */ and this causes an error */
+```
+
+### Documentation Comments
+
+Documentation comments use triple slashes (`///`) and are used to document functions, structs, and other items. These are commonly used in the standard library:
+
+```rust
+/// Enable interrupts by clearing the interrupt disable flag
+/// Maps to: CLI (Clear Interrupt Disable)
+/// Cycles: 2
+#[inline]
+fn enable_interrupts() {
+    asm {
+        "CLI"
+    }
+}
+
+/// Add two u8 values with saturation at 255
+/// Returns: a + b, or 255 if overflow would occur
+/// Cycles: ~6-8
+fn saturating_add(a: u8, b: u8) -> u8 {
+    // implementation
+}
+```
+
+Documentation comments are typically placed immediately before the item they document and should describe:
+- What the function/struct/item does
+- Parameter meanings (if not obvious)
+- Return value semantics
+- Performance characteristics (cycle counts for 6502)
+- Hardware mapping (for intrinsics)
+
+### Comments in Inline Assembly
+
+Comments can be used within inline assembly blocks. Both comment styles work:
+
+```rust
+fn example_asm() {
+    asm {
+        // Single-line comment in assembly
+        "LDA #$42",     // Load accumulator with 0x42
+
+        /*
+           Multi-line comment explaining
+           the next few instructions
+        */
+        "STA $6000",
+        "RTS"           // Return from subroutine
+    }
+}
+```
+
+**Important**: Assembly string literals themselves are passed directly to the assembler and should use the assembler's comment syntax (typically `;` for 6502 assemblers):
+
+```rust
+fn with_assembler_comments() {
+    asm {
+        "LDA #$42    ; Assembler comment (inside the string)",
+        // Wraith comment (outside the string)
+        "STA $6000"
+    }
+}
+```
+
+### Best Practices
+
+**DO:**
+- Use `///` documentation comments for public API functions
+- Include cycle counts for performance-critical functions
+- Comment non-obvious bit manipulation or hardware interactions
+- Explain "why" rather than "what" in regular comments
+- Use comments to mark TODO items or known limitations
+
+```rust
+/// Fast integer division by 10 using multiplication and shifts
+/// Cycles: ~45 (much faster than div16)
+fn div10_fast(value: u8) -> u8 {
+    // Using multiply by 0xCD and shift right by 11 bits
+    // This works because 0xCD / 2048 ≈ 1/10 for u8 range
+    // TODO: Verify accuracy for values > 200
+}
+```
+
+**DON'T:**
+- Over-comment obvious code
+- Leave commented-out code in production
+- Use comments to describe what the code literally does (if it's clear)
+
+```rust
+// BAD: Obvious comment
+let x: u8 = 42;  // Set x to 42
+
+// GOOD: Explains why
+let x: u8 = 42;  // Magic number from hardware spec (p. 23)
+
+// BAD: Commented-out code
+// let old_value: u8 = some_old_function();
+
+// GOOD: TODO with context
+// TODO: Replace with hardware timer when available (issue #42)
+let delay: u8 = software_delay(100);
+```
+
+### Comment Preprocessor Interaction
+
+Comments are stripped during lexical analysis and do not affect code generation. This means:
+
+```rust
+fn test() {
+    let x: u8 = 10 /* comment in middle */ + 5;  // Valid, equals 15
+}
+```
+
+However, comments inside assembly string literals are **not** processed by Wraith:
+
+```rust
+asm {
+    "LDA #$42  ; This semicolon comment goes to the assembler",
+    // This slash comment is processed by Wraith
+}
 ```
 
 ### Completion Status
 
 - [x] Comment syntax documented
-- [ ] Add documentation comment syntax (if supported)
-- [ ] Document comment handling in inline assembly
+- [x] Documentation comment syntax documented
+- [x] Comment handling in inline assembly documented
+- [x] Best practices and examples added
 
 ---
 
