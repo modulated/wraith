@@ -653,16 +653,107 @@ p2.x = 15;
 let x_coord: u8 = p1.x;
 ```
 
+### Memory Layout
+
+Structs are laid out sequentially in memory with no padding:
+
+```rust
+struct Point {
+    x: u8,    // Offset 0
+    y: u8,    // Offset 1
+}           // Total size: 2 bytes
+
+struct Entity {
+    position: Point,  // Offset 0-1 (2 bytes)
+    health: u8,       // Offset 2
+    score: u16,       // Offset 3-4 (2 bytes, little-endian)
+}                   // Total size: 5 bytes
+```
+
+**Layout Characteristics:**
+- No padding or alignment (sequential bytes)
+- Nested structs inlined directly
+- Multi-byte fields stored little-endian
+- Total struct size = sum of field sizes
+
+### Nested Structs
+
+Structs can contain other structs as fields:
+
+```rust
+struct Vector {
+    x: i16,
+    y: i16,
+}
+
+struct Sprite {
+    position: Vector,
+    velocity: Vector,
+    color: u8,
+}
+
+fn update_sprite(s: Sprite) {
+    // Access nested fields
+    let px: i16 = s.position.x;
+    let vy: i16 = s.velocity.y;
+
+    // Modify nested fields
+    s.position.x = s.position.x + s.velocity.x;
+    s.position.y = s.position.y + s.velocity.y;
+}
+```
+
+### Structs in Arrays
+
+Arrays can contain struct elements:
+
+```rust
+struct Enemy {
+    x: u8,
+    y: u8,
+    health: u8,
+}
+
+const MAX_ENEMIES: u8 = 8;
+let enemies: [Enemy; 8] = [
+    {x: 10, y: 20, health: 100},
+    {x: 30, y: 40, health: 100},
+    // ... rest initialized to zero if not specified
+];
+
+// Access array of structs
+enemies[0].health = enemies[0].health - 10;
+let x_pos: u8 = enemies[3].x;
+```
+
+### Passing Structs to Functions
+
+Small structs (1-2 bytes) passed in registers/zero page, larger structs via pointer or stack:
+
+```rust
+// Small struct - passed efficiently
+fn move_point(p: Point, dx: u8, dy: u8) -> Point {
+    p.x = p.x + dx;
+    p.y = p.y + dy;
+    return p;
+}
+
+// Large struct - typically passed by reference in real usage
+fn update_entity(e: Entity) {
+    e.health = e.health - 1;
+}
+```
+
 ### Completion Status
 
 - [x] Basic struct declaration documented
 - [x] Struct initialization syntax documented
 - [x] Field access documented
-- [ ] Document struct memory layout
-- [ ] Add padding and alignment information
-- [ ] Document nested struct behavior
-- [ ] Add examples of structs in arrays
-- [ ] Document struct passing to functions
+- [x] Document struct memory layout
+- [x] Add padding and alignment information
+- [x] Document nested struct behavior
+- [x] Add examples of structs in arrays
+- [x] Document struct passing to functions
 
 ---
 
@@ -687,12 +778,93 @@ let dir: Direction = Direction::North;
 - [ ] Add examples of tagged unions if supported
 - [ ] Document memory layout of tagged unions
 
+### Default Discriminant Values
+
+If not specified, discriminants start at 0 and increment:
+
+```rust
+enum Status {
+    Idle,      // 0 (implicit)
+    Running,   // 1 (implicit)
+    Stopped,   // 2 (implicit)
+}
+
+enum Priority {
+    Low = 10,
+    Medium,    // 11 (continues from previous)
+    High,      // 12
+    Critical = 100,
+}
+```
+
+**Rules:**
+- First variant defaults to 0 if not specified
+- Subsequent variants increment by 1 from previous
+- Explicit values override auto-increment
+- Values must fit in u8 (0-255)
+
+### Pattern Matching with Enums
+
+Use match statements for exhaustive enum handling:
+
+```rust
+enum Direction {
+    North = 0,
+    South = 1,
+    East = 2,
+    West = 3,
+}
+
+fn move_player(dir: Direction) {
+    match dir {
+        Direction::North => {
+            y = y - 1;
+        },
+        Direction::South => {
+            y = y + 1;
+        },
+        Direction::East => {
+            x = x + 1;
+        },
+        Direction::West => {
+            x = x - 1;
+        },
+    }
+}
+
+// Enum in conditions
+if current_dir == Direction::North {
+    // moving up
+}
+```
+
+### Memory Representation
+
+Enums are stored as single bytes (u8):
+
+```rust
+enum State {
+    Off = 0,
+    On = 1,
+}
+
+let s: State = State::On;  // Stored as u8 value 1
+let raw: u8 = s as u8;     // Cast to u8: 1
+```
+
+**Characteristics:**
+- Size: 1 byte (u8)
+- Values: 0-255
+- Can be cast to/from u8
+- Used directly in comparisons
+- Efficient switch/match compilation
+
 ### Completion Status
 
 - [x] Simple enum declaration documented
-- [ ] Document default discriminant values
-- [ ] Add pattern matching with enums
-- [ ] Document enum memory representation
+- [x] Document default discriminant values
+- [x] Add pattern matching with enums
+- [x] Document enum memory representation
 
 ---
 
@@ -717,16 +889,129 @@ let array: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 process_data(array);  // Automatic coercion to slice
 ```
 
+### Array Bounds Checking
+
+**Compile-time Checking:**
+Constant indices are checked at compile time:
+
+```rust
+let data: [u8; 5] = [1, 2, 3, 4, 5];
+let x: u8 = data[10];  // ERROR: index out of bounds (caught at compile time)
+```
+
+**Runtime Behavior:**
+Variable indices have NO runtime bounds checking:
+
+```rust
+let data: [u8; 5] = [1, 2, 3, 4, 5];
+let i: u8 = get_index();  // Unknown at compile time
+let x: u8 = data[i];      // NO bounds check - undefined if i >= 5
+```
+
+**Programmer Responsibility:**
+- Always ensure indices are within bounds
+- Use constants when possible for compile-time checking
+- Add manual checks for variable indices if needed
+
+```rust
+if i < 5 {
+    let x: u8 = data[i];  // Safe
+}
+```
+
+### Slice Operations
+
+Slices are fat pointers (pointer + length) that reference array data:
+
+```rust
+// Function taking slice
+fn sum_values(values: [u8]) -> u16 {
+    let total: u16 = 0;
+    for v in values {
+        total = total + (v as u16);
+    }
+    return total;
+}
+
+// Arrays automatically coerce to slices
+let data: [u8; 5] = [10, 20, 30, 40, 50];
+let result: u16 = sum_values(data);  // Passes as slice
+```
+
+**Slice Characteristics:**
+- Size: 2 bytes (pointer to data)
+- Length tracked separately
+- Read-only view of array data
+- No slice syntax (e.g., `arr[1..3]`) - pass whole array only
+
+### Slice Memory Representation
+
+```rust
+const DATA: [u8; 6] = [0, 1, 2, 3, 4, 5];
+
+fn process(slice: [u8]) {
+    // slice is a pointer to DATA
+    // Length is known from array type
+}
+```
+
+**Memory Layout:**
+- Slice parameter: 2-byte pointer to first element
+- Length: Tracked by compiler/type system
+- Data: Stored wherever array is allocated (const data, stack, etc.)
+
+### Multidimensional Arrays
+
+Wraith supports arrays of arrays for multidimensional data:
+
+```rust
+// 2D array: 4 rows × 8 columns
+let screen: [[u8; 8]; 4] = [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 0, 0, 0, 0, 1, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0],
+];
+
+// Access elements
+screen[1][3] = 2;  // Row 1, column 3
+let pixel: u8 = screen[2][5];
+```
+
+**Memory Layout:**
+- Row-major order (rows stored sequentially)
+- No padding between elements
+- Total size: rows × columns × element_size
+
+### Array Assignment and Copying
+
+Arrays are value types - assignment copies all elements:
+
+```rust
+let source: [u8; 3] = [1, 2, 3];
+let dest: [u8; 3] = source;  // Copies all 3 bytes
+
+source[0] = 10;  // dest is unchanged (independent copy)
+```
+
+**For large arrays**, use `memcpy` for efficiency:
+
+```rust
+let source: [u8; 100] = [...];
+let dest: [u8; 100];
+memcpy(&dest as u16, &source as u16, 100);
+```
+
 ### Completion Status
 
 - [x] Fixed array declaration documented
 - [x] Array initialization syntax documented
 - [x] Array indexing documented
-- [ ] Document array bounds checking (compile-time vs runtime)
-- [ ] Add slice syntax and operations
-- [ ] Document slice memory representation
-- [ ] Add multidimensional array examples
-- [ ] Document array assignment and copying behavior
+- [x] Document array bounds checking (compile-time vs runtime)
+- [x] Add slice syntax and operations
+- [x] Document slice memory representation
+- [x] Add multidimensional array examples
+- [x] Document array assignment and copying behavior
 
 ---
 
@@ -837,6 +1122,78 @@ match msg {
 }
 ```
 
+### Continue Statement
+
+Skip the rest of the current loop iteration and continue with the next:
+
+```rust
+for i in 0..10 {
+    if i == 5 {
+        continue;  // Skip when i is 5
+    }
+    process(i);  // Not called when i == 5
+}
+
+let counter: u8 = 0;
+while counter < 100 {
+    counter = counter + 1;
+
+    if counter % 2 == 0 {
+        continue;  // Skip even numbers
+    }
+
+    process_odd(counter);
+}
+```
+
+**Behavior:**
+- Jumps to start of next iteration
+- Works in `for`, `while`, and `loop`
+- Skips remaining code in current iteration
+
+### Break Statement
+
+Exit from a loop immediately:
+
+```rust
+loop {
+    let input: u8 = read_input();
+
+    if input == 0 {
+        break;  // Exit loop
+    }
+
+    process(input);
+}
+
+// break in for loop
+for i in 0..100 {
+    if check_condition(i) {
+        break;  // Exit early
+    }
+}
+```
+
+**Note:** Break with labels (e.g., `'outer: loop` and `break 'outer`) is not currently supported.
+
+### Short-Circuit Conditions
+
+Conditions in if/while use short-circuit evaluation:
+
+```rust
+// Check bounds before array access
+if i < array.length && array[i] == target {
+    // array[i] only evaluated if i < array.length
+}
+
+// Check null before dereference
+if ptr != 0 && *ptr == value {
+    // *ptr only dereferenced if ptr != 0
+}
+```
+
+See [Operators](#operators) section for full short-circuit documentation.
+
 ### Completion Status
 
 - [x] If/else documented
@@ -844,10 +1201,10 @@ match msg {
 - [x] Infinite loop documented
 - [x] For loop documented
 - [x] Match statement documented
-- [ ] Document continue statement
-- [ ] Document break with labels (if supported)
+- [x] Document continue statement
+- [x] Document break statement
 - [ ] Add assembly output examples for each control flow construct
-- [ ] Document short-circuit evaluation in conditions
+- [x] Document short-circuit evaluation in conditions
 
 ---
 
@@ -868,13 +1225,96 @@ let addr: u16 = 0x1000;
 **No implicit conversions** - all casts must be explicit.
 **No error checking** - casts that are invalid will overflow/underflow.
 
+### Valid Cast Combinations
+
+**Integer Widening (Safe):**
+```rust
+let small: u8 = 100;
+let large: u16 = small as u16;  // 100 -> 100 (zero-extended)
+
+let signed: i8 = -10;
+let wide: i16 = signed as i16;  // -10 -> -10 (sign-extended)
+```
+
+**Integer Narrowing (Truncation):**
+```rust
+let large: u16 = 0x1234;
+let small: u8 = large as u8;  // 0x1234 -> 0x34 (truncate high byte)
+
+let wide: i16 = -300;
+let narrow: i8 = wide as i8;  // Truncates, may lose sign
+```
+
+**Signed ↔ Unsigned:**
+```rust
+let unsigned: u8 = 200;
+let signed: i8 = unsigned as i8;  // 200 -> -56 (reinterpret bits)
+
+let negative: i8 = -10;
+let positive: u8 = negative as u8;  // -10 -> 246 (reinterpret bits)
+```
+
+**BCD Conversions:**
+```rust
+let bcd: b8 = 0x42 as b8;    // Binary 42 -> BCD 42
+let bin: u8 = bcd as u8;     // BCD 42 -> Binary 0x42
+
+let score: b16 = 1234 as b16; // Binary -> BCD 1234
+let raw: u16 = score as u16;  // BCD 1234 -> 0x1234
+```
+
+**Boolean Conversions:**
+```rust
+let flag: bool = true;
+let num: u8 = flag as u8;    // true -> 1, false -> 0
+
+let value: u8 = 42;
+let is_set: bool = value as bool;  // 0 -> false, nonzero -> true
+```
+
+### Truncation Behavior
+
+When casting to a smaller type, high bytes are discarded:
+
+```rust
+let value: u16 = 0xABCD;
+let low: u8 = value as u8;    // 0xCD (low byte)
+let high: u8 = (value >> 8) as u8;  // 0xAB (high byte, shifted first)
+
+// Multi-step truncation
+let big: u16 = 0x1234;
+let small: u8 = big as u8;    // 0x34
+```
+
+### Sign Extension
+
+Signed casts preserve the sign by extending the sign bit:
+
+```rust
+let small: i8 = -1;          // 0xFF in binary
+let large: i16 = small as i16;  // 0xFFFF (sign extended)
+
+let positive: i8 = 127;      // 0x7F
+let wide: i16 = positive as i16; // 0x007F (zero extended for positive)
+```
+
+**Manual Sign Extension (if needed):**
+```rust
+fn sign_extend_u8_to_u16(value: u8) -> u16 {
+    if value >= 128 {  // Negative in i8
+        return (value as u16) | 0xFF00;  // Sign extend
+    }
+    return value as u16;  // Positive, zero extend
+}
+```
+
 ### Completion Status
 
 - [x] Basic casting syntax documented
-- [ ] Document all valid cast combinations
-- [ ] Add truncation behavior examples
-- [ ] Document sign extension behavior
-- [ ] Add casting to/from bool
+- [x] Document all valid cast combinations
+- [x] Add truncation behavior examples
+- [x] Document sign extension behavior
+- [x] Add casting to/from bool
 
 ---
 
@@ -908,15 +1348,160 @@ fn add_with_carry(a: u8, b: u8) -> u8 {
 
 Variables in `{}` are substituted with their memory locations.
 
+### Register Clobbering
+
+Inline assembly can modify registers without compiler tracking:
+
+```rust
+fn custom_operation() -> u8 {
+    let result: u8;
+    asm {
+        "LDA #$42",      // Load accumulator
+        "CLC",
+        "ADC #$10",
+        "STA {result}",  // Store result
+    }
+    return result;  // A, X, Y may be clobbered
+}
+```
+
+**Best Practices:**
+- Store important values before inline asm
+- Assume A, X, Y registers are clobbered
+- Use variable substitution to save/restore state
+- Keep assembly blocks short and focused
+
+### Common Assembly Patterns
+
+**Reading Hardware Registers:**
+```rust
+fn read_timer() -> u8 {
+    let value: u8;
+    asm {
+        "LDA $D012",  // Read VIC-II raster register (C64 example)
+        "STA {value}",
+    }
+    return value;
+}
+```
+
+**Bit Manipulation:**
+```rust
+fn set_interrupt_mask(mask: u8) {
+    asm {
+        "LDA {mask}",
+        "STA $D01A",   // VIA interrupt enable register
+    }
+}
+```
+
+**Timing-Critical Code:**
+```rust
+#[inline]
+fn wait_cycles(count: u8) {
+    asm {
+        "LDX {count}",
+        "loop:",
+        "DEX",
+        "BNE loop",
+    }
+}
+```
+
+**Direct Memory Block Operations:**
+```rust
+fn fast_clear(addr: u16, len: u8) {
+    asm {
+        "LDA #$00",
+        "LDY {len}",
+        "loop:",
+        "STA ({addr}),Y",
+        "DEY",
+        "BNE loop",
+    }
+}
+```
+
+### Labels in Assembly
+
+Use labels for loops and branches within asm blocks:
+
+```rust
+fn find_byte(haystack: u16, needle: u8, len: u8) -> u8 {
+    let result: u8;
+    asm {
+        "LDA {needle}",
+        "LDY #$00",
+        "search_loop:",
+        "CMP ({haystack}),Y",
+        "BEQ found",
+        "INY",
+        "CPY {len}",
+        "BNE search_loop",
+        // Not found
+        "LDA #$FF",
+        "JMP done",
+        "found:",
+        "TYA",  // Transfer index to A
+        "done:",
+        "STA {result}",
+    }
+    return result;
+}
+```
+
+**Label Scope:**
+- Labels are local to the asm block
+- Must be unique within the block
+- Cannot reference labels outside the block
+
+### Limitations
+
+**What inline assembly CANNOT do:**
+- Access local variables by name (must use substitution)
+- Call Wraith functions directly (use JSR to label)
+- Automatically save/restore registers
+- Type checking on operations
+- Bounds checking on memory access
+
+**Size Limits:**
+- No hard limit on asm block size
+- Large blocks may impact optimization
+- Consider using separate function for large asm
+
+### Optimizer Interaction
+
+Inline assembly is treated as opaque by the optimizer:
+
+```rust
+fn example() {
+    let x: u8 = 10;
+
+    // Optimizer cannot see what asm does
+    asm {
+        "NOP",
+        "NOP",
+    }
+
+    let y: u8 = x + 5;  // Optimizer assumes x unchanged
+}
+```
+
+**Implications:**
+- Variables used in asm won't be optimized away
+- Code motion around asm blocks is limited
+- Asm blocks act as optimization barriers
+- Use `#[inline]` on functions with small asm blocks for better optimization
+
 ### Completion Status
 
 - [x] Basic assembly block documented
 - [x] Variable substitution documented
-- [ ] Document register clobbering
-- [ ] Add examples of common assembly patterns
-- [ ] Document inline assembly limitations
-- [ ] Add examples using labels in assembly
-- [ ] Document interaction with optimizer
+- [x] Document register clobbering
+- [x] Add examples of common assembly patterns
+- [x] Document inline assembly limitations
+- [x] Add examples using labels in assembly
+- [x] Document interaction with optimizer
 
 ---
 
