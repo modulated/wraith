@@ -11,5 +11,6 @@ mod interrupts;
 mod operators;
 mod cpu_flags;
 mod bcd;
+mod bcd_validation;
 mod math16;
 mod enums;
