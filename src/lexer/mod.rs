@@ -55,6 +55,8 @@ pub enum Token {
     Read,
     #[token("write")]
     Write,
+    #[token("pub")]
+    Pub,
 
     // === Boolean literals ===
     #[token("true")]
