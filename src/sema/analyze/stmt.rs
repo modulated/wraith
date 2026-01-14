@@ -545,7 +545,9 @@ impl SemanticAnalyzer {
                                             mutable: false,
                                             access_mode: None,
                                         };
-                                        self.table.insert(binding.name.node.clone(), info);
+                                        self.table.insert(binding.name.node.clone(), info.clone());
+                                        // Also add to resolved_symbols so codegen can find it
+                                        self.resolved_symbols.insert(binding.name.span, info);
                                     }
                                 }
                             }
@@ -566,7 +568,10 @@ impl SemanticAnalyzer {
                     mutable: false,
                     access_mode: None,
                 };
-                self.table.insert(name.clone(), info);
+                self.table.insert(name.clone(), info.clone());
+                // Also add to resolved_symbols so codegen can find it
+                // Note: Pattern::Variable doesn't have a span, so we can't add to resolved_symbols here
+                // This is a limitation of the current AST structure
             }
             Pattern::Wildcard => {
                 // No bindings for wildcard
