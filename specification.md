@@ -1651,6 +1651,141 @@ Wraith supports a simple file-based import system for code organization and reus
 import {symbol1, symbol2, symbol3} from "module.wr";
 ```
 
+### Module Visibility
+
+**All items are private by default.** Only items marked with `pub` can be imported from other modules.
+
+#### Visibility Rules
+
+- Functions, constants, structs, enums, and address declarations are private unless marked `pub`
+- Private items cannot be imported by other modules
+- Public items marked with `pub` can be imported
+- Local variables, function parameters, and pattern bindings are always private
+
+#### Example: Public Items
+
+```rust
+// file: math_utils.wr
+
+// Public function - can be imported
+pub fn add(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+// Private function - cannot be imported
+fn internal_helper() -> u8 {
+    return 42;
+}
+
+// Public constant - can be imported
+pub const MAX_VALUE: u8 = 255;
+
+// Private constant - cannot be imported
+const INTERNAL_CONSTANT: u8 = 10;
+
+// Public struct - can be imported
+pub struct Point {
+    x: u8,
+    y: u8,
+}
+
+// Private struct - cannot be imported
+struct InternalData {
+    value: u8,
+}
+
+// Public enum - can be imported
+pub enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+// Private enum - cannot be imported
+enum InternalState {
+    Idle,
+    Running,
+}
+
+// Public address - can be imported
+pub const LED_PORT: addr = 0x6000;
+
+// Private address - cannot be imported
+const INTERNAL_PORT: addr = 0x6001;
+
+#[reset]
+fn main() {}
+```
+
+#### Using Public Items
+
+```rust
+// file: main.wr
+import {add, MAX_VALUE, Point, Color, LED_PORT} from "math_utils.wr";
+
+fn main() {
+    // Can use all public items
+    let sum: u8 = add(10, 20);
+    let max: u8 = MAX_VALUE;
+    let p: Point = Point { x: 5, y: 10 };
+    let c: Color = Color::Red;
+    LED_PORT = 1;
+
+    // ERROR: Cannot import private items
+    // import {internal_helper} from "math_utils.wr";  // Compile error!
+}
+```
+
+#### Error: Importing Private Items
+
+Attempting to import a private item results in a clear error:
+
+```rust
+import {internal_helper} from "math_utils.wr";
+```
+
+**Error Message:**
+```
+error: import error
+  --> 1:9
+    |
+  1 | import {internal_helper} from "math_utils.wr";
+    |         ^^^^^^^^^^^^^^^ symbol 'internal_helper' is private and cannot be imported
+```
+
+#### Visibility and API Design
+
+The `pub` keyword enables explicit API boundaries:
+
+```rust
+// file: graphics_lib.wr
+
+// Public API - stable interface
+pub fn draw_sprite(x: u8, y: u8, sprite_id: u8) {
+    setup_vram();
+    write_sprite_data(x, y, sprite_id);
+}
+
+pub fn clear_screen() {
+    fill_vram(0);
+}
+
+// Private implementation - can be changed without affecting users
+fn setup_vram() {
+    // Internal implementation
+}
+
+fn write_sprite_data(x: u8, y: u8, sprite_id: u8) {
+    // Internal implementation
+}
+
+fn fill_vram(value: u8) {
+    // Internal implementation
+}
+```
+
+Users of `graphics_lib.wr` can only import `draw_sprite` and `clear_screen`, ensuring the internal implementation details remain encapsulated.
+
 ### Import Resolution
 
 **Relative imports**: Start with `./` or `../`
