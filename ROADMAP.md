@@ -36,16 +36,7 @@ fn internal_helper() { }  // Not visible to importers
 
 ---
 
-### 3. Compile-Time Array Bounds Checking
-
-**Current State**: Only runtime checks (if any)
-**Improvement**: Error on `array[10]` when array size is 5
-**Benefit**: Catch bugs at compile time
-**Complexity**: Medium (constant propagation in semantic analysis)
-
----
-
-### 4. Tagged Enum Pattern Matching
+### 3. Tagged Enum Pattern Matching
 
 **Current State**:
 - Tuple variant creation works: `Option::Some(42)`
@@ -107,9 +98,9 @@ match msg {
 
 ---
 
-### 5. BCD Enhancements
+### 4. BCD Enhancements
 
-#### 5.1 Peephole Optimization for SED/CLD
+#### 4.1 Peephole Optimization for SED/CLD
 
 **Current State**: Each BCD operation generates individual SED/CLD pairs
 **Improvement**: Combine consecutive BCD operations into one SED...CLD block
@@ -133,14 +124,7 @@ ADC ...
 CLD
 ```
 
-#### 5.2 Compile-Time BCD Literal Validation
-
-**Current State**: Can cast any u8 to b8 without validation (e.g., `0xFF as b8`)
-**Improvement**: Validate that BCD literals contain only valid decimal digits (0-9 per nibble)
-**Benefit**: Catch invalid BCD values at compile time
-**Complexity**: Low (add validation in cast analysis)
-
-#### 5.3 BCD String Conversion Helpers
+#### 4.2 BCD String Conversion Helpers
 
 **Missing Functions**:
 - `bcd_to_string(value: b8) -> str` - Convert BCD to decimal string
@@ -152,25 +136,9 @@ CLD
 
 ---
 
-### 6. Additional Compiler Warnings
-
-#### 6.1 Address Overlap Warning
-
-**Improvement**: Warn when `addr` location overlaps with compiler-generated memory sections
-**Benefit**: Prevent memory corruption from overlapping allocations
-**Complexity**: Low (add validation in semantic analysis)
-
-**Example**:
-```wraith
-// wraith.toml specifies CODE section at $9000-$BFFF
-addr MY_VAR = 0x9500;  // WARNING: Overlaps with CODE section
-```
-
----
-
 ## 🟢 MEDIUM PRIORITY
 
-### 7. Bitfield Access Syntax
+### 5. Bitfield Access Syntax
 
 **Current State**: Manual bit manipulation with shifts and masks
 **Improvement**: Add `.bit(n)` accessor and bitfield syntax
@@ -187,7 +155,7 @@ flags.bits[7:4]            // Access bits 7-4 (nibble)
 
 ---
 
-### 8. Branch Optimization Intelligence
+### 6. Branch Optimization Intelligence
 
 **Current State**: Status flags discarded after comparisons
 **Improvement**: Track flag state and reuse for multiple conditionals
@@ -206,7 +174,7 @@ if x > 5 {           // Could skip second CMP if x unchanged
 
 ---
 
-### 9. Disassembly Output Mode
+### 7. Disassembly Output Mode
 
 **Current State**: Only assembly source output
 **Improvement**: Generate annotated listing with addresses and cycle counts
@@ -223,7 +191,7 @@ if x > 5 {           // Could skip second CMP if x unchanged
 
 ## 🔵 LOWER PRIORITY
 
-### 10. Inline Data Directive
+### 8. Inline Data Directive
 
 **Current State**: Data must be in static variables or string literals
 **Improvement**: Allow inline data in functions
@@ -239,7 +207,7 @@ data lookup_table: [u8; 16] = [
 
 ---
 
-### 11. PRNG (Pseudo-Random Number Generator)
+### 9. PRNG (Pseudo-Random Number Generator)
 
 **Add to stdlib**:
 - `rand_init(seed: u16)` - Initialize generator
@@ -257,9 +225,6 @@ data lookup_table: [u8; 16] = [
 
 1. **Tagged enum pattern matching** (tuple variant testing + struct variant implementation)
 2. Module visibility system (`pub` keyword)
-3. Compile-time array bounds checking
-4. BCD literal validation
-5. Address overlap warning
 
 **Expected Impact**: Fewer runtime bugs, better APIs, safer code, complete enum functionality
 
@@ -295,6 +260,9 @@ For reference, these major features were completed in January 2026:
 - Constant array optimization (const arrays emit to DATA section with .RES)
 - Tail call optimization (recursive functions use JMP instead of JSR)
 - Multi-dimensional array indexing (full support for `arr[i][j]` syntax)
-- Comprehensive warning system (8 warning types implemented)
+- Comprehensive warning system (9 warning types implemented)
+- **Compile-time array bounds checking** (errors on constant out-of-bounds access)
+- **BCD literal validation** (compile-time range checking for b8/b16 casts)
+- **Address overlap warning** (warns when addr overlaps CODE/DATA sections)
 
 See [Language Specification](specification.md) for complete documentation of all implemented features.
