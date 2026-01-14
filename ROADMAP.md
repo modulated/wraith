@@ -45,9 +45,71 @@ fn internal_helper() { }  // Not visible to importers
 
 ---
 
-### 4. BCD Enhancements
+### 4. Tagged Enum Pattern Matching
 
-#### 4.1 Peephole Optimization for SED/CLD
+**Current State**:
+- Tuple variant creation works: `Option::Some(42)`
+- Pattern matching code exists but is **minimally tested**
+- Struct variant pattern matching explicitly **not implemented**
+
+**Improvements Needed**:
+
+#### 4.1 Complete Testing for Tuple Variant Pattern Matching
+
+**What Works** (but needs testing):
+```rust
+enum Option {
+    None,
+    Some(u8),
+}
+
+match opt {
+    Option::Some(value) => {  // Code exists, needs tests
+        // Extract 'value' from enum
+    }
+    Option::None => { }
+}
+```
+
+**Status**: Code generation exists in `src/codegen/stmt.rs:1188-1226` and semantic analysis in `src/sema/analyze/stmt.rs:524-572`, but **zero tests verify this works correctly**. High risk of bugs.
+
+**Action Items**:
+- Write comprehensive tests for single-field tuple variants
+- Test multi-field tuple variants (e.g., `RGB(u8, u8, u8)`)
+- Test with u16 fields (multi-byte data)
+- Test nested pattern matching
+- Test edge cases (zero fields, mismatched binding counts)
+
+**Complexity**: Low (testing only, implementation exists)
+
+#### 4.2 Implement Struct Variant Pattern Matching
+
+**Currently Fails**:
+```rust
+enum Message {
+    Move { x: u8, y: u8 },
+}
+
+match msg {
+    Message::Move { x, y } => {  // ❌ Error: not implemented
+        // Would extract x and y
+    }
+}
+```
+
+**Action Items**:
+- Implement codegen for struct variant field extraction
+- Add semantic analysis for named field bindings
+- Handle field order independence
+- Write comprehensive tests
+
+**Complexity**: Medium (requires new codegen logic)
+
+---
+
+### 5. BCD Enhancements
+
+#### 5.1 Peephole Optimization for SED/CLD
 
 **Current State**: Each BCD operation generates individual SED/CLD pairs
 **Improvement**: Combine consecutive BCD operations into one SED...CLD block
@@ -71,14 +133,14 @@ ADC ...
 CLD
 ```
 
-#### 4.2 Compile-Time BCD Literal Validation
+#### 5.2 Compile-Time BCD Literal Validation
 
 **Current State**: Can cast any u8 to b8 without validation (e.g., `0xFF as b8`)
 **Improvement**: Validate that BCD literals contain only valid decimal digits (0-9 per nibble)
 **Benefit**: Catch invalid BCD values at compile time
 **Complexity**: Low (add validation in cast analysis)
 
-#### 4.3 BCD String Conversion Helpers
+#### 5.3 BCD String Conversion Helpers
 
 **Missing Functions**:
 - `bcd_to_string(value: b8) -> str` - Convert BCD to decimal string
@@ -90,9 +152,9 @@ CLD
 
 ---
 
-### 5. Additional Compiler Warnings
+### 6. Additional Compiler Warnings
 
-#### 5.1 Address Overlap Warning
+#### 6.1 Address Overlap Warning
 
 **Improvement**: Warn when `addr` location overlaps with compiler-generated memory sections
 **Benefit**: Prevent memory corruption from overlapping allocations
@@ -108,7 +170,7 @@ addr MY_VAR = 0x9500;  // WARNING: Overlaps with CODE section
 
 ## 🟢 MEDIUM PRIORITY
 
-### 6. Bitfield Access Syntax
+### 7. Bitfield Access Syntax
 
 **Current State**: Manual bit manipulation with shifts and masks
 **Improvement**: Add `.bit(n)` accessor and bitfield syntax
@@ -125,7 +187,7 @@ flags.bits[7:4]            // Access bits 7-4 (nibble)
 
 ---
 
-### 7. Branch Optimization Intelligence
+### 8. Branch Optimization Intelligence
 
 **Current State**: Status flags discarded after comparisons
 **Improvement**: Track flag state and reuse for multiple conditionals
@@ -144,7 +206,7 @@ if x > 5 {           // Could skip second CMP if x unchanged
 
 ---
 
-### 8. Disassembly Output Mode
+### 9. Disassembly Output Mode
 
 **Current State**: Only assembly source output
 **Improvement**: Generate annotated listing with addresses and cycle counts
@@ -161,7 +223,7 @@ if x > 5 {           // Could skip second CMP if x unchanged
 
 ## 🔵 LOWER PRIORITY
 
-### 9. Inline Data Directive
+### 10. Inline Data Directive
 
 **Current State**: Data must be in static variables or string literals
 **Improvement**: Allow inline data in functions
@@ -177,7 +239,7 @@ data lookup_table: [u8; 16] = [
 
 ---
 
-### 10. PRNG (Pseudo-Random Number Generator)
+### 11. PRNG (Pseudo-Random Number Generator)
 
 **Add to stdlib**:
 - `rand_init(seed: u16)` - Initialize generator
@@ -193,12 +255,13 @@ data lookup_table: [u8; 16] = [
 ### Phase 1: Core Language & Safety
 **Focus**: Essential language features and compile-time safety
 
-1. Module visibility system (`pub` keyword)
-2. Compile-time array bounds checking
-3. BCD literal validation
-4. Address overlap warning
+1. **Tagged enum pattern matching** (tuple variant testing + struct variant implementation)
+2. Module visibility system (`pub` keyword)
+3. Compile-time array bounds checking
+4. BCD literal validation
+5. Address overlap warning
 
-**Expected Impact**: Fewer runtime bugs, better APIs, safer code
+**Expected Impact**: Fewer runtime bugs, better APIs, safer code, complete enum functionality
 
 ---
 

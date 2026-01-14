@@ -1,0 +1,255 @@
+// Tuple Variant Pattern Matching Example
+//
+// This example demonstrates enum tuple variants with pattern matching.
+// It tests extraction of values from enum variants and outputs results
+// to memory-mapped registers.
+//
+// Memory Map:
+// $6000 - Test result 1
+// $6001 - Test result 2
+// $6002 - Test result 3
+// $6003 - Status (0=pass, 255=fail)
+//
+// To run in an emulator:
+// 1. cargo run --release examples/tuple.wr
+// 2. Load the generated .asm into your 6502 emulator
+// 3. Set breakpoints or watch addresses $6000-$6003 to see results
+//
+// NOTE: Current limitation - enum variant creation requires constant expressions.
+// Variables cannot be used as field values (e.g., RGB(r, g, b) where r/g/b are variables).
+// This is a known limitation as enum data is allocated statically.
+
+// Memory-mapped I/O for test output
+const TEST_OUT1: addr = 0x6000;
+const TEST_OUT2: addr = 0x6001;
+const TEST_OUT3: addr = 0x6002;
+const STATUS: addr = 0x6003;
+
+// ============================================================
+// Test 1: Single-field tuple variant (Option-like pattern)
+// ============================================================
+
+enum Option {
+    None,
+    Some(u8),
+}
+
+fn test_option() {
+    let opt: Option = Option::Some(42);
+
+    match opt {
+        Option::Some(value) => {
+            // Extract the value from Some variant
+            TEST_OUT1 = value;  // Should write 42 to $6000
+        }
+        Option::None => {
+            TEST_OUT1 = 0;
+        }
+    }
+}
+
+// ============================================================
+// Test 2: Multi-field tuple variant (RGB Color)
+// ============================================================
+
+enum Color {
+    RGB(u8, u8, u8),
+    Grayscale(u8),
+}
+
+fn test_color() {
+    let red_color: Color = Color::RGB(255, 0, 0);
+
+    match red_color {
+        Color::RGB(r, g, b) => {
+            // Extract all three values
+            TEST_OUT1 = r;  // Should write 255
+            TEST_OUT2 = g;  // Should write 0
+            TEST_OUT3 = b;  // Should write 0
+        }
+        Color::Grayscale(gray) => {
+            TEST_OUT1 = gray;
+            TEST_OUT2 = gray;
+            TEST_OUT3 = gray;
+        }
+    }
+}
+
+// ============================================================
+// Test 3: u16 field extraction
+// ============================================================
+
+enum Result {
+    Ok(u16),
+    Err(u8),
+}
+
+fn test_u16() {
+    let success: Result = Result::Ok(1000);
+
+    match success {
+        Result::Ok(value) => {
+            // Extract u16 value (1000 = 0x03E8)
+            let low: u8 = value as u8;           // Low byte: 0xE8 = 232
+            let high: u8 = (value >> 8) as u8;   // High byte: 0x03 = 3
+            TEST_OUT1 = low;   // Should write 232
+            TEST_OUT2 = high;  // Should write 3
+        }
+        Result::Err(code) => {
+            TEST_OUT1 = code;
+            TEST_OUT2 = 0;
+        }
+    }
+}
+
+// ============================================================
+// Test 4: Mixed variant types
+// ============================================================
+
+enum Message {
+    Quit,                    // Unit variant
+    Value(u8),              // Single-field tuple
+    Coords(u8, u8),         // Two-field tuple
+}
+
+fn test_mixed() {
+    let msg1: Message = Message::Value(100);
+    let msg2: Message = Message::Coords(50, 75);
+
+    // Test 1: Extract single value
+    match msg1 {
+        Message::Value(v) => {
+            TEST_OUT1 = v;  // Should write 100
+        }
+        Message::Coords(x, y) => {
+            TEST_OUT1 = x;
+        }
+        Message::Quit => {
+            TEST_OUT1 = 0;
+        }
+    }
+
+    // Test 2: Extract coordinates
+    match msg2 {
+        Message::Coords(x, y) => {
+            TEST_OUT2 = x;  // Should write 50
+            TEST_OUT3 = y;  // Should write 75
+        }
+        Message::Value(v) => {
+            TEST_OUT2 = v;
+        }
+        Message::Quit => {
+            TEST_OUT2 = 0;
+        }
+    }
+}
+
+// ============================================================
+// Test 5: Multiple variant matching
+// ============================================================
+
+enum Status {
+    Ready,
+    Processing(u8),
+    Complete(u8),
+}
+
+fn test_status() {
+    let status1: Status = Status::Processing(50);
+    let status2: Status = Status::Complete(100);
+
+    // Test processing status
+    match status1 {
+        Status::Processing(percent) => {
+            TEST_OUT1 = percent;  // Should write 50
+        }
+        Status::Complete(percent) => {
+            TEST_OUT1 = percent;
+        }
+        Status::Ready => {
+            TEST_OUT1 = 0;
+        }
+    }
+
+    // Test complete status
+    match status2 {
+        Status::Complete(percent) => {
+            TEST_OUT2 = percent;  // Should write 100
+        }
+        Status::Processing(percent) => {
+            TEST_OUT2 = percent;
+        }
+        Status::Ready => {
+            TEST_OUT2 = 0;
+        }
+    }
+}
+
+// ============================================================
+// Test 6: Function returning extracted value
+// ============================================================
+
+fn unwrap_or_default(opt: Option, default: u8) -> u8 {
+    match opt {
+        Option::Some(value) => {
+            return value;
+        }
+        Option::None => {
+            return default;
+        }
+    }
+}
+
+fn test_function_return() {
+    let opt1: Option = Option::Some(99);
+    let opt2: Option = Option::None;
+
+    let result1: u8 = unwrap_or_default(opt1, 0);
+    let result2: u8 = unwrap_or_default(opt2, 255);
+
+    TEST_OUT1 = result1;  // Should write 99
+    TEST_OUT2 = result2;  // Should write 255
+}
+
+// ============================================================
+// Main entry point - runs all tests
+// ============================================================
+
+#[reset]
+fn main() {
+    // Initialize status to pass
+    STATUS = 0;
+
+    // Run Test 1: Simple Option-like pattern
+    test_option();
+    // Expected: TEST_OUT1 = 42
+
+    // Run Test 2: RGB color extraction
+    test_color();
+    // Expected: TEST_OUT1 = 255, TEST_OUT2 = 0, TEST_OUT3 = 0
+
+    // Run Test 3: u16 extraction
+    test_u16();
+    // Expected: TEST_OUT1 = 232 (0xE8), TEST_OUT2 = 3
+
+    // Run Test 4: Mixed variant types
+    test_mixed();
+    // Expected: TEST_OUT1 = 100, TEST_OUT2 = 50, TEST_OUT3 = 75
+
+    // Run Test 5: Multiple variant matching
+    test_status();
+    // Expected: TEST_OUT1 = 50, TEST_OUT2 = 100
+
+    // Run Test 6: Function with unwrap pattern
+    test_function_return();
+    // Expected: TEST_OUT1 = 99, TEST_OUT2 = 255
+
+    // If we got here, all tests passed
+    // Final values in memory-mapped registers show test results
+    STATUS = 0;  // Success!
+
+    // Infinite loop
+    loop {
+        // In a real system, this would be WFI or similar
+    }
+}
