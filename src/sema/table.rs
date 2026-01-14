@@ -32,6 +32,8 @@ pub struct SymbolInfo {
     pub mutable: bool,
     /// Access mode for address declarations (read-only, write-only, or read-write)
     pub access_mode: Option<AccessMode>,
+    /// Visibility: true if marked with `pub`, false if private
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -89,6 +89,7 @@ pub struct Function {
     pub return_type: Option<Spanned<TypeExpr>>,
     pub body: Spanned<Stmt>,
     pub attributes: Vec<FnAttribute>,
+    pub is_pub: bool,
 }
 
 /// A struct definition
@@ -97,6 +98,7 @@ pub struct Struct {
     pub name: Spanned<String>,
     pub fields: Vec<StructField>,
     pub attributes: Vec<StructAttribute>,
+    pub is_pub: bool,
 }
 
 /// An enum definition
@@ -104,6 +106,7 @@ pub struct Struct {
 pub struct Enum {
     pub name: Spanned<String>,
     pub variants: Vec<EnumVariant>,
+    pub is_pub: bool,
 }
 
 /// Access mode for memory-mapped I/O addresses
@@ -123,6 +126,7 @@ pub struct AddressDecl {
     pub name: Spanned<String>,
     pub address: Spanned<super::expr::Expr>,
     pub access: AccessMode,
+    pub is_pub: bool,
 }
 
 /// Static/const variable declaration (top-level)
@@ -133,6 +137,7 @@ pub struct Static {
     pub init: Spanned<super::expr::Expr>,
     pub mutable: bool,
     pub zero_page: bool,
+    pub is_pub: bool,
 }
 
 /// Import declaration

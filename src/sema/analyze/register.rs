@@ -80,6 +80,7 @@ impl SemanticAnalyzer {
             location: SymbolLocation::Absolute(0),
             mutable: false,
             access_mode: None,
+            is_pub: func.is_pub,
         };
         self.table.insert(name.clone(), info);
 
@@ -243,6 +244,7 @@ impl SemanticAnalyzer {
             location: SymbolLocation::Absolute(0),
             mutable: stat.mutable,
             access_mode: None,
+            is_pub: stat.is_pub,
         };
         self.table.insert(name, info);
 
@@ -316,6 +318,7 @@ impl SemanticAnalyzer {
             // Write and ReadWrite can be written to; Read cannot
             mutable: matches!(addr.access, crate::ast::AccessMode::Write | crate::ast::AccessMode::ReadWrite),
             access_mode: Some(addr.access),
+            is_pub: addr.is_pub,
         };
         self.table.insert(name, info);
 
@@ -392,6 +395,15 @@ impl SemanticAnalyzer {
         for symbol_name in &import.symbols {
             let name = &symbol_name.node;
             if let Some(symbol) = imported_info.table.lookup(name) {
+                // Check if the symbol is public
+                if !symbol.is_pub {
+                    return Err(SemaError::ImportError {
+                        path: import.path.node.clone(),
+                        reason: format!("symbol '{}' is private and cannot be imported", name),
+                        span: symbol_name.span,
+                    });
+                }
+
                 self.table.insert(name.clone(), symbol.clone());
 
                 // Track imported symbol for unused import detection
@@ -530,6 +542,7 @@ impl SemanticAnalyzer {
                 location: SymbolLocation::None,
                 mutable: false,
                 access_mode: None,
+                is_pub: struct_def.is_pub,
             },
         );
 
@@ -675,6 +688,7 @@ impl SemanticAnalyzer {
                 location: SymbolLocation::None,
                 mutable: false,
                 access_mode: None,
+                is_pub: enum_def.is_pub,
             },
         );
 

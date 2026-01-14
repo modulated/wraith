@@ -241,6 +241,7 @@ impl SemanticAnalyzer {
             location,
             mutable,
             access_mode: None,
+            is_pub: false, // Local variables are never public
         };
         self.table.insert(name.node.clone(), info.clone());
         // Also add to resolved_symbols so codegen can find it
@@ -376,6 +377,7 @@ impl SemanticAnalyzer {
             location: SymbolLocation::ZeroPage(addr),
             mutable: true,
             access_mode: None,
+            is_pub: false, // Local variables are never public
         };
         self.table.insert(var_name.node.clone(), info);
 
@@ -453,6 +455,7 @@ impl SemanticAnalyzer {
             location: SymbolLocation::ZeroPage(addr),
             mutable: true,
             access_mode: None,
+            is_pub: false, // Local variables are never public
         };
         self.table.insert(var_name.node.clone(), info.clone());
         // Add to resolved_symbols so codegen can find it
@@ -544,6 +547,7 @@ impl SemanticAnalyzer {
                                             location: SymbolLocation::ZeroPage(addr),
                                             mutable: false,
                                             access_mode: None,
+                                            is_pub: false, // Pattern bindings are never public
                                         };
                                         self.table.insert(binding.name.node.clone(), info.clone());
                                         // Also add to resolved_symbols so codegen can find it
@@ -567,6 +571,7 @@ impl SemanticAnalyzer {
                     location: SymbolLocation::ZeroPage(addr),
                     mutable: false,
                     access_mode: None,
+                    is_pub: false, // Pattern bindings are never public
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Also add to resolved_symbols so codegen can find it

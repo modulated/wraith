@@ -63,6 +63,14 @@ impl Parser<'_> {
             attributes.push(self.parse_attribute()?);
         }
 
+        // Parse optional 'pub' keyword
+        let is_pub = if self.check(&Token::Pub) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         match self.peek().cloned() {
             Some(Token::Import) => {
                 let import = self.parse_import()?;
@@ -71,19 +79,19 @@ impl Parser<'_> {
             }
 
             Some(Token::Fn) => {
-                let func = self.parse_function(attributes)?;
+                let func = self.parse_function(attributes, is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Function(Box::new(func)), span))
             }
 
             Some(Token::Struct) => {
-                let s = self.parse_struct(attributes)?;
+                let s = self.parse_struct(attributes, is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Struct(s), span))
             }
 
             Some(Token::Enum) => {
-                let e = self.parse_enum()?;
+                let e = self.parse_enum(is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Enum(e), span))
             }
@@ -118,6 +126,7 @@ impl Parser<'_> {
                         name,
                         address: init,
                         access,
+                        is_pub,
                     }), span))
                 } else {
                     // Access modifiers are only valid for addr types
@@ -133,6 +142,7 @@ impl Parser<'_> {
                         init,
                         mutable: false,
                         zero_page: false,
+                        is_pub,
                     }), span))
                 }
             }
@@ -276,7 +286,7 @@ impl Parser<'_> {
     }
 
     /// Parse a function definition
-    fn parse_function(&mut self, attributes: Vec<FnAttribute>) -> ParseResult<Function> {
+    fn parse_function(&mut self, attributes: Vec<FnAttribute>, is_pub: bool) -> ParseResult<Function> {
         self.expect(&Token::Fn)?;
 
         let name = self.expect_ident()?;
@@ -320,11 +330,12 @@ impl Parser<'_> {
             return_type,
             body,
             attributes,
+            is_pub,
         })
     }
 
     /// Parse a struct definition
-    fn parse_struct(&mut self, attributes: Vec<FnAttribute>) -> ParseResult<Struct> {
+    fn parse_struct(&mut self, attributes: Vec<FnAttribute>, is_pub: bool) -> ParseResult<Struct> {
         self.expect(&Token::Struct)?;
 
         let name = self.expect_ident()?;
@@ -363,11 +374,12 @@ impl Parser<'_> {
             name,
             fields,
             attributes: struct_attrs,
+            is_pub,
         })
     }
 
     /// Parse an enum definition
-    fn parse_enum(&mut self) -> ParseResult<Enum> {
+    fn parse_enum(&mut self, is_pub: bool) -> ParseResult<Enum> {
         self.expect(&Token::Enum)?;
 
         let name = self.expect_ident()?;
@@ -461,6 +473,6 @@ impl Parser<'_> {
 
         self.expect(&Token::RBrace)?;
 
-        Ok(Enum { name, variants })
+        Ok(Enum { name, variants, is_pub })
     }
 }

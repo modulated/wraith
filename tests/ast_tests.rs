@@ -72,6 +72,7 @@ fn test_function_definition() {
         return_type: Some(Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8))),
         body: Spanned::dummy(Stmt::Block(vec![])),
         attributes: vec![],
+        is_pub: false,
     };
 
     assert_eq!(func.name.node, "add");
@@ -92,6 +93,7 @@ fn test_struct_definition() {
                 ty: Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8)),
             },
         ],
+        is_pub: false,
         attributes: vec![],
     };
 
@@ -125,6 +127,7 @@ fn test_enum_with_variants() {
                 fields: vec![Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8))],
             },
         ],
+        is_pub: false,
     };
 
     assert_eq!(message.variants.len(), 3);
@@ -137,12 +140,14 @@ fn test_enum_with_variants() {
 fn test_source_file() {
     let file = SourceFile::with_items(vec![
         Spanned::dummy(Item::Struct(Struct {
+            is_pub: false,
             name: Spanned::dummy("Point".to_string()),
             fields: vec![],
             attributes: vec![],
         })),
         Spanned::dummy(Item::Function(Box::new(Function {
             name: Spanned::dummy("main".to_string()),
+            is_pub: false,
             params: vec![],
             return_type: Some(Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8))),
             body: Spanned::dummy(Stmt::Block(vec![])),
