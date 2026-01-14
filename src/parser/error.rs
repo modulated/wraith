@@ -240,6 +240,7 @@ fn format_token(token: &Token) -> String {
         Token::Zp => "keyword 'zp'".to_string(),
         Token::Read => "keyword 'read'".to_string(),
         Token::Write => "keyword 'write'".to_string(),
+        Token::Pub => "keyword 'pub'".to_string(),
         Token::Asm => "keyword 'asm'".to_string(),
         Token::U8 => "type 'u8'".to_string(),
         Token::I8 => "type 'i8'".to_string(),

@@ -402,3 +402,143 @@ fn test_no_warn_inline_functions() {
         _ => panic!("Expected successful compilation"),
     }
 }
+// ============================================================================
+// Address Overlap Warnings
+// ============================================================================
+
+#[test]
+fn warn_address_overlaps_code_section() {
+    // Default CODE section is 0x8000-0xBFFF
+    let result = compile(r#"
+        const OVERLAP: addr = 0x9000;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(warnings.contains("overlap"), "Should warn about address overlap");
+            assert!(warnings.contains("0x9000") || warnings.contains("$9000"), "Should mention the address");
+            assert!(warnings.contains("CODE"), "Should mention CODE section");
+        }
+        _ => panic!("Expected successful compilation with warnings"),
+    }
+}
+
+#[test]
+fn warn_address_overlaps_data_section() {
+    // Default DATA section is 0xD000-0xEFFF
+    let result = compile(r#"
+        const OVERLAP: addr = 0xD500;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(warnings.contains("overlap"), "Should warn about address overlap");
+            assert!(warnings.contains("0xD500") || warnings.contains("$D500"), "Should mention the address");
+            assert!(warnings.contains("DATA"), "Should mention DATA section");
+        }
+        _ => panic!("Expected successful compilation with warnings"),
+    }
+}
+
+#[test]
+fn warn_address_at_section_start() {
+    // Test address exactly at CODE section start (0x8000)
+    let result = compile(r#"
+        const AT_START: addr = 0x8000;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(warnings.contains("overlap"), "Should warn about overlap at section start");
+            assert!(warnings.contains("CODE"), "Should mention CODE section");
+        }
+        _ => panic!("Expected successful compilation with warnings"),
+    }
+}
+
+#[test]
+fn warn_address_at_section_end() {
+    // Test address exactly at CODE section end (0xBFFF)
+    let result = compile(r#"
+        const AT_END: addr = 0xBFFF;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(warnings.contains("overlap"), "Should warn about overlap at section end");
+            assert!(warnings.contains("CODE"), "Should mention CODE section");
+        }
+        _ => panic!("Expected successful compilation with warnings"),
+    }
+}
+
+#[test]
+fn no_warn_address_outside_sections() {
+    // Address in zero page (0x0000-0x00FF) - outside CODE/DATA sections
+    let result = compile(r#"
+        const ZERO_PAGE: addr = 0x0040;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("overlap"), "Should not warn for zero page address");
+        }
+        _ => panic!("Expected successful compilation"),
+    }
+}
+
+#[test]
+fn no_warn_address_between_sections() {
+    // Address between CODE (ends at 0xBFFF) and DATA (starts at 0xD000)
+    let result = compile(r#"
+        const BETWEEN: addr = 0xC000;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("overlap"), "Should not warn for address between sections");
+        }
+        _ => panic!("Expected successful compilation"),
+    }
+}
+
+#[test]
+fn no_warn_address_after_sections() {
+    // Address above DATA section (ends at 0xEFFF)
+    let result = compile(r#"
+        const HIGH_MEM: addr = 0xF000;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(!warnings.contains("overlap"), "Should not warn for address above sections");
+        }
+        _ => panic!("Expected successful compilation"),
+    }
+}
+
+#[test]
+fn warn_multiple_overlapping_addresses() {
+    let result = compile(r#"
+        const OVERLAP1: addr = 0x8000;
+        const OVERLAP2: addr = 0x9000;
+        const OVERLAP3: addr = 0xD000;
+        fn main() {}
+    "#);
+
+    match result {
+        CompileResult::Success(warnings, _) => {
+            // Should have warnings for all three overlapping addresses
+            let overlap_count = warnings.matches("overlap").count();
+            assert!(overlap_count >= 3, "Should warn about all overlapping addresses, got {} warnings", overlap_count);
+        }
+        _ => panic!("Expected successful compilation with warnings"),
+    }
+}

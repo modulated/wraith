@@ -4,3 +4,4 @@
 
 mod parse_errors;
 mod sema_errors;
+mod visibility_errors;
