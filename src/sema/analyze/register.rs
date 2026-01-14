@@ -413,6 +413,15 @@ impl SemanticAnalyzer {
                 if let Some(metadata) = imported_info.function_metadata.get(name) {
                     self.function_metadata.insert(name.clone(), metadata.clone());
                 }
+
+                // Also import type definitions (struct/enum) if this is a type
+                if symbol.kind == SymbolKind::Type {
+                    if let Some(struct_info) = imported_info.type_registry.get_struct(name) {
+                        self.type_registry.add_struct(struct_info.clone());
+                    } else if let Some(enum_info) = imported_info.type_registry.get_enum(name) {
+                        self.type_registry.add_enum(enum_info.clone());
+                    }
+                }
             } else {
                 return Err(SemaError::ImportError {
                     path: import.path.node.clone(),
