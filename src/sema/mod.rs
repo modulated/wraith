@@ -463,6 +463,16 @@ pub enum Warning {
         bytes_available: u8,
         span: Span,
     },
+
+    /// Address declaration overlaps with compiler-managed memory section
+    AddressOverlap {
+        name: String,
+        address: u16,
+        section_name: String,
+        section_start: u16,
+        section_end: u16,
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -495,6 +505,12 @@ impl Warning {
                 (format!(
                     "function `{}` parameters use {} bytes, exceeds available {} bytes",
                     function_name, bytes_used, bytes_available
+                ), span)
+            }
+            Warning::AddressOverlap { name, address, section_name, section_start, section_end, span } => {
+                (format!(
+                    "address declaration `{}` at ${:04X} overlaps with {} section (${:04X}-${:04X})",
+                    name, address, section_name, section_start, section_end
                 ), span)
             }
         };

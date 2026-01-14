@@ -293,6 +293,21 @@ impl SemanticAnalyzer {
         // (e.g., addr SCREEN = BASE + 0x100)
         self.const_env.insert(name.clone(), ConstValue::Integer(address as i64));
 
+        // Check for overlap with compiler-managed memory sections
+        for section in &self.memory_config.sections {
+            if section.contains(address) {
+                self.warnings.push(Warning::AddressOverlap {
+                    name: name.clone(),
+                    address,
+                    section_name: section.name.clone(),
+                    section_start: section.start,
+                    section_end: section.end,
+                    span: addr.address.span,
+                });
+                break; // Only warn once per address
+            }
+        }
+
         let info = SymbolInfo {
             name: name.clone(),
             kind: SymbolKind::Address,

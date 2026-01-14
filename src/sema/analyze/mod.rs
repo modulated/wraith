@@ -63,6 +63,8 @@ pub struct SemanticAnalyzer {
     pub(super) expected_type: Option<Type>,
     /// Map from span to resolved struct name for anonymous struct inits
     pub(super) resolved_struct_names: HashMap<Span, String>,
+    /// Memory configuration from wraith.toml for overlap checking
+    pub(super) memory_config: crate::config::MemoryConfig,
 }
 
 impl Default for SemanticAnalyzer {
@@ -101,6 +103,7 @@ impl SemanticAnalyzer {
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::new(),
+            memory_config: crate::config::MemoryConfig::load_or_default(),
         }
     }
 
@@ -133,6 +136,7 @@ impl SemanticAnalyzer {
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::new(),
+            memory_config: crate::config::MemoryConfig::load_or_default(),
         }
     }
 

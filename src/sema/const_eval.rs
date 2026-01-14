@@ -275,6 +275,45 @@ fn decimal_to_bcd(decimal: i64, max_digits: usize) -> Option<i64> {
     Some(result)
 }
 
+/// Validate that a value can be safely cast to a BCD type
+pub fn validate_bcd_cast(
+    value: ConstValue,
+    target_prim: &crate::ast::PrimitiveType,
+    span: crate::ast::Span,
+) -> Result<(), SemaError> {
+    use crate::ast::PrimitiveType;
+
+    if let Some(n) = value.as_integer() {
+        match target_prim {
+            PrimitiveType::B8 => {
+                if decimal_to_bcd(n, 2).is_none() {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "value {} is out of range for BCD type b8 (valid range: 0-99)",
+                            n
+                        ),
+                        span,
+                    });
+                }
+            }
+            PrimitiveType::B16 => {
+                if decimal_to_bcd(n, 4).is_none() {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "value {} is out of range for BCD type b16 (valid range: 0-9999)",
+                            n
+                        ),
+                        span,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Apply type cast to a constant value
 fn apply_type_cast(
     value: ConstValue,
