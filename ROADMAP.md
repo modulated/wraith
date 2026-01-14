@@ -8,22 +8,7 @@ This roadmap contains **unimplemented features only**. For a complete list of cu
 
 ## 🟡 HIGH PRIORITY
 
-### 1. Module Visibility System
-
-**Current State**: All imports are public, no privacy control
-**Improvement**: Add `pub` keyword for functions, structs, enums, constants
-**Benefit**: Better encapsulation, clearer API boundaries
-**Complexity**: Medium (semantic analysis changes)
-
-**Syntax**:
-```wraith
-pub fn exported_function() { }
-fn internal_helper() { }  // Not visible to importers
-```
-
----
-
-### 2. Standard Library Expansion
+### 1. Standard Library Expansion
 
 **Missing Functions**:
 - `mul16(a: u16, b: u16) -> u16` - 16-bit multiplication
@@ -36,7 +21,7 @@ fn internal_helper() { }  // Not visible to importers
 
 ---
 
-### 3. Tagged Enum Pattern Matching
+### 2. Tagged Enum Pattern Matching
 
 **Current State**:
 - Tuple variant creation works: `Option::Some(42)`
@@ -98,7 +83,7 @@ match msg {
 
 ---
 
-### 4. BCD Enhancements
+### 3. BCD Enhancements
 
 #### 4.1 Peephole Optimization for SED/CLD
 
@@ -138,7 +123,7 @@ CLD
 
 ## 🟢 MEDIUM PRIORITY
 
-### 5. Bitfield Access Syntax
+### 4. Bitfield Access Syntax
 
 **Current State**: Manual bit manipulation with shifts and masks
 **Improvement**: Add `.bit(n)` accessor and bitfield syntax
@@ -155,7 +140,7 @@ flags.bits[7:4]            // Access bits 7-4 (nibble)
 
 ---
 
-### 6. Branch Optimization Intelligence
+### 5. Branch Optimization Intelligence
 
 **Current State**: Status flags discarded after comparisons
 **Improvement**: Track flag state and reuse for multiple conditionals
@@ -174,7 +159,7 @@ if x > 5 {           // Could skip second CMP if x unchanged
 
 ---
 
-### 7. Disassembly Output Mode
+### 6. Disassembly Output Mode
 
 **Current State**: Only assembly source output
 **Improvement**: Generate annotated listing with addresses and cycle counts
@@ -191,7 +176,7 @@ if x > 5 {           // Could skip second CMP if x unchanged
 
 ## 🔵 LOWER PRIORITY
 
-### 8. Inline Data Directive
+### 7. Inline Data Directive
 
 **Current State**: Data must be in static variables or string literals
 **Improvement**: Allow inline data in functions
@@ -207,7 +192,7 @@ data lookup_table: [u8; 16] = [
 
 ---
 
-### 9. PRNG (Pseudo-Random Number Generator)
+### 8. PRNG (Pseudo-Random Number Generator)
 
 **Add to stdlib**:
 - `rand_init(seed: u16)` - Initialize generator
@@ -224,9 +209,8 @@ data lookup_table: [u8; 16] = [
 **Focus**: Essential language features and compile-time safety
 
 1. **Tagged enum pattern matching** (tuple variant testing + struct variant implementation)
-2. Module visibility system (`pub` keyword)
 
-**Expected Impact**: Fewer runtime bugs, better APIs, safer code, complete enum functionality
+**Expected Impact**: Fewer runtime bugs, complete enum functionality
 
 ---
 
@@ -264,5 +248,6 @@ For reference, these major features were completed in January 2026:
 - **Compile-time array bounds checking** (errors on constant out-of-bounds access)
 - **BCD literal validation** (compile-time range checking for b8/b16 casts)
 - **Address overlap warning** (warns when addr overlaps CODE/DATA sections)
+- **Module visibility system** (pub keyword for explicit exports, private by default)
 
 See [Language Specification](specification.md) for complete documentation of all implemented features.
