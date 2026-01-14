@@ -249,7 +249,5 @@ fn main() {
     STATUS = 0;  // Success!
 
     // Infinite loop
-    loop {
-        // In a real system, this would be WFI or similar
-    }
+    loop { }
 }

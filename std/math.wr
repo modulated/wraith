@@ -13,7 +13,7 @@
 /// Optimized assembly: Uses CMP and BCC to avoid boolean intermediate
 /// Cycles: ~8 (1 comparison + 1 conditional branch)
 #[inline]
-fn min(a: u8, b: u8) -> u8 {
+pub fn min(a: u8, b: u8) -> u8 {
     asm {
         "LDA {a}",
         "CMP {b}",
@@ -27,7 +27,7 @@ fn min(a: u8, b: u8) -> u8 {
 /// Optimized assembly: Uses CMP and BCS to avoid boolean intermediate
 /// Cycles: ~8 (1 comparison + 1 conditional branch)
 #[inline]
-fn max(a: u8, b: u8) -> u8 {
+pub fn max(a: u8, b: u8) -> u8 {
     asm {
         "LDA {a}",
         "CMP {b}",
@@ -41,7 +41,7 @@ fn max(a: u8, b: u8) -> u8 {
 /// Optimized assembly: Two comparisons with early exit
 /// Cycles: ~12-16 (best case: in range, worst case: clamped twice)
 #[inline]
-fn clamp(value: u8, min_val: u8, max_val: u8) -> u8 {
+pub fn clamp(value: u8, min_val: u8, max_val: u8) -> u8 {
     asm {
         "LDA {value}",
         "CMP {min_val}",
@@ -65,7 +65,7 @@ fn clamp(value: u8, min_val: u8, max_val: u8) -> u8 {
 /// Cycles: ~18-20
 /// Note: Uses zero page $20 for temporary storage
 #[inline]
-fn set_bit(value: u8, bit: u8) -> u8 {
+pub fn set_bit(value: u8, bit: u8) -> u8 {
 
     asm {
         "LDA {value}",
@@ -120,7 +120,7 @@ fn set_bit(value: u8, bit: u8) -> u8 {
 /// Cycles: ~18-20
 /// Note: Uses zero page $20 for temporary storage
 #[inline]
-fn clear_bit(value: u8, bit: u8) -> u8 {
+pub fn clear_bit(value: u8, bit: u8) -> u8 {
 
     asm {
         "LDA {value}",
@@ -176,7 +176,7 @@ fn clear_bit(value: u8, bit: u8) -> u8 {
 /// Returns: 1 if bit is set, 0 if clear
 /// Note: Uses zero page $20 for temporary storage
 #[inline]
-fn test_bit(value: u8, bit: u8) -> u8 {
+pub fn test_bit(value: u8, bit: u8) -> u8 {
 
     asm {
         "LDA {value}",
@@ -240,7 +240,7 @@ fn test_bit(value: u8, bit: u8) -> u8 {
 /// Cycles: ~6-8 (saved 2 cycles by eliminating STA)
 /// Returns: a + b, or 255 if overflow would occur
 #[inline]
-fn saturating_add(a: u8, b: u8) -> u8 {
+pub fn saturating_add(a: u8, b: u8) -> u8 {
     asm {
         "CLC",
         "LDA {a}",
@@ -256,7 +256,7 @@ fn saturating_add(a: u8, b: u8) -> u8 {
 /// Cycles: ~6-8 (saved 2 cycles by eliminating STA)
 /// Returns: a - b, or 0 if underflow would occur
 #[inline]
-fn saturating_sub(a: u8, b: u8) -> u8 {
+pub fn saturating_sub(a: u8, b: u8) -> u8 {
     asm {
         "SEC",
         "LDA {a}",
@@ -276,7 +276,7 @@ fn saturating_sub(a: u8, b: u8) -> u8 {
 /// Cycles: ~58-76 (saved 2 cycles by using TYA instead of STY/LDA)
 /// Returns: number of 1 bits in the value
 #[inline]
-fn count_bits(value: u8) -> u8 {
+pub fn count_bits(value: u8) -> u8 {
     asm {
         "LDA {value}",
         "LDX #$08",
@@ -298,7 +298,7 @@ fn count_bits(value: u8) -> u8 {
 /// Example: 0b11010010 -> 0b01001011
 /// Note: Uses zero page $20 for temporary storage
 #[inline]
-fn reverse_bits(value: u8) -> u8 {
+pub fn reverse_bits(value: u8) -> u8 {
     asm {
         "LDA #$00",
         "STA $20",
@@ -318,7 +318,7 @@ fn reverse_bits(value: u8) -> u8 {
 /// Cycles: ~10-14 (saved 2 cycles by eliminating STA)
 /// Example: 0xAB -> 0xBA
 #[inline]
-fn swap_nibbles(value: u8) -> u8 {
+pub fn swap_nibbles(value: u8) -> u8 {
     asm {
         "LDA {value}",
         "ASL A",
@@ -351,7 +351,7 @@ fn swap_nibbles(value: u8) -> u8 {
 /// $22-$23: result accumulator
 /// $24-$25: multiplier (shifted right each iteration)
 /// $26: loop counter (16 iterations)
-fn mul16(a: u16, b: u16) -> u16 {
+pub fn mul16(a: u16, b: u16) -> u16 {
     asm {
         // Initialize result to 0
         "LDA #$00",
@@ -424,7 +424,7 @@ fn mul16(a: u16, b: u16) -> u16 {
 /// $24-$25: quotient (result)
 /// $26: loop counter (16 iterations)
 /// $27: temp for division by zero check
-fn div16(a: u16, b: u16) -> u16 {
+pub fn div16(a: u16, b: u16) -> u16 {
     asm {
         // Check for division by zero (b == 0)
         "LDA $82",      // b.low
