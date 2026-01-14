@@ -25,8 +25,6 @@ A systems programming language designed specifically for the 6502 processor, tak
 
 ## Overview
 
-- [x] Add overview of design philosophy
-- [x] Document compilation process and output format
 - [ ] Explain memory model and zero page usage
 - [ ] Document calling conventions
 
@@ -177,10 +175,7 @@ let high: u8 = value.high;  // 0x12
 
 ### Completion Status
 
-- [x] Basic primitive types documented
-- [x] Document BCD (Binary Coded Decimal) types usage and operations
-- [x] Add examples of type overflow behavior
-- [x] Document type size and alignment
+All items completed.
 
 ---
 
@@ -335,13 +330,7 @@ fn fast_loop() {
 
 ### Completion Status
 
-- [x] Variable declaration syntax documented
-- [x] Mutability behavior documented
-- [x] Constants documented with examples
-- [x] Memory-mapped addresses documented
-- [x] Document variable scope rules
-- [x] Add shadowing behavior (if supported)
-- [x] Document zero page allocation strategy
+All items completed.
 
 ---
 
@@ -616,13 +605,7 @@ fn main() {
 
 ### Completion Status
 
-- [x] Basic function declaration documented
-- [x] Document function calling convention
-- [x] Explain parameter passing (registers vs stack vs zero page)
-- [x] Document return value handling
-- [x] Add examples for each attribute
-- [x] Document tail call optimization behavior
-- [x] Explain inline attribute impact on code size
+All items completed.
 
 ---
 
@@ -746,14 +729,7 @@ fn update_entity(e: Entity) {
 
 ### Completion Status
 
-- [x] Basic struct declaration documented
-- [x] Struct initialization syntax documented
-- [x] Field access documented
-- [x] Document struct memory layout
-- [x] Add padding and alignment information
-- [x] Document nested struct behavior
-- [x] Add examples of structs in arrays
-- [x] Document struct passing to functions
+All items completed.
 
 ---
 
@@ -993,12 +969,6 @@ let raw: u8 = s as u8;     // Cast to u8: 1
 
 ### Completion Status
 
-- [x] Simple enum declaration documented
-- [x] Document default discriminant values
-- [x] Add pattern matching with enums
-- [x] Document enum memory representation
-- [x] Document tagged unions (tuple and struct variants)
-- [x] Document memory layout for tagged unions
 - [ ] Complete testing for tuple variant pattern matching (in progress)
 - [ ] Implement struct variant pattern matching (planned)
 
@@ -1140,14 +1110,7 @@ memcpy(&dest as u16, &source as u16, 100);
 
 ### Completion Status
 
-- [x] Fixed array declaration documented
-- [x] Array initialization syntax documented
-- [x] Array indexing documented
-- [x] Document array bounds checking (compile-time vs runtime)
-- [x] Add slice syntax and operations
-- [x] Document slice memory representation
-- [x] Add multidimensional array examples
-- [x] Document array assignment and copying behavior
+All items completed.
 
 ---
 
@@ -1332,15 +1295,7 @@ See [Operators](#operators) section for full short-circuit documentation.
 
 ### Completion Status
 
-- [x] If/else documented
-- [x] While loop documented
-- [x] Infinite loop documented
-- [x] For loop documented
-- [x] Match statement documented
-- [x] Document continue statement
-- [x] Document break statement
 - [ ] Add assembly output examples for each control flow construct
-- [x] Document short-circuit evaluation in conditions
 
 ---
 
@@ -1446,11 +1401,7 @@ fn sign_extend_u8_to_u16(value: u8) -> u16 {
 
 ### Completion Status
 
-- [x] Basic casting syntax documented
-- [x] Document all valid cast combinations
-- [x] Add truncation behavior examples
-- [x] Document sign extension behavior
-- [x] Add casting to/from bool
+All items completed.
 
 ---
 
@@ -1631,13 +1582,7 @@ fn example() {
 
 ### Completion Status
 
-- [x] Basic assembly block documented
-- [x] Variable substitution documented
-- [x] Document register clobbering
-- [x] Add examples of common assembly patterns
-- [x] Document inline assembly limitations
-- [x] Add examples using labels in assembly
-- [x] Document interaction with optimizer
+All items completed.
 
 ---
 
@@ -1953,10 +1898,6 @@ These may be changed in future versions:
   - Cannot do `graphics::sprite::draw()`
   - All imports are at file level
 
-- **No pub/private visibility** - All symbols in a file are importable
-  - Planned for Phase 3 with `pub` keyword (see ROADMAP.md)
-  - Currently, all functions/structs/enums are public
-
 - **No re-exports** - Cannot re-export imported symbols
   - Each module must import directly from the source
 
@@ -1965,12 +1906,7 @@ These may be changed in future versions:
 
 ### Completion Status
 
-- [x] Import syntax documented
-- [x] Import resolution documented
-- [x] Limitations documented
-- [x] Add circular import handling
-- [x] Document import order dependencies
-- [x] Add examples of organizing larger projects
+All items completed.
 
 ---
 
@@ -1990,7 +1926,6 @@ import { enable_interrupts, disable_interrupts, nop } from "intrinsics.wr";
 #### Interrupt Control
 
 ##### `enable_interrupts()`
-- [x] Document `enable_interrupts()` - CLI (Clear Interrupt Disable)
 
 Enable maskable interrupts (IRQ) by clearing the interrupt disable flag.
 
@@ -2018,8 +1953,6 @@ fn reset_handler() {
 ```
 
 ##### `disable_interrupts()`
-- [x] Document `disable_interrupts()` - SEI (Set Interrupt Disable)
-
 Disable maskable interrupts (IRQ) by setting the interrupt disable flag.
 
 ```rust
@@ -2046,8 +1979,6 @@ fn critical_update() {
 #### Carry Flag Control
 
 ##### `clear_carry()`
-- [x] Document `clear_carry()` - CLC (Clear Carry)
-
 Clear the carry flag before addition operations.
 
 ```rust
@@ -2060,8 +1991,6 @@ fn clear_carry()
 **Note:** Compiler normally handles this automatically for addition. Use for manual multi-byte arithmetic.
 
 ##### `set_carry()`
-- [x] Document `set_carry()` - SEC (Set Carry)
-
 Set the carry flag before subtraction operations.
 
 ```rust
@@ -2076,7 +2005,6 @@ fn set_carry()
 #### Decimal Mode Control
 
 ##### `clear_decimal()`
-- [x] Document `clear_decimal()` - CLD (Clear Decimal Mode)
 
 Switch CPU to binary arithmetic mode.
 
@@ -2090,7 +2018,6 @@ fn clear_decimal()
 **Note:** In binary mode (default), ADC and SBC perform normal binary addition/subtraction. Most programs run in binary mode.
 
 ##### `set_decimal()`
-- [x] Document `set_decimal()` - SED (Set Decimal Mode)
 
 Switch CPU to Binary-Coded Decimal (BCD) arithmetic mode.
 
@@ -2118,7 +2045,6 @@ fn bcd_add(a: u8, b: u8) -> u8 {
 #### Other CPU Control
 
 ##### `clear_overflow()`
-- [x] Document `clear_overflow()` - CLV (Clear Overflow Flag)
 
 Clear the overflow (V) flag in the processor status register.
 
@@ -2132,7 +2058,6 @@ fn clear_overflow()
 **Note:** The overflow flag is set by ADC/SBC for signed arithmetic overflow.
 
 ##### `nop()`
-- [x] Document `nop()` - NOP (No Operation)
 
 Execute a no-operation instruction (2 cycle delay).
 
@@ -2149,7 +2074,6 @@ fn nop()
 - Placeholder for future instructions
 
 ##### `brk()`
-- [x] Document `brk()` - BRK (Software Interrupt)
 
 Trigger a software interrupt/breakpoint.
 
@@ -2175,7 +2099,6 @@ fn brk()
 **Note:** Most debuggers/emulators treat BRK as a breakpoint.
 
 ##### `set_stack_pointer(value: u8)`
-- [x] Document `set_stack_pointer()` - Set SP to specific value
 
 Set the stack pointer to a specific value.
 
@@ -2210,7 +2133,6 @@ import { memcpy, memset, memcmp, mem_read, mem_write } from "mem.wr";
 #### Memory Block Operations
 
 ##### `memcpy(dest: u16, src: u16, len: u8)`
-- [x] Document `memcpy(dest: u16, src: u16, len: u8)` - Copy memory
 
 Copy `len` bytes from source address to destination address.
 
@@ -2234,7 +2156,6 @@ memcpy(SCREEN_BUFFER as u16, &SOURCE_DATA as u16, 5);
 ```
 
 ##### `memset(dest: u16, value: u8, len: u8)`
-- [x] Document `memset(dest: u16, value: u8, len: u8)` - Fill memory
 
 Fill `len` bytes at destination with a constant value.
 
@@ -2261,7 +2182,6 @@ memset(SCREEN as u16, 0x20, 255);
 ```
 
 ##### `memcmp(a: u16, b: u16, len: u8) -> u8`
-- [x] Document `memcmp(a: u16, b: u16, len: u8) -> u8` - Compare memory
 
 Compare two memory regions for equality.
 
@@ -2291,7 +2211,6 @@ if memcmp(&EXPECTED as u16, TEST_DATA as u16, 4) == 1 {
 #### Indirect Memory Access
 
 ##### `mem_read(address: u16) -> u8`
-- [x] Document `mem_read(address: u16) -> u8` - Read byte indirectly
 
 Read a byte from an address using indirect addressing.
 
@@ -2309,7 +2228,6 @@ let value: u8 = mem_read(0x0400);  // Read from $0400
 ```
 
 ##### `mem_write(address: u16, value: u8)`
-- [x] Document `mem_write(address: u16, value: u8)` - Write byte indirectly
 
 Write a byte to an address using indirect addressing.
 
@@ -2327,7 +2245,6 @@ mem_write(0x0400, 42);  // Write 42 to $0400
 ```
 
 ##### `mem_jump(address: u16)`
-- [x] Document `mem_jump(address: u16)` - Jump to address
 
 Transfer execution to the specified address.
 
@@ -2358,7 +2275,6 @@ import { min, max, clamp, set_bit, clear_bit, saturating_add, mul16, div16 } fro
 #### Comparison Operations
 
 ##### `min(a: u8, b: u8) -> u8`
-- [x] Document `min(a: u8, b: u8) -> u8` - Return minimum
 
 Return the smaller of two u8 values.
 
@@ -2376,7 +2292,6 @@ let health: u8 = min(current_health, 100);  // Cap at 100
 ```
 
 ##### `max(a: u8, b: u8) -> u8`
-- [x] Document `max(a: u8, b: u8) -> u8` - Return maximum
 
 Return the larger of two u8 values.
 
@@ -2394,7 +2309,6 @@ let damage: u8 = max(base_damage, 1);  // Minimum 1 damage
 ```
 
 ##### `clamp(value: u8, min_val: u8, max_val: u8) -> u8`
-- [x] Document `clamp(value: u8, min_val: u8, max_val: u8) -> u8` - Clamp value
 
 Clamp a value between min and max bounds (inclusive).
 
@@ -2418,7 +2332,6 @@ Uses 65C02 SMB/RMB/BBS instructions for efficient bit operations.
 **Note:** These functions use zero page $20 for temporary storage.
 
 ##### `set_bit(value: u8, bit: u8) -> u8`
-- [x] Document `set_bit(value: u8, bit: u8) -> u8` - Set bit (0-7)
 
 Set a specific bit (0-7) in a byte using 65C02 SMB instructions.
 
@@ -2438,7 +2351,6 @@ flags = set_bit(flags, 3);  // Set bit 3 -> 0b00001000
 ```
 
 ##### `clear_bit(value: u8, bit: u8) -> u8`
-- [x] Document `clear_bit(value: u8, bit: u8) -> u8` - Clear bit (0-7)
 
 Clear a specific bit (0-7) in a byte using 65C02 RMB instructions.
 
@@ -2458,7 +2370,6 @@ flags = clear_bit(flags, 5);  // Clear bit 5 -> 0b11011111
 ```
 
 ##### `test_bit(value: u8, bit: u8) -> u8`
-- [x] Document `test_bit(value: u8, bit: u8) -> u8` - Test if bit is set
 
 Test if a specific bit (0-7) is set using 65C02 BBS instructions.
 
@@ -2483,7 +2394,6 @@ if test_bit(status, 4) == 1 {
 #### Saturating Arithmetic
 
 ##### `saturating_add(a: u8, b: u8) -> u8`
-- [x] Document `saturating_add(a: u8, b: u8) -> u8` - Add with saturation at 255
 
 Add two u8 values with saturation at 255 (no wrap-around).
 
@@ -2502,7 +2412,6 @@ health = saturating_add(health, 10);  // Result: 255, not wrap to 4
 ```
 
 ##### `saturating_sub(a: u8, b: u8) -> u8`
-- [x] Document `saturating_sub(a: u8, b: u8) -> u8` - Subtract with saturation at 0
 
 Subtract b from a with saturation at 0 (no wrap-around).
 
@@ -2523,7 +2432,6 @@ ammo = saturating_sub(ammo, 5);  // Result: 0, not wrap to 254
 #### Advanced Bit Operations
 
 ##### `count_bits(value: u8) -> u8`
-- [x] Document `count_bits(value: u8) -> u8` - Count set bits (population count)
 
 Count the number of set bits (1s) in a byte.
 
@@ -2541,7 +2449,6 @@ let bits: u8 = count_bits(0b10110101);  // Returns 5
 ```
 
 ##### `reverse_bits(value: u8) -> u8`
-- [x] Document `reverse_bits(value: u8) -> u8` - Reverse bit order
 
 Reverse the bits in a byte (bit 0 ↔ bit 7, bit 1 ↔ bit 6, etc.).
 
@@ -2561,7 +2468,6 @@ let test: u8 = reverse_bits(0x01);      // 0x01 -> 0x80
 ```
 
 ##### `swap_nibbles(value: u8) -> u8`
-- [x] Document `swap_nibbles(value: u8) -> u8` - Swap high and low nibbles
 
 Swap the high and low nibbles (4-bit halves) of a byte.
 
@@ -2582,7 +2488,6 @@ let color: u8 = swap_nibbles(0xF0);    // 0xF0 -> 0x0F
 #### 16-bit Arithmetic
 
 ##### `mul16(a: u16, b: u16) -> u16`
-- [x] Document `mul16(a: u16, b: u16) -> u16` - Multiply 16-bit integers
 
 Multiply two 16-bit unsigned integers using shift-and-add algorithm.
 
@@ -2601,7 +2506,6 @@ let area: u16 = mul16(320, 200);  // Screen area calculation
 ```
 
 ##### `div16(a: u16, b: u16) -> u16`
-- [x] Document `div16(a: u16, b: u16) -> u16` - Divide 16-bit integers
 
 Divide two 16-bit unsigned integers using non-restoring division.
 
@@ -2642,25 +2546,21 @@ if result == 0xFFFF {
 
 ### Completion Status
 
-- [x] Add usage examples for each stdlib function
-- [x] Document performance characteristics
 - [ ] Add assembly output examples
-- [x] Document 65C02 vs 6502 compatibility
-- [x] Add examples combining multiple stdlib functions
 
 ---
 
 ## Reserved Keywords
 
-The following **36 keywords** are reserved in Wraith and cannot be used as identifiers:
+The following **37 keywords** are reserved in Wraith and cannot be used as identifiers:
 
 ```
 addr      as        asm       b8        b16       bool      break
 carry     const     continue  else      enum      false     fn
 for       from      i8        i16       if        import    in
-let       loop      match     negative  overflow  read      return
-str       struct    true      u8        u16       while     write
-zero      zp
+let       loop      match     negative  overflow  pub       read
+return    str       struct    true      u8        u16       while
+write     zero      zp
 ```
 
 ### Keywords by Category
@@ -2687,9 +2587,9 @@ b8        b16       bool      str
 fn        struct    enum
 ```
 
-**Module System (2 keywords):**
+**Module System (3 keywords):**
 ```
-import    from
+import    from      pub
 ```
 
 **CPU Status Flags - Read-Only (4 keywords):**
@@ -2714,11 +2614,7 @@ true      false
 
 ### Future Reserved Keywords
 
-The following keywords are planned for future versions (based on ROADMAP.md):
-
-- **`pub`** - Module visibility control (Phase 3)
-  - Will mark functions, structs, enums, and constants as publicly exportable
-  - Example: `pub fn exported_function() { }`
+No additional keywords are currently planned for future versions.
 
 ### Keyword Usage Examples
 
@@ -2776,9 +2672,7 @@ fn custom_operation() {
 
 ### Completion Status
 
-- [x] Verify complete list of reserved keywords
-- [x] Document future reserved keywords
-- [x] Add examples of keyword usage
+All items completed.
 
 ---
 
@@ -2886,11 +2780,6 @@ if quick_check() || slow_check() {
 
 ### Completion Status
 
-- [x] All operators listed
-- [x] Document operator precedence
-- [x] Add overflow behavior for arithmetic operators
-- [x] Document short-circuit evaluation for logical operators
-- [x] Add examples of operator usage
 - [ ] Document operator implementation in assembly
 
 ---
@@ -3054,10 +2943,7 @@ asm {
 
 ### Completion Status
 
-- [x] Comment syntax documented
-- [x] Documentation comment syntax documented
-- [x] Comment handling in inline assembly documented
-- [x] Best practices and examples added
+All items completed.
 
 ---
 
