@@ -61,8 +61,8 @@ impl SemanticAnalyzer {
 
                 // Validate BCD casts for constant expressions
                 let target_ty = self.resolve_type(&target_type.node)?;
-                if let Type::Primitive(prim) = &target_ty {
-                    if matches!(prim, crate::ast::PrimitiveType::B8 | crate::ast::PrimitiveType::B16) {
+                if let Type::Primitive(prim) = &target_ty
+                    && matches!(prim, crate::ast::PrimitiveType::B8 | crate::ast::PrimitiveType::B16) {
                         // Try to evaluate as constant to validate BCD range
                         if let Ok(value) = crate::sema::const_eval::eval_const_expr(inner) {
                             // Use the same validation as const_eval's apply_type_cast
@@ -72,7 +72,6 @@ impl SemanticAnalyzer {
                         // Note: Non-constant expressions cannot be validated at compile time
                         // This is a known limitation - runtime casts to BCD may produce invalid values
                     }
-                }
 
                 target_ty
             }
