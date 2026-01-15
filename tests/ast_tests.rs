@@ -44,15 +44,14 @@ fn test_expression_construction() {
 
 #[test]
 fn test_type_expressions() {
-    // Pointer type
-    let u8_type = Spanned::dummy(TypeExpr::primitive(PrimitiveType::U8));
-    let ptr_type = TypeExpr::pointer(u8_type, false);
-    assert!(matches!(ptr_type, TypeExpr::Pointer { mutable: false, .. }));
-
     // Array type
     let element = Spanned::dummy(TypeExpr::primitive(PrimitiveType::U16));
-    let array_type = TypeExpr::array(element, 10);
+    let array_type = TypeExpr::array(element.clone(), 10);
     assert!(matches!(array_type, TypeExpr::Array { size: 10, .. }));
+
+    // Slice type
+    let slice_type = TypeExpr::slice(element, true);
+    assert!(matches!(slice_type, TypeExpr::Slice { mutable: true, .. }));
 }
 
 #[test]

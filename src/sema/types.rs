@@ -9,10 +9,10 @@ use crate::ast::PrimitiveType;
 pub enum Type {
     /// Primitive types (u8, i8, etc.)
     Primitive(PrimitiveType),
-    /// Pointer to another type
-    Pointer(Box<Type>, bool), // (pointee, is_mutable)
     /// Array type [T; N]
     Array(Box<Type>, usize),
+    /// Slice type &[T] - fat pointer with base address and length
+    Slice(Box<Type>),
     /// String type - represented as length-prefixed byte array
     /// In memory: [u16 length (little-endian)] [bytes...]
     /// The type points to the start of the length field
@@ -31,15 +31,11 @@ impl Type {
         matches!(self, Type::Primitive(_))
     }
 
-    pub fn is_pointer(&self) -> bool {
-        matches!(self, Type::Pointer(_, _))
-    }
-
     pub fn size(&self) -> usize {
         match self {
             Type::Primitive(prim) => prim.size_bytes(),
-            Type::Pointer(_, _) => 2, // Pointers are 16-bit
             Type::Array(ty, len) => ty.size() * len,
+            Type::Slice(_) => 4, // Fat pointer: 2 bytes base address + 2 bytes length
             Type::String => 2, // String is represented as a pointer to length-prefixed data
             Type::Function(_, _) => 2, // Function pointer is 16-bit address
             Type::Void => 0,
@@ -60,14 +56,8 @@ impl Type {
                 PrimitiveType::B16 => "b16".to_string(),
                 PrimitiveType::Addr => "addr".to_string(),
             },
-            Type::Pointer(inner, mutable) => {
-                if *mutable {
-                    format!("*mut {}", inner.display_name())
-                } else {
-                    format!("*{}", inner.display_name())
-                }
-            }
             Type::Array(element_ty, size) => format!("[{}; {}]", element_ty.display_name(), size),
+            Type::Slice(element_ty) => format!("&[{}]", element_ty.display_name()),
             Type::Function(params, ret) => {
                 let params_str = params.iter()
                     .map(|p| p.display_name())

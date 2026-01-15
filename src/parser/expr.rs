@@ -148,19 +148,6 @@ impl Parser<'_> {
                 let span = start.merge(operand.span);
                 Ok(Spanned::new(Expr::unary(UnaryOp::BitNot, operand), span))
             }
-            Some(Token::Star) => {
-                self.advance();
-                let operand = self.parse_prefix_expr()?;
-                let span = start.merge(operand.span);
-                Ok(Spanned::new(Expr::unary(UnaryOp::Deref, operand), span))
-            }
-            Some(Token::Amp) => {
-                self.advance();
-                // All references are mutable (no mut keyword in language)
-                let operand = self.parse_prefix_expr()?;
-                let span = start.merge(operand.span);
-                Ok(Spanned::new(Expr::unary(UnaryOp::AddrOfMut, operand), span))
-            }
 
             // Parenthesized expression
             Some(Token::LParen) => {
@@ -514,15 +501,6 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Pointer type: *T (all pointers are mutable)
-            Some(Token::Star) => {
-                self.advance();
-                let pointee = self.parse_type()?;
-                let span = start.merge(pointee.span);
-                // All pointers are mutable (no mut keyword in language)
-                Ok(Spanned::new(TypeExpr::pointer(pointee, true), span))
-            }
-
             // Slice type: &[T] (all slices are mutable)
             Some(Token::Amp) => {
                 self.advance();

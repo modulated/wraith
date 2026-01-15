@@ -47,12 +47,6 @@ pub enum TypeExpr {
     /// A named type (struct or enum name)
     Named(String),
 
-    /// Pointer type: *T or *mut T
-    Pointer {
-        pointee: Box<Spanned<TypeExpr>>,
-        mutable: bool,
-    },
-
     /// Fixed-size array: [T; N]
     Array {
         element: Box<Spanned<TypeExpr>>,
@@ -75,14 +69,6 @@ impl TypeExpr {
     /// Create a named type
     pub fn named(name: impl Into<String>) -> Self {
         TypeExpr::Named(name.into())
-    }
-
-    /// Create a pointer type
-    pub fn pointer(pointee: Spanned<TypeExpr>, mutable: bool) -> Self {
-        TypeExpr::Pointer {
-            pointee: Box::new(pointee),
-            mutable,
-        }
     }
 
     /// Create an array type

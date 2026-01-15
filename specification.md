@@ -11,7 +11,6 @@ A systems programming language designed specifically for the 6502 processor, tak
 - [Structs](#structs)
 - [Enums](#enums)
 - [Arrays and Slices](#arrays-and-slices)
-- [Pointers](#pointers)
 - [Control Flow](#control-flow)
 - [Type Casting](#type-casting)
 - [Inline Assembly](#inline-assembly)
@@ -986,7 +985,7 @@ buffer[5] = 42;
 let value: u16 = data[2];
 ```
 
-### Slices (Fat Pointers)
+### Slices
 
 ```rust
 const DATA: [u8; 6] = [0, 1, 2, 3, 4, 5];
@@ -1027,7 +1026,7 @@ if i < 5 {
 
 ### Slice Operations
 
-Slices are fat pointers (pointer + length) that reference array data:
+Slices are references to array data with tracked length:
 
 ```rust
 // Function taking slice
@@ -1045,9 +1044,9 @@ let result: u16 = sum_values(data);  // Passes as slice
 ```
 
 **Slice Characteristics:**
-- Size: 2 bytes (pointer to data)
-- Length tracked separately
+- Size: 4 bytes (2-byte base address + 2-byte length)
 - Read-only view of array data
+- Length tracked at runtime
 - No slice syntax (e.g., `arr[1..3]`) - pass whole array only
 
 ### Slice Memory Representation
@@ -1055,15 +1054,16 @@ let result: u16 = sum_values(data);  // Passes as slice
 ```rust
 const DATA: [u8; 6] = [0, 1, 2, 3, 4, 5];
 
-fn process(slice: [u8]) {
-    // slice is a pointer to DATA
+fn process(slice: &[u8]) {
+    // slice references DATA
     // Length is known from array type
 }
 ```
 
 **Memory Layout:**
-- Slice parameter: 2-byte pointer to first element
-- Length: Tracked by compiler/type system
+- Slice parameter: 4 bytes total (base address + length)
+- Base address: 2 bytes pointing to first element
+- Length: 2 bytes for element count
 - Data: Stored wherever array is allocated (const data, stack, etc.)
 
 ### Multidimensional Arrays
@@ -1111,18 +1111,6 @@ memcpy(&dest as u16, &source as u16, 100);
 ### Completion Status
 
 All items completed.
-
----
-
-## Pointers
-
-- [ ] TODO: Document if pointers are implemented
-- [ ] Add pointer declaration syntax
-- [ ] Document pointer arithmetic
-- [ ] Add dereferencing examples
-- [ ] Document pointer safety guarantees (if any)
-- [ ] Add examples of pointers to structs
-- [ ] Document null pointer handling
 
 ---
 
@@ -1285,9 +1273,10 @@ if i < array.length && array[i] == target {
     // array[i] only evaluated if i < array.length
 }
 
-// Check null before dereference
-if ptr != 0 && *ptr == value {
-    // *ptr only dereferenced if ptr != 0
+// Check address validity before reading
+const STATUS: addr = 0x6000;
+if STATUS != 0 && STATUS == 0xFF {
+    // Second check only evaluated if STATUS != 0
 }
 ```
 
@@ -2776,7 +2765,7 @@ if quick_check() || slow_check() {
 **Benefits:**
 - Avoids unnecessary computation
 - Prevents errors (e.g., array bounds checking)
-- Common pattern: `if ptr != 0 && *ptr == value`
+- Common pattern: `if i < len && array[i] == value`
 
 ### Completion Status
 

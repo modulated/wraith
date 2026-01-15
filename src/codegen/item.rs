@@ -21,13 +21,6 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
             PrimitiveType::B16 => "b16".to_string(),
             PrimitiveType::Addr => "addr".to_string(),
         },
-        TypeExpr::Pointer { pointee, mutable } => {
-            if *mutable {
-                format!("*mut {}", format_type(pointee))
-            } else {
-                format!("*{}", format_type(pointee))
-            }
-        }
         TypeExpr::Array { element, size } => {
             format!("[{}; {}]", format_type(element), size)
         }

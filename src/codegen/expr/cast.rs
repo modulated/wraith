@@ -180,10 +180,6 @@ pub(super) fn generate_type_cast(
                 }
             }
         }
-        TypeExpr::Pointer { .. } => {
-            // Pointer cast: for now, just treat as address value
-            emitter.emit_comment("Cast to pointer (no conversion)");
-        }
         _ => {
             // Casting to/from complex types (structs, enums, etc.) is not supported
             // Only primitive type casts are part of the language

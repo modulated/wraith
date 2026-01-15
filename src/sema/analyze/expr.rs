@@ -120,7 +120,7 @@ impl SemanticAnalyzer {
 
                 // Check if it's a type that has a length
                 match &slice_ty {
-                    Type::Pointer(..) | Type::Array(_, _) | Type::String => {
+                    Type::Slice(..) | Type::Array(_, _) | Type::String => {
                         // Slice/array/string length is always u16 on 6502 (our usize equivalent)
                         Type::Primitive(PrimitiveType::U16)
                     }
@@ -286,29 +286,6 @@ impl SemanticAnalyzer {
     ) -> Result<Type, SemaError> {
         let left_ty = self.check_expr(left)?;
         let right_ty = self.check_expr(right)?;
-
-        // Special handling for pointer arithmetic
-        match (&left_ty, op, &right_ty) {
-            // Pointer + Integer or Integer + Pointer
-            (Type::Pointer(..), BinaryOp::Add, Type::Primitive(_))
-            | (Type::Primitive(_), BinaryOp::Add, Type::Pointer(..)) => {
-                // Return the pointer type
-                if matches!(left_ty, Type::Pointer(..)) {
-                    return Ok(left_ty);
-                } else {
-                    return Ok(right_ty);
-                }
-            }
-            // Pointer - Integer
-            (Type::Pointer(..), BinaryOp::Sub, Type::Primitive(_)) => {
-                return Ok(left_ty);
-            }
-            // Pointer - Pointer (returns offset as integer)
-            (Type::Pointer(..), BinaryOp::Sub, Type::Pointer(..)) => {
-                return Ok(Type::Primitive(PrimitiveType::U16));
-            }
-            _ => {}
-        }
 
         // BCD type validation
         if let (Type::Primitive(left_prim), Type::Primitive(right_prim)) = (&left_ty, &right_ty)
@@ -483,7 +460,6 @@ impl SemanticAnalyzer {
                 // Logical NOT returns bool
                 Ok(Type::Primitive(PrimitiveType::Bool))
             }
-            _ => Ok(operand_ty), // For other operators, preserve type
         }
     }
 

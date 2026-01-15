@@ -241,10 +241,6 @@ fn eval_unary_with_env(
                 })
             }
         }
-        _ => Err(SemaError::Custom {
-            message: "unsupported unary operation in constant expression".to_string(),
-            span,
-        }),
     }
 }
 
@@ -427,17 +423,6 @@ fn apply_type_cast(
                 }
             }
         },
-        TypeExpr::Pointer { .. } => {
-            // Pointer casts: treat as integer value
-            if let Some(n) = value.as_integer() {
-                Ok(ConstValue::Integer(n))
-            } else {
-                Err(SemaError::Custom {
-                    message: "cannot cast to pointer type".to_string(),
-                    span,
-                })
-            }
-        }
         _ => Err(SemaError::Custom {
             message: "unsupported type cast in constant expression".to_string(),
             span,
