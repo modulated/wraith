@@ -18,7 +18,9 @@ mod literal;
 mod unary;
 
 // Import functions from submodules
-use aggregate::{generate_enum_variant, generate_field_access, generate_index, generate_struct_init};
+use aggregate::{
+    generate_enum_variant, generate_field_access, generate_index, generate_struct_init,
+};
 use binary::generate_binary;
 use call::generate_call;
 use cast::generate_type_cast;
@@ -30,8 +32,8 @@ use literal::{generate_literal, generate_variable};
 use unary::generate_unary;
 
 // Re-export for use in other codegen modules
-pub use call::generate_tail_recursive_update;
 pub use aggregate::generate_struct_init_runtime;
+pub use call::generate_tail_recursive_update;
 
 pub fn generate_expr(
     expr: &Spanned<Expr>,
@@ -45,11 +47,14 @@ pub fn generate_expr(
             crate::sema::const_eval::ConstValue::Integer(n) => {
                 // Check if this is a 16-bit type
                 let expr_type = info.resolved_types.get(&expr.span);
-                let is_16bit = expr_type.is_some_and(|ty| matches!(ty,
-                    crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16) |
-                    crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16) |
-                    crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
-                ));
+                let is_16bit = expr_type.is_some_and(|ty| {
+                    matches!(
+                        ty,
+                        crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
+                            | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
+                            | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+                    )
+                });
 
                 // Load the constant value
                 let val = *n as u64;
@@ -71,7 +76,8 @@ pub fn generate_expr(
                 let str_label = string_collector.add_string(s.clone());
 
                 // Escape special characters for display in comment
-                let display = s.chars()
+                let display = s
+                    .chars()
                     .map(|c| match c {
                         '\n' => "\\n".to_string(),
                         '\r' => "\\r".to_string(),
@@ -96,27 +102,37 @@ pub fn generate_expr(
     match &expr.node {
         Expr::Literal(lit) => generate_literal(lit, emitter, string_collector),
         Expr::Variable(name) => generate_variable(name, expr.span, emitter, info),
-        Expr::Binary { left, op, right } => generate_binary(left, *op, right, emitter, info, string_collector),
-        Expr::Unary { op, operand } => generate_unary(*op, operand, emitter, info, string_collector),
-        Expr::Call { function, args } => generate_call(function, args, emitter, info, string_collector),
-        Expr::Paren(inner) => generate_expr(inner, emitter, info, string_collector), // Just unwrap
-        Expr::Cast { expr: inner, target_type } => {
-            generate_type_cast(inner, target_type, emitter, info, string_collector)
+        Expr::Binary { left, op, right } => {
+            generate_binary(left, *op, right, emitter, info, string_collector)
         }
-        Expr::Index { object, index } => generate_index(object, index, emitter, info, string_collector),
+        Expr::Unary { op, operand } => {
+            generate_unary(*op, operand, expr.span, emitter, info, string_collector)
+        }
+        Expr::Call { function, args } => {
+            generate_call(function, args, emitter, info, string_collector)
+        }
+        Expr::Paren(inner) => generate_expr(inner, emitter, info, string_collector), // Just unwrap
+        Expr::Cast {
+            expr: inner,
+            target_type,
+        } => generate_type_cast(inner, target_type, emitter, info, string_collector),
+        Expr::Index { object, index } => {
+            generate_index(object, index, emitter, info, string_collector)
+        }
         Expr::Slice { .. } => {
             // Slices are only valid as assignment targets, not as expressions
             Err(CodegenError::UnsupportedOperation(
-                "Slice expressions can only be used as assignment targets".to_string()
+                "Slice expressions can only be used as assignment targets".to_string(),
             ))
         }
         Expr::StructInit { name, fields } => generate_struct_init(name, fields, emitter, info),
         Expr::AnonStructInit { fields } => {
             // Look up the resolved struct name from sema
-            let struct_name = info.resolved_struct_names.get(&expr.span)
-                .ok_or_else(|| CodegenError::UnsupportedOperation(
-                    "Anonymous struct init missing resolved name".to_string()
-                ))?;
+            let struct_name = info.resolved_struct_names.get(&expr.span).ok_or_else(|| {
+                CodegenError::UnsupportedOperation(
+                    "Anonymous struct init missing resolved name".to_string(),
+                )
+            })?;
             // Create a synthetic Spanned<String> for the struct name
             let name = crate::ast::Spanned::new(struct_name.clone(), expr.span);
             generate_struct_init(&name, fields, emitter, info)
@@ -149,27 +165,28 @@ pub fn generate_expr(
                         // Load length (first 2 bytes) via indirect indexed
                         emitter.emit_inst("LDY", "#$00");
                         emitter.emit_inst("LDA", "($F0),Y"); // Low byte of length
-                        emitter.emit_inst("TAX", "");  // Save low byte in X temporarily
+                        emitter.emit_inst("TAX", ""); // Save low byte in X temporarily
                         emitter.emit_inst("INY", "");
                         emitter.emit_inst("LDA", "($F0),Y"); // High byte of length
                         // Result: length in A (high) and X (low)
                         // Swap them so A has low byte, Y has high byte (standard u16 convention)
-                        emitter.emit_inst("TAY", "");  // High byte to Y
-                        emitter.emit_inst("TXA", "");  // Low byte to A
+                        emitter.emit_inst("TAY", ""); // High byte to Y
+                        emitter.emit_inst("TXA", ""); // Low byte to A
 
                         Ok(())
                     }
                     _ => {
                         // Other types not yet supported
-                        Err(CodegenError::UnsupportedOperation(
-                            format!("Length access (.len) not yet implemented for type: {}", obj_ty.display_name())
-                        ))
+                        Err(CodegenError::UnsupportedOperation(format!(
+                            "Length access (.len) not yet implemented for type: {}",
+                            obj_ty.display_name()
+                        )))
                     }
                 }
             } else {
                 // No type information available - this shouldn't happen if semantic analysis passed
                 Err(CodegenError::UnsupportedOperation(
-                    "Length access (.len) missing type information (compiler bug)".to_string()
+                    "Length access (.len) missing type information (compiler bug)".to_string(),
                 ))
             }
         }
@@ -188,15 +205,13 @@ pub fn generate_expr(
                         SymbolLocation::ZeroPage(addr) => {
                             emitter.emit_lda_zp(addr);
                             if emitter.is_verbose() {
-                                emitter
-                                    .emit_comment(&format!("Load low byte from ${:02X}", addr));
+                                emitter.emit_comment(&format!("Load low byte from ${:02X}", addr));
                             }
                         }
                         SymbolLocation::Absolute(addr) => {
                             emitter.emit_lda_abs(addr);
                             if emitter.is_verbose() {
-                                emitter
-                                    .emit_comment(&format!("Load low byte from ${:04X}", addr));
+                                emitter.emit_comment(&format!("Load low byte from ${:04X}", addr));
                             }
                         }
                         _ => {
@@ -234,15 +249,19 @@ pub fn generate_expr(
                         SymbolLocation::ZeroPage(addr) => {
                             emitter.emit_inst("LDA", &format!("${:02X}", addr + 1));
                             if emitter.is_verbose() {
-                                emitter
-                                    .emit_comment(&format!("Load high byte from ${:02X}", addr + 1));
+                                emitter.emit_comment(&format!(
+                                    "Load high byte from ${:02X}",
+                                    addr + 1
+                                ));
                             }
                         }
                         SymbolLocation::Absolute(addr) => {
                             emitter.emit_inst("LDA", &format!("${:04X}", addr + 1));
                             if emitter.is_verbose() {
-                                emitter
-                                    .emit_comment(&format!("Load high byte from ${:04X}", addr + 1));
+                                emitter.emit_comment(&format!(
+                                    "Load high byte from ${:04X}",
+                                    addr + 1
+                                ));
                             }
                         }
                         _ => {
@@ -274,7 +293,7 @@ pub fn generate_expr(
             let set_label = emitter.next_label("cf");
             let end_label = emitter.next_label("cx");
 
-            emitter.emit_inst("BCS", &set_label);  // Branch if carry set
+            emitter.emit_inst("BCS", &set_label); // Branch if carry set
             // Carry clear
             emitter.emit_inst("LDA", "#$00");
             emitter.emit_inst("JMP", &end_label);
@@ -291,13 +310,13 @@ pub fn generate_expr(
             // Convert zero flag to boolean (0 or 1)
             // Note: We need a value to test. Use a register that's likely unchanged
             // or better: use PHP (push processor status) and PLA
-            emitter.emit_inst("PHP", "");  // Push processor status
-            emitter.emit_inst("PLA", "");  // Pull to A
-            emitter.emit_inst("AND", "#$02");  // Mask zero flag (bit 1)
+            emitter.emit_inst("PHP", ""); // Push processor status
+            emitter.emit_inst("PLA", ""); // Pull to A
+            emitter.emit_inst("AND", "#$02"); // Mask zero flag (bit 1)
             // Now A = 0 if zero clear, 2 if zero set
             // Convert 2 to 1
             let end_label = emitter.next_label("zx");
-            emitter.emit_inst("BEQ", &end_label);  // If zero, A already = 0
+            emitter.emit_inst("BEQ", &end_label); // If zero, A already = 0
             emitter.emit_inst("LDA", "#$01");
             emitter.emit_label(&end_label);
 
@@ -310,7 +329,7 @@ pub fn generate_expr(
             let set_label = emitter.next_label("vf");
             let end_label = emitter.next_label("vx");
 
-            emitter.emit_inst("BVS", &set_label);  // Branch if overflow set
+            emitter.emit_inst("BVS", &set_label); // Branch if overflow set
             // Overflow clear
             emitter.emit_inst("LDA", "#$00");
             emitter.emit_inst("JMP", &end_label);
@@ -328,7 +347,7 @@ pub fn generate_expr(
             let set_label = emitter.next_label("nf");
             let end_label = emitter.next_label("nx");
 
-            emitter.emit_inst("BMI", &set_label);  // Branch if minus (negative set)
+            emitter.emit_inst("BMI", &set_label); // Branch if minus (negative set)
             // Negative clear
             emitter.emit_inst("LDA", "#$00");
             emitter.emit_inst("JMP", &end_label);
@@ -341,4 +360,3 @@ pub fn generate_expr(
         }
     }
 }
-

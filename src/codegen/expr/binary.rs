@@ -8,11 +8,14 @@
 
 use crate::ast::{Expr, Spanned};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
-use crate::sema::types::Type;
 use crate::sema::ProgramInfo;
+use crate::sema::types::Type;
 
 // Import comparison and logical functions from sibling modules
-use super::{generate_compare_eq, generate_compare_ne, generate_compare_lt, generate_compare_gt, generate_compare_le, generate_compare_ge, generate_logical_and, generate_logical_or};
+use super::{
+    generate_compare_eq, generate_compare_ge, generate_compare_gt, generate_compare_le,
+    generate_compare_lt, generate_compare_ne, generate_logical_and, generate_logical_or,
+};
 
 // Import generate_expr from parent module for recursive calls
 use super::generate_expr;
@@ -41,18 +44,31 @@ pub(super) fn generate_binary(
 ) -> Result<(), CodegenError> {
     // Handle short-circuit logical operations specially
     match op {
-        crate::ast::BinaryOp::And => return generate_logical_and(left, right, emitter, info, string_collector),
-        crate::ast::BinaryOp::Or => return generate_logical_or(left, right, emitter, info, string_collector),
+        crate::ast::BinaryOp::And => {
+            return generate_logical_and(left, right, emitter, info, string_collector);
+        }
+        crate::ast::BinaryOp::Or => {
+            return generate_logical_or(left, right, emitter, info, string_collector);
+        }
         _ => {}
     }
 
     // Check if we're doing 16-bit arithmetic (check before generating expressions)
     let left_type = info.resolved_types.get(&left.span);
-    let is_u16 = left_type.is_some_and(|ty| matches!(ty,
-        Type::Primitive(crate::ast::PrimitiveType::U16) |
-        Type::Primitive(crate::ast::PrimitiveType::I16) |
-        Type::Primitive(crate::ast::PrimitiveType::B16)
-    ));
+    let right_type = info.resolved_types.get(&right.span);
+
+    let is_pointer = left_type.is_some_and(|ty| matches!(ty, Type::Pointer(..)));
+    let is_right_pointer = right_type.is_some_and(|ty| matches!(ty, Type::Pointer(..)));
+    let is_right_u8 = right_type.is_some_and(|ty| ty.size() == 1);
+
+    let is_u16 = left_type.is_some_and(|ty| {
+        matches!(
+            ty,
+            Type::Primitive(crate::ast::PrimitiveType::U16)
+                | Type::Primitive(crate::ast::PrimitiveType::I16)
+                | Type::Primitive(crate::ast::PrimitiveType::B16)
+        )
+    }) || is_pointer;
 
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
@@ -220,10 +236,13 @@ pub(super) fn generate_binary(
     }
 
     // Check if we're doing BCD arithmetic
-    let is_bcd = left_type.is_some_and(|ty| matches!(ty,
-        crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B8) |
-        crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
-    ));
+    let is_bcd = left_type.is_some_and(|ty| {
+        matches!(
+            ty,
+            crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B8)
+                | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+        )
+    });
 
     // For BCD arithmetic, enter decimal mode
     if is_bcd && matches!(op, crate::ast::BinaryOp::Add | crate::ast::BinaryOp::Sub) {
@@ -244,12 +263,12 @@ pub(super) fn generate_binary(
                 let temp_high = temp_low + 1;
 
                 emitter.emit_inst("CLC", "");
-                emitter.emit_inst("ADC", &format!("${:02X}", temp_low));  // Add low bytes
-                emitter.emit_inst("PHA", "");  // Save low byte result on stack
-                emitter.emit_inst("TYA", "");  // Get left high byte from Y
+                emitter.emit_inst("ADC", &format!("${:02X}", temp_low)); // Add low bytes
+                emitter.emit_inst("PHA", ""); // Save low byte result on stack
+                emitter.emit_inst("TYA", ""); // Get left high byte from Y
                 emitter.emit_inst("ADC", &format!("${:02X}", temp_high)); // Add high bytes with carry
-                emitter.emit_inst("TAY", "");  // Store high byte result in Y
-                emitter.emit_inst("PLA", "");  // Restore low byte result to A
+                emitter.emit_inst("TAY", ""); // Store high byte result in Y
+                emitter.emit_inst("PLA", ""); // Restore low byte result to A
             } else {
                 // 8-bit addition
                 emitter.emit_inst("CLC", "");
@@ -265,12 +284,12 @@ pub(super) fn generate_binary(
                 let temp_high = temp_low + 1;
 
                 emitter.emit_inst("SEC", "");
-                emitter.emit_inst("SBC", &format!("${:02X}", temp_low));  // Subtract low bytes
-                emitter.emit_inst("PHA", "");  // Save low byte result on stack
-                emitter.emit_inst("TYA", "");  // Get left high byte from Y
+                emitter.emit_inst("SBC", &format!("${:02X}", temp_low)); // Subtract low bytes
+                emitter.emit_inst("PHA", ""); // Save low byte result on stack
+                emitter.emit_inst("TYA", ""); // Get left high byte from Y
                 emitter.emit_inst("SBC", &format!("${:02X}", temp_high)); // Subtract high bytes with borrow
-                emitter.emit_inst("TAY", "");  // Store high byte result in Y
-                emitter.emit_inst("PLA", "");  // Restore low byte result to A
+                emitter.emit_inst("TAY", ""); // Store high byte result in Y
+                emitter.emit_inst("PLA", ""); // Restore low byte result to A
             } else {
                 // 8-bit subtraction
                 emitter.emit_inst("SEC", "");
@@ -305,26 +324,26 @@ pub(super) fn generate_binary(
         }
         // Comparison operations - result is boolean (0 or 1)
         crate::ast::BinaryOp::Eq => {
-            generate_compare_eq(emitter)?;
+            generate_compare_eq(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Ne => {
-            generate_compare_ne(emitter)?;
+            generate_compare_ne(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Lt => {
-            generate_compare_lt(emitter)?;
+            generate_compare_lt(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Ge => {
-            generate_compare_ge(emitter)?;
+            generate_compare_ge(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Gt => {
             // A > B is same as B < A, so swap and use Lt
             // We already have A in accumulator and B in TEMP
             // Just swap them conceptually
-            generate_compare_gt(emitter)?;
+            generate_compare_gt(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Le => {
             // A <= B is same as B >= A
-            generate_compare_le(emitter)?;
+            generate_compare_le(emitter, is_u16)?;
         }
         // And/Or are handled earlier with short-circuit evaluation
         crate::ast::BinaryOp::And | crate::ast::BinaryOp::Or => {
@@ -351,7 +370,12 @@ pub(super) fn generate_binary(
             BinaryOp::Shl | BinaryOp::Shr => {
                 emitter.emit_comment("Result: A=shifted_value");
             }
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge => {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Gt
+            | BinaryOp::Le
+            | BinaryOp::Ge => {
                 emitter.emit_comment("Result: A=boolean (0=false, 1=true)");
             }
             _ => {}
@@ -510,9 +534,9 @@ fn generate_multiply_u8(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // Check if multiplier bit 0 is set
     emitter.emit_inst("LDA", &format!("${:02X}", temp));
-    emitter.emit_inst("LSR", "");  // Shift right, bit 0 -> carry
-    emitter.emit_inst("STA", &format!("${:02X}", temp));  // Save shifted multiplier
-    emitter.emit_inst("BCC", &skip_add);  // If bit was 0, skip addition
+    emitter.emit_inst("LSR", ""); // Shift right, bit 0 -> carry
+    emitter.emit_inst("STA", &format!("${:02X}", temp)); // Save shifted multiplier
+    emitter.emit_inst("BCC", &skip_add); // If bit was 0, skip addition
 
     // Add multiplicand to result
     emitter.emit_inst("LDA", &format!("${:02X}", result_addr));
@@ -553,14 +577,14 @@ fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // mul16 expects parameters at $80-$83
     // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80");  // Store low byte
-    emitter.emit_inst("STY", "$81");  // Store high byte
+    emitter.emit_inst("STA", "$80"); // Store low byte
+    emitter.emit_inst("STY", "$81"); // Store high byte
 
     // Store right operand (TEMP:TEMP+1) to $82-$83
     let temp = emitter.memory_layout.temp_reg();
-    emitter.emit_inst("LDA", &format!("${:02X}", temp));      // Load right.low
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
     emitter.emit_inst("STA", "$82");
-    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1));  // Load right.high
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
     emitter.emit_inst("STA", "$83");
 
     // Call mul16
@@ -638,14 +662,14 @@ fn generate_divide_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // div16 expects parameters at $80-$83
     // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80");  // Store low byte
-    emitter.emit_inst("STY", "$81");  // Store high byte
+    emitter.emit_inst("STA", "$80"); // Store low byte
+    emitter.emit_inst("STY", "$81"); // Store high byte
 
     // Store right operand (TEMP:TEMP+1) to $82-$83
     let temp = emitter.memory_layout.temp_reg();
-    emitter.emit_inst("LDA", &format!("${:02X}", temp));      // Load right.low
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
     emitter.emit_inst("STA", "$82");
-    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1));  // Load right.high
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
     emitter.emit_inst("STA", "$83");
 
     // Call div16
@@ -715,14 +739,14 @@ fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // mod16 expects parameters at $80-$83
     // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80");  // Store low byte
-    emitter.emit_inst("STY", "$81");  // Store high byte
+    emitter.emit_inst("STA", "$80"); // Store low byte
+    emitter.emit_inst("STY", "$81"); // Store high byte
 
     // Store right operand (TEMP:TEMP+1) to $82-$83
     let temp = emitter.memory_layout.temp_reg();
-    emitter.emit_inst("LDA", &format!("${:02X}", temp));      // Load right.low
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
     emitter.emit_inst("STA", "$82");
-    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1));  // Load right.high
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
     emitter.emit_inst("STA", "$83");
 
     // Call mod16

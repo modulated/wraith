@@ -40,12 +40,16 @@ pub(super) fn generate_literal(
                 // 16-bit value: load low byte into A, high byte into Y
                 emitter.emit_inst("LDA", &format!("#${:02X}", value & 0xFF));
                 emitter.emit_inst("LDY", &format!("#${:02X}", (value >> 8) & 0xFF));
-                emitter.reg_state.set_a(crate::codegen::regstate::RegisterValue::Immediate(
-                    (value & 0xFF) as i64,
-                ));
-                emitter.reg_state.set_y(crate::codegen::regstate::RegisterValue::Immediate(
-                    ((value >> 8) & 0xFF) as i64,
-                ));
+                emitter
+                    .reg_state
+                    .set_a(crate::codegen::regstate::RegisterValue::Immediate(
+                        (value & 0xFF) as i64,
+                    ));
+                emitter
+                    .reg_state
+                    .set_y(crate::codegen::regstate::RegisterValue::Immediate(
+                        ((value >> 8) & 0xFF) as i64,
+                    ));
             } else {
                 // Values larger than 16-bit not supported on 6502
                 return Err(CodegenError::UnsupportedOperation(format!(
@@ -183,10 +187,7 @@ pub(super) fn generate_literal(
             const ZERO_FILL_THRESHOLD: usize = 16;
             if byte_val == 0 && *count >= ZERO_FILL_THRESHOLD {
                 // Use efficient zero-fill directive
-                emitter.emit_comment(&format!(
-                    "Zero-filled array optimized: {} bytes",
-                    count
-                ));
+                emitter.emit_comment(&format!("Zero-filled array optimized: {} bytes", count));
                 emitter.emit_raw(&format!("    .RES {}", count));
             } else {
                 // Emit the value 'count' times
@@ -199,7 +200,10 @@ pub(super) fn generate_literal(
             emitter.emit_label(&skip_label);
 
             // Load address of array into A (low byte) and X (high byte)
-            emitter.emit_comment(&format!("Load address of filled array ({} elements)", count));
+            emitter.emit_comment(&format!(
+                "Load address of filled array ({} elements)",
+                count
+            ));
             emitter.emit_inst("LDA", &format!("#<{}", arr_label));
             emitter.emit_inst("LDX", &format!("#>{}", arr_label));
 
@@ -233,6 +237,18 @@ pub(super) fn generate_variable(
                 | Type::Primitive(crate::ast::PrimitiveType::B16)
         );
 
+        // Check if this is an enum variable (needs 2-byte pointer in A:X)
+        let is_enum = if let Type::Named(type_name) = &sym.ty {
+            info.type_registry.get_enum(type_name).is_some()
+        } else {
+            false
+        };
+
+        // Check if this is a pointer-like type (Pointer, Array, String, Enum)
+        // These use the A:X register convention
+        let is_pointer_like =
+            matches!(sym.ty, Type::Pointer(..) | Type::Array(..) | Type::String) || is_enum;
+
         match sym.location {
             SymbolLocation::Absolute(_addr) => {
                 // Check if this is an address declaration - use symbolic name
@@ -241,8 +257,12 @@ pub(super) fn generate_variable(
                 } else {
                     // Regular variable at absolute address - use numeric
                     emitter.emit_lda_abs(_addr);
-                    // For u16/i16, also load high byte into X
+                    // For u16/i16, also load high byte into Y (A:Y convention)
                     if is_u16 {
+                        emitter.emit_inst("LDY", &format!("${:04X}", _addr + 1));
+                    }
+                    // For pointers/enums, load high byte into X (A:X convention)
+                    if is_pointer_like {
                         emitter.emit_inst("LDX", &format!("${:04X}", _addr + 1));
                     }
                 }
@@ -254,6 +274,10 @@ pub(super) fn generate_variable(
                 // For u16/i16, also load high byte into Y
                 if is_u16 {
                     emitter.emit_inst("LDY", &format!("${:02X}", addr + 1));
+                }
+                // For pointers/enums, load high byte into X (pointer convention: A=low, X=high)
+                if is_pointer_like {
+                    emitter.emit_inst("LDX", &format!("${:02X}", addr + 1));
                 }
                 Ok(())
             }

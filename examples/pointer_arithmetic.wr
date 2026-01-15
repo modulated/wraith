@@ -1,0 +1,27 @@
+#[reset]
+fn main() {
+    let arr: [u8; 4] = [10, 20, 30, 40];
+    let ptr: *u8 = &arr;
+    
+    // Pointer Arithmetic: Add
+    let p2: *u8 = ptr + 1;
+    let val: u8 = *p2;
+    
+    // Verify *p2 == 20
+    if val != 20 {
+        // Error
+        asm { "BRK" }
+    }
+    
+    // Pointer Arithmetic: Sub
+    let p3: *u8 = p2 - 1;
+    let val2: u8 = *p3;
+    
+    // Verify *p3 == 10
+    if val2 != 10 {
+        // Error
+        asm { "BRK" }
+    }
+
+    loop {}
+}

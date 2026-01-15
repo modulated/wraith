@@ -3,10 +3,10 @@
 //! Type checking for all expression variants in the AST.
 
 use crate::ast::{BinaryOp, Expr, PrimitiveType, Spanned};
+use crate::sema::SemaError;
 use crate::sema::const_eval::eval_const_expr_with_env;
 use crate::sema::table::SymbolKind;
 use crate::sema::types::Type;
-use crate::sema::SemaError;
 
 use super::SemanticAnalyzer;
 
@@ -36,8 +36,7 @@ impl SemanticAnalyzer {
         // Use const_env so we can fold references to const variables
         // BUT: don't fold if the expression contains references to addr (runtime values)
         let contains_addr_ref = self.contains_addr_reference(expr);
-        if !contains_addr_ref
-            && let Ok(const_val) = eval_const_expr_with_env(expr, &self.const_env)
+        if !contains_addr_ref && let Ok(const_val) = eval_const_expr_with_env(expr, &self.const_env)
         {
             self.folded_constants.insert(expr.span, const_val);
         }
@@ -55,23 +54,29 @@ impl SemanticAnalyzer {
 
             Expr::Paren(inner) => self.check_expr(inner)?,
 
-            Expr::Cast { expr: inner, target_type } => {
+            Expr::Cast {
+                expr: inner,
+                target_type,
+            } => {
                 // Check that the inner expression is valid
                 self.check_expr(inner)?;
 
                 // Validate BCD casts for constant expressions
                 let target_ty = self.resolve_type(&target_type.node)?;
-                if let Type::Primitive(prim) = &target_ty {
-                    if matches!(prim, crate::ast::PrimitiveType::B8 | crate::ast::PrimitiveType::B16) {
-                        // Try to evaluate as constant to validate BCD range
-                        if let Ok(value) = crate::sema::const_eval::eval_const_expr(inner) {
-                            // Use the same validation as const_eval's apply_type_cast
-                            use crate::sema::const_eval::validate_bcd_cast;
-                            validate_bcd_cast(value, prim, expr.span)?;
-                        }
-                        // Note: Non-constant expressions cannot be validated at compile time
-                        // This is a known limitation - runtime casts to BCD may produce invalid values
+                if let Type::Primitive(prim) = &target_ty
+                    && matches!(
+                        prim,
+                        crate::ast::PrimitiveType::B8 | crate::ast::PrimitiveType::B16
+                    )
+                {
+                    // Try to evaluate as constant to validate BCD range
+                    if let Ok(value) = crate::sema::const_eval::eval_const_expr(inner) {
+                        // Use the same validation as const_eval's apply_type_cast
+                        use crate::sema::const_eval::validate_bcd_cast;
+                        validate_bcd_cast(value, prim, expr.span)?;
                     }
+                    // Note: Non-constant expressions cannot be validated at compile time
+                    // This is a known limitation - runtime casts to BCD may produce invalid values
                 }
 
                 target_ty
@@ -94,25 +99,24 @@ impl SemanticAnalyzer {
                 Type::Named(name.node.clone())
             }
 
-            Expr::AnonStructInit { fields } => {
-                self.check_anon_struct_init(fields, expr.span)?
-            }
+            Expr::AnonStructInit { fields } => self.check_anon_struct_init(fields, expr.span)?,
 
-            Expr::EnumVariant { enum_name, variant, data } => {
-                self.check_enum_variant(enum_name, variant, data, expr.span)?
-            }
+            Expr::EnumVariant {
+                enum_name,
+                variant,
+                data,
+            } => self.check_enum_variant(enum_name, variant, data, expr.span)?,
 
-            Expr::Field { object, field } => {
-                self.check_field_access(object, field)?
-            }
+            Expr::Field { object, field } => self.check_field_access(object, field)?,
 
-            Expr::Index { object, index } => {
-                self.check_index(object, index, expr.span)?
-            }
+            Expr::Index { object, index } => self.check_index(object, index, expr.span)?,
 
-            Expr::Slice { object, start, end, inclusive } => {
-                self.check_slice(object, start, end, *inclusive, expr.span)?
-            }
+            Expr::Slice {
+                object,
+                start,
+                end,
+                inclusive,
+            } => self.check_slice(object, start, end, *inclusive, expr.span)?,
 
             Expr::SliceLen(slice_expr) => {
                 // Verify the expression is actually a slice, array, or string
@@ -137,8 +141,7 @@ impl SemanticAnalyzer {
             Expr::U16Low(operand) => {
                 let operand_ty = self.check_expr(operand)?;
                 match &operand_ty {
-                    Type::Primitive(PrimitiveType::U16)
-                    | Type::Primitive(PrimitiveType::I16) => {
+                    Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16) => {
                         Type::Primitive(PrimitiveType::U8)
                     }
                     _ => {
@@ -154,8 +157,7 @@ impl SemanticAnalyzer {
             Expr::U16High(operand) => {
                 let operand_ty = self.check_expr(operand)?;
                 match &operand_ty {
-                    Type::Primitive(PrimitiveType::U16)
-                    | Type::Primitive(PrimitiveType::I16) => {
+                    Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16) => {
                         Type::Primitive(PrimitiveType::U8)
                     }
                     _ => {
@@ -169,9 +171,10 @@ impl SemanticAnalyzer {
             }
 
             // CPU status flags - all return bool
-            Expr::CpuFlagCarry | Expr::CpuFlagZero | Expr::CpuFlagOverflow | Expr::CpuFlagNegative => {
-                Type::Primitive(PrimitiveType::Bool)
-            }
+            Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => Type::Primitive(PrimitiveType::Bool),
         };
 
         // Store the resolved type for this expression so codegen can access it
@@ -180,7 +183,11 @@ impl SemanticAnalyzer {
         Ok(result_ty)
     }
 
-    fn check_literal(&mut self, lit: &crate::ast::Literal, span: crate::ast::Span) -> Result<Type, SemaError> {
+    fn check_literal(
+        &mut self,
+        lit: &crate::ast::Literal,
+        span: crate::ast::Span,
+    ) -> Result<Type, SemaError> {
         match lit {
             crate::ast::Literal::Integer(val) => {
                 // Infer type based on value range
@@ -200,26 +207,22 @@ impl SemanticAnalyzer {
                     } else {
                         // Value too large for any type
                         Err(SemaError::Custom {
-                            message: format!("integer literal {} is too large (max 65535 for u16)", val),
+                            message: format!(
+                                "integer literal {} is too large (max 65535 for u16)",
+                                val
+                            ),
                             span,
                         })
                     }
                 }
             }
-            crate::ast::Literal::Bool(_) => {
-                Ok(Type::Primitive(PrimitiveType::Bool))
-            }
-            crate::ast::Literal::String(_) => {
-                Ok(Type::String)
-            }
+            crate::ast::Literal::Bool(_) => Ok(Type::Primitive(PrimitiveType::Bool)),
+            crate::ast::Literal::String(_) => Ok(Type::String),
             crate::ast::Literal::Array(elements) => {
                 if elements.is_empty() {
                     // Empty array - need type context to determine element type
                     // For now, default to [u8; 0]
-                    return Ok(Type::Array(
-                        Box::new(Type::Primitive(PrimitiveType::U8)),
-                        0,
-                    ));
+                    return Ok(Type::Array(Box::new(Type::Primitive(PrimitiveType::U8)), 0));
                 }
 
                 // Infer element type from first element
@@ -303,9 +306,13 @@ impl SemanticAnalyzer {
 
             // Only allow Add, Sub, comparisons on BCD
             match op {
-                BinaryOp::Add | BinaryOp::Sub => {}  // Hardware supported
-                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt |
-                BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {}  // Comparisons work
+                BinaryOp::Add | BinaryOp::Sub => {} // Hardware supported
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {} // Comparisons work
 
                 BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                     return Err(SemaError::InvalidBinaryOp {
@@ -316,8 +323,11 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor |
-                BinaryOp::Shl | BinaryOp::Shr => {
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
                     return Err(SemaError::InvalidBinaryOp {
                         op: format!("{:?} (bitwise ops not allowed on BCD)", op),
                         left_ty: left_ty.display_name(),
@@ -361,10 +371,14 @@ impl SemanticAnalyzer {
 
         // Comparison and logical operators return Bool
         match op {
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le
-            | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or => {
-                Ok(Type::Primitive(PrimitiveType::Bool))
-            }
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::And
+            | BinaryOp::Or => Ok(Type::Primitive(PrimitiveType::Bool)),
             // Arithmetic and bitwise operators return the operand type
             _ => Ok(left_ty),
         }
@@ -513,18 +527,25 @@ impl SemanticAnalyzer {
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
         // Look up the enum definition
-        let enum_def = self.type_registry.get_enum(&enum_name.node)
+        let enum_def = self
+            .type_registry
+            .get_enum(&enum_name.node)
             .ok_or_else(|| SemaError::UndefinedSymbol {
                 name: enum_name.node.clone(),
                 span: enum_name.span,
             })?;
 
         // Verify the variant exists
-        let variant_info = enum_def.get_variant(&variant.node)
-            .ok_or_else(|| SemaError::Custom {
-                message: format!("variant '{}' not found in enum '{}'", variant.node, enum_name.node),
-                span: variant.span,
-            })?;
+        let variant_info =
+            enum_def
+                .get_variant(&variant.node)
+                .ok_or_else(|| SemaError::Custom {
+                    message: format!(
+                        "variant '{}' not found in enum '{}'",
+                        variant.node, enum_name.node
+                    ),
+                    span: variant.span,
+                })?;
 
         // Type check the variant data
         use crate::ast::VariantData;
@@ -570,7 +591,8 @@ impl SemanticAnalyzer {
                     let value_ty = self.check_expr(&field_init.value)?;
 
                     // Find the expected type for this field
-                    let field_info = field_info_vec.iter()
+                    let field_info = field_info_vec
+                        .iter()
                         .find(|f| f.name == field_init.name.node)
                         .ok_or_else(|| SemaError::FieldNotFound {
                             struct_name: enum_name.node.clone(),
@@ -620,19 +642,23 @@ impl SemanticAnalyzer {
         };
 
         // Look up the struct definition
-        let struct_def = self.type_registry.get_struct(struct_name)
-            .ok_or_else(|| SemaError::Custom {
-                message: format!("struct '{}' not found", struct_name),
-                span: object.span,
-            })?;
+        let struct_def =
+            self.type_registry
+                .get_struct(struct_name)
+                .ok_or_else(|| SemaError::Custom {
+                    message: format!("struct '{}' not found", struct_name),
+                    span: object.span,
+                })?;
 
         // Find the field and return its type
-        let field_info = struct_def.get_field(&field.node)
-            .ok_or_else(|| SemaError::FieldNotFound {
-                struct_name: struct_name.clone(),
-                field_name: field.node.clone(),
-                span: field.span,
-            })?;
+        let field_info =
+            struct_def
+                .get_field(&field.node)
+                .ok_or_else(|| SemaError::FieldNotFound {
+                    struct_name: struct_name.clone(),
+                    field_name: field.node.clone(),
+                    span: field.span,
+                })?;
 
         Ok(field_info.ty.clone())
     }
@@ -645,7 +671,10 @@ impl SemanticAnalyzer {
     ) -> Result<Type, SemaError> {
         // Type check the index expression (should be integer)
         let index_ty = self.check_expr(index)?;
-        if !matches!(index_ty, Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)) {
+        if !matches!(
+            index_ty,
+            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
+        ) {
             return Err(SemaError::TypeMismatch {
                 expected: "u8 or i8".to_string(),
                 found: index_ty.display_name(),
@@ -662,27 +691,28 @@ impl SemanticAnalyzer {
                 // COMPILE-TIME BOUNDS CHECK
                 // Try to evaluate index as a constant expression
                 if let Ok(const_val) = eval_const_expr_with_env(index, &self.const_env)
-                    && let Some(index_value) = const_val.as_integer() {
-                        // Check for negative indices (only possible with i8)
-                        if index_value < 0 {
-                            return Err(SemaError::ArrayIndexOutOfBounds {
-                                index: index_value,
-                                array_size: *array_size,
-                                span: index.span,
-                            });
-                        }
-
-                        // Check if index >= array_size
-                        let index_usize = index_value as usize;
-                        if index_usize >= *array_size {
-                            return Err(SemaError::ArrayIndexOutOfBounds {
-                                index: index_value,
-                                array_size: *array_size,
-                                span: index.span,
-                            });
-                        }
-                        // Index is valid at compile-time
+                    && let Some(index_value) = const_val.as_integer()
+                {
+                    // Check for negative indices (only possible with i8)
+                    if index_value < 0 {
+                        return Err(SemaError::ArrayIndexOutOfBounds {
+                            index: index_value,
+                            array_size: *array_size,
+                            span: index.span,
+                        });
                     }
+
+                    // Check if index >= array_size
+                    let index_usize = index_value as usize;
+                    if index_usize >= *array_size {
+                        return Err(SemaError::ArrayIndexOutOfBounds {
+                            index: index_value,
+                            array_size: *array_size,
+                            span: index.span,
+                        });
+                    }
+                    // Index is valid at compile-time
+                }
                 // If evaluation fails or not an integer, index is not constant - skip check
 
                 // Return the element type
@@ -692,13 +722,11 @@ impl SemanticAnalyzer {
                 // String indexing returns u8 (a single byte)
                 Ok(Type::Primitive(PrimitiveType::U8))
             }
-            _ => {
-                Err(SemaError::TypeMismatch {
-                    expected: "array or string".to_string(),
-                    found: object_ty.display_name(),
-                    span: object.span,
-                })
-            }
+            _ => Err(SemaError::TypeMismatch {
+                expected: "array or string".to_string(),
+                found: object_ty.display_name(),
+                span: object.span,
+            }),
         }
     }
 
@@ -712,7 +740,10 @@ impl SemanticAnalyzer {
     ) -> Result<Type, SemaError> {
         // Type check start bound (must be u8)
         let start_ty = self.check_expr(start)?;
-        if !matches!(start_ty, Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)) {
+        if !matches!(
+            start_ty,
+            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
+        ) {
             return Err(SemaError::TypeMismatch {
                 expected: "u8 or i8".to_string(),
                 found: start_ty.display_name(),
@@ -722,7 +753,10 @@ impl SemanticAnalyzer {
 
         // Type check end bound (must be u8)
         let end_ty = self.check_expr(end)?;
-        if !matches!(end_ty, Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)) {
+        if !matches!(
+            end_ty,
+            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
+        ) {
             return Err(SemaError::TypeMismatch {
                 expected: "u8 or i8".to_string(),
                 found: end_ty.display_name(),
@@ -739,48 +773,49 @@ impl SemanticAnalyzer {
                 // Try to evaluate both bounds as constant expressions
                 if let (Ok(start_val), Ok(end_val)) = (
                     eval_const_expr_with_env(start, &self.const_env),
-                    eval_const_expr_with_env(end, &self.const_env)
-                )
-                    && let (Some(s), Some(e)) = (start_val.as_integer(), end_val.as_integer()) {
-                        let actual_end = if inclusive { e + 1 } else { e };
+                    eval_const_expr_with_env(end, &self.const_env),
+                ) && let (Some(s), Some(e)) = (start_val.as_integer(), end_val.as_integer())
+                {
+                    let actual_end = if inclusive { e + 1 } else { e };
 
-                        // Check for negative indices
-                        if s < 0 {
-                            return Err(SemaError::ArrayIndexOutOfBounds {
-                                index: s,
-                                array_size: *array_size,
-                                span: start.span,
-                            });
-                        }
-
-                        // Check if start > end
-                        if s > actual_end {
-                            return Err(SemaError::Custom {
-                                message: format!("slice start ({}) is greater than end ({})", s, actual_end),
-                                span,
-                            });
-                        }
-
-                        // Check if end exceeds array size
-                        if actual_end as usize > *array_size {
-                            return Err(SemaError::ArrayIndexOutOfBounds {
-                                index: actual_end - 1,
-                                array_size: *array_size,
-                                span: end.span,
-                            });
-                        }
+                    // Check for negative indices
+                    if s < 0 {
+                        return Err(SemaError::ArrayIndexOutOfBounds {
+                            index: s,
+                            array_size: *array_size,
+                            span: start.span,
+                        });
                     }
+
+                    // Check if start > end
+                    if s > actual_end {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "slice start ({}) is greater than end ({})",
+                                s, actual_end
+                            ),
+                            span,
+                        });
+                    }
+
+                    // Check if end exceeds array size
+                    if actual_end as usize > *array_size {
+                        return Err(SemaError::ArrayIndexOutOfBounds {
+                            index: actual_end - 1,
+                            array_size: *array_size,
+                            span: end.span,
+                        });
+                    }
+                }
 
                 // Slices return the same array type (for assignment compatibility)
                 Ok(object_ty.clone())
             }
-            _ => {
-                Err(SemaError::TypeMismatch {
-                    expected: "array".to_string(),
-                    found: object_ty.display_name(),
-                    span: object.span,
-                })
-            }
+            _ => Err(SemaError::TypeMismatch {
+                expected: "array".to_string(),
+                found: object_ty.display_name(),
+                span: object.span,
+            }),
         }
     }
 }

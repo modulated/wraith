@@ -15,21 +15,42 @@ use super::generate_expr;
 /// Generate equality comparison (==)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if equal, 0 otherwise
-pub(super) fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_eq(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
     // A == TEMP: Compare and set A to 1 if equal, 0 otherwise
     let true_label = emitter.next_label("et");
     let end_label = emitter.next_label("ex");
+    let temp = emitter.memory_layout.temp_reg();
 
-    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("BEQ", &true_label);
+    if is_u16 {
+        // 16-bit comparison
+        // Compare low bytes (A vs TEMP)
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        let false_label = emitter.next_label("ef");
+        emitter.emit_inst("BNE", &false_label);
 
-    // False case
-    emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("JMP", &end_label);
+        // Compare high bytes (Y vs TEMP+1)
+        emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BNE", &false_label);
 
-    // True case
-    emitter.emit_label(&true_label);
-    emitter.emit_inst("LDA", "#$01");
+        // Equal
+        emitter.emit_inst("LDA", "#$01");
+        emitter.emit_inst("JMP", &end_label);
+
+        emitter.emit_label(&false_label);
+        emitter.emit_inst("LDA", "#$00");
+    } else {
+        // 8-bit comparison
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &true_label);
+
+        // False case
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True case
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    }
 
     emitter.emit_label(&end_label);
     // Comparison modifies A register - invalidate tracking
@@ -40,21 +61,42 @@ pub(super) fn generate_compare_eq(emitter: &mut Emitter) -> Result<(), CodegenEr
 /// Generate inequality comparison (!=)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if not equal, 0 otherwise
-pub(super) fn generate_compare_ne(emitter: &mut Emitter) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_ne(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
     // A != TEMP: Opposite of equal
     let true_label = emitter.next_label("nt");
     let end_label = emitter.next_label("nx");
+    let temp = emitter.memory_layout.temp_reg();
 
-    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("BNE", &true_label);
+    if is_u16 {
+        // 16-bit comparison
+        // Compare low bytes
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BNE", &true_label);
 
-    // False case
-    emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("JMP", &end_label);
+        // Compare high bytes
+        emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BNE", &true_label);
 
-    // True case
-    emitter.emit_label(&true_label);
-    emitter.emit_inst("LDA", "#$01");
+        // Equal (False)
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // Not Equal (True)
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    } else {
+        // 8-bit comparison
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BNE", &true_label);
+
+        // False case
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True case
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    }
 
     emitter.emit_label(&end_label);
     // Comparison modifies A register - invalidate tracking
@@ -65,21 +107,46 @@ pub(super) fn generate_compare_ne(emitter: &mut Emitter) -> Result<(), CodegenEr
 /// Generate less-than comparison (<)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if less than, 0 otherwise
-pub(super) fn generate_compare_lt(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // A < TEMP: Use CMP which sets carry flag if A >= TEMP
+pub(super) fn generate_compare_lt(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    // A < TEMP
     let true_label = emitter.next_label("lt");
     let end_label = emitter.next_label("lx");
+    let temp = emitter.memory_layout.temp_reg();
 
-    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("BCC", &true_label); // Branch if carry clear (A < TEMP)
+    if is_u16 {
+        // 16-bit comparison (Unsigned)
+        let false_label = emitter.next_label("lf");
 
-    // False case
-    emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("JMP", &end_label);
+        // Compare High Bytes (Y vs TEMP+1)
+        emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BCC", &true_label); // Y < High -> True
+        emitter.emit_inst("BNE", &false_label); // Y > High -> False
 
-    // True case
-    emitter.emit_label(&true_label);
-    emitter.emit_inst("LDA", "#$01");
+        // High bytes equal, compare Low Bytes (A vs TEMP)
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BCC", &true_label); // A < Low -> True
+
+        // False
+        emitter.emit_label(&false_label);
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    } else {
+        // 8-bit comparison
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BCC", &true_label); // Branch if carry clear (A < TEMP)
+
+        // False case
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True case
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    }
 
     emitter.emit_label(&end_label);
     // Comparison modifies A register - invalidate tracking
@@ -90,21 +157,47 @@ pub(super) fn generate_compare_lt(emitter: &mut Emitter) -> Result<(), CodegenEr
 /// Generate greater-than-or-equal comparison (>=)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if greater than or equal, 0 otherwise
-pub(super) fn generate_compare_ge(emitter: &mut Emitter) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_ge(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
     // A >= TEMP: Opposite of <
+    // Optimized: Invert logic of LT
     let true_label = emitter.next_label("gt");
     let end_label = emitter.next_label("gx");
+    let temp = emitter.memory_layout.temp_reg();
 
-    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("BCS", &true_label); // Branch if carry set (A >= TEMP)
+    if is_u16 {
+        // 16-bit (Unsigned)
+        let false_label = emitter.next_label("gf");
 
-    // False case
-    emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("JMP", &end_label);
+        // Compare High Bytes
+        emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BCC", &false_label); // Y < High -> False
+        emitter.emit_inst("BNE", &true_label); // Y > High -> True
 
-    // True case
-    emitter.emit_label(&true_label);
-    emitter.emit_inst("LDA", "#$01");
+        // High equal, check Low
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BCS", &true_label); // A >= Low -> True
+
+        // False
+        emitter.emit_label(&false_label);
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    } else {
+        // 8-bit comparison
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BCS", &true_label); // Branch if carry set (A >= TEMP)
+
+        // False case
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True case
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    }
 
     emitter.emit_label(&end_label);
     // Comparison modifies A register - invalidate tracking
@@ -115,28 +208,50 @@ pub(super) fn generate_compare_ge(emitter: &mut Emitter) -> Result<(), CodegenEr
 /// Generate greater-than comparison (>)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if greater than, 0 otherwise
-pub(super) fn generate_compare_gt(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // A > TEMP: Same as TEMP < A
-    // We need to swap: load TEMP into A, then compare with original A
-    // But original A is gone. Alternative: A > B is equivalent to NOT(A <= B)
-    // A <= B means A < B OR A == B
-    // So A > B means A >= B AND A != B
-    // Or simply: CMP sets flags, if carry set AND not equal, then A > B
-
+pub(super) fn generate_compare_gt(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    // A > TEMP
     let true_label = emitter.next_label("gt");
     let end_label = emitter.next_label("gx");
+    let temp = emitter.memory_layout.temp_reg();
 
-    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("BEQ", &end_label); // If equal, result is 0 (false)
-    emitter.emit_inst("BCS", &true_label); // If carry set and not equal, A > TEMP
+    if is_u16 {
+        // 16-bit (Unsigned)
+        let false_label = emitter.next_label("gf");
 
-    // False case (carry clear, meaning A < TEMP)
-    emitter.emit_inst("LDA", "#$00");
-    emitter.emit_inst("JMP", &end_label);
+        // Compare High Bytes
+        emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BCC", &false_label); // Y < High -> False
+        emitter.emit_inst("BNE", &true_label); // Y > High -> True
 
-    // True case
-    emitter.emit_label(&true_label);
-    emitter.emit_inst("LDA", "#$01");
+        // High equal, check Low
+        // A > Low means A >= Low AND A != Low
+        // BCS (>=) and BNE (!=)
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &false_label);
+        emitter.emit_inst("BCS", &true_label);
+
+        // False
+        emitter.emit_label(&false_label);
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    } else {
+        // 8-bit comparison
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &end_label); // If equal, result is 0 (false)
+        emitter.emit_inst("BCS", &true_label); // If carry set and not equal, A > TEMP
+
+        // False case (carry clear, meaning A < TEMP)
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True case
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    }
 
     emitter.emit_label(&end_label);
     // Comparison modifies A register - invalidate tracking
@@ -147,25 +262,71 @@ pub(super) fn generate_compare_gt(emitter: &mut Emitter) -> Result<(), CodegenEr
 /// Generate less-than-or-equal comparison (<=)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if less than or equal, 0 otherwise
-pub(super) fn generate_compare_le(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // A <= TEMP: Same as NOT(A > TEMP)
-    // A <= B means A < B OR A == B
-    // CMP: if carry clear OR equal, then A <= TEMP
-
-    let false_label = emitter.next_label("lf");
+pub(super) fn generate_compare_le(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    // A <= TEMP
     let end_label = emitter.next_label("lx");
+    let temp = emitter.memory_layout.temp_reg();
 
-    emitter.emit_inst("CMP", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-    emitter.emit_inst("BEQ", &end_label); // If equal, keep A as is, set to 1 after
-    emitter.emit_inst("BCS", &false_label); // If A >= TEMP and not equal, A > TEMP (false)
+    if is_u16 {
+        // 16-bit (Unsigned)
+        let true_label = emitter.next_label("lt");
 
-    // True case (carry clear, meaning A < TEMP, or was equal)
-    emitter.emit_inst("LDA", "#$01");
-    emitter.emit_inst("JMP", &end_label);
+        // Compare High Bytes
+        emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BCC", &true_label); // Y < High -> True
+        emitter.emit_inst("BNE", &end_label); // Y > High -> False (LDA 0 below)
 
-    // False case
-    emitter.emit_label(&false_label);
-    emitter.emit_inst("LDA", "#$00");
+        // High equal, check Low
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &true_label); // Equal -> True
+        emitter.emit_inst("BCC", &true_label); // A < Low -> True
+
+        // False (Default fallthrough state needs to be loaded with 0? No wait)
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    } else {
+        // 8-bit comparison
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &end_label); // If equal, keep A as is (wait, A is matched val, non-zero? No A==TEMP. BEQ taken means A==TEMP.)
+        // Bug in original: "If equal, keep A as is, set to 1 after".
+        // If A=5, TEMP=5. CMP -> Z=1. BEQ end_label.
+        // At end_label, A is still 5!
+        // But we want boolean logic 0/1.
+        // If A=0, TEMP=0. A=0.
+        // Incorrect logic in original?
+        // Let's fix 8-bit too.
+
+        // Original logic:
+        // BEQ end_label
+        // BCS false_label
+        // LDA 1
+        // JMP end
+        // false: LDA 0
+        // end:
+
+        // If EQ: Jumps to END with A unchanged.
+        // If A was 5. A is 5 (True in C bool, but we want 1).
+        // If A was 0. A is 0 (False).
+        // So `0 <= 0` returns 0 (False)? Wrong.
+
+        // Fix 8-bit logic:
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        let true_label = emitter.next_label("lt");
+        emitter.emit_inst("BEQ", &true_label);
+        emitter.emit_inst("BCC", &true_label);
+
+        // False
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("JMP", &end_label);
+
+        // True
+        emitter.emit_label(&true_label);
+        emitter.emit_inst("LDA", "#$01");
+    }
 
     emitter.emit_label(&end_label);
     // Comparison modifies A register - invalidate tracking

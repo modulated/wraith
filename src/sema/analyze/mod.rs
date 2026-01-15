@@ -214,9 +214,10 @@ impl SemanticAnalyzer {
             let func_name = func.name.node.clone();
 
             // Check if this is an inline function
-            let is_inline = func.attributes.iter().any(|attr| {
-                matches!(attr, crate::ast::FnAttribute::Inline)
-            });
+            let is_inline = func
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, crate::ast::FnAttribute::Inline));
 
             self.table.enter_scope();
 
@@ -250,7 +251,8 @@ impl SemanticAnalyzer {
             // Each parameter gets sequential bytes (16-bit params take 2 bytes)
             let layout = MemoryLayout::new();
             let mut byte_offset = 0u8;
-            let mut struct_param_locals: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+            let mut struct_param_locals: std::collections::HashMap<String, u8> =
+                std::collections::HashMap::new();
 
             for param in func.params.iter() {
                 let name = param.name.node.clone();
@@ -283,15 +285,31 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // Struct parameters are passed by reference (2-byte pointer)
+                // Struct and enum parameters are passed by reference (2-byte pointer)
                 // Other types are passed by value
                 let is_struct_param = matches!(param_type, Type::Named(_))
-                    && self.type_registry.get_struct(
-                        if let Type::Named(n) = &param_type { n } else { "" }
-                    ).is_some();
+                    && self
+                        .type_registry
+                        .get_struct(if let Type::Named(n) = &param_type {
+                            n
+                        } else {
+                            ""
+                        })
+                        .is_some();
 
-                let param_size = if is_struct_param {
-                    2  // Pointer size for pass-by-reference
+                // Enum parameters are also passed as 2-byte pointers
+                let is_enum_param = matches!(param_type, Type::Named(_))
+                    && self
+                        .type_registry
+                        .get_enum(if let Type::Named(n) = &param_type {
+                            n
+                        } else {
+                            ""
+                        })
+                        .is_some();
+
+                let param_size = if is_struct_param || is_enum_param {
+                    2 // Pointer size for pass-by-reference
                 } else {
                     param_type.size()
                 };
@@ -325,29 +343,29 @@ impl SemanticAnalyzer {
 
             // Store struct param locals mapping in function metadata
             if !struct_param_locals.is_empty()
-                && let Some(metadata) = self.function_metadata.get_mut(&func_name) {
-                    metadata.struct_param_locals = struct_param_locals;
-                }
+                && let Some(metadata) = self.function_metadata.get_mut(&func_name)
+            {
+                metadata.struct_param_locals = struct_param_locals;
+            }
 
             // Analyze body
             self.analyze_stmt(&func.body)?;
 
             // For inline functions, capture all symbols that were added during body analysis
             // This includes both parameter definitions and all references to them
-            if is_inline
-                && let Some(before) = resolved_before {
-                    // Collect all NEW symbols that were added during parameter registration and body analysis
-                    let mut inline_symbols = std::collections::HashMap::new();
-                    for (span, info) in &self.resolved_symbols {
-                        if !before.contains_key(span) {
-                            inline_symbols.insert(*span, info.clone());
-                        }
-                    }
-
-                    if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
-                        metadata.inline_param_symbols = Some(inline_symbols);
+            if is_inline && let Some(before) = resolved_before {
+                // Collect all NEW symbols that were added during parameter registration and body analysis
+                let mut inline_symbols = std::collections::HashMap::new();
+                for (span, info) in &self.resolved_symbols {
+                    if !before.contains_key(span) {
+                        inline_symbols.insert(*span, info.clone());
                     }
                 }
+
+                if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+                    metadata.inline_param_symbols = Some(inline_symbols);
+                }
+            }
 
             // Check for unused variables and parameters
             self.check_unused_variables();
@@ -368,7 +386,9 @@ impl SemanticAnalyzer {
                 }
 
                 // Check if it's a known type (struct or enum)
-                if self.type_registry.structs.contains_key(name) || self.type_registry.enums.contains_key(name) {
+                if self.type_registry.structs.contains_key(name)
+                    || self.type_registry.enums.contains_key(name)
+                {
                     Ok(Type::Named(name.clone()))
                 } else {
                     // For now, allow unknown named types

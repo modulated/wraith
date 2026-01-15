@@ -12,7 +12,7 @@
 /// After calling this function, the CPU will respond to IRQ interrupts.
 /// Note: NMI interrupts are always enabled and cannot be disabled.
 #[inline]
-fn enable_interrupts() {
+pub fn enable_interrupts() {
     asm {
         "CLI",
     }
@@ -26,7 +26,7 @@ fn enable_interrupts() {
 /// Use this for critical sections that must not be interrupted.
 /// Note: NMI interrupts cannot be disabled and will still occur.
 #[inline]
-fn disable_interrupts() {
+pub fn disable_interrupts() {
     asm {
         "SEI",
     }
@@ -43,7 +43,7 @@ fn disable_interrupts() {
 /// Used before addition operations to ensure no carry-in.
 /// The compiler normally handles this automatically for additions.
 #[inline]
-fn clear_carry() {
+pub fn clear_carry() {
     asm {
         "CLC",
     }
@@ -57,7 +57,7 @@ fn clear_carry() {
 /// The compiler normally handles this automatically for subtractions.
 /// Can also be used for manual multi-byte arithmetic.
 #[inline]
-fn set_carry() {
+pub fn set_carry() {
     asm {
         "SEC",
     }
@@ -75,7 +75,7 @@ fn set_carry() {
 /// In binary mode, ADC and SBC perform normal binary addition/subtraction.
 /// Most programs should run in binary mode.
 #[inline]
-fn clear_decimal() {
+pub fn clear_decimal() {
     asm {
         "CLD",
     }
@@ -90,7 +90,7 @@ fn clear_decimal() {
 /// Useful for calculations that need to display decimal results.
 /// Example: 0x09 + 0x01 = 0x10 (not 0x0A)
 #[inline]
-fn set_decimal() {
+pub fn set_decimal() {
     asm {
         "SED",
     }
@@ -107,7 +107,7 @@ fn set_decimal() {
 /// Clears the overflow (V) flag in the processor status register.
 /// The overflow flag is set by ADC/SBC for signed arithmetic overflow.
 #[inline]
-fn clear_overflow() {
+pub fn clear_overflow() {
     asm {
         "CLV",
     }
@@ -122,7 +122,7 @@ fn clear_overflow() {
 /// - Code alignment
 /// - Placeholder for future instructions
 #[inline]
-fn nop() {
+pub fn nop() {
     asm {
         "NOP",
     }
@@ -141,7 +141,7 @@ fn nop() {
 /// Used for debugging or implementing system calls.
 /// Note: Most debuggers/emulators treat BRK as a breakpoint.
 #[inline]
-fn brk() {
+pub fn brk() {
     asm {
         "BRK",
     }
@@ -165,7 +165,7 @@ fn brk() {
 /// ```
 
 #[inline]
-fn set_stack_pointer(value: u8) {
+pub fn set_stack_pointer(value: u8) {
     asm {
         "LDX {value}",
         "TXS",
