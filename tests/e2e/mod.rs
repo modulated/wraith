@@ -7,6 +7,7 @@ mod control_flow;
 mod functions;
 mod types;
 mod memory;
+mod pointers;
 mod interrupts;
 mod operators;
 mod cpu_flags;
