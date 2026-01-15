@@ -124,7 +124,7 @@ impl SemanticAnalyzer {
 
                 // Check if it's a type that has a length
                 match &slice_ty {
-                    Type::Pointer(..) | Type::Array(_, _) | Type::String => {
+                    Type::Slice(..) | Type::Array(_, _) | Type::String => {
                         // Slice/array/string length is always u16 on 6502 (our usize equivalent)
                         Type::Primitive(PrimitiveType::U16)
                     }
@@ -289,29 +289,6 @@ impl SemanticAnalyzer {
     ) -> Result<Type, SemaError> {
         let left_ty = self.check_expr(left)?;
         let right_ty = self.check_expr(right)?;
-
-        // Special handling for pointer arithmetic
-        match (&left_ty, op, &right_ty) {
-            // Pointer + Integer or Integer + Pointer
-            (Type::Pointer(..), BinaryOp::Add, Type::Primitive(_))
-            | (Type::Primitive(_), BinaryOp::Add, Type::Pointer(..)) => {
-                // Return the pointer type
-                if matches!(left_ty, Type::Pointer(..)) {
-                    return Ok(left_ty);
-                } else {
-                    return Ok(right_ty);
-                }
-            }
-            // Pointer +/- Integer
-            (Type::Pointer(..), BinaryOp::Add | BinaryOp::Sub, Type::Primitive(_)) => {
-                return Ok(left_ty);
-            }
-            // Pointer - Pointer (returns offset as integer)
-            (Type::Pointer(..), BinaryOp::Sub, Type::Pointer(..)) => {
-                return Ok(Type::Primitive(PrimitiveType::U16));
-            }
-            _ => {}
-        }
 
         // BCD type validation
         if let (Type::Primitive(left_prim), Type::Primitive(right_prim)) = (&left_ty, &right_ty)
@@ -496,42 +473,6 @@ impl SemanticAnalyzer {
             crate::ast::UnaryOp::Not => {
                 // Logical NOT returns bool
                 Ok(Type::Primitive(PrimitiveType::Bool))
-            }
-            crate::ast::UnaryOp::Deref => {
-                // Dereference: *ptr
-                match operand_ty {
-                    Type::Pointer(inner, _) => Ok(*inner),
-                    _ => Err(SemaError::TypeMismatch {
-                        expected: "pointer".to_string(),
-                        found: operand_ty.display_name(),
-                        span,
-                    }),
-                }
-            }
-            crate::ast::UnaryOp::AddrOf | crate::ast::UnaryOp::AddrOfMut => {
-                // Address-of: &x
-                // Verify that the operand is an l-value (something that has an address)
-                let is_lvalue = matches!(
-                    operand.node,
-                    Expr::Variable(_)
-                        | Expr::Field { .. }
-                        | Expr::Index { .. }
-                        | Expr::Unary {
-                            op: crate::ast::UnaryOp::Deref,
-                            ..
-                        }
-                );
-
-                if !is_lvalue {
-                    return Err(SemaError::Custom {
-                        message: "cannot take address of non-lvalue (expected variable, field, index, or dereference)".to_string(),
-                        span: operand.span,
-                    });
-                }
-
-                // Create pointer type
-                // In Wraith, currently all pointers are effectively mutable
-                Ok(Type::Pointer(Box::new(operand_ty), true))
             }
         }
     }

@@ -42,12 +42,6 @@ pub enum UnaryOp {
     BitNot,
     /// Logical NOT: !x
     Not,
-    /// Dereference: *ptr
-    Deref,
-    /// Address-of: &x
-    AddrOf,
-    /// Mutable address-of: &mut x
-    AddrOfMut,
 }
 
 /// A literal value
