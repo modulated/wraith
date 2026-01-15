@@ -26,39 +26,96 @@ use super::generate_expr;
 /// - `~x`: Bitwise NOT (XOR with $FF)
 /// - `!x`: Logical NOT (converts to boolean 0/1 and inverts)
 /// - `*ptr`: Dereference (load value from address using indirect addressing)
+///
+/// Generate code for unary operations
 pub(super) fn generate_unary(
     op: UnaryOp,
     operand: &Spanned<Expr>,
+    expr_span: crate::ast::Span,
     emitter: &mut Emitter,
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match op {
         UnaryOp::Deref => {
-            // Dereference: *ptr - Load value from address stored in operand
+            // Dereference: *ptr
+            // 1. Evaluate operand to get the pointer (Address)
             generate_expr(operand, emitter, info, string_collector)?;
 
-            // A now contains the address (low byte for u8 pointers)
-            // For 6502, we need to set up indirect addressing
-            // Store address in zero page for indirect access
-            emitter.emit_inst("STA", "$30"); // Store low byte at $30
+            // Result is in A:X (Pointer convention)
+            // Store to Zero Page Scratch ($30-$31) for indirect addressing
+            emitter.emit_inst("STA", "$30");
+            emitter.emit_inst("STX", "$31");
 
-            // For u16 pointers, we'd also load high byte:
-            // For now, assume u8 addresses or low byte only
-            emitter.emit_inst("LDA", "#$00");
-            emitter.emit_inst("STA", "$31"); // High byte = 0 for zero page
+            // 2. Determine type of the result (the pointee type)
+            let result_ty = info.resolved_types.get(&expr_span).ok_or_else(|| {
+                CodegenError::UnsupportedOperation("Missing type info for dereference".to_string())
+            })?;
 
-            // Load value using indirect addressing
-            emitter.emit_inst("LDY", "#$00");
-            emitter.emit_inst("LDA", "($30),Y"); // Indirect indexed addressing
+            // 3. Load value based on type
+            match result_ty {
+                // 1-byte types
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U8)
+                | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I8)
+                | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::Bool)
+                | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B8) => {
+                    emitter.emit_inst("LDY", "#$00");
+                    emitter.emit_inst("LDA", "($30),Y");
+                }
+
+                // 2-byte Arithmetic types (A:Y convention)
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
+                | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
+                | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16) => {
+                    // Safe sequence: Load Low->X, Load High->Y, Move X->A
+                    emitter.emit_inst("LDY", "#$00");
+                    emitter.emit_inst("LDA", "($30),Y"); // Low byte -> A
+                    emitter.emit_inst("TAX", ""); // Save Low in X
+
+                    emitter.emit_inst("INY", "");
+                    emitter.emit_inst("LDA", "($30),Y"); // High byte -> A
+                    emitter.emit_inst("TAY", ""); // High byte -> Y
+
+                    emitter.emit_inst("TXA", ""); // Restore Low byte to A
+                }
+
+                // 2-byte Pointer types / Enums (A:X convention)
+                crate::sema::types::Type::Pointer(..)
+                | crate::sema::types::Type::String
+                | crate::sema::types::Type::Array(..)
+                | crate::sema::types::Type::Named(_) => {
+                    // Optimized sequence: High->X, Low->A
+
+                    // High byte first (Y=1)
+                    emitter.emit_inst("LDY", "#$01");
+                    emitter.emit_inst("LDA", "($30),Y");
+                    emitter.emit_inst("TAX", ""); // High -> X
+
+                    // Low byte second (Y=0)
+                    emitter.emit_inst("LDY", "#$00");
+                    emitter.emit_inst("LDA", "($30),Y"); // Low -> A
+                }
+
+                crate::sema::types::Type::Void => {
+                    // No load needed
+                }
+
+                _ => {
+                    // Function pointers?
+                    emitter.emit_inst("LDY", "#$01");
+                    emitter.emit_inst("LDA", "($30),Y");
+                    emitter.emit_inst("TAX", "");
+                    emitter.emit_inst("LDY", "#$00");
+                    emitter.emit_inst("LDA", "($30),Y");
+                }
+            }
 
             return Ok(());
         }
         UnaryOp::AddrOf | UnaryOp::AddrOfMut => {
-            // Address-of: &var or &mut var - Get the address of a variable
-            // Don't evaluate the operand, just get its address
+            // Address-of: &var
             if let Expr::Variable(name) = &operand.node {
-                // Try resolved_symbols first, fallback to global table
+                // Determine symbol location
                 let sym = info
                     .resolved_symbols
                     .get(&operand.span)
@@ -76,30 +133,17 @@ pub(super) fn generate_unary(
                         }
                     };
 
-                    // Load the address into A (low byte) and X (high byte) for 16-bit addresses
-                    // For zero page addresses (< 256), high byte is 0
-                    // For absolute addresses (>= 256), load both bytes
+                    // Load Address into A:X (Pointer Convention)
+                    // Low byte -> A
                     emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
 
+                    // High byte -> X
                     if addr > 0xFF {
-                        // 16-bit address: load high byte into Y
-                        emitter.emit_inst("LDY", &format!("#${:02X}", (addr >> 8) & 0xFF));
-                        emitter.reg_state.set_y(
-                            crate::codegen::regstate::RegisterValue::Immediate(
-                                ((addr >> 8) & 0xFF) as i64,
-                            ),
-                        );
+                        emitter.emit_inst("LDX", &format!("#${:02X}", (addr >> 8) & 0xFF));
                     } else {
-                        // Zero page address: high byte is 0
-                        emitter.emit_inst("LDY", "#$00");
-                        emitter
-                            .reg_state
-                            .set_y(crate::codegen::regstate::RegisterValue::Immediate(0));
+                        // Zero page, high byte is 0
+                        emitter.emit_inst("LDX", "#$00");
                     }
-
-                    emitter.reg_state.set_a(
-                        crate::codegen::regstate::RegisterValue::Immediate((addr & 0xFF) as i64),
-                    );
 
                     return Ok(());
                 } else {

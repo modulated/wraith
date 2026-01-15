@@ -20,9 +20,8 @@ impl SemanticAnalyzer {
                 for s in stmts.iter() {
                     if found_terminator {
                         // Warn about unreachable code after return/break/continue
-                        self.warnings.push(Warning::UnreachableCode {
-                            span: s.span,
-                        });
+                        self.warnings
+                            .push(Warning::UnreachableCode { span: s.span });
                         // Track for dead code elimination in codegen
                         self.unreachable_stmts.insert(s.span);
                         // Continue analyzing (don't skip) to find other errors/warnings
@@ -211,18 +210,18 @@ impl SemanticAnalyzer {
         // Arrays (pointers) and u16/i16/b16 types need 2 bytes
         // Named types: structs need their full size, enums need 2 bytes (pointer)
         let alloc_size = match &declared_ty {
-            Type::Array(_, _) => 2,  // Pointer
-            Type::Primitive(PrimitiveType::U16) |
-            Type::Primitive(PrimitiveType::I16) |
-            Type::Primitive(PrimitiveType::B16) => 2,
+            Type::Array(_, _) | Type::Pointer(_, _) => 2, // Pointer
+            Type::Primitive(PrimitiveType::U16)
+            | Type::Primitive(PrimitiveType::I16)
+            | Type::Primitive(PrimitiveType::B16) => 2,
             Type::Named(type_name) => {
                 // Check if it's a struct (allocate full size) or enum (allocate pointer)
                 if let Some(struct_def) = self.type_registry.get_struct(type_name) {
                     struct_def.total_size
                 } else if self.type_registry.get_enum(type_name).is_some() {
-                    2  // Enums are stored as pointers to their data
+                    2 // Enums are stored as pointers to their data
                 } else {
-                    1  // Unknown type, default to 1
+                    1 // Unknown type, default to 1
                 }
             }
             _ => 1,
@@ -265,28 +264,34 @@ impl SemanticAnalyzer {
         let value_ty = self.check_expr(value)?;
 
         // Special handling for slice assignment: arr[start..end] = [values]
-        if let Expr::Slice { object: _, start, end, inclusive } = &target.node {
+        if let Expr::Slice {
+            object: _,
+            start,
+            end,
+            inclusive,
+        } = &target.node
+        {
             // For slice assignment, check that RHS is an array with matching length
             if let Type::Array(_, rhs_size) = &value_ty {
                 // Try to evaluate slice bounds as constants
                 if let (Ok(start_val), Ok(end_val)) = (
                     eval_const_expr_with_env(start, &self.const_env),
-                    eval_const_expr_with_env(end, &self.const_env)
-                )
-                    && let (Some(s), Some(e)) = (start_val.as_integer(), end_val.as_integer()) {
-                        let actual_end = if *inclusive { e + 1 } else { e };
-                        let slice_len = (actual_end - s) as usize;
+                    eval_const_expr_with_env(end, &self.const_env),
+                ) && let (Some(s), Some(e)) = (start_val.as_integer(), end_val.as_integer())
+                {
+                    let actual_end = if *inclusive { e + 1 } else { e };
+                    let slice_len = (actual_end - s) as usize;
 
-                        if *rhs_size != slice_len {
-                            return Err(SemaError::Custom {
-                                message: format!(
-                                    "slice length ({}) does not match array length ({})",
-                                    slice_len, rhs_size
-                                ),
-                                span: value.span,
-                            });
-                        }
+                    if *rhs_size != slice_len {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "slice length ({}) does not match array length ({})",
+                                slice_len, rhs_size
+                            ),
+                            span: value.span,
+                        });
                     }
+                }
                 // If bounds aren't constant, we'll check at runtime (or in codegen)
             } else {
                 return Err(SemaError::TypeMismatch {
@@ -309,23 +314,25 @@ impl SemanticAnalyzer {
 
         // Check mutability and access mode
         if let Expr::Variable(name) = &target.node
-            && let Some(info) = self.table.lookup(name) {
-                // Check for writing to read-only address
-                if info.kind == SymbolKind::Address
-                    && let Some(crate::ast::AccessMode::Read) = info.access_mode {
-                        return Err(SemaError::ReadOnlyWrite {
-                            name: name.clone(),
-                            span: target.span,
-                        });
-                    }
-                // Check general mutability
-                if !info.mutable {
-                    return Err(SemaError::ImmutableAssignment {
-                        symbol: name.clone(),
-                        span: target.span,
-                    });
-                }
+            && let Some(info) = self.table.lookup(name)
+        {
+            // Check for writing to read-only address
+            if info.kind == SymbolKind::Address
+                && let Some(crate::ast::AccessMode::Read) = info.access_mode
+            {
+                return Err(SemaError::ReadOnlyWrite {
+                    name: name.clone(),
+                    span: target.span,
+                });
             }
+            // Check general mutability
+            if !info.mutable {
+                return Err(SemaError::ImmutableAssignment {
+                    symbol: name.clone(),
+                    span: target.span,
+                });
+            }
+        }
 
         Ok(())
     }
@@ -350,13 +357,11 @@ impl SemanticAnalyzer {
 
             // Use the larger of the two types
             match (start_ty, end_ty) {
-                (Type::Primitive(PrimitiveType::U16), _) | (_, Type::Primitive(PrimitiveType::U16)) => {
-                    Type::Primitive(PrimitiveType::U16)
-                }
-                (Type::Primitive(PrimitiveType::I16), _) | (_, Type::Primitive(PrimitiveType::I16)) => {
-                    Type::Primitive(PrimitiveType::I16)
-                }
-                _ => Type::Primitive(PrimitiveType::U8) // Default to u8
+                (Type::Primitive(PrimitiveType::U16), _)
+                | (_, Type::Primitive(PrimitiveType::U16)) => Type::Primitive(PrimitiveType::U16),
+                (Type::Primitive(PrimitiveType::I16), _)
+                | (_, Type::Primitive(PrimitiveType::I16)) => Type::Primitive(PrimitiveType::I16),
+                _ => Type::Primitive(PrimitiveType::U8), // Default to u8
             }
         };
 
@@ -440,9 +445,9 @@ impl SemanticAnalyzer {
 
         // Allocate storage for loop variable
         // u16/i16 types need 2 bytes
-        let addr = if matches!(var_ty,
-            Type::Primitive(PrimitiveType::U16) |
-            Type::Primitive(PrimitiveType::I16)
+        let addr = if matches!(
+            var_ty,
+            Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16)
         ) {
             self.zp_allocator.allocate_range(2)?
         } else {
@@ -487,9 +492,9 @@ impl SemanticAnalyzer {
         };
 
         // Check if there's a wildcard pattern
-        let has_wildcard = arms.iter().any(|arm| {
-            matches!(arm.pattern.node, Pattern::Wildcard)
-        });
+        let has_wildcard = arms
+            .iter()
+            .any(|arm| matches!(arm.pattern.node, Pattern::Wildcard));
 
         if has_wildcard {
             // Wildcard covers everything - match is exhaustive
@@ -530,36 +535,42 @@ impl SemanticAnalyzer {
         match_ty: &Type,
     ) -> Result<(), SemaError> {
         match pattern {
-            Pattern::EnumVariant { enum_name, variant, bindings } => {
+            Pattern::EnumVariant {
+                enum_name,
+                variant,
+                bindings,
+            } => {
                 // Get enum definition to find variant field types
                 if let Some(enum_def) = self.type_registry.get_enum(&enum_name.node)
-                    && let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == variant.node) {
-                        // Add bindings for tuple variant fields
-                        match &variant_def.data {
-                            VariantData::Tuple(field_types) => {
-                                for (i, binding) in bindings.iter().enumerate() {
-                                    if let Some(field_ty) = field_types.get(i) {
-                                        let addr = self.zp_allocator.allocate()?;
-                                        let info = SymbolInfo {
-                                            name: binding.name.node.clone(),
-                                            kind: SymbolKind::Variable,
-                                            ty: field_ty.clone(),
-                                            location: SymbolLocation::ZeroPage(addr),
-                                            mutable: false,
-                                            access_mode: None,
-                                            is_pub: false, // Pattern bindings are never public
-                                        };
-                                        self.table.insert(binding.name.node.clone(), info.clone());
-                                        // Also add to resolved_symbols so codegen can find it
-                                        self.resolved_symbols.insert(binding.name.span, info);
-                                    }
+                    && let Some(variant_def) =
+                        enum_def.variants.iter().find(|v| v.name == variant.node)
+                {
+                    // Add bindings for tuple variant fields
+                    match &variant_def.data {
+                        VariantData::Tuple(field_types) => {
+                            for (i, binding) in bindings.iter().enumerate() {
+                                if let Some(field_ty) = field_types.get(i) {
+                                    let addr = self.zp_allocator.allocate()?;
+                                    let info = SymbolInfo {
+                                        name: binding.name.node.clone(),
+                                        kind: SymbolKind::Variable,
+                                        ty: field_ty.clone(),
+                                        location: SymbolLocation::ZeroPage(addr),
+                                        mutable: false,
+                                        access_mode: None,
+                                        is_pub: false, // Pattern bindings are never public
+                                    };
+                                    self.table.insert(binding.name.node.clone(), info.clone());
+                                    // Also add to resolved_symbols so codegen can find it
+                                    self.resolved_symbols.insert(binding.name.span, info);
                                 }
                             }
-                            _ => {
-                                // Unit and Struct variants don't have tuple-style bindings
-                            }
+                        }
+                        _ => {
+                            // Unit and Struct variants don't have tuple-style bindings
                         }
                     }
+                }
             }
             Pattern::Variable(name) => {
                 // Bind the entire matched value

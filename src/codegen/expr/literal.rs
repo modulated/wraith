@@ -244,6 +244,11 @@ pub(super) fn generate_variable(
             false
         };
 
+        // Check if this is a pointer-like type (Pointer, Array, String, Enum)
+        // These use the A:X register convention
+        let is_pointer_like =
+            matches!(sym.ty, Type::Pointer(..) | Type::Array(..) | Type::String) || is_enum;
+
         match sym.location {
             SymbolLocation::Absolute(_addr) => {
                 // Check if this is an address declaration - use symbolic name
@@ -252,12 +257,12 @@ pub(super) fn generate_variable(
                 } else {
                     // Regular variable at absolute address - use numeric
                     emitter.emit_lda_abs(_addr);
-                    // For u16/i16, also load high byte into X
+                    // For u16/i16, also load high byte into Y (A:Y convention)
                     if is_u16 {
-                        emitter.emit_inst("LDX", &format!("${:04X}", _addr + 1));
+                        emitter.emit_inst("LDY", &format!("${:04X}", _addr + 1));
                     }
-                    // For enums, load high byte into X (pointer convention)
-                    if is_enum {
+                    // For pointers/enums, load high byte into X (A:X convention)
+                    if is_pointer_like {
                         emitter.emit_inst("LDX", &format!("${:04X}", _addr + 1));
                     }
                 }
@@ -270,8 +275,8 @@ pub(super) fn generate_variable(
                 if is_u16 {
                     emitter.emit_inst("LDY", &format!("${:02X}", addr + 1));
                 }
-                // For enums, load high byte into X (pointer convention: A=low, X=high)
-                if is_enum {
+                // For pointers/enums, load high byte into X (pointer convention: A=low, X=high)
+                if is_pointer_like {
                     emitter.emit_inst("LDX", &format!("${:02X}", addr + 1));
                 }
                 Ok(())

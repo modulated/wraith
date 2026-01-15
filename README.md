@@ -15,6 +15,7 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 ## Quick Setup
 
 ### Prerequisites
+
 - Rust toolchain (cargo)
 - A 6502 assembler (e.g., ca65, DASM, or your preferred 6502 assembler)
 
@@ -25,14 +26,13 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 cargo build --release
 
 # Compile a Wraith program
-cargo run --release <your-program.wr>
+cargo run --release my_program.wr
 
-# This generates <your-program.asm>
+# This generates my_program.asm
 # Assemble it with your 6502 assembler of choice
-ca65 your-program.asm -o your-program.o
-ld65 your-program.o -o your-program.bin
+ca65 my_program.asm -o my_program.o
+ld65 my_program.o -o my_program.bin
 ```
-
 
 ## Documentation
 
@@ -71,6 +71,7 @@ default_section = "CODE"
 ### Default Configuration
 
 If no `wraith.toml` is present, the compiler uses these defaults:
+
 - **CODE**: `0x8000-0xBFFF` (16KB) - User code (default)
 - **DATA**: `0xD000-0xEFFF` (8KB) - Constants and data
 
@@ -79,6 +80,7 @@ Functions without an explicit `#[org]` or `#[section]` attribute are placed in t
 ## Examples
 
 Check the `examples/` directory for sample programs demonstrating:
+
 - Tail-recursive optimization
 - Interrupt handling
 - Nested structs
@@ -88,4 +90,3 @@ Check the `examples/` directory for sample programs demonstrating:
 ## Contributing
 
 See [ROADMAP.md](ROADMAP.md) for planned features and development priorities.
-
