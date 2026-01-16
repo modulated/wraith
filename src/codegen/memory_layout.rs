@@ -89,6 +89,12 @@ impl MemoryLayout {
         self.temp_storage_start + 0x02
     }
 
+    /// Get the jump table indirect pointer address (2 bytes for JMP indirect)
+    /// Used by match statement jump table dispatch
+    pub fn jump_ptr(&self) -> u8 {
+        self.pointer_ops_start // $30 by default
+    }
+
     /// Get reserved regions for zero page allocator
     pub fn get_reserved_regions(&self) -> Vec<(u8, u8)> {
         vec![

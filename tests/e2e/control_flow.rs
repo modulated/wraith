@@ -200,9 +200,11 @@ fn match_enum_variants() {
         }
     "#);
 
-    // Should compare tag values and branch
+    // With 4 variants, uses jump table dispatch (ASL/TAX/JMP indirect)
     assert_asm_contains(&asm, "LDA");
-    assert_asm_contains(&asm, "CMP");
+    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
+    assert_asm_contains(&asm, "TAX"); // Transfer to X for table indexing
+    assert_asm_contains(&asm, "JMP"); // Jump to arm
 }
 
 #[test]

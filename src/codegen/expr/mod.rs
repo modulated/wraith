@@ -106,7 +106,7 @@ pub fn generate_expr(
             generate_binary(left, *op, right, emitter, info, string_collector)
         }
         Expr::Unary { op, operand } => {
-            generate_unary(*op, operand, expr.span, emitter, info, string_collector)
+            generate_unary(*op, operand, emitter, info, string_collector)
         }
         Expr::Call { function, args } => {
             generate_call(function, args, emitter, info, string_collector)

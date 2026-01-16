@@ -199,7 +199,7 @@ buffer[5] = 42;
 let value: u16 = data[2];
 ```
 
-### Slices (Fat Pointers)
+### Slices
 
 ```
 const DATA: [u8; 6] = [0, 1, 2, 3, 4, 5];
@@ -208,10 +208,6 @@ const DATA: [u8; 6] = [0, 1, 2, 3, 4, 5];
 array: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 process_data(array);      // Automatic coercion
 ```
-
-## Pointers
-
-- [ ] TODO - ?implemented in language
 
 ## Control Flow
 

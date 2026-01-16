@@ -58,9 +58,9 @@ fn simple_enum_match() {
         }
     "#);
 
-    // Should have match statement structure
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "CMP");
+    // With 3 variants, uses jump table dispatch
+    assert_asm_contains(&asm, "; Match statement (jump table)");
+    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
 }
 
 // ============================================================
@@ -393,11 +393,10 @@ fn match_multiple_tuple_variants() {
         }
     "#);
 
-    // Should have match statement with comparisons
-    // Note: Compiler may optimize away some comparisons
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "CMP");  // Should have at least some comparisons
-    assert_asm_contains(&asm, "($20),Y");  // Should extract fields using indirect indexed
+    // With 4 variants, uses jump table dispatch
+    assert_asm_contains(&asm, "; Match statement (jump table)");
+    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
+    assert_asm_contains(&asm, "($20),Y"); // Should extract fields using indirect indexed
 }
 
 #[test]
@@ -502,11 +501,9 @@ fn complex_tuple_variant_pattern() {
         }
     "#);
 
-    // Complex enum with multiple variant types
+    // Complex enum with multiple variant types - uses jump table for 4+ variants
     assert_asm_contains(&asm, "; Enum variant: Message::Move");
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "CMP #$00");  // Quit
-    assert_asm_contains(&asm, "CMP #$01");  // Move
-    assert_asm_contains(&asm, "CMP #$02");  // Write
-    assert_asm_contains(&asm, "CMP #$03");  // ChangeColor
+    assert_asm_contains(&asm, "; Match statement (jump table)");
+    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
+    assert_asm_contains(&asm, ".WORD match_"); // Jump table entries
 }

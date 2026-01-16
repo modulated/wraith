@@ -402,7 +402,7 @@ match color {
 ✅ Interrupt Vector Generation
 ✅ Match Statements
 ✅ Struct & Enum Operations
-✅ Pointer Operations
+✅ Array Operations
 ✅ Array Literals
 ✅ Type Casts
 ✅ Constant Folding

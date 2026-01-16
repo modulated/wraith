@@ -602,20 +602,54 @@ fn test_codegen_enum_pattern_matching() {
     let program = analyze(&ast).unwrap();
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
-    // Should have match statement structure
-    assert!(asm.contains("; Match statement"), "Should have match comment");
+    // Should have match statement structure (jump table for 3+ arms)
+    assert!(
+        asm.contains("; Match statement (jump table)"),
+        "Should have jump table match comment"
+    );
 
     // Should store enum pointer and load tag
     assert!(asm.contains("STA $20"), "Should store pointer low byte");
     assert!(asm.contains("STX $21"), "Should store pointer high byte");
     assert!(asm.contains("LDY #$00"), "Should set Y to 0");
-    assert!(asm.contains("LDA ($20),Y"), "Should load tag byte using indirect indexed");
+    assert!(
+        asm.contains("LDA ($20),Y"),
+        "Should load tag byte using indirect indexed"
+    );
     assert!(asm.contains("STA $22"), "Should store tag at $22");
 
-    // Should compare with each variant tag
-    assert!(asm.contains("CMP #$00"), "Should compare with tag 0 (Off)");
-    assert!(asm.contains("CMP #$01"), "Should compare with tag 1 (On)");
-    assert!(asm.contains("CMP #$02"), "Should compare with tag 2 (Error)");
+    // Should have jump table dispatch
+    assert!(asm.contains("ASL"), "Should double tag for address indexing");
+    assert!(asm.contains("TAX"), "Should transfer to X for indexing");
+    assert!(
+        asm.contains("LDA match_0_jt,X"),
+        "Should load jump address low byte"
+    );
+    assert!(asm.contains("STA $30"), "Should store jump address low byte");
+    assert!(
+        asm.contains("LDA match_0_jt+1,X"),
+        "Should load jump address high byte"
+    );
+    assert!(
+        asm.contains("STA $31"),
+        "Should store jump address high byte"
+    );
+    assert!(asm.contains("JMP ($30)"), "Should jump indirect");
+
+    // Should have jump table with .WORD entries
+    assert!(asm.contains("match_0_jt:"), "Should have jump table label");
+    assert!(
+        asm.contains(".WORD match_0_arm_0"),
+        "Should have arm 0 in jump table"
+    );
+    assert!(
+        asm.contains(".WORD match_0_arm_1"),
+        "Should have arm 1 in jump table"
+    );
+    assert!(
+        asm.contains(".WORD match_0_arm_2"),
+        "Should have arm 2 in jump table"
+    );
 
     // Should have match arm labels
     assert!(asm.contains("match_0_arm_0:"), "Should have arm 0 label");

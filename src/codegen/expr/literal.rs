@@ -244,10 +244,9 @@ pub(super) fn generate_variable(
             false
         };
 
-        // Check if this is a pointer-like type (Pointer, Array, String, Enum)
+        // Check if this is a pointer-like type (Array, String, Enum)
         // These use the A:X register convention
-        let is_pointer_like =
-            matches!(sym.ty, Type::Pointer(..) | Type::Array(..) | Type::String) || is_enum;
+        let is_pointer_like = matches!(sym.ty, Type::Array(..) | Type::String) || is_enum;
 
         match sym.location {
             SymbolLocation::Absolute(_addr) => {

@@ -7,6 +7,63 @@ use crate::codegen::expr::generate_expr;
 use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 
+/// Strategy for generating match statement code
+#[derive(Debug)]
+enum MatchStrategy {
+    /// Use sequential CMP/BEQ comparisons (for small matches)
+    Sequential,
+    /// Use jump table for efficient dispatch (for enum matches with 3+ arms)
+    JumpTable {
+        /// Maximum tag value in the enum
+        max_tag: u8,
+        /// Index of the wildcard arm, if any
+        wildcard_arm_index: Option<usize>,
+    },
+}
+
+/// Determine the best strategy for generating a match statement
+///
+/// Uses jump tables for enum matches with 3+ arms to avoid BEQ branch distance limits.
+/// Sequential comparisons are used for small matches (1-2 arms) or non-enum matches.
+fn determine_match_strategy(arms: &[crate::ast::MatchArm], info: &ProgramInfo) -> MatchStrategy {
+    use crate::ast::Pattern;
+
+    // Collect enum variant tags from the patterns
+    let mut enum_tags: Vec<u8> = Vec::new();
+    let mut wildcard_arm_index: Option<usize> = None;
+
+    for (i, arm) in arms.iter().enumerate() {
+        match &arm.pattern.node {
+            Pattern::EnumVariant {
+                enum_name, variant, ..
+            } => {
+                // Look up the enum definition and get the tag
+                if let Some(enum_def) = info.type_registry.get_enum(&enum_name.node)
+                    && let Some(variant_info) = enum_def.get_variant(&variant.node)
+                {
+                    enum_tags.push(variant_info.tag);
+                }
+            }
+            Pattern::Wildcard | Pattern::Variable(_) => {
+                wildcard_arm_index = Some(i);
+            }
+            _ => {}
+        }
+    }
+
+    // Use jump table for enum matches with 3+ arms
+    // This avoids the BEQ branch distance limitation for large match bodies
+    if !enum_tags.is_empty() && arms.len() >= 3 {
+        let max_tag = enum_tags.iter().copied().max().unwrap_or(0);
+        MatchStrategy::JumpTable {
+            max_tag,
+            wildcard_arm_index,
+        }
+    } else {
+        MatchStrategy::Sequential
+    }
+}
+
 pub fn generate_stmt(
     stmt: &Spanned<Stmt>,
     emitter: &mut Emitter,
@@ -142,16 +199,14 @@ pub fn generate_stmt(
                 let is_multibyte = matches!(
                     sym.ty,
                     Type::Array(_, _)
-                        | Type::Pointer(..)
                         | Type::Primitive(crate::ast::PrimitiveType::U16)
                         | Type::Primitive(crate::ast::PrimitiveType::I16)
                         | Type::Primitive(crate::ast::PrimitiveType::B16)
                 ) || is_enum;
 
-                // Arrays, enums, and pointers store address in A (low) and X (high)
+                // Arrays and enums store address in A (low) and X (high)
                 // Other u16 types store in A (low) and Y (high)
-                let is_array_or_enum =
-                    matches!(sym.ty, Type::Array(_, _) | Type::Pointer(..)) || is_enum;
+                let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
@@ -1142,11 +1197,44 @@ fn generate_match(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    // Determine the best strategy for this match
+    let strategy = determine_match_strategy(arms, info);
+
+    match strategy {
+        MatchStrategy::Sequential => {
+            generate_match_sequential(expr, arms, emitter, info, string_collector)
+        }
+        MatchStrategy::JumpTable {
+            max_tag,
+            wildcard_arm_index,
+        } => generate_match_jump_table(
+            expr,
+            arms,
+            emitter,
+            info,
+            string_collector,
+            max_tag,
+            wildcard_arm_index,
+        ),
+    }
+}
+
+/// Generate match statement using sequential CMP/BEQ comparisons
+///
+/// Used for small matches (1-2 arms) or non-enum patterns.
+/// May fail for large matches if arm bodies exceed BEQ branch distance (127 bytes).
+fn generate_match_sequential(
+    expr: &Spanned<crate::ast::Expr>,
+    arms: &[crate::ast::MatchArm],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
 
     let match_id = emitter.next_match_id();
 
-    emitter.emit_comment("Match statement");
+    emitter.emit_comment("Match statement (sequential)");
 
     // Check if we're matching on an enum by looking at the first pattern
     let is_enum_match = arms
@@ -1264,7 +1352,134 @@ fn generate_match(
         emitter.emit_comment("No pattern matched - should not reach here");
     }
 
-    // Generate bodies for each arm
+    // Generate arm bodies
+    generate_match_arm_bodies(arms, emitter, info, string_collector, match_id)?;
+
+    emitter.emit_label(&format!("match_{}_end", match_id));
+
+    Ok(())
+}
+
+/// Generate match statement using jump table dispatch
+///
+/// Used for enum matches with 3+ arms to avoid BEQ branch distance limitations.
+/// The jump table allows arm bodies to be arbitrarily large.
+fn generate_match_jump_table(
+    expr: &Spanned<crate::ast::Expr>,
+    arms: &[crate::ast::MatchArm],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+    max_tag: u8,
+    wildcard_arm_index: Option<usize>,
+) -> Result<(), CodegenError> {
+    let match_id = emitter.next_match_id();
+    let jump_ptr = emitter.memory_layout.jump_ptr();
+
+    emitter.emit_comment("Match statement (jump table)");
+
+    // Evaluate the matched expression into accumulator
+    // For enum matching, expression returns a pointer in A:X
+    generate_expr(expr, emitter, info, string_collector)?;
+
+    // Store pointer at $20 (low) and $21 (high)
+    emitter.emit_inst("STA", "$20");
+    emitter.emit_inst("STX", "$21");
+
+    // Load the discriminant tag from the enum (first byte)
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_inst("LDA", "($20),Y");
+    emitter.emit_inst("STA", "$22"); // Store tag at $22 for binding extraction
+
+    // Jump table dispatch:
+    // 1. Double the tag (addresses are 2 bytes)
+    // 2. Use as index into jump table
+    // 3. Load address and JMP indirect
+    emitter.emit_inst("ASL", ""); // tag * 2
+    emitter.emit_inst("TAX", ""); // Transfer to X for indexing
+    emitter.emit_inst("LDA", &format!("match_{}_jt,X", match_id));
+    emitter.emit_inst("STA", &format!("${:02X}", jump_ptr));
+    emitter.emit_inst("LDA", &format!("match_{}_jt+1,X", match_id));
+    emitter.emit_inst("STA", &format!("${:02X}", jump_ptr + 1));
+    emitter.emit_inst("JMP", &format!("(${:02X})", jump_ptr));
+
+    // Emit jump table
+    emit_jump_table(emitter, arms, info, match_id, max_tag, wildcard_arm_index)?;
+
+    // Generate arm bodies
+    generate_match_arm_bodies(arms, emitter, info, string_collector, match_id)?;
+
+    // Panic handler for non-exhaustive matches (if no wildcard)
+    if wildcard_arm_index.is_none() {
+        emitter.emit_label(&format!("match_{}_panic", match_id));
+        emitter.emit_comment("Unreachable - non-exhaustive match");
+        emitter.emit_inst("BRK", "");
+    }
+
+    emitter.emit_label(&format!("match_{}_end", match_id));
+
+    Ok(())
+}
+
+/// Emit the jump table for a match statement
+///
+/// The table contains .WORD entries for each tag value from 0 to max_tag.
+/// Missing tags are filled with the wildcard arm label (or panic label if no wildcard).
+fn emit_jump_table(
+    emitter: &mut Emitter,
+    arms: &[crate::ast::MatchArm],
+    info: &ProgramInfo,
+    match_id: u32,
+    max_tag: u8,
+    wildcard_arm_index: Option<usize>,
+) -> Result<(), CodegenError> {
+    use crate::ast::Pattern;
+
+    // Build mapping from tag -> arm index
+    let mut tag_to_arm: Vec<Option<usize>> = vec![None; (max_tag + 1) as usize];
+
+    for (arm_index, arm) in arms.iter().enumerate() {
+        if let Pattern::EnumVariant {
+            enum_name, variant, ..
+        } = &arm.pattern.node
+            && let Some(enum_def) = info.type_registry.get_enum(&enum_name.node)
+            && let Some(variant_info) = enum_def.get_variant(&variant.node)
+            && (variant_info.tag as usize) < tag_to_arm.len()
+        {
+            tag_to_arm[variant_info.tag as usize] = Some(arm_index);
+        }
+    }
+
+    // Emit jump table label
+    emitter.emit_label(&format!("match_{}_jt", match_id));
+
+    // Emit .WORD entries for each tag
+    for tag in 0..=max_tag {
+        let arm_label = if let Some(arm_index) = tag_to_arm[tag as usize] {
+            format!("match_{}_arm_{}", match_id, arm_index)
+        } else if let Some(wildcard_index) = wildcard_arm_index {
+            format!("match_{}_arm_{}", match_id, wildcard_index)
+        } else {
+            format!("match_{}_panic", match_id)
+        };
+        emitter.emit_word_label(&arm_label);
+    }
+
+    Ok(())
+}
+
+/// Generate arm bodies for a match statement
+///
+/// Shared between sequential and jump table strategies.
+fn generate_match_arm_bodies(
+    arms: &[crate::ast::MatchArm],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+    match_id: u32,
+) -> Result<(), CodegenError> {
+    use crate::ast::Pattern;
+
     for (i, arm) in arms.iter().enumerate() {
         emitter.emit_label(&format!("match_{}_arm_{}", match_id, i));
 
@@ -1362,8 +1577,6 @@ fn generate_match(
         generate_stmt(&arm.body, emitter, info, string_collector)?;
         emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
     }
-
-    emitter.emit_label(&format!("match_{}_end", match_id));
 
     Ok(())
 }

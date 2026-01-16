@@ -55,11 +55,6 @@ pub(super) fn generate_binary(
 
     // Check if we're doing 16-bit arithmetic (check before generating expressions)
     let left_type = info.resolved_types.get(&left.span);
-    let right_type = info.resolved_types.get(&right.span);
-
-    let is_pointer = left_type.is_some_and(|ty| matches!(ty, Type::Pointer(..)));
-    let is_right_pointer = right_type.is_some_and(|ty| matches!(ty, Type::Pointer(..)));
-    let is_right_u8 = right_type.is_some_and(|ty| ty.size() == 1);
 
     let is_u16 = left_type.is_some_and(|ty| {
         matches!(
@@ -68,7 +63,7 @@ pub(super) fn generate_binary(
                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                 | Type::Primitive(crate::ast::PrimitiveType::B16)
         )
-    }) || is_pointer;
+    });
 
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
