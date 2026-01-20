@@ -34,8 +34,30 @@ pub(super) fn generate_type_cast(
     // Get source type to determine what kind of cast is needed
     let source_type = info.resolved_types.get(&expr.span);
 
+    // Check if source is an enum type
+    let source_is_enum = source_type.is_some_and(|ty| {
+        if let crate::sema::types::Type::Named(type_name) = ty {
+            info.type_registry.get_enum(type_name).is_some()
+        } else {
+            false
+        }
+    });
+
     // Evaluate the source expression
     generate_expr(expr, emitter, info, string_collector)?;
+
+    // If source is an enum, dereference the pointer to get the discriminant
+    // Enums are represented as pointers (A:X = low:high) to their data,
+    // where the first byte is the discriminant tag
+    if source_is_enum {
+        emitter.emit_comment("Dereference enum pointer to get discriminant");
+        // A = low byte of pointer, X = high byte
+        emitter.emit_inst("STA", "$20");
+        emitter.emit_inst("STX", "$21");
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_inst("LDA", "($20),Y");
+        // Now A contains the discriminant value
+    }
 
     // Determine target type
     match &target_type.node {

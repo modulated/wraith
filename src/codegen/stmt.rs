@@ -392,13 +392,25 @@ pub fn generate_stmt(
                         use crate::sema::table::SymbolKind;
                         use crate::sema::types::Type;
 
-                        // Check if this is a multi-byte type (u16/i16/b16)
+                        // Check if this is an enum type
+                        let is_enum = if let Type::Named(type_name) = &sym.ty {
+                            info.type_registry.get_enum(type_name).is_some()
+                        } else {
+                            false
+                        };
+
+                        // Check if this is a multi-byte type (u16/i16/b16, arrays, enums)
                         let is_multibyte = matches!(
                             sym.ty,
-                            Type::Primitive(crate::ast::PrimitiveType::U16)
+                            Type::Array(_, _)
+                                | Type::Primitive(crate::ast::PrimitiveType::U16)
                                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                                 | Type::Primitive(crate::ast::PrimitiveType::B16)
-                        );
+                        ) || is_enum;
+
+                        // Arrays and enums store address in A (low) and X (high)
+                        // Other u16 types store in A (low) and Y (high)
+                        let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
 
                         match sym.location {
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
@@ -407,17 +419,19 @@ pub fn generate_stmt(
                                     emitter.emit_sta_symbol(name);
                                 } else {
                                     emitter.emit_sta_abs(addr);
-                                    // For multi-byte types, also store high byte (in Y)
+                                    // For multi-byte types, also store high byte
                                     if is_multibyte {
-                                        emitter.emit_inst("STY", &format!("${:04X}", addr + 1));
+                                        let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
+                                        emitter.emit_inst(hi_inst, &format!("${:04X}", addr + 1));
                                     }
                                 }
                             }
                             crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                                 emitter.emit_sta_zp(addr);
-                                // For multi-byte types, also store high byte (in Y)
+                                // For multi-byte types, also store high byte
                                 if is_multibyte {
-                                    emitter.emit_inst("STY", &format!("${:02X}", addr + 1));
+                                    let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
+                                    emitter.emit_inst(hi_inst, &format!("${:02X}", addr + 1));
                                 }
                             }
                             crate::sema::table::SymbolLocation::None => {
