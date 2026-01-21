@@ -909,27 +909,27 @@ fn test_codegen_match_no_jmp_after_break() {
     // The Continue arm doesn't terminate, so it SHOULD have JMP match_X_end
 
     // Count total JMP match_X_end instructions
-    let jmp_match_end_count = asm.matches("JMP match_").filter(|m| m.contains("_end") || asm[asm.find(m).unwrap()..].starts_with("JMP match_") && asm[asm.find(m).unwrap()..].contains("_end")).count();
+    let _jmp_match_end_count = asm.matches("JMP match_").filter(|m| m.contains("_end") || asm[asm.find(m).unwrap()..].starts_with("JMP match_") && asm[asm.find(m).unwrap()..].contains("_end")).count();
 
     // Should have exactly 1 JMP to match end (from Continue arm only)
     // The Stop arm with break should NOT have a JMP
     let lines: Vec<&str> = asm.lines().collect();
     let mut found_break_with_jmp = false;
-    for i in 0..lines.len().saturating_sub(1) {
-        let line = lines[i].trim();
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        
         // Look for the pattern where we jump out of loop (break) followed by JMP match_end
         if line.starts_with("JMP lp_") || line.starts_with("JMP lx_") {
-            // This is a break - check if next non-comment line is JMP match_end
-            for j in (i+1)..lines.len() {
-                let next = lines[j].trim();
-                if next.is_empty() || next.starts_with(';') {
-                    continue;
-                }
-                if next.starts_with("JMP match_") && next.contains("_end") {
+            // Find the next non-empty, non-comment line using an iterator
+            let next_meaningful_line = lines.iter()
+                .skip(i + 1)
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty() && !l.starts_with(';'));
+
+            if let Some(next) = next_meaningful_line
+                && next.starts_with("JMP match_") && next.contains("_end") {
                     found_break_with_jmp = true;
                 }
-                break;
-            }
         }
     }
     assert!(!found_break_with_jmp, "Should not have JMP match_end after break");
