@@ -15,9 +15,13 @@
 - [x] Redundant `LDX` after `STX` to same location (in eliminate_load_after_store)
 - [x] Redundant `LDY #$00` when Y is known to be 0 (eliminate_redundant_ldy_zero)
 - [x] Remove redundant `CMP #$00` after LDA/AND/ORA/EOR (eliminate_redundant_cmp_zero)
+- [x] Branch optimization (invert condition to avoid JMP) (eliminate_branch_over_jump)
+- [x] Redundant `LDX #$00` when X is known to be 0 (eliminate_redundant_ldx_zero)
+- [x] Remove no-op `CLC; ADC #$00` pairs (eliminate_clc_adc_zero)
+- [x] Remove no-op `SEC; SBC #$00` pairs (eliminate_sec_sbc_zero)
+- [x] Redundant flag operations (`CLC; CLC`, `CLC; SEC`) (eliminate_redundant_flag_ops)
 - [ ] Combine address loading (`LDA #<label; LDX #>label` patterns)
 - [ ] Strength reduction (`ASL` for multiply by 2, etc.)
-- [ ] Branch optimization (invert condition to avoid JMP)
 - [ ] Tail call optimization for non-recursive calls
 
 ## 65C02 Target Support
