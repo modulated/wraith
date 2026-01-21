@@ -126,6 +126,7 @@ pub fn optimize(lines: &[Line]) -> Vec<Line> {
         result = eliminate_dead_stores(&result);
         result = eliminate_nop_operations(&result);
         result = eliminate_redundant_transfers(&result);
+        result = eliminate_unreachable_after_terminator(&result);
 
         if result.len() != before_len {
             changed = true;
@@ -335,6 +336,56 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
     result
 }
 
+/// Eliminate unreachable code after unconditional control flow terminators
+///
+/// Removes instructions that follow RTS, JMP, or BRK since they can never be executed.
+/// Stops at labels since they may be jump targets from elsewhere.
+/// Preserves comments, directives, and empty lines (only removes unreachable instructions).
+fn eliminate_unreachable_after_terminator(lines: &[Line]) -> Vec<Line> {
+    let mut result = Vec::new();
+    let mut skip_until_label = false;
+
+    for line in lines {
+        match line {
+            // Labels are always kept and reset the skip flag
+            Line::Label(_) => {
+                skip_until_label = false;
+                result.push(line.clone());
+            }
+            // Check for control flow terminators
+            Line::Instruction { mnemonic, operand, .. } => {
+                if skip_until_label {
+                    // Skip this instruction - it's unreachable
+                    continue;
+                }
+
+                result.push(line.clone());
+
+                // Start skipping after unconditional control flow
+                if mnemonic == "RTS" || mnemonic == "RTI" || mnemonic == "BRK" {
+                    skip_until_label = true;
+                } else if mnemonic == "JMP" {
+                    // JMP is unconditional (unlike branches)
+                    // But JMP ($xxxx) indirect might not terminate if it's a computed jump
+                    // For safety, only treat direct JMP as terminator
+                    if let Some(op) = operand {
+                        if !op.starts_with('(') {
+                            skip_until_label = true;
+                        }
+                    }
+                }
+            }
+            // Always keep comments, directives, and empty lines
+            // These provide structure and documentation, not executable code
+            _ => {
+                result.push(line.clone());
+            }
+        }
+    }
+
+    result
+}
+
 /// Convert optimized lines back to assembly string
 pub fn lines_to_string(lines: &[Line]) -> String {
     let mut result = lines
@@ -377,5 +428,48 @@ mod tests {
         let lines = parse_assembly(asm);
         let optimized = eliminate_dead_stores(&lines);
         assert_eq!(optimized.len(), 2);
+    }
+
+    #[test]
+    fn test_unreachable_after_rts() {
+        let asm = "    RTS\n    JMP label\n    LDA #$00\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_unreachable_after_terminator(&lines);
+        // Should keep RTS and label, remove JMP and LDA
+        assert_eq!(optimized.len(), 2);
+        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "RTS"));
+        assert!(matches!(&optimized[1], Line::Label(l) if l == "label"));
+    }
+
+    #[test]
+    fn test_unreachable_after_jmp() {
+        let asm = "    JMP somewhere\n    LDA #$00\n    STA $40\nnext:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_unreachable_after_terminator(&lines);
+        // Should keep JMP and label, remove LDA and STA
+        assert_eq!(optimized.len(), 2);
+        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "JMP"));
+        assert!(matches!(&optimized[1], Line::Label(l) if l == "next"));
+    }
+
+    #[test]
+    fn test_unreachable_preserves_comments() {
+        let asm = "    RTS\n; This is a comment\n    LDA #$00\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_unreachable_after_terminator(&lines);
+        // Should keep RTS, comment, and label; remove LDA
+        assert_eq!(optimized.len(), 3);
+        assert!(matches!(&optimized[1], Line::Comment(_)));
+    }
+
+    #[test]
+    fn test_unreachable_indirect_jmp_not_terminator() {
+        // Indirect JMP like JMP ($30) should NOT be treated as terminator
+        // because it could be a computed jump that returns
+        let asm = "    JMP ($30)\n    LDA #$00\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_unreachable_after_terminator(&lines);
+        // Should keep all lines since indirect JMP is not a terminator
+        assert_eq!(optimized.len(), 3);
     }
 }

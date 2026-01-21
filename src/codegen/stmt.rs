@@ -64,6 +64,30 @@ fn determine_match_strategy(arms: &[crate::ast::MatchArm], info: &ProgramInfo) -
     }
 }
 
+/// Check if a statement unconditionally terminates control flow
+///
+/// Used for dead code elimination - if a match arm ends with return/break/continue,
+/// we don't need to emit a JMP to the match end label.
+fn stmt_terminates(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Block(stmts) => stmts
+            .last()
+            .map(|s| stmt_terminates(&s.node))
+            .unwrap_or(false),
+        Stmt::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => stmt_terminates(&then_branch.node) && stmt_terminates(&else_branch.node),
+        Stmt::Match { arms, .. } => {
+            // A match terminates if all arms terminate
+            !arms.is_empty() && arms.iter().all(|arm| stmt_terminates(&arm.body.node))
+        }
+        _ => false,
+    }
+}
+
 pub fn generate_stmt(
     stmt: &Spanned<Stmt>,
     emitter: &mut Emitter,
@@ -1589,7 +1613,12 @@ fn generate_match_arm_bodies(
         }
 
         generate_stmt(&arm.body, emitter, info, string_collector)?;
-        emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
+
+        // Only emit JMP if the arm body doesn't already terminate control flow
+        // (e.g., return, break, continue) - this eliminates dead code
+        if !stmt_terminates(&arm.body.node) {
+            emitter.emit_inst("JMP", &format!("match_{}_end", match_id));
+        }
     }
 
     Ok(())
