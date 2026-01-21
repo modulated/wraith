@@ -12,10 +12,10 @@
 - [x] Unreachable code after terminator (`RTS; JMP label` → `RTS`)
 
 ### Planned
-- [ ] Redundant `LDX` after `STX` to same location
-- [ ] Redundant `LDY #$00` when Y is known to be 0
+- [x] Redundant `LDX` after `STX` to same location (in eliminate_load_after_store)
+- [x] Redundant `LDY #$00` when Y is known to be 0 (eliminate_redundant_ldy_zero)
+- [x] Remove redundant `CMP #$00` after LDA/AND/ORA/EOR (eliminate_redundant_cmp_zero)
 - [ ] Combine address loading (`LDA #<label; LDX #>label` patterns)
-- [ ] Remove redundant `CMP` after operations that set flags appropriately
 - [ ] Strength reduction (`ASL` for multiply by 2, etc.)
 - [ ] Branch optimization (invert condition to avoid JMP)
 - [ ] Tail call optimization for non-recursive calls

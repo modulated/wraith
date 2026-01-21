@@ -185,7 +185,8 @@ fn match_tuple_variant_single_field_extract() {
 
     // Should compare tags
     assert_asm_contains(&asm, "CMP #$01");  // Compare with Some tag
-    assert_asm_contains(&asm, "CMP #$00");  // Compare with None tag
+    // Note: CMP #$00 is optimized away since LDA sets the Z flag
+    // and BEQ can be used directly to check for zero (None)
 
     // Should have field extraction code
     // The binding extraction happens after tag match

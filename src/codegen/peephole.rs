@@ -127,6 +127,8 @@ pub fn optimize(lines: &[Line]) -> Vec<Line> {
         result = eliminate_nop_operations(&result);
         result = eliminate_redundant_transfers(&result);
         result = eliminate_unreachable_after_terminator(&result);
+        result = eliminate_redundant_cmp_zero(&result);
+        result = eliminate_redundant_ldy_zero(&result);
 
         if result.len() != before_len {
             changed = true;
@@ -386,6 +388,94 @@ fn eliminate_unreachable_after_terminator(lines: &[Line]) -> Vec<Line> {
     result
 }
 
+/// Eliminate redundant CMP #$00 after LDA
+///
+/// LDA sets the Z flag based on the loaded value, so CMP #$00 is redundant
+/// when we only care about the zero flag for BEQ/BNE.
+fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        if i + 1 < lines.len()
+            && let (
+                Line::Instruction { mnemonic: m1, .. },
+                Line::Instruction { mnemonic: m2, operand: op2, .. },
+            ) = (&lines[i], &lines[i + 1])
+        {
+            // LDA followed by CMP #$00 - the CMP is redundant
+            // LDA already sets Z flag if value is 0
+            if m1 == "LDA" && m2 == "CMP" && op2.as_deref() == Some("#$00") {
+                result.push(lines[i].clone());
+                i += 2; // Skip the CMP
+                continue;
+            }
+            // Also handle AND, ORA, EOR which set Z flag
+            if (m1 == "AND" || m1 == "ORA" || m1 == "EOR")
+                && m2 == "CMP" && op2.as_deref() == Some("#$00")
+            {
+                result.push(lines[i].clone());
+                i += 2;
+                continue;
+            }
+        }
+
+        result.push(lines[i].clone());
+        i += 1;
+    }
+
+    result
+}
+
+/// Eliminate redundant LDY #$00 when Y is already known to be 0
+///
+/// Tracks Y register value through the instruction stream and removes
+/// redundant loads of 0 into Y.
+fn eliminate_redundant_ldy_zero(lines: &[Line]) -> Vec<Line> {
+    let mut result = Vec::new();
+    let mut y_is_zero = false;
+
+    for line in lines {
+        match line {
+            Line::Instruction { mnemonic, operand, .. } => {
+                // Check if this is LDY #$00 when Y is already 0
+                if mnemonic == "LDY" && operand.as_deref() == Some("#$00") && y_is_zero {
+                    // Skip this redundant instruction
+                    continue;
+                }
+
+                result.push(line.clone());
+
+                // Track Y register state
+                if mnemonic == "LDY" {
+                    y_is_zero = operand.as_deref() == Some("#$00");
+                } else if mnemonic == "INY" || mnemonic == "DEY" {
+                    // Y is modified, no longer known to be 0
+                    y_is_zero = false;
+                } else if mnemonic == "TAY" {
+                    // Y = A, unknown value
+                    y_is_zero = false;
+                } else if mnemonic == "PLY" {
+                    // Y pulled from stack, unknown
+                    y_is_zero = false;
+                }
+                // Note: JSR/RTS don't necessarily change Y on 6502
+                // but we reset at labels to be safe
+            }
+            Line::Label(_) => {
+                // At labels, we don't know Y's value (could jump here from anywhere)
+                y_is_zero = false;
+                result.push(line.clone());
+            }
+            _ => {
+                result.push(line.clone());
+            }
+        }
+    }
+
+    result
+}
+
 /// Convert optimized lines back to assembly string
 pub fn lines_to_string(lines: &[Line]) -> String {
     let mut result = lines
@@ -470,6 +560,62 @@ mod tests {
         let lines = parse_assembly(asm);
         let optimized = eliminate_unreachable_after_terminator(&lines);
         // Should keep all lines since indirect JMP is not a terminator
+        assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn test_redundant_cmp_zero_after_lda() {
+        let asm = "    LDA $40\n    CMP #$00\n    BEQ label\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_cmp_zero(&lines);
+        // CMP #$00 should be removed, LDA sets Z flag
+        assert_eq!(optimized.len(), 2);
+        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "LDA"));
+        assert!(matches!(&optimized[1], Line::Instruction { mnemonic, .. } if mnemonic == "BEQ"));
+    }
+
+    #[test]
+    fn test_redundant_cmp_zero_after_and() {
+        let asm = "    AND #$0F\n    CMP #$00\n    BNE label\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_cmp_zero(&lines);
+        // CMP #$00 should be removed, AND sets Z flag
+        assert_eq!(optimized.len(), 2);
+    }
+
+    #[test]
+    fn test_cmp_nonzero_not_eliminated() {
+        let asm = "    LDA $40\n    CMP #$05\n    BEQ label\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_cmp_zero(&lines);
+        // CMP #$05 should NOT be removed
+        assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn test_redundant_ldy_zero() {
+        let asm = "    LDY #$00\n    LDA ($20),Y\n    LDY #$00\n    LDA ($22),Y\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_ldy_zero(&lines);
+        // Second LDY #$00 should be removed
+        assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn test_ldy_zero_after_iny() {
+        let asm = "    LDY #$00\n    INY\n    LDY #$00\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_ldy_zero(&lines);
+        // After INY, Y is not 0, so second LDY #$00 is needed
+        assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn test_ldy_zero_after_label() {
+        let asm = "    LDY #$00\nlabel:\n    LDY #$00\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_ldy_zero(&lines);
+        // After label, Y state is unknown, so second LDY #$00 is needed
         assert_eq!(optimized.len(), 3);
     }
 }

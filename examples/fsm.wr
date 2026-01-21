@@ -1,0 +1,55 @@
+const OUT: addr = 0x6000;
+enum State {
+    INIT,
+    RUNNING,
+    OPEN,    
+    STOPPED
+}
+
+enum Event {
+    START,    
+    STOP,
+    OPEN,
+    CLOSE
+}
+
+#[reset]
+fn main() {
+    let state: State = State::INIT;
+    state = state_step(state, Event::START);
+    state = state_step(state, Event::OPEN);
+    state = state_step(state, Event::CLOSE);
+    state = state_step(state, Event::STOP);
+    OUT = state as u8;
+    loop{}
+}
+
+fn state_step(state: State, event: Event) -> State {
+    match (state) {
+        State::INIT => {
+            match (event) {
+                Event::START => {return State::RUNNING;}
+                _ => {return state;}
+            }
+        },
+        State::RUNNING => {
+            match (event) {
+                Event::STOP => {return State::STOPPED;}
+                Event::OPEN => {return State::OPEN;}                
+                _ => {return state;}
+            }
+        },
+        State::OPEN => {
+            match (event) {
+                Event::CLOSE => {return State::RUNNING;}
+                _ => {return state;}
+            }
+        },
+        State::STOPPED => {
+            match (event) {
+                Event::START => {return State::RUNNING;}
+                _ => {return state;}
+            }
+        }
+    }
+}

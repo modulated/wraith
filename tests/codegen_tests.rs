@@ -291,13 +291,13 @@ fn test_codegen_logical_and_short_circuit() {
     // 2. If false (0), skip right and jump to end
     // 3. Otherwise evaluate right
     assert!(asm.contains("LDA X"), "Should load left operand from X");
-    assert!(asm.contains("CMP #$00"), "Should check if false");
+    // Note: CMP #$00 is optimized away because LDA already sets the Z flag
     assert!(asm.contains("BEQ ax_"), "Should short-circuit if false");
 
-    // CMP should come before BEQ
-    let first_cmp = asm.find("CMP #$00").unwrap();
+    // LDA should come before BEQ
+    let first_lda_x = asm.find("LDA X").unwrap();
     let first_beq = asm.find("BEQ ax_").unwrap();
-    assert!(first_cmp < first_beq, "CMP before BEQ for short-circuit");
+    assert!(first_lda_x < first_beq, "LDA X before BEQ for short-circuit");
 }
 
 #[test]
