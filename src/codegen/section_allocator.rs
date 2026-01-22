@@ -55,7 +55,9 @@ impl SectionAllocator {
 
     /// Allocate space in a specific section, returning the absolute address
     pub fn allocate(&mut self, section_name: &str, size: u16) -> Result<u16, String> {
-        let section = self.config.get_section(section_name)
+        let section = self
+            .config
+            .get_section(section_name)
             .ok_or_else(|| format!("Unknown section: {}", section_name))?;
 
         let offset = self.offsets.get_mut(section_name).unwrap();
@@ -94,7 +96,13 @@ impl SectionAllocator {
     }
 
     /// Record an allocation (for conflict detection)
-    pub fn record_allocation(&mut self, name: String, start: u16, size: u16, source: AllocationSource) {
+    pub fn record_allocation(
+        &mut self,
+        name: String,
+        start: u16,
+        size: u16,
+        source: AllocationSource,
+    ) {
         let end = start.saturating_add(size).saturating_sub(1);
         self.allocations.push(Allocation {
             start,
@@ -122,15 +130,19 @@ impl SectionAllocator {
 
     /// Get usage statistics for all sections
     pub fn get_statistics(&self) -> Vec<SectionStats> {
-        self.config.sections.iter().map(|section| {
-            let used = *self.offsets.get(&section.name).unwrap_or(&0);
-            let total = section.end - section.start + 1;
-            SectionStats {
-                name: section.name.clone(),
-                used,
-                total,
-            }
-        }).collect()
+        self.config
+            .sections
+            .iter()
+            .map(|section| {
+                let used = *self.offsets.get(&section.name).unwrap_or(&0);
+                let total = section.end - section.start + 1;
+                SectionStats {
+                    name: section.name.clone(),
+                    used,
+                    total,
+                }
+            })
+            .collect()
     }
 }
 
@@ -154,7 +166,8 @@ impl SectionStats {
 
     /// Format as human-readable string
     pub fn format(&self) -> String {
-        format!("{:8} - {:5}/{:5} bytes ({:5.2}%)",
+        format!(
+            "{:8} - {:5}/{:5} bytes ({:5.2}%)",
             self.name,
             self.used,
             self.total,
@@ -166,7 +179,8 @@ impl SectionStats {
     pub fn format_compact(&self) -> String {
         let used_kb = self.used as f32 / 1024.0;
         let total_kb = self.total as f32 / 1024.0;
-        format!("{:5.2}/{:5.2} KB ({:5.2}%)",
+        format!(
+            "{:5.2}/{:5.2} KB ({:5.2}%)",
             used_kb,
             total_kb,
             self.percentage()

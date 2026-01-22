@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use crate::ast::AccessMode;
 use super::types::Type;
+use crate::ast::AccessMode;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolKind {

@@ -27,7 +27,11 @@ impl PrimitiveType {
     /// Returns the size in bytes of this primitive type
     pub fn size_bytes(&self) -> usize {
         match self {
-            PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::Bool | PrimitiveType::B8 | PrimitiveType::Addr => 1,
+            PrimitiveType::U8
+            | PrimitiveType::I8
+            | PrimitiveType::Bool
+            | PrimitiveType::B8
+            | PrimitiveType::Addr => 1,
             PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 => 2,
         }
     }

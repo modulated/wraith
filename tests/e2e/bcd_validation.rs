@@ -9,13 +9,15 @@ use crate::common::*;
 #[test]
 fn valid_bcd_decimal_literals() {
     // These should all work - converting decimal to BCD format
-    let _asm = compile_success(r#"
+    let _asm = compile_success(
+        r#"
         fn main() {
             let a: b8 = 0 as b8;      // 0 decimal -> 0x00 BCD
             let b: b8 = 99 as b8;     // 99 decimal -> 0x99 BCD
             let c: b16 = 1234 as b16; // 1234 decimal -> 0x1234 BCD
         }
-    "#);
+    "#,
+    );
 }
 
 // ============================================================
@@ -53,11 +55,13 @@ fn bcd_negative_value_compiles_but_wraps() {
     // BCD doesn't support negative numbers, but -1 as a unary expression
     // cannot be fully evaluated at compile time in all cases
     // This is a known limitation - the value will wrap at runtime
-    let _asm = compile_success(r#"
+    let _asm = compile_success(
+        r#"
         fn main() {
             let a: b8 = -1 as b8;  // Will wrap to 255 at runtime
         }
-    "#);
+    "#,
+    );
     // TODO: Consider adding a warning for this case
 }
 
@@ -69,11 +73,13 @@ fn bcd_negative_value_compiles_but_wraps() {
 fn bcd_from_valid_hex_literal() {
     // Hex literals are just integers - they get converted to decimal first
     // 0x42 = 66 decimal, which converts to 0x66 BCD
-    let _asm = compile_success(r#"
+    let _asm = compile_success(
+        r#"
         fn main() {
             let a: b8 = 0x42 as b8;  // 0x42 hex = 66 decimal -> 0x66 BCD
         }
-    "#);
+    "#,
+    );
 }
 
 #[test]
@@ -98,11 +104,13 @@ fn runtime_u8_to_bcd_cast_compiles() {
     // This is the problematic case - runtime cast from u8 to b8
     // The u8 might contain invalid BCD digits (e.g., 0xAB)
     // Currently this compiles but ideally should warn
-    let _asm = compile_success(r#"
+    let _asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 171;  // Would be 0xAB in hex
             let y: b8 = x as b8;  // Runtime cast - no validation possible
         }
-    "#);
+    "#,
+    );
     // TODO: Add warning for runtime casts to BCD types
 }

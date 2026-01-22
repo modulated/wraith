@@ -9,6 +9,6 @@
 #[path = "common/mod.rs"]
 mod common;
 
+mod e2e;
 mod errors;
 mod integration;
-mod e2e;

@@ -19,10 +19,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub enum SemaError {
     /// Symbol not found in scope
-    UndefinedSymbol {
-        name: String,
-        span: Span,
-    },
+    UndefinedSymbol { name: String, span: Span },
 
     /// Type mismatch in expression or assignment
     TypeMismatch {
@@ -54,16 +51,10 @@ pub enum SemaError {
     },
 
     /// Attempting to assign to immutable variable
-    ImmutableAssignment {
-        symbol: String,
-        span: Span,
-    },
+    ImmutableAssignment { symbol: String, span: Span },
 
     /// Circular import detected
-    CircularImport {
-        path: String,
-        chain: Vec<String>,
-    },
+    CircularImport { path: String, chain: Vec<String> },
 
     /// Return type mismatch
     ReturnTypeMismatch {
@@ -73,14 +64,10 @@ pub enum SemaError {
     },
 
     /// Return outside of function
-    ReturnOutsideFunction {
-        span: Span,
-    },
+    ReturnOutsideFunction { span: Span },
 
     /// Break/continue outside of loop
-    BreakOutsideLoop {
-        span: Span,
-    },
+    BreakOutsideLoop { span: Span },
 
     /// Duplicate symbol definition
     DuplicateSymbol {
@@ -104,46 +91,25 @@ pub enum SemaError {
     },
 
     /// Out of zero page memory
-    OutOfZeroPage {
-        span: Span,
-    },
+    OutOfZeroPage { span: Span },
 
     /// Identifier conflicts with 6502 instruction mnemonic
-    InstructionConflict {
-        name: String,
-        span: Span,
-    },
+    InstructionConflict { name: String, span: Span },
 
     /// Generic error with custom message
-    Custom {
-        message: String,
-        span: Span,
-    },
+    Custom { message: String, span: Span },
 
     /// Constant value overflow for declared type
-    ConstantOverflow {
-        value: i64,
-        ty: String,
-        span: Span,
-    },
+    ConstantOverflow { value: i64, ty: String, span: Span },
 
     /// Cannot read from write-only address
-    WriteOnlyRead {
-        name: String,
-        span: Span,
-    },
+    WriteOnlyRead { name: String, span: Span },
 
     /// Cannot write to read-only address
-    ReadOnlyWrite {
-        name: String,
-        span: Span,
-    },
+    ReadOnlyWrite { name: String, span: Span },
 
     /// addr type can only be used in const declarations
-    InvalidAddrUsage {
-        context: String,
-        span: Span,
-    },
+    InvalidAddrUsage { context: String, span: Span },
 
     /// Array index out of bounds (compile-time check)
     ArrayIndexOutOfBounds {
@@ -164,27 +130,67 @@ impl SemaError {
         match self {
             SemaError::UndefinedSymbol { name, span } => {
                 let msg = format!("undefined symbol '{}'", name);
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::TypeMismatch { expected, found, span } => {
+            SemaError::TypeMismatch {
+                expected,
+                found,
+                span,
+            } => {
                 let msg = format!("expected {}, found {}", expected, found);
-                format!("error: type mismatch\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: type mismatch\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::InvalidBinaryOp { op, left_ty, right_ty, span } => {
-                let msg = format!("cannot apply '{}' to types {} and {}", op, left_ty, right_ty);
-                format!("error: invalid binary operation\n{}", span.format_error_context(source, filename, &msg))
+            SemaError::InvalidBinaryOp {
+                op,
+                left_ty,
+                right_ty,
+                span,
+            } => {
+                let msg = format!(
+                    "cannot apply '{}' to types {} and {}",
+                    op, left_ty, right_ty
+                );
+                format!(
+                    "error: invalid binary operation\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::InvalidUnaryOp { op, operand_ty, span } => {
+            SemaError::InvalidUnaryOp {
+                op,
+                operand_ty,
+                span,
+            } => {
                 let msg = format!("cannot apply '{}' to type {}", op, operand_ty);
-                format!("error: invalid unary operation\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: invalid unary operation\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::ArityMismatch { expected, found, span } => {
+            SemaError::ArityMismatch {
+                expected,
+                found,
+                span,
+            } => {
                 let msg = format!("expected {} argument(s), found {}", expected, found);
-                format!("error: function call\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: function call\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::ImmutableAssignment { symbol, span } => {
                 let msg = format!("cannot assign to immutable variable '{}'", symbol);
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::CircularImport { path, chain } => {
                 format!(
@@ -193,19 +199,38 @@ impl SemaError {
                     path
                 )
             }
-            SemaError::ReturnTypeMismatch { expected, found, span } => {
+            SemaError::ReturnTypeMismatch {
+                expected,
+                found,
+                span,
+            } => {
                 let msg = format!("expected {}, found {}", expected, found);
-                format!("error: return type mismatch\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: return type mismatch\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::ReturnOutsideFunction { span } => {
                 let msg = "return statement outside function".to_string();
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::BreakOutsideLoop { span } => {
                 let msg = "break/continue outside loop".to_string();
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::DuplicateSymbol { name, span, previous_span } => {
+            SemaError::DuplicateSymbol {
+                name,
+                span,
+                previous_span,
+            } => {
                 let msg = if let Some(prev) = previous_span {
                     format!(
                         "duplicate symbol '{}' (previously defined at {})",
@@ -215,49 +240,102 @@ impl SemaError {
                 } else {
                     format!("duplicate symbol '{}'", name)
                 };
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::FieldNotFound { struct_name, field_name, span } => {
-                let msg = format!("field '{}' not found in struct '{}'", field_name, struct_name);
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+            SemaError::FieldNotFound {
+                struct_name,
+                field_name,
+                span,
+            } => {
+                let msg = format!(
+                    "field '{}' not found in struct '{}'",
+                    field_name, struct_name
+                );
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::ImportError { path, reason, span } => {
                 let msg = format!("failed to import '{}': {}", path, reason);
-                format!("error: import error\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: import error\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::OutOfZeroPage { span } => {
                 let msg = "no more zero page addresses available".to_string();
-                format!("error: out of zero page memory\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: out of zero page memory\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::InstructionConflict { name, span } => {
                 let msg = format!("identifier '{}' conflicts with instruction mnemonic", name);
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::Custom { message, span } => {
-                format!("error: {}\n{}", message, span.format_error_context(source, filename, message))
+                format!(
+                    "error: {}\n{}",
+                    message,
+                    span.format_error_context(source, filename, message)
+                )
             }
             SemaError::ConstantOverflow { value, ty, span } => {
                 let msg = format!("constant value {} does not fit in type {}", value, ty);
-                format!("error: constant overflow\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: constant overflow\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::WriteOnlyRead { name, span } => {
                 let msg = format!("cannot read from write-only address '{}'", name);
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::ReadOnlyWrite { name, span } => {
                 let msg = format!("cannot write to read-only address '{}'", name);
-                format!("error: {}\n{}", msg, span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: {}\n{}",
+                    msg,
+                    span.format_error_context(source, filename, &msg)
+                )
             }
             SemaError::InvalidAddrUsage { context, span } => {
-                let msg = format!("addr type can only be used in const declarations, not {}", context);
-                format!("error: invalid addr usage\n{}", span.format_error_context(source, filename, &msg))
+                let msg = format!(
+                    "addr type can only be used in const declarations, not {}",
+                    context
+                );
+                format!(
+                    "error: invalid addr usage\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
-            SemaError::ArrayIndexOutOfBounds { index, array_size, span } => {
+            SemaError::ArrayIndexOutOfBounds {
+                index,
+                array_size,
+                span,
+            } => {
                 let msg = format!(
                     "array index {} is out of bounds for array of length {}",
                     index, array_size
                 );
-                format!("error: array index out of bounds\n{}", span.format_error_context(source, filename, &msg))
+                format!(
+                    "error: array index out of bounds\n{}",
+                    span.format_error_context(source, filename, &msg)
+                )
             }
         }
     }
@@ -267,30 +345,51 @@ impl std::fmt::Display for SemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SemaError::UndefinedSymbol { name, span } => {
-                write!(f, "undefined symbol '{}' at {}..{}", name, span.start, span.end)
+                write!(
+                    f,
+                    "undefined symbol '{}' at {}..{}",
+                    name, span.start, span.end
+                )
             }
-            SemaError::TypeMismatch { expected, found, span } => {
+            SemaError::TypeMismatch {
+                expected,
+                found,
+                span,
+            } => {
                 write!(
                     f,
                     "type mismatch at {}..{}: expected {}, found {}",
                     span.start, span.end, expected, found
                 )
             }
-            SemaError::InvalidBinaryOp { op, left_ty, right_ty, span } => {
+            SemaError::InvalidBinaryOp {
+                op,
+                left_ty,
+                right_ty,
+                span,
+            } => {
                 write!(
                     f,
                     "invalid binary operation '{}' at {}..{}: cannot apply to types {} and {}",
                     op, span.start, span.end, left_ty, right_ty
                 )
             }
-            SemaError::InvalidUnaryOp { op, operand_ty, span } => {
+            SemaError::InvalidUnaryOp {
+                op,
+                operand_ty,
+                span,
+            } => {
                 write!(
                     f,
                     "invalid unary operation '{}' at {}..{}: cannot apply to type {}",
                     op, span.start, span.end, operand_ty
                 )
             }
-            SemaError::ArityMismatch { expected, found, span } => {
+            SemaError::ArityMismatch {
+                expected,
+                found,
+                span,
+            } => {
                 write!(
                     f,
                     "function call at {}..{}: expected {} argument(s), found {}",
@@ -312,7 +411,11 @@ impl std::fmt::Display for SemaError {
                     path
                 )
             }
-            SemaError::ReturnTypeMismatch { expected, found, span } => {
+            SemaError::ReturnTypeMismatch {
+                expected,
+                found,
+                span,
+            } => {
                 write!(
                     f,
                     "return type mismatch at {}..{}: expected {}, found {}",
@@ -320,12 +423,24 @@ impl std::fmt::Display for SemaError {
                 )
             }
             SemaError::ReturnOutsideFunction { span } => {
-                write!(f, "return statement outside function at {}..{}", span.start, span.end)
+                write!(
+                    f,
+                    "return statement outside function at {}..{}",
+                    span.start, span.end
+                )
             }
             SemaError::BreakOutsideLoop { span } => {
-                write!(f, "break/continue outside loop at {}..{}", span.start, span.end)
+                write!(
+                    f,
+                    "break/continue outside loop at {}..{}",
+                    span.start, span.end
+                )
             }
-            SemaError::DuplicateSymbol { name, span, previous_span } => {
+            SemaError::DuplicateSymbol {
+                name,
+                span,
+                previous_span,
+            } => {
                 if let Some(prev) = previous_span {
                     write!(
                         f,
@@ -340,7 +455,11 @@ impl std::fmt::Display for SemaError {
                     )
                 }
             }
-            SemaError::FieldNotFound { struct_name, field_name, span } => {
+            SemaError::FieldNotFound {
+                struct_name,
+                field_name,
+                span,
+            } => {
                 write!(
                     f,
                     "field '{}' not found in struct '{}' at {}..{}",
@@ -399,7 +518,11 @@ impl std::fmt::Display for SemaError {
                     span.start, span.end, context
                 )
             }
-            SemaError::ArrayIndexOutOfBounds { index, array_size, span } => {
+            SemaError::ArrayIndexOutOfBounds {
+                index,
+                array_size,
+                span,
+            } => {
                 write!(
                     f,
                     "array index out of bounds at {}..{}: index {} is out of bounds for array of length {}",
@@ -416,33 +539,19 @@ impl std::error::Error for SemaError {}
 #[derive(Debug, Clone)]
 pub enum Warning {
     /// Unused variable
-    UnusedVariable {
-        name: String,
-        span: Span,
-    },
+    UnusedVariable { name: String, span: Span },
 
     /// Unused import
-    UnusedImport {
-        name: String,
-        span: Span,
-    },
+    UnusedImport { name: String, span: Span },
 
     /// Unreachable code after return/break/continue
-    UnreachableCode {
-        span: Span,
-    },
+    UnreachableCode { span: Span },
 
     /// Unused function parameter
-    UnusedParameter {
-        name: String,
-        span: Span,
-    },
+    UnusedParameter { name: String, span: Span },
 
     /// Unused function
-    UnusedFunction {
-        name: String,
-        span: Span,
-    },
+    UnusedFunction { name: String, span: Span },
 
     /// Non-exhaustive match (missing enum variants)
     NonExhaustiveMatch {
@@ -451,10 +560,7 @@ pub enum Warning {
     },
 
     /// Constant with non-uppercase name
-    NonUppercaseConstant {
-        name: String,
-        span: Span,
-    },
+    NonUppercaseConstant { name: String, span: Span },
 
     /// Function parameters exceed available zero-page space
     ParameterOverflow {
@@ -482,37 +588,54 @@ impl Warning {
             Warning::UnusedVariable { name, span } => {
                 (format!("unused variable: `{}`", name), span)
             }
-            Warning::UnusedImport { name, span } => {
-                (format!("unused import: `{}`", name), span)
-            }
-            Warning::UnreachableCode { span } => {
-                ("unreachable code".to_string(), span)
-            }
+            Warning::UnusedImport { name, span } => (format!("unused import: `{}`", name), span),
+            Warning::UnreachableCode { span } => ("unreachable code".to_string(), span),
             Warning::UnusedParameter { name, span } => {
                 (format!("unused parameter: `{}`", name), span)
             }
             Warning::UnusedFunction { name, span } => {
                 (format!("unused function: `{}`", name), span)
             }
-            Warning::NonExhaustiveMatch { missing_patterns, span } => {
+            Warning::NonExhaustiveMatch {
+                missing_patterns,
+                span,
+            } => {
                 let patterns = missing_patterns.join("`, `");
-                (format!("non-exhaustive match, missing: `{}`", patterns), span)
+                (
+                    format!("non-exhaustive match, missing: `{}`", patterns),
+                    span,
+                )
             }
-            Warning::NonUppercaseConstant { name, span } => {
-                (format!("constant `{}` should have an uppercase name", name), span)
-            }
-            Warning::ParameterOverflow { function_name, bytes_used, bytes_available, span } => {
-                (format!(
+            Warning::NonUppercaseConstant { name, span } => (
+                format!("constant `{}` should have an uppercase name", name),
+                span,
+            ),
+            Warning::ParameterOverflow {
+                function_name,
+                bytes_used,
+                bytes_available,
+                span,
+            } => (
+                format!(
                     "function `{}` parameters use {} bytes, exceeds available {} bytes",
                     function_name, bytes_used, bytes_available
-                ), span)
-            }
-            Warning::AddressOverlap { name, address, section_name, section_start, section_end, span } => {
-                (format!(
+                ),
+                span,
+            ),
+            Warning::AddressOverlap {
+                name,
+                address,
+                section_name,
+                section_start,
+                section_end,
+                span,
+            } => (
+                format!(
                     "address declaration `{}` at ${:04X} overlaps with {} section (${:04X}-${:04X})",
                     name, address, section_name, section_start, section_end
-                ), span)
-            }
+                ),
+                span,
+            ),
         };
 
         format!(
@@ -582,18 +705,15 @@ pub struct ProgramInfo {
 /// Using these as identifiers will cause assembly conflicts
 const INSTRUCTION_MNEMONICS: &[&str] = &[
     // Standard 6502 instructions
-    "ADC", "AND", "ASL", "BCC", "BCS", "BEQ", "BIT", "BMI", "BNE", "BPL",
-    "BRK", "BVC", "BVS", "CLC", "CLD", "CLI", "CLV", "CMP", "CPX", "CPY",
-    "DEC", "DEX", "DEY", "EOR", "INC", "INX", "INY", "JMP", "JSR", "LDA",
-    "LDX", "LDY", "LSR", "NOP", "ORA", "PHA", "PHP", "PLA", "PLP", "ROL",
-    "ROR", "RTI", "RTS", "SBC", "SEC", "SED", "SEI", "STA", "STX", "STY",
-    "TAX", "TAY", "TSX", "TXA", "TXS", "TYA",
-    // 65C02 extensions
+    "ADC", "AND", "ASL", "BCC", "BCS", "BEQ", "BIT", "BMI", "BNE", "BPL", "BRK", "BVC", "BVS",
+    "CLC", "CLD", "CLI", "CLV", "CMP", "CPX", "CPY", "DEC", "DEX", "DEY", "EOR", "INC", "INX",
+    "INY", "JMP", "JSR", "LDA", "LDX", "LDY", "LSR", "NOP", "ORA", "PHA", "PHP", "PLA", "PLP",
+    "ROL", "ROR", "RTI", "RTS", "SBC", "SEC", "SED", "SEI", "STA", "STX", "STY", "TAX", "TAY",
+    "TSX", "TXA", "TXS", "TYA", // 65C02 extensions
     "BRA", "PHX", "PHY", "PLX", "PLY", "STZ", "TRB", "TSB", "WAI", "STP",
     // 65C02 bit manipulation (BBR0-7, BBS0-7, RMB0-7, SMB0-7)
-    "BBR0", "BBR1", "BBR2", "BBR3", "BBR4", "BBR5", "BBR6", "BBR7",
-    "BBS0", "BBS1", "BBS2", "BBS3", "BBS4", "BBS5", "BBS6", "BBS7",
-    "RMB0", "RMB1", "RMB2", "RMB3", "RMB4", "RMB5", "RMB6", "RMB7",
+    "BBR0", "BBR1", "BBR2", "BBR3", "BBR4", "BBR5", "BBR6", "BBR7", "BBS0", "BBS1", "BBS2", "BBS3",
+    "BBS4", "BBS5", "BBS6", "BBS7", "RMB0", "RMB1", "RMB2", "RMB3", "RMB4", "RMB5", "RMB6", "RMB7",
     "SMB0", "SMB1", "SMB2", "SMB3", "SMB4", "SMB5", "SMB6", "SMB7",
 ];
 

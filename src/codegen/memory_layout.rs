@@ -161,7 +161,12 @@ impl TempAllocator {
     /// Allocate `size` consecutive bytes from the primary temp pool ($20-$3F)
     /// Returns the starting address, or None if no space available
     pub fn alloc_primary(&mut self, size: u8) -> Option<u8> {
-        Self::alloc_from_pool(&mut self.primary_pool, Self::PRIMARY_BASE, Self::PRIMARY_SIZE, size)
+        Self::alloc_from_pool(
+            &mut self.primary_pool,
+            Self::PRIMARY_BASE,
+            Self::PRIMARY_SIZE,
+            size,
+        )
     }
 
     /// Free previously allocated bytes in the primary pool

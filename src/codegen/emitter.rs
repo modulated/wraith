@@ -2,9 +2,9 @@
 //!
 //! Helper for generating formatted 6502 assembly code.
 
+use super::CommentVerbosity;
 use super::memory_layout::{MemoryLayout, TempAllocator};
 use super::regstate::{RegisterState, RegisterValue};
-use super::CommentVerbosity;
 
 /// Loop context for break/continue statements
 #[derive(Debug, Clone)]
@@ -188,12 +188,10 @@ impl Emitter {
         if operand.is_empty() {
             // Implied or accumulator mode (1 byte)
             match mnemonic {
-                "RTS" | "RTI" | "PHA" | "PLA" | "PHP" | "PLP" |
-                "TAX" | "TAY" | "TXA" | "TYA" | "TXS" | "TSX" |
-                "INX" | "INY" | "DEX" | "DEY" | "CLC" | "SEC" |
-                "CLI" | "SEI" | "CLD" | "SED" | "CLV" | "NOP" |
-                "BRK" | "ASL" | "LSR" | "ROL" | "ROR" => 1,
-                _ => 1,  // Default for unknown implied
+                "RTS" | "RTI" | "PHA" | "PLA" | "PHP" | "PLP" | "TAX" | "TAY" | "TXA" | "TYA"
+                | "TXS" | "TSX" | "INX" | "INY" | "DEX" | "DEY" | "CLC" | "SEC" | "CLI" | "SEI"
+                | "CLD" | "SED" | "CLV" | "NOP" | "BRK" | "ASL" | "LSR" | "ROL" | "ROR" => 1,
+                _ => 1, // Default for unknown implied
             }
         } else if operand.starts_with('#') {
             // Immediate mode (2 bytes)
@@ -210,10 +208,14 @@ impl Emitter {
                 // Indirect: (addr) (3 bytes for JMP)
                 3
             }
-        } else if operand.contains(",X") || operand.contains(",x") ||
-                  operand.contains(",Y") || operand.contains(",y") {
+        } else if operand.contains(",X")
+            || operand.contains(",x")
+            || operand.contains(",Y")
+            || operand.contains(",y")
+        {
             // Indexed addressing
-            if operand.starts_with('$') && operand.len() <= 4 { // $XX format
+            if operand.starts_with('$') && operand.len() <= 4 {
+                // $XX format
                 // Zero page indexed (2 bytes)
                 2
             } else {
@@ -489,7 +491,9 @@ impl Emitter {
 
     /// Get the loop restart label for tail recursive functions
     pub fn tail_call_loop_label(&self) -> Option<String> {
-        self.current_function.as_ref().map(|name| format!("{}_loop_start", name))
+        self.current_function
+            .as_ref()
+            .map(|name| format!("{}_loop_start", name))
     }
 
     // ========================================================================
@@ -516,7 +520,7 @@ impl Emitter {
         }
 
         // Increment stack pointer by 8
-        self.emit_inst("INX", "");  // One more to point to next free spot
+        self.emit_inst("INX", ""); // One more to point to next free spot
         self.emit_inst("STX", "$FF");
 
         // Invalidate register state after stack operations
