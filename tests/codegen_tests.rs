@@ -191,9 +191,12 @@ fn test_codegen_function_call() {
 
     // Function call should:
     // 1. Store arguments to zero page argument area (not using hardware stack)
-    // 2. JSR to function
+    // 2. JSR to function (or JMP if tail-call optimized)
     // 3. Function accesses args from parameter locations
-    assert!(asm.contains("JSR add"), "Should call function with JSR");
+    assert!(
+        asm.contains("JSR add") || asm.contains("JMP add"),
+        "Should call function with JSR or JMP (tail-call optimized)"
+    );
 
     // Our calling convention uses zero page, not hardware stack (PHA/PLA)
     // Arguments are stored to zero page locations before JSR
@@ -908,9 +911,6 @@ fn test_codegen_match_no_jmp_after_break() {
     // The Stop arm ends with break, so no JMP match_X_end should follow
     // The Continue arm doesn't terminate, so it SHOULD have JMP match_X_end
 
-    // Count total JMP match_X_end instructions
-    let jmp_match_end_count = asm.matches("JMP match_").filter(|m| m.contains("_end") || asm[asm.find(m).unwrap()..].starts_with("JMP match_") && asm[asm.find(m).unwrap()..].contains("_end")).count();
-
     // Should have exactly 1 JMP to match end (from Continue arm only)
     // The Stop arm with break should NOT have a JMP
     let lines: Vec<&str> = asm.lines().collect();
@@ -920,8 +920,8 @@ fn test_codegen_match_no_jmp_after_break() {
         // Look for the pattern where we jump out of loop (break) followed by JMP match_end
         if line.starts_with("JMP lp_") || line.starts_with("JMP lx_") {
             // This is a break - check if next non-comment line is JMP match_end
-            for j in (i+1)..lines.len() {
-                let next = lines[j].trim();
+            for next_line in lines.iter().skip(i + 1) {
+                let next = next_line.trim();
                 if next.is_empty() || next.starts_with(';') {
                     continue;
                 }

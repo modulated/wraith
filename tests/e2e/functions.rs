@@ -12,7 +12,11 @@ fn function_call_no_args() {
         }
     "#);
 
-    assert_asm_contains(&asm, "JSR foo");
+    // Tail call optimization may convert JSR+RTS to JMP
+    assert!(
+        asm.contains("JSR foo") || asm.contains("JMP foo"),
+        "Expected JSR or JMP foo (tail-call optimized)"
+    );
     assert_asm_contains(&asm, "foo:");
 }
 

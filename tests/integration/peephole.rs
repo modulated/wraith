@@ -293,3 +293,93 @@ fn optimization_reduces_size() {
     // Should be relatively small due to constant folding
     assert!(optimized_size < 10, "Optimized code should be compact");
 }
+
+// ============================================================================
+// Tail Call Optimization
+// ============================================================================
+
+#[test]
+fn tail_call_optimization() {
+    // When a function ends with a call followed by return,
+    // the JSR; RTS should be optimized to JMP
+    let asm = compile_success(r#"
+        fn helper() -> u8 {
+            return 42;
+        }
+
+        fn tail_caller() -> u8 {
+            return helper();
+        }
+
+        fn main() {
+            let x: u8 = tail_caller();
+        }
+    "#);
+
+    // The tail_caller function should use JMP instead of JSR+RTS
+    // Count JMP instructions in the output
+    let jmp_count = asm.lines()
+        .filter(|line| line.trim().starts_with("JMP"))
+        .count();
+
+    // Should have at least one JMP (from the tail call optimization)
+    assert!(jmp_count >= 1, "Expected tail call optimization (JMP), found {} JMPs\n{}", jmp_count, asm);
+}
+
+// ============================================================================
+// Strength Reduction
+// ============================================================================
+
+#[test]
+fn multiply_by_power_of_two() {
+    let asm = compile_success(r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            let x: u8 = 5;
+            let y: u8 = x * 2;  // Should use ASL instead of full multiply
+            OUT = y;
+        }
+    "#);
+
+    // Should use ASL for multiply by 2
+    assert_asm_contains(&asm, "ASL");
+}
+
+#[test]
+fn multiply_by_four() {
+    let asm = compile_success(r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            let x: u8 = 3;
+            let y: u8 = x * 4;  // Should use shift left twice
+            OUT = y;
+        }
+    "#);
+
+    // Should use ASL for multiply by power of 2
+    assert_asm_contains(&asm, "ASL");
+}
+
+// ============================================================================
+// Address Loading Optimization
+// ============================================================================
+
+#[test]
+fn redundant_immediate_loads_eliminated() {
+    let asm = compile_success(r#"
+        const OUT1: addr = 0x6000;
+        const OUT2: addr = 0x6001;
+        fn main() {
+            OUT1 = 0;
+            OUT2 = 0;  // Second LDA #$00 should be optimized away
+        }
+    "#);
+
+    // Count LDA #$00 instructions
+    let lda_zero_count = asm.lines()
+        .filter(|line| line.contains("LDA #$00"))
+        .count();
+
+    // Should only have one LDA #$00 due to optimization
+    assert!(lda_zero_count <= 1, "Expected at most 1 LDA #$00, found {}\n{}", lda_zero_count, asm);
+}

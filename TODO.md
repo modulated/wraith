@@ -20,9 +20,9 @@
 - [x] Remove no-op `CLC; ADC #$00` pairs (eliminate_clc_adc_zero)
 - [x] Remove no-op `SEC; SBC #$00` pairs (eliminate_sec_sbc_zero)
 - [x] Redundant flag operations (`CLC; CLC`, `CLC; SEC`) (eliminate_redundant_flag_ops)
-- [ ] Combine address loading (`LDA #<label; LDX #>label` patterns)
-- [ ] Strength reduction (`ASL` for multiply by 2, etc.)
-- [ ] Tail call optimization for non-recursive calls
+- [x] Combine address loading (`LDA #<label; LDX #>label` patterns) (eliminate_redundant_address_loads)
+- [x] Strength reduction (`ASL` for multiply by 2, etc.) (apply_strength_reduction)
+- [x] Tail call optimization for non-recursive calls (optimize_tail_calls)
 
 ## 65C02 Target Support
 

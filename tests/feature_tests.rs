@@ -262,7 +262,11 @@ fn test_function_call_no_args() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "JSR helper");
+    // Tail call optimization may convert JSR+RTS to JMP
+    assert!(
+        asm.contains("JSR helper") || asm.contains("JMP helper"),
+        "Expected JSR or JMP helper (tail-call optimized)"
+    );
 }
 
 #[test]
@@ -278,7 +282,11 @@ fn test_function_call_with_args() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "JSR add");
+    // Tail call optimization may convert JSR+RTS to JMP
+    assert!(
+        asm.contains("JSR add") || asm.contains("JMP add"),
+        "Expected JSR or JMP add (tail-call optimized)"
+    );
 }
 
 #[test]
