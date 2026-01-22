@@ -51,8 +51,7 @@ impl Config {
         let content = fs::read_to_string(path.as_ref())
             .map_err(|e| format!("Failed to read config file: {}", e))?;
 
-        toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file: {}", e))
+        toml::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
     }
 
     /// Try to load from wraith.toml in current directory, fall back to defaults
@@ -70,8 +69,8 @@ impl Config {
     pub fn default_6502() -> Self {
         Self {
             sections: vec![
-                Section::new("CODE", 0x8000, 0xBFFF),   // 16KB for user code
-                Section::new("DATA", 0xD000, 0xEFFF),   // 8KB for constants/data
+                Section::new("CODE", 0x8000, 0xBFFF), // 16KB for user code
+                Section::new("DATA", 0xD000, 0xEFFF), // 8KB for constants/data
             ],
             default_section: "CODE".to_string(),
         }
@@ -119,7 +118,12 @@ impl MemoryConfig {
     pub fn default_section(&self) -> &Section {
         // Use configured default section
         self.get_section(&self.default_section_name)
-            .unwrap_or_else(|| panic!("Default section '{}' must exist in config", self.default_section_name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Default section '{}' must exist in config",
+                    self.default_section_name
+                )
+            })
     }
 }
 

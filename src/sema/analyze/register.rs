@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Spanned};
-use crate::sema::const_eval::{eval_const_expr_with_env, ConstValue};
+use crate::sema::const_eval::{ConstValue, eval_const_expr_with_env};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation};
 use crate::sema::type_defs::{EnumDef, FieldInfo, StructDef, VariantData, VariantInfo};
 use crate::sema::types::Type;
@@ -18,7 +18,8 @@ use super::SemanticAnalyzer;
 /// Check if a name is all uppercase (allowing underscores and digits)
 /// Used to enforce constant naming conventions
 pub(super) fn is_uppercase_name(name: &str) -> bool {
-    name.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
+    name.chars()
+        .all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
 impl SemanticAnalyzer {
@@ -51,9 +52,10 @@ impl SemanticAnalyzer {
 
         // Check for instruction conflict
         // Check if function has inline attribute
-        let is_inline = func.attributes.iter().any(|attr| {
-            matches!(attr, crate::ast::FnAttribute::Inline)
-        });
+        let is_inline = func
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, crate::ast::FnAttribute::Inline));
 
         // Exception: inline functions (intrinsics) are allowed to use instruction names
         // because they're meant to be direct wrappers for CPU instructions
@@ -109,7 +111,9 @@ impl SemanticAnalyzer {
         };
 
         // Calculate total bytes used by parameters
-        let param_bytes_used: u8 = func.params.iter()
+        let param_bytes_used: u8 = func
+            .params
+            .iter()
             .map(|p| {
                 if let Ok(ty) = self.resolve_type(&p.ty.node) {
                     self.type_size(&ty) as u8
@@ -152,11 +156,12 @@ impl SemanticAnalyzer {
         // - nmi (NMI handler)
         // - inline (may be called from other modules)
         let is_special = func.attributes.iter().any(|attr| {
-            matches!(attr,
-                crate::ast::FnAttribute::Reset |
-                crate::ast::FnAttribute::Irq |
-                crate::ast::FnAttribute::Nmi |
-                crate::ast::FnAttribute::Inline
+            matches!(
+                attr,
+                crate::ast::FnAttribute::Reset
+                    | crate::ast::FnAttribute::Irq
+                    | crate::ast::FnAttribute::Nmi
+                    | crate::ast::FnAttribute::Inline
             )
         });
 
@@ -206,15 +211,9 @@ impl SemanticAnalyzer {
                     if let Some(int_val) = val.as_integer() {
                         // Check overflow based on type
                         let fits = match &declared_ty {
-                            Type::Primitive(PrimitiveType::U8) => {
-                                (0..=255).contains(&int_val)
-                            }
-                            Type::Primitive(PrimitiveType::I8) => {
-                                (-128..=127).contains(&int_val)
-                            }
-                            Type::Primitive(PrimitiveType::U16) => {
-                                (0..=65535).contains(&int_val)
-                            }
+                            Type::Primitive(PrimitiveType::U8) => (0..=255).contains(&int_val),
+                            Type::Primitive(PrimitiveType::I8) => (-128..=127).contains(&int_val),
+                            Type::Primitive(PrimitiveType::U16) => (0..=65535).contains(&int_val),
                             Type::Primitive(PrimitiveType::I16) => {
                                 (-32768..=32767).contains(&int_val)
                             }
@@ -293,7 +292,8 @@ impl SemanticAnalyzer {
 
         // Add address to const_env so it can be used in other addr declarations
         // (e.g., addr SCREEN = BASE + 0x100)
-        self.const_env.insert(name.clone(), ConstValue::Integer(address as i64));
+        self.const_env
+            .insert(name.clone(), ConstValue::Integer(address as i64));
 
         // Check for overlap with compiler-managed memory sections
         for section in &self.memory_config.sections {
@@ -316,7 +316,10 @@ impl SemanticAnalyzer {
             ty: Type::Primitive(PrimitiveType::U8),
             location: SymbolLocation::Absolute(address),
             // Write and ReadWrite can be written to; Read cannot
-            mutable: matches!(addr.access, crate::ast::AccessMode::Write | crate::ast::AccessMode::ReadWrite),
+            mutable: matches!(
+                addr.access,
+                crate::ast::AccessMode::Write | crate::ast::AccessMode::ReadWrite
+            ),
             access_mode: Some(addr.access),
             is_pub: addr.is_pub,
         };
@@ -357,26 +360,23 @@ impl SemanticAnalyzer {
         self.imported_files.insert(import_path.clone());
 
         // Load and parse the imported file
-        let source = std::fs::read_to_string(&import_path)
-            .map_err(|e| SemaError::ImportError {
-                path: import.path.node.clone(),
-                reason: format!("failed to import '{}': {}", import.path.node, e),
-                span: import.path.span,
-            })?;
+        let source = std::fs::read_to_string(&import_path).map_err(|e| SemaError::ImportError {
+            path: import.path.node.clone(),
+            reason: format!("failed to import '{}': {}", import.path.node, e),
+            span: import.path.span,
+        })?;
 
-        let tokens = crate::lex(&source)
-            .map_err(|e| SemaError::ImportError {
-                path: import.path.node.clone(),
-                reason: format!("lexer error: {:?}", e),
-                span: import.path.span,
-            })?;
+        let tokens = crate::lex(&source).map_err(|e| SemaError::ImportError {
+            path: import.path.node.clone(),
+            reason: format!("lexer error: {:?}", e),
+            span: import.path.span,
+        })?;
 
-        let ast = crate::Parser::parse(&tokens)
-            .map_err(|e| SemaError::ImportError {
-                path: import.path.node.clone(),
-                reason: format!("parser error: {:?}", e),
-                span: import.path.span,
-            })?;
+        let ast = crate::Parser::parse(&tokens).map_err(|e| SemaError::ImportError {
+            path: import.path.node.clone(),
+            reason: format!("parser error: {:?}", e),
+            span: import.path.span,
+        })?;
 
         // Analyze the imported file
         let mut imported_analyzer = SemanticAnalyzer::with_base_path(import_path.clone());
@@ -389,7 +389,8 @@ impl SemanticAnalyzer {
         self.imported_items.extend(ast.items.clone());
 
         // Also collect items from transitively imported modules
-        self.imported_items.extend(imported_info.imported_items.clone());
+        self.imported_items
+            .extend(imported_info.imported_items.clone());
 
         // Import the requested symbols into our table
         for symbol_name in &import.symbols {
@@ -411,7 +412,8 @@ impl SemanticAnalyzer {
 
                 // Also import function metadata if this is a function
                 if let Some(metadata) = imported_info.function_metadata.get(name) {
-                    self.function_metadata.insert(name.clone(), metadata.clone());
+                    self.function_metadata
+                        .insert(name.clone(), metadata.clone());
                 }
 
                 // Also import type definitions (struct/enum) if this is a type
@@ -459,7 +461,8 @@ impl SemanticAnalyzer {
         // Merge function_metadata (already done above in the loop, but ensure transitives)
         for (name, metadata) in &imported_info.function_metadata {
             if !self.function_metadata.contains_key(name) {
-                self.function_metadata.insert(name.clone(), metadata.clone());
+                self.function_metadata
+                    .insert(name.clone(), metadata.clone());
             }
         }
 
@@ -469,7 +472,10 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
-    pub(super) fn register_struct(&mut self, struct_def: &crate::ast::Struct) -> Result<(), SemaError> {
+    pub(super) fn register_struct(
+        &mut self,
+        struct_def: &crate::ast::Struct,
+    ) -> Result<(), SemaError> {
         let name = struct_def.name.node.clone();
 
         // Check for instruction conflict
@@ -528,9 +534,10 @@ impl SemanticAnalyzer {
         }
 
         // Check if struct should be in zero page
-        let zero_page = struct_def.attributes.iter().any(|attr| {
-            matches!(attr, crate::ast::StructAttribute::ZpSection)
-        });
+        let zero_page = struct_def
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, crate::ast::StructAttribute::ZpSection));
 
         let struct_info = StructDef {
             name: name.clone(),
@@ -585,12 +592,18 @@ impl SemanticAnalyzer {
         // Process each variant
         for variant in &enum_def.variants {
             let (variant_name, variant_data, tag) = match variant {
-                EnumVariant::Unit { name: var_name, value } => {
+                EnumVariant::Unit {
+                    name: var_name,
+                    value,
+                } => {
                     let tag = value.map(|v| v as u8).unwrap_or(next_tag);
                     next_tag = tag + 1;
                     (var_name.node.clone(), VariantData::Unit, tag)
                 }
-                EnumVariant::Tuple { name: var_name, fields: field_types } => {
+                EnumVariant::Tuple {
+                    name: var_name,
+                    fields: field_types,
+                } => {
                     let mut types = Vec::new();
                     for ty in field_types {
                         let resolved_ty = self.resolve_type(&ty.node)?;
@@ -609,7 +622,10 @@ impl SemanticAnalyzer {
                     next_tag += 1;
                     (var_name.node.clone(), VariantData::Tuple(types), tag)
                 }
-                EnumVariant::Struct { name: var_name, fields } => {
+                EnumVariant::Struct {
+                    name: var_name,
+                    fields,
+                } => {
                     let mut variant_fields = Vec::new();
                     let mut field_offset = 0;
 
@@ -637,7 +653,11 @@ impl SemanticAnalyzer {
 
                     let tag = next_tag;
                     next_tag += 1;
-                    (var_name.node.clone(), VariantData::Struct(variant_fields), tag)
+                    (
+                        var_name.node.clone(),
+                        VariantData::Struct(variant_fields),
+                        tag,
+                    )
                 }
             };
 
@@ -671,7 +691,10 @@ impl SemanticAnalyzer {
                 VariantData::Tuple(types) => types.iter().map(|t| self.type_size(t)).sum(),
                 VariantData::Struct(fields) => {
                     // Use the last field's offset + size, or 0 if no fields
-                    fields.last().map(|f| f.offset + self.type_size(&f.ty)).unwrap_or(0)
+                    fields
+                        .last()
+                        .map(|f| f.offset + self.type_size(&f.ty))
+                        .unwrap_or(0)
                 }
             })
             .max()

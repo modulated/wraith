@@ -20,10 +20,7 @@ pub enum Line {
     /// A comment line
     Comment(String),
     /// A directive (.BYTE, .ORG, etc.)
-    Directive {
-        name: String,
-        args: String,
-    },
+    Directive { name: String, args: String },
     /// Empty line
     Empty,
 }
@@ -31,7 +28,11 @@ pub enum Line {
 impl fmt::Display for Line {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Line::Instruction { mnemonic, operand, comment } => {
+            Line::Instruction {
+                mnemonic,
+                operand,
+                comment,
+            } => {
                 write!(f, "    {}", mnemonic)?;
                 if let Some(op) = operand {
                     write!(f, " {}", op)?;
@@ -154,21 +155,26 @@ fn eliminate_redundant_loads(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: op1, .. },
-                Line::Instruction { mnemonic: m2, operand: op2, .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: op1,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: op2,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
-            {
-                // Check for same load instruction with same operand
-                if (m1 == "LDA" || m1 == "LDX" || m1 == "LDY")
-                    && m1 == m2
-                    && op1 == op2
-                {
-                    // Keep only the first load
-                    result.push(lines[i].clone());
-                    i += 2; // Skip the redundant load
-                    continue;
-                }
+        {
+            // Check for same load instruction with same operand
+            if (m1 == "LDA" || m1 == "LDX" || m1 == "LDY") && m1 == m2 && op1 == op2 {
+                // Keep only the first load
+                result.push(lines[i].clone());
+                i += 2; // Skip the redundant load
+                continue;
             }
+        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -185,21 +191,26 @@ fn eliminate_redundant_stores(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: op1, .. },
-                Line::Instruction { mnemonic: m2, operand: op2, .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: op1,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: op2,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
-            {
-                // Check for same store instruction with same operand
-                if (m1 == "STA" || m1 == "STX" || m1 == "STY")
-                    && m1 == m2
-                    && op1 == op2
-                {
-                    // Keep only the first store
-                    result.push(lines[i].clone());
-                    i += 2; // Skip the redundant store
-                    continue;
-                }
+        {
+            // Check for same store instruction with same operand
+            if (m1 == "STA" || m1 == "STX" || m1 == "STY") && m1 == m2 && op1 == op2 {
+                // Keep only the first store
+                result.push(lines[i].clone());
+                i += 2; // Skip the redundant store
+                continue;
             }
+        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -216,29 +227,37 @@ fn eliminate_load_after_store(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: op1, .. },
-                Line::Instruction { mnemonic: m2, operand: op2, .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: op1,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: op2,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
-            {
-                // STA $40; LDA $40 → STA $40 (A already contains the value)
-                if m1 == "STA" && m2 == "LDA" && op1 == op2 {
-                    result.push(lines[i].clone());
-                    i += 2; // Skip the load
-                    continue;
-                }
-                // STX $40; LDX $40 → STX $40
-                if m1 == "STX" && m2 == "LDX" && op1 == op2 {
-                    result.push(lines[i].clone());
-                    i += 2;
-                    continue;
-                }
-                // STY $40; LDY $40 → STY $40
-                if m1 == "STY" && m2 == "LDY" && op1 == op2 {
-                    result.push(lines[i].clone());
-                    i += 2;
-                    continue;
-                }
+        {
+            // STA $40; LDA $40 → STA $40 (A already contains the value)
+            if m1 == "STA" && m2 == "LDA" && op1 == op2 {
+                result.push(lines[i].clone());
+                i += 2; // Skip the load
+                continue;
             }
+            // STX $40; LDX $40 → STX $40
+            if m1 == "STX" && m2 == "LDX" && op1 == op2 {
+                result.push(lines[i].clone());
+                i += 2;
+                continue;
+            }
+            // STY $40; LDY $40 → STY $40
+            if m1 == "STY" && m2 == "LDY" && op1 == op2 {
+                result.push(lines[i].clone());
+                i += 2;
+                continue;
+            }
+        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -255,21 +274,29 @@ fn eliminate_dead_stores(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 2 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: op1, .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: op1,
+                    ..
+                },
                 Line::Instruction { mnemonic: m2, .. },
-                Line::Instruction { mnemonic: m3, operand: op3, .. },
+                Line::Instruction {
+                    mnemonic: m3,
+                    operand: op3,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1], &lines[i + 2])
-            {
-                // STA $40; LDA #$05; STA $40 → LDA #$05; STA $40
-                // First store is dead because second store overwrites it
-                if m1 == "STA" && m2 == "LDA" && m3 == "STA" && op1 == op3 {
-                    // Skip the first store
-                    result.push(lines[i + 1].clone());
-                    result.push(lines[i + 2].clone());
-                    i += 3;
-                    continue;
-                }
+        {
+            // STA $40; LDA #$05; STA $40 → LDA #$05; STA $40
+            // First store is dead because second store overwrites it
+            if m1 == "STA" && m2 == "LDA" && m3 == "STA" && op1 == op3 {
+                // Skip the first store
+                result.push(lines[i + 1].clone());
+                result.push(lines[i + 2].clone());
+                i += 3;
+                continue;
             }
+        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -283,7 +310,10 @@ fn eliminate_nop_operations(lines: &[Line]) -> Vec<Line> {
     lines
         .iter()
         .filter(|line| {
-            if let Line::Instruction { mnemonic, operand, .. } = line {
+            if let Line::Instruction {
+                mnemonic, operand, ..
+            } = line
+            {
                 // ORA #$00 is a no-op
                 if mnemonic == "ORA" && operand.as_deref() == Some("#$00") {
                     return false;
@@ -313,31 +343,39 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: None, .. },
-                Line::Instruction { mnemonic: m2, operand: None, .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: None,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: None,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
-            {
-                // TAX; TXA → nothing (if no X usage between)
-                if m1 == "TAX" && m2 == "TXA" {
-                    i += 2; // Skip both
-                    continue;
-                }
-                // TAY; TYA → nothing
-                if m1 == "TAY" && m2 == "TYA" {
-                    i += 2;
-                    continue;
-                }
-                // TXA; TAX → nothing
-                if m1 == "TXA" && m2 == "TAX" {
-                    i += 2;
-                    continue;
-                }
-                // TYA; TAY → nothing
-                if m1 == "TYA" && m2 == "TAY" {
-                    i += 2;
-                    continue;
-                }
+        {
+            // TAX; TXA → nothing (if no X usage between)
+            if m1 == "TAX" && m2 == "TXA" {
+                i += 2; // Skip both
+                continue;
             }
+            // TAY; TYA → nothing
+            if m1 == "TAY" && m2 == "TYA" {
+                i += 2;
+                continue;
+            }
+            // TXA; TAX → nothing
+            if m1 == "TXA" && m2 == "TAX" {
+                i += 2;
+                continue;
+            }
+            // TYA; TAY → nothing
+            if m1 == "TYA" && m2 == "TAY" {
+                i += 2;
+                continue;
+            }
+        }
 
         result.push(lines[i].clone());
         i += 1;
@@ -363,7 +401,9 @@ fn eliminate_unreachable_after_terminator(lines: &[Line]) -> Vec<Line> {
                 result.push(line.clone());
             }
             // Check for control flow terminators
-            Line::Instruction { mnemonic, operand, .. } => {
+            Line::Instruction {
+                mnemonic, operand, ..
+            } => {
                 if skip_until_label {
                     // Skip this instruction - it's unreachable
                     continue;
@@ -379,9 +419,10 @@ fn eliminate_unreachable_after_terminator(lines: &[Line]) -> Vec<Line> {
                     // But JMP ($xxxx) indirect might not terminate if it's a computed jump
                     // For safety, only treat direct JMP as terminator
                     if let Some(op) = operand
-                        && !op.starts_with('(') {
-                            skip_until_label = true;
-                        }
+                        && !op.starts_with('(')
+                    {
+                        skip_until_label = true;
+                    }
                 }
             }
             // Always keep comments, directives, and empty lines
@@ -407,7 +448,11 @@ fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
         if i + 1 < lines.len()
             && let (
                 Line::Instruction { mnemonic: m1, .. },
-                Line::Instruction { mnemonic: m2, operand: op2, .. },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: op2,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
         {
             // LDA followed by CMP #$00 - the CMP is redundant
@@ -419,7 +464,8 @@ fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
             }
             // Also handle AND, ORA, EOR which set Z flag
             if (m1 == "AND" || m1 == "ORA" || m1 == "EOR")
-                && m2 == "CMP" && op2.as_deref() == Some("#$00")
+                && m2 == "CMP"
+                && op2.as_deref() == Some("#$00")
             {
                 result.push(lines[i].clone());
                 i += 2;
@@ -444,7 +490,9 @@ fn eliminate_redundant_ldy_zero(lines: &[Line]) -> Vec<Line> {
 
     for line in lines {
         match line {
-            Line::Instruction { mnemonic, operand, .. } => {
+            Line::Instruction {
+                mnemonic, operand, ..
+            } => {
                 // Check if this is LDY #$00 when Y is already 0
                 if mnemonic == "LDY" && operand.as_deref() == Some("#$00") && y_is_zero {
                     // Skip this redundant instruction
@@ -520,25 +568,35 @@ fn eliminate_branch_over_jump(lines: &[Line]) -> Vec<Line> {
         // Check for pattern: Bxx skip; JMP target; skip:
         if i + 2 < lines.len()
             && let (
-                Line::Instruction { mnemonic: branch_m, operand: Some(skip_label), comment: branch_comment },
-                Line::Instruction { mnemonic: jmp_m, operand: Some(target_label), .. },
+                Line::Instruction {
+                    mnemonic: branch_m,
+                    operand: Some(skip_label),
+                    comment: branch_comment,
+                },
+                Line::Instruction {
+                    mnemonic: jmp_m,
+                    operand: Some(target_label),
+                    ..
+                },
                 Line::Label(label),
             ) = (&lines[i], &lines[i + 1], &lines[i + 2])
         {
             // Check if this is a conditional branch followed by JMP, and the label matches
             if let Some(inverted) = invert_branch(branch_m)
-                && jmp_m == "JMP" && skip_label == label {
-                    // Replace with inverted branch to target
-                    result.push(Line::Instruction {
-                        mnemonic: inverted.to_string(),
-                        operand: Some(target_label.clone()),
-                        comment: branch_comment.clone(),
-                    });
-                    // Keep the label (might be used elsewhere)
-                    result.push(lines[i + 2].clone());
-                    i += 3;
-                    continue;
-                }
+                && jmp_m == "JMP"
+                && skip_label == label
+            {
+                // Replace with inverted branch to target
+                result.push(Line::Instruction {
+                    mnemonic: inverted.to_string(),
+                    operand: Some(target_label.clone()),
+                    comment: branch_comment.clone(),
+                });
+                // Keep the label (might be used elsewhere)
+                result.push(lines[i + 2].clone());
+                i += 3;
+                continue;
+            }
         }
 
         result.push(lines[i].clone());
@@ -558,7 +616,9 @@ fn eliminate_redundant_ldx_zero(lines: &[Line]) -> Vec<Line> {
 
     for line in lines {
         match line {
-            Line::Instruction { mnemonic, operand, .. } => {
+            Line::Instruction {
+                mnemonic, operand, ..
+            } => {
                 // Check if this is LDX #$00 when X is already 0
                 if mnemonic == "LDX" && operand.as_deref() == Some("#$00") && x_is_zero {
                     // Skip this redundant instruction
@@ -608,8 +668,16 @@ fn eliminate_clc_adc_zero(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: None, .. },
-                Line::Instruction { mnemonic: m2, operand: Some(op2), .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: None,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: Some(op2),
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
         {
             // CLC followed by ADC #$00 is a no-op
@@ -636,8 +704,16 @@ fn eliminate_sec_sbc_zero(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: None, .. },
-                Line::Instruction { mnemonic: m2, operand: Some(op2), .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: None,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: Some(op2),
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
         {
             // SEC followed by SBC #$00 is a no-op
@@ -683,8 +759,16 @@ fn eliminate_redundant_flag_ops(lines: &[Line]) -> Vec<Line> {
     while i < lines.len() {
         if i + 1 < lines.len()
             && let (
-                Line::Instruction { mnemonic: m1, operand: None, .. },
-                Line::Instruction { mnemonic: m2, operand: None, .. },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: None,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: None,
+                    ..
+                },
             ) = (&lines[i], &lines[i + 1])
         {
             let mut skip_first = false;
@@ -780,8 +864,19 @@ fn eliminate_redundant_address_loads(lines: &[Line]) -> Vec<Line> {
                 // Instructions that modify A
                 if matches!(
                     mnemonic.as_str(),
-                    "LDA" | "TXA" | "TYA" | "PLA" | "ADC" | "SBC" | "AND" | "ORA" | "EOR" | "ASL"
-                        | "LSR" | "ROL" | "ROR"
+                    "LDA"
+                        | "TXA"
+                        | "TYA"
+                        | "PLA"
+                        | "ADC"
+                        | "SBC"
+                        | "AND"
+                        | "ORA"
+                        | "EOR"
+                        | "ASL"
+                        | "LSR"
+                        | "ROL"
+                        | "ROR"
                 ) {
                     a_value = None;
                 }
@@ -1112,8 +1207,10 @@ mod tests {
         let optimized = eliminate_branch_over_jump(&lines);
         // BEQ skip; JMP target; skip: → BNE target; skip:
         assert_eq!(optimized.len(), 3);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
-            if mnemonic == "BNE" && operand.as_deref() == Some("target")));
+        assert!(
+            matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
+            if mnemonic == "BNE" && operand.as_deref() == Some("target"))
+        );
         assert!(matches!(&optimized[1], Line::Label(l) if l == "skip"));
     }
 
@@ -1327,10 +1424,14 @@ mod tests {
         let optimized = apply_strength_reduction(&lines);
         // LDA $40; CLC; ADC $40 → LDA $40; ASL A
         assert_eq!(optimized.len(), 2);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
-            if mnemonic == "LDA" && operand.as_deref() == Some("$40")));
-        assert!(matches!(&optimized[1], Line::Instruction { mnemonic, operand, .. }
-            if mnemonic == "ASL" && operand.as_deref() == Some("A")));
+        assert!(
+            matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
+            if mnemonic == "LDA" && operand.as_deref() == Some("$40"))
+        );
+        assert!(
+            matches!(&optimized[1], Line::Instruction { mnemonic, operand, .. }
+            if mnemonic == "ASL" && operand.as_deref() == Some("A"))
+        );
     }
 
     #[test]
@@ -1363,8 +1464,10 @@ mod tests {
         let optimized = optimize_tail_calls(&lines);
         // JSR; RTS → JMP
         assert_eq!(optimized.len(), 1);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
-            if mnemonic == "JMP" && operand.as_deref() == Some("subroutine")));
+        assert!(
+            matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
+            if mnemonic == "JMP" && operand.as_deref() == Some("subroutine"))
+        );
     }
 
     #[test]
@@ -1406,7 +1509,9 @@ mod tests {
         let optimized = optimize_tail_calls(&lines);
         // JSR; comment; RTS → JMP (comment skipped)
         assert_eq!(optimized.len(), 1);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
-            if mnemonic == "JMP" && operand.as_deref() == Some("subroutine")));
+        assert!(
+            matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
+            if mnemonic == "JMP" && operand.as_deref() == Some("subroutine"))
+        );
     }
 }

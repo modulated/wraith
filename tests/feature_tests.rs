@@ -402,8 +402,8 @@ fn test_address_declaration() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "SCREEN = $C000");  // Address label
-    assert_asm_contains(&asm, "STA SCREEN");      // Symbolic name
+    assert_asm_contains(&asm, "SCREEN = $C000"); // Address label
+    assert_asm_contains(&asm, "STA SCREEN"); // Symbolic name
 }
 
 #[test]
@@ -417,8 +417,8 @@ fn test_constant_address_expression() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "SCREEN = $C100");  // 0xC000 + 0x100
-    assert_asm_contains(&asm, "STA SCREEN");      // Symbolic name
+    assert_asm_contains(&asm, "SCREEN = $C100"); // 0xC000 + 0x100
+    assert_asm_contains(&asm, "STA SCREEN"); // Symbolic name
 }
 
 // ============================================================================

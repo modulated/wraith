@@ -21,8 +21,8 @@ pub struct FunctionMetadata {
 #[derive(Debug, Clone)]
 pub struct CompiledFunction {
     pub name: String,
-    pub assembly: String,  // Assembly code without .ORG
-    pub size: u16,         // Size in bytes
+    pub assembly: String, // Assembly code without .ORG
+    pub size: u16,        // Size in bytes
 }
 
 /// An address range occupied by a function
@@ -67,8 +67,14 @@ impl ConflictError {
     pub fn to_diagnostic(&self) -> String {
         format!(
             "Address conflict: function '{}' at ${:04X}-${:04X} ({}) overlaps with '{}' at ${:04X}-${:04X} ({})",
-            self.func1, self.range1.0, self.range1.1, self.source1,
-            self.func2, self.range2.0, self.range2.1, self.source2
+            self.func1,
+            self.range1.0,
+            self.range1.1,
+            self.source1,
+            self.func2,
+            self.range2.0,
+            self.range2.1,
+            self.source2
         )
     }
 }
@@ -100,7 +106,9 @@ impl AddressAllocator {
         let mut functions: Vec<_> = metadata.keys().cloned().collect();
         functions.sort_by_key(|name| {
             // Sort by: explicit org first (by address), then auto-allocated (by name)
-            metadata[name].org_address.map(|addr| (0, addr, name.clone()))
+            metadata[name]
+                .org_address
+                .map(|addr| (0, addr, name.clone()))
                 .unwrap_or_else(|| (1, 0, name.clone()))
         });
 
@@ -119,7 +127,10 @@ impl AddressAllocator {
                 match self.section_allocator.allocate(section, func.size) {
                     Ok(addr) => (addr, PlacementSource::Section(section.clone())),
                     Err(e) => {
-                        eprintln!("Warning: section allocation failed for {}: {}", func_name, e);
+                        eprintln!(
+                            "Warning: section allocation failed for {}: {}",
+                            func_name, e
+                        );
                         continue;
                     }
                 }
@@ -128,7 +139,10 @@ impl AddressAllocator {
                 match self.section_allocator.allocate_default(func.size) {
                     Ok(addr) => (addr, PlacementSource::AutoAllocated),
                     Err(e) => {
-                        eprintln!("Warning: default allocation failed for {}: {}", func_name, e);
+                        eprintln!(
+                            "Warning: default allocation failed for {}: {}",
+                            func_name, e
+                        );
                         continue;
                     }
                 }
@@ -167,8 +181,8 @@ impl AddressAllocator {
     /// Find if a range conflicts with any existing allocation
     fn find_conflict(&self, new_range: &AddressRange) -> Option<&AddressRange> {
         // Check if ranges overlap: two ranges overlap if one doesn't end before the other starts
-        self.ranges.iter().find(|existing|
-            !(new_range.end < existing.start || new_range.start > existing.end)
-        )
+        self.ranges
+            .iter()
+            .find(|existing| !(new_range.end < existing.start || new_range.start > existing.end))
     }
 }

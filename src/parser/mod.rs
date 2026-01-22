@@ -148,7 +148,13 @@ impl<'a> Parser<'a> {
                     return; // Don't consume the closing brace
                 }
                 // Top-level item starts (including Let and Zp to prevent cascading errors)
-                Token::Fn | Token::Struct | Token::Enum | Token::Const | Token::Addr | Token::Let | Token::Zp => {
+                Token::Fn
+                | Token::Struct
+                | Token::Enum
+                | Token::Const
+                | Token::Addr
+                | Token::Let
+                | Token::Zp => {
                     return; // Don't consume, let item parser handle it
                 }
                 _ => {

@@ -49,19 +49,23 @@ pub fn eval_const_expr(expr: &Spanned<Expr>) -> Result<ConstValue, SemaError> {
 }
 
 /// Evaluates a constant expression with an environment of named constants
-pub fn eval_const_expr_with_env(expr: &Spanned<Expr>, env: &ConstEnv) -> Result<ConstValue, SemaError> {
+pub fn eval_const_expr_with_env(
+    expr: &Spanned<Expr>,
+    env: &ConstEnv,
+) -> Result<ConstValue, SemaError> {
     match &expr.node {
         Expr::Literal(lit) => eval_literal(lit),
-        Expr::Variable(name) => {
-            env.get(name).cloned().ok_or_else(|| SemaError::Custom {
-                message: format!("constant '{}' not found in this scope", name),
-                span: expr.span,
-            })
-        }
+        Expr::Variable(name) => env.get(name).cloned().ok_or_else(|| SemaError::Custom {
+            message: format!("constant '{}' not found in this scope", name),
+            span: expr.span,
+        }),
         Expr::Binary { left, op, right } => eval_binary_with_env(left, *op, right, expr.span, env),
         Expr::Unary { op, operand } => eval_unary_with_env(*op, operand, expr.span, env),
         Expr::Paren(inner) => eval_const_expr_with_env(inner, env),
-        Expr::Cast { expr: inner, target_type } => {
+        Expr::Cast {
+            expr: inner,
+            target_type,
+        } => {
             // Evaluate the inner expression
             let value = eval_const_expr_with_env(inner, env)?;
 
@@ -208,12 +212,12 @@ fn eval_unary_with_env(
     match op {
         UnaryOp::Neg => {
             if let Some(n) = val.as_integer() {
-                Ok(ConstValue::Integer(
-                    -n.checked_neg().ok_or_else(|| SemaError::Custom {
+                Ok(ConstValue::Integer(-n.checked_neg().ok_or_else(|| {
+                    SemaError::Custom {
                         message: "negation overflow in constant expression".to_string(),
                         span,
-                    })?,
-                ))
+                    }
+                })?))
             } else {
                 Err(SemaError::Custom {
                     message: "cannot negate non-integer constant".to_string(),

@@ -19,7 +19,7 @@ fn test_analyze_simple_program() {
 
     // Check global symbols
     let screen = program.table.lookup("SCREEN").expect("SCREEN not found");
-    assert_eq!(screen.kind, SymbolKind::Address);  // Address declarations are marked as Address kind
+    assert_eq!(screen.kind, SymbolKind::Address); // Address declarations are marked as Address kind
     assert!(screen.mutable);
 
     let main = program.table.lookup("main").expect("main not found");

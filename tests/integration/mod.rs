@@ -3,5 +3,5 @@
 //! Tests each phase in isolation to ensure correctness
 
 mod codegen;
-mod warnings;
 mod peephole;
+mod warnings;

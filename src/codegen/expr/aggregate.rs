@@ -8,7 +8,7 @@
 //! - Enum variant construction
 
 use crate::Spanned;
-use crate::ast::{Expr};
+use crate::ast::Expr;
 use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 
@@ -83,7 +83,9 @@ pub(super) fn generate_index(
     match &object.node {
         Expr::Variable(name) => {
             // Look up the array variable to get its location
-            let sym = info.resolved_symbols.get(&object.span)
+            let sym = info
+                .resolved_symbols
+                .get(&object.span)
                 .or_else(|| info.table.lookup(name))
                 .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
@@ -97,7 +99,7 @@ pub(super) fn generate_index(
                     // For now, assume array pointers are in zero page (address < 256)
                     if addr >= 256 {
                         return Err(CodegenError::UnsupportedOperation(
-                            "array variables must be in zero page for indexing".to_string()
+                            "array variables must be in zero page for indexing".to_string(),
                         ));
                     }
 
@@ -126,7 +128,7 @@ pub(super) fn generate_index(
                 crate::sema::table::SymbolLocation::None => {
                     // Compile-time constants don't have runtime storage
                     Err(CodegenError::UnsupportedOperation(
-                        "cannot index compile-time constant".to_string()
+                        "cannot index compile-time constant".to_string(),
                     ))
                 }
             }
@@ -134,7 +136,7 @@ pub(super) fn generate_index(
         _ => {
             // Complex array expressions not yet supported
             Err(CodegenError::UnsupportedOperation(
-                "only variable array indexing is currently supported".to_string()
+                "only variable array indexing is currently supported".to_string(),
             ))
         }
     }
@@ -149,10 +151,12 @@ pub(super) fn generate_struct_init(
     emitter.emit_comment(&format!("Struct init: {}", name.node));
 
     // Look up the struct definition
-    let struct_def = info.type_registry.get_struct(&name.node)
-        .ok_or_else(|| CodegenError::UnsupportedOperation(
-            format!("struct '{}' not found in type registry", name.node)
-        ))?;
+    let struct_def = info.type_registry.get_struct(&name.node).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "struct '{}' not found in type registry",
+            name.node
+        ))
+    })?;
 
     // Generate labels for struct data
     let struct_label = emitter.next_label(&format!("struct_{}", name.node));
@@ -165,10 +169,10 @@ pub(super) fn generate_struct_init(
     emitter.emit_label(&struct_label);
 
     // Create a map of field values for quick lookup
-    let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> =
-        fields.iter()
-            .map(|f| (f.name.node.clone(), &f.value))
-            .collect();
+    let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> = fields
+        .iter()
+        .map(|f| (f.name.node.clone(), &f.value))
+        .collect();
 
     // Initialize each field in order (respecting struct layout)
     for field_info in &struct_def.fields {
@@ -187,9 +191,10 @@ pub(super) fn generate_struct_init(
                             emitter.emit_byte((*val & 0xFF) as u8);
                             emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
                         } else {
-                            return Err(CodegenError::UnsupportedOperation(
-                                format!("struct field type with size {} not yet supported", size)
-                            ));
+                            return Err(CodegenError::UnsupportedOperation(format!(
+                                "struct field type with size {} not yet supported",
+                                size
+                            )));
                         }
                     }
                     crate::ast::Literal::Bool(b) => {
@@ -197,13 +202,14 @@ pub(super) fn generate_struct_init(
                     }
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(
-                            "only integer and bool literals supported in struct initialization".to_string()
+                            "only integer and bool literals supported in struct initialization"
+                                .to_string(),
                         ));
                     }
                 }
             } else {
                 return Err(CodegenError::UnsupportedOperation(
-                    "only constant expressions supported in struct initialization".to_string()
+                    "only constant expressions supported in struct initialization".to_string(),
                 ));
             }
         } else {
@@ -234,19 +240,24 @@ pub fn generate_struct_init_runtime(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    emitter.emit_comment(&format!("Struct init (runtime): {} at ${:02X}", struct_name, dest_addr));
+    emitter.emit_comment(&format!(
+        "Struct init (runtime): {} at ${:02X}",
+        struct_name, dest_addr
+    ));
 
     // Look up the struct definition
-    let struct_def = info.type_registry.get_struct(struct_name)
-        .ok_or_else(|| CodegenError::UnsupportedOperation(
-            format!("struct '{}' not found in type registry", struct_name)
-        ))?;
+    let struct_def = info.type_registry.get_struct(struct_name).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "struct '{}' not found in type registry",
+            struct_name
+        ))
+    })?;
 
     // Create a map of field values for quick lookup
-    let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> =
-        fields.iter()
-            .map(|f| (f.name.node.clone(), &f.value))
-            .collect();
+    let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> = fields
+        .iter()
+        .map(|f| (f.name.node.clone(), &f.value))
+        .collect();
 
     // Initialize each field in order (respecting struct layout)
     for field_info in &struct_def.fields {
@@ -265,9 +276,10 @@ pub fn generate_struct_init_runtime(
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
                 emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
             } else {
-                return Err(CodegenError::UnsupportedOperation(
-                    format!("struct field type with size {} not yet supported", size)
-                ));
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "struct field type with size {} not yet supported",
+                    size
+                )));
             }
         } else {
             // Field not provided - initialize to zero
@@ -295,7 +307,9 @@ pub(super) fn generate_field_access(
     // Get the base object (must be a variable for now)
     if let Expr::Variable(var_name) = &object.node {
         // Look up the variable using span from resolved_symbols, fallback to global table
-        let sym = info.resolved_symbols.get(&object.span)
+        let sym = info
+            .resolved_symbols
+            .get(&object.span)
             .or_else(|| info.table.lookup(var_name));
 
         if let Some(sym) = sym {
@@ -304,9 +318,10 @@ pub(super) fn generate_field_access(
                 crate::sema::table::SymbolLocation::ZeroPage(addr) => addr as u16,
                 crate::sema::table::SymbolLocation::Absolute(addr) => addr,
                 _ => {
-                    return Err(CodegenError::UnsupportedOperation(
-                        format!("Cannot access field of variable with location: {:?}", sym.location)
-                    ));
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "Cannot access field of variable with location: {:?}",
+                        sym.location
+                    )));
                 }
             };
 
@@ -316,22 +331,27 @@ pub(super) fn generate_field_access(
             let struct_name = if let crate::sema::types::Type::Named(name) = &sym.ty {
                 name
             } else {
-                return Err(CodegenError::UnsupportedOperation(
-                    format!("variable '{}' is not a struct type", var_name)
-                ));
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "variable '{}' is not a struct type",
+                    var_name
+                )));
             };
 
             // Look up the struct definition
-            let struct_def = info.type_registry.get_struct(struct_name)
-                .ok_or_else(|| CodegenError::UnsupportedOperation(
-                    format!("struct '{}' not found in type registry", struct_name)
-                ))?;
+            let struct_def = info.type_registry.get_struct(struct_name).ok_or_else(|| {
+                CodegenError::UnsupportedOperation(format!(
+                    "struct '{}' not found in type registry",
+                    struct_name
+                ))
+            })?;
 
             // Find the field and get its offset
-            let field_info = struct_def.get_field(&field.node)
-                .ok_or_else(|| CodegenError::UnsupportedOperation(
-                    format!("field '{}' not found in struct '{}'", field.node, struct_name)
-                ))?;
+            let field_info = struct_def.get_field(&field.node).ok_or_else(|| {
+                CodegenError::UnsupportedOperation(format!(
+                    "field '{}' not found in struct '{}'",
+                    field.node, struct_name
+                ))
+            })?;
 
             // Check if this is a parameter (pass-by-reference)
             // Parameters are in the param region ($80-$BF)
@@ -342,7 +362,8 @@ pub(super) fn generate_field_access(
             if is_parameter {
                 // Check if this struct param has a local pointer copy
                 // (prevents clobbering on nested calls)
-                let local_ptr_addr = emitter.current_function()
+                let local_ptr_addr = emitter
+                    .current_function()
                     .and_then(|fn_name| info.function_metadata.get(fn_name))
                     .and_then(|meta| meta.struct_param_locals.get(var_name))
                     .copied();
@@ -369,7 +390,7 @@ pub(super) fn generate_field_access(
         }
     } else {
         Err(CodegenError::UnsupportedOperation(
-            "Field access only supported on variables (not expressions)".to_string()
+            "Field access only supported on variables (not expressions)".to_string(),
         ))
     }
 }
@@ -381,19 +402,29 @@ pub(super) fn generate_enum_variant(
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
-    emitter.emit_comment(&format!("Enum variant: {}::{}", enum_name.node, variant.node));
+    emitter.emit_comment(&format!(
+        "Enum variant: {}::{}",
+        enum_name.node, variant.node
+    ));
 
     // Look up the enum definition
-    let enum_def = info.type_registry.get_enum(&enum_name.node)
-        .ok_or_else(|| CodegenError::UnsupportedOperation(
-            format!("enum '{}' not found in type registry", enum_name.node)
-        ))?;
+    let enum_def = info
+        .type_registry
+        .get_enum(&enum_name.node)
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(format!(
+                "enum '{}' not found in type registry",
+                enum_name.node
+            ))
+        })?;
 
     // Find the variant
-    let variant_info = enum_def.get_variant(&variant.node)
-        .ok_or_else(|| CodegenError::UnsupportedOperation(
-            format!("variant '{}' not found in enum '{}'", variant.node, enum_name.node)
-        ))?;
+    let variant_info = enum_def.get_variant(&variant.node).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "variant '{}' not found in enum '{}'",
+            variant.node, enum_name.node
+        ))
+    })?;
 
     // Generate labels for enum data
     // Use short label prefix to stay within 12-char assembler limit
@@ -414,12 +445,18 @@ pub(super) fn generate_enum_variant(
         (crate::sema::type_defs::VariantData::Unit, crate::ast::VariantData::Unit) => {
             // Unit variant - just the tag, no data
         }
-        (crate::sema::type_defs::VariantData::Tuple(field_types), crate::ast::VariantData::Tuple(values)) => {
+        (
+            crate::sema::type_defs::VariantData::Tuple(field_types),
+            crate::ast::VariantData::Tuple(values),
+        ) => {
             // Tuple variant - emit each value
             if values.len() != field_types.len() {
-                return Err(CodegenError::UnsupportedOperation(
-                    format!("variant '{}' expects {} fields, got {}", variant.node, field_types.len(), values.len())
-                ));
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "variant '{}' expects {} fields, got {}",
+                    variant.node,
+                    field_types.len(),
+                    values.len()
+                )));
             }
 
             for (value_expr, field_type) in values.iter().zip(field_types.iter()) {
@@ -435,9 +472,10 @@ pub(super) fn generate_enum_variant(
                                 emitter.emit_byte((*val & 0xFF) as u8);
                                 emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
                             } else {
-                                return Err(CodegenError::UnsupportedOperation(
-                                    format!("field type with size {} not yet supported", size)
-                                ));
+                                return Err(CodegenError::UnsupportedOperation(format!(
+                                    "field type with size {} not yet supported",
+                                    size
+                                )));
                             }
                         }
                         crate::ast::Literal::Bool(b) => {
@@ -445,21 +483,27 @@ pub(super) fn generate_enum_variant(
                         }
                         _ => {
                             return Err(CodegenError::UnsupportedOperation(
-                                "only integer and bool literals supported in enum variant data".to_string()
+                                "only integer and bool literals supported in enum variant data"
+                                    .to_string(),
                             ));
                         }
                     }
                 } else {
                     return Err(CodegenError::UnsupportedOperation(
-                        "only constant expressions supported in enum variant construction".to_string()
+                        "only constant expressions supported in enum variant construction"
+                            .to_string(),
                     ));
                 }
             }
         }
-        (crate::sema::type_defs::VariantData::Struct(field_infos), crate::ast::VariantData::Struct(field_inits)) => {
+        (
+            crate::sema::type_defs::VariantData::Struct(field_infos),
+            crate::ast::VariantData::Struct(field_inits),
+        ) => {
             // Struct variant - similar to struct initialization
             let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> =
-                field_inits.iter()
+                field_inits
+                    .iter()
                     .map(|f| (f.name.node.clone(), &f.value))
                     .collect();
 
@@ -475,9 +519,10 @@ pub(super) fn generate_enum_variant(
                                     emitter.emit_byte((*val & 0xFF) as u8);
                                     emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
                                 } else {
-                                    return Err(CodegenError::UnsupportedOperation(
-                                        format!("field type with size {} not yet supported", size)
-                                    ));
+                                    return Err(CodegenError::UnsupportedOperation(format!(
+                                        "field type with size {} not yet supported",
+                                        size
+                                    )));
                                 }
                             }
                             crate::ast::Literal::Bool(b) => {
@@ -485,13 +530,15 @@ pub(super) fn generate_enum_variant(
                             }
                             _ => {
                                 return Err(CodegenError::UnsupportedOperation(
-                                    "only integer and bool literals supported in enum variant".to_string()
+                                    "only integer and bool literals supported in enum variant"
+                                        .to_string(),
                                 ));
                             }
                         }
                     } else {
                         return Err(CodegenError::UnsupportedOperation(
-                            "only constant expressions supported in enum variant construction".to_string()
+                            "only constant expressions supported in enum variant construction"
+                                .to_string(),
                         ));
                     }
                 } else {
@@ -503,9 +550,10 @@ pub(super) fn generate_enum_variant(
             }
         }
         _ => {
-            return Err(CodegenError::UnsupportedOperation(
-                format!("variant data mismatch for '{}'", variant.node)
-            ));
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "variant data mismatch for '{}'",
+                variant.node
+            )));
         }
     }
 

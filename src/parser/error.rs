@@ -95,7 +95,11 @@ impl ParseError {
     /// Format error with source code context and filename
     pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
         match &self.kind {
-            ParseErrorKind::CustomDetailed { prefix, message, suffix } => {
+            ParseErrorKind::CustomDetailed {
+                prefix,
+                message,
+                suffix,
+            } => {
                 // Format: {prefix}\n{context}\n{suffix}
                 let mut result = String::new();
 
@@ -132,24 +136,25 @@ impl ParseError {
                             Some(tok) => format_token(tok),
                             None => "end of file".to_string(),
                         };
-                        ("error", format!("expected {}, found {}", expected, found_str))
+                        (
+                            "error",
+                            format!("expected {}, found {}", expected, found_str),
+                        )
                     }
-                    ParseErrorKind::UnexpectedEof { expected } => {
-                        ("error", format!("unexpected end of file, expected {}", expected))
-                    }
+                    ParseErrorKind::UnexpectedEof { expected } => (
+                        "error",
+                        format!("unexpected end of file, expected {}", expected),
+                    ),
                     ParseErrorKind::InvalidInteger(s) => {
                         ("error", format!("invalid integer: {}", s))
                     }
-                    ParseErrorKind::InvalidType(s) => {
-                        ("error", format!("invalid type: {}", s))
-                    }
-                    ParseErrorKind::Custom(msg) => {
-                        ("error", msg.clone())
-                    }
+                    ParseErrorKind::InvalidType(s) => ("error", format!("invalid type: {}", s)),
+                    ParseErrorKind::Custom(msg) => ("error", msg.clone()),
                     _ => unreachable!(),
                 };
 
-                format!("{}: {}\n{}",
+                format!(
+                    "{}: {}\n{}",
                     error_type,
                     message,
                     self.span.format_error_context(source, filename, &message)

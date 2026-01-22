@@ -5,5 +5,18 @@
       "Bash(cargo clippy:*)",
       "Bash(git add:*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt --quiet 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
   }
 }
