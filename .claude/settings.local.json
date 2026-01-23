@@ -1,9 +1,20 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)",
-      "Bash(git add:*)"
-    ]
-  }
+    "permissions": {
+        "allow": [
+            "Bash(cargo test:*)",
+            "Bash(cargo clippy:*)",
+            "Bash(cargo build:*)",
+            "Bash(git add:*)",
+            "Bash(cargo run:*)",
+            "Bash(cat:*)",
+            "Bash(ls:*)",
+            "Bash(git grep:*)",
+            "Bash(git add:*)",
+            "Bash(git stash:*)",
+            "Bash(grep:*)",
+            "Bash(wc:*)",
+            "Bash(find:*)",
+            "Bash(xxd:*)"
+        ]
+    }
 }
