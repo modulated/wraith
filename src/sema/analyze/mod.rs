@@ -154,7 +154,7 @@ impl SemanticAnalyzer {
             Type::Primitive(prim) => prim.size_bytes(),
             Type::Array(element_ty, len) => self.type_size(element_ty) * len,
             Type::Slice(_) => 4, // Fat pointer: 2 bytes base address + 2 bytes length
-            Type::String => 2, // String is represented as a pointer
+            Type::String => 2,   // String is represented as a pointer
             Type::Function(_, _) => 2, // Function pointer is 16-bit
             Type::Void => 0,
             Type::Named(name) => {
@@ -400,7 +400,10 @@ impl SemanticAnalyzer {
                 let element_type = self.resolve_type(&element.node)?;
                 Ok(Type::Array(Box::new(element_type), *size))
             }
-            TypeExpr::Slice { element, mutable: _ } => {
+            TypeExpr::Slice {
+                element,
+                mutable: _,
+            } => {
                 // Slice is a fat pointer with base address and length
                 let element_type = self.resolve_type(&element.node)?;
                 Ok(Type::Slice(Box::new(element_type)))

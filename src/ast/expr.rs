@@ -143,9 +143,7 @@ pub enum Expr {
 
     /// Anonymous struct construction: { x: 10, y: 20 }
     /// Struct name is inferred from context (e.g., variable type annotation)
-    AnonStructInit {
-        fields: Vec<FieldInit>,
-    },
+    AnonStructInit { fields: Vec<FieldInit> },
 
     /// Enum variant construction: Direction::North or Message::Move { x: 1, y: 2 }
     EnumVariant {

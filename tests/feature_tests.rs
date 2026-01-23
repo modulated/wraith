@@ -262,7 +262,11 @@ fn test_function_call_no_args() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "JSR helper");
+    // Tail call optimization may convert JSR+RTS to JMP
+    assert!(
+        asm.contains("JSR helper") || asm.contains("JMP helper"),
+        "Expected JSR or JMP helper (tail-call optimized)"
+    );
 }
 
 #[test]
@@ -278,7 +282,11 @@ fn test_function_call_with_args() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "JSR add");
+    // Tail call optimization may convert JSR+RTS to JMP
+    assert!(
+        asm.contains("JSR add") || asm.contains("JMP add"),
+        "Expected JSR or JMP add (tail-call optimized)"
+    );
 }
 
 #[test]
@@ -394,8 +402,8 @@ fn test_address_declaration() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "SCREEN = $C000");  // Address label
-    assert_asm_contains(&asm, "STA SCREEN");      // Symbolic name
+    assert_asm_contains(&asm, "SCREEN = $C000"); // Address label
+    assert_asm_contains(&asm, "STA SCREEN"); // Symbolic name
 }
 
 #[test]
@@ -409,8 +417,8 @@ fn test_constant_address_expression() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "SCREEN = $C100");  // 0xC000 + 0x100
-    assert_asm_contains(&asm, "STA SCREEN");      // Symbolic name
+    assert_asm_contains(&asm, "SCREEN = $C100"); // 0xC000 + 0x100
+    assert_asm_contains(&asm, "STA SCREEN"); // Symbolic name
 }
 
 // ============================================================================

@@ -105,7 +105,10 @@ fn main() {
     // Print imports
     for item in &ast.items {
         if let wraith::ast::Item::Import(import) = &item.node {
-            println!("{}{:>12}{} {}", YELLOW, "Importing", RESET, import.path.node);
+            println!(
+                "{}{:>12}{} {}",
+                YELLOW, "Importing", RESET, import.path.node
+            );
         }
     }
 
@@ -121,7 +124,10 @@ fn main() {
 
     // Display warnings
     for warning in &program_info.warnings {
-        eprintln!("{}", warning.format_with_source_and_file(&source, Some(&file)));
+        eprintln!(
+            "{}",
+            warning.format_with_source_and_file(&source, Some(&file))
+        );
         eprintln!(); // Add blank line between warnings
     }
 
@@ -144,13 +150,22 @@ fn main() {
     let elapsed = start_time.elapsed();
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
 
-    println!("{}{:>12}{} {} in {:.2}ms", GREEN, "Finished", RESET, out_file, elapsed_ms);
+    println!(
+        "{}{:>12}{} {} in {:.2}ms",
+        GREEN, "Finished", RESET, out_file, elapsed_ms
+    );
 
     // Print section statistics
     let stats = section_alloc.get_statistics();
     for stat in stats {
         if stat.used > 0 {
-            println!("{}{:>12}{} {}", YELLOW, stat.name, RESET, stat.format_compact());
+            println!(
+                "{}{:>12}{} {}",
+                YELLOW,
+                stat.name,
+                RESET,
+                stat.format_compact()
+            );
         }
     }
 }

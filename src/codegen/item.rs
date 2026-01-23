@@ -43,7 +43,9 @@ pub fn generate_item(
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match &item.node {
-        Item::Function(func) => generate_function(func, emitter, info, section_alloc, string_collector),
+        Item::Function(func) => {
+            generate_function(func, emitter, info, section_alloc, string_collector)
+        }
         Item::Static(stat) => generate_static(stat, emitter, info, string_collector),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
@@ -68,10 +70,12 @@ fn generate_function(
 
     // Check if this is an interrupt handler (need to know for size calculation)
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
-    let is_interrupt = func.attributes.iter().any(|attr| matches!(
-        attr,
-        FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
-    ));
+    let is_interrupt = func.attributes.iter().any(|attr| {
+        matches!(
+            attr,
+            FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
+        )
+    });
 
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
@@ -112,34 +116,35 @@ fn generate_function(
 
     // Determine function address
     // Priority: explicit org > section attribute > default section
-    let (function_addr, allocation_source) = if let Some(metadata) = info.function_metadata.get(name) {
-        if let Some(org_addr) = metadata.org_address {
-            // Explicit org address takes precedence
-            emitter.emit_org(org_addr);
-            (org_addr, AllocationSource::ExplicitOrg)
-        } else if let Some(section_name) = &metadata.section {
-            // Allocate in specified section using actual measured size
-            let addr = section_alloc
-                .allocate(section_name, function_size)
-                .map_err(CodegenError::SectionError)?;
-            emitter.emit_org(addr);
-            (addr, AllocationSource::Section(section_name.clone()))
+    let (function_addr, allocation_source) =
+        if let Some(metadata) = info.function_metadata.get(name) {
+            if let Some(org_addr) = metadata.org_address {
+                // Explicit org address takes precedence
+                emitter.emit_org(org_addr);
+                (org_addr, AllocationSource::ExplicitOrg)
+            } else if let Some(section_name) = &metadata.section {
+                // Allocate in specified section using actual measured size
+                let addr = section_alloc
+                    .allocate(section_name, function_size)
+                    .map_err(CodegenError::SectionError)?;
+                emitter.emit_org(addr);
+                (addr, AllocationSource::Section(section_name.clone()))
+            } else {
+                // Use default section (CODE)
+                let addr = section_alloc
+                    .allocate_default(function_size)
+                    .map_err(CodegenError::SectionError)?;
+                emitter.emit_org(addr);
+                (addr, AllocationSource::AutoAllocated)
+            }
         } else {
-            // Use default section (CODE)
+            // No metadata - use default section
             let addr = section_alloc
                 .allocate_default(function_size)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
             (addr, AllocationSource::AutoAllocated)
-        }
-    } else {
-        // No metadata - use default section
-        let addr = section_alloc
-            .allocate_default(function_size)
-            .map_err(CodegenError::SectionError)?;
-        emitter.emit_org(addr);
-        (addr, AllocationSource::AutoAllocated)
-    };
+        };
 
     // Record this allocation for conflict detection
     section_alloc.record_allocation(
@@ -154,7 +159,9 @@ fn generate_function(
 
     // Parameters
     if !func.params.is_empty() {
-        let params_str: Vec<String> = func.params.iter()
+        let params_str: Vec<String> = func
+            .params
+            .iter()
             .map(|p| format!("{}: {}", p.name.node, format_type(&p.ty)))
             .collect();
         emitter.emit_comment(&format!("  Params: {}", params_str.join(", ")));
@@ -174,10 +181,14 @@ fn generate_function(
 
     // Document zero-page usage in verbose mode
     if emitter.is_verbose() {
-        emitter.emit_comment(&format!("  Temps: $20-${:02X}=available scratch",
-            emitter.memory_layout.param_base - 1));
-        emitter.emit_comment(&format!("  Params: ${:02X}-$81=parameter area",
-            emitter.memory_layout.param_base));
+        emitter.emit_comment(&format!(
+            "  Temps: $20-${:02X}=available scratch",
+            emitter.memory_layout.param_base - 1
+        ));
+        emitter.emit_comment(&format!(
+            "  Params: ${:02X}-$81=parameter area",
+            emitter.memory_layout.param_base
+        ));
     }
 
     // Attributes
@@ -197,18 +208,23 @@ fn generate_function(
     emitter.emit_label(name);
 
     // Initialize software stack pointer for reset handler
-    let is_reset = func.attributes.iter().any(|attr| matches!(attr, FnAttribute::Reset));
+    let is_reset = func
+        .attributes
+        .iter()
+        .any(|attr| matches!(attr, FnAttribute::Reset));
     if is_reset {
         emitter.emit_comment("Initialize software stack pointer for parameter preservation");
         emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("STA", "$FF");  // Stack pointer at $FF, stack at $0200-$02FF
+        emitter.emit_inst("STA", "$FF"); // Stack pointer at $FF, stack at $0200-$02FF
     }
 
     // Set current function context for tail call detection
     emitter.set_current_function(name.clone());
 
     // Check if function has tail recursion - if so, emit loop restart label
-    let has_tail_recursion = info.function_metadata.get(name)
+    let has_tail_recursion = info
+        .function_metadata
+        .get(name)
         .map(|m| m.has_tail_recursion)
         .unwrap_or(false);
 
@@ -220,41 +236,47 @@ fn generate_function(
     // Copy struct parameter pointers to local storage
     // This ensures nested calls don't clobber the struct pointer in param space
     if let Some(metadata) = info.function_metadata.get(name)
-        && !metadata.struct_param_locals.is_empty() {
-            emitter.emit_comment("Copy struct param pointers to local storage");
-            let param_base = emitter.memory_layout.param_base;
-            let mut param_offset = 0u8;
+        && !metadata.struct_param_locals.is_empty()
+    {
+        emitter.emit_comment("Copy struct param pointers to local storage");
+        let param_base = emitter.memory_layout.param_base;
+        let mut param_offset = 0u8;
 
-            // Iterate through params to find struct params and their offsets
-            for param in &func.params {
-                let param_name = &param.name.node;
-                let param_type = info.resolved_types.get(&param.ty.span);
+        // Iterate through params to find struct params and their offsets
+        for param in &func.params {
+            let param_name = &param.name.node;
+            let param_type = info.resolved_types.get(&param.ty.span);
 
-                // Check if this param has a local copy
-                if let Some(&local_addr) = metadata.struct_param_locals.get(param_name) {
-                    let param_addr = param_base + param_offset;
-                    emitter.emit_comment(&format!("Copy '{}' pointer ${:02X} -> ${:02X}", param_name, param_addr, local_addr));
-                    emitter.emit_inst("LDA", &format!("${:02X}", param_addr));
-                    emitter.emit_inst("STA", &format!("${:02X}", local_addr));
-                    emitter.emit_inst("LDA", &format!("${:02X}", param_addr + 1));
-                    emitter.emit_inst("STA", &format!("${:02X}", local_addr + 1));
-                    param_offset += 2; // Struct pointers are 2 bytes
-                } else if let Some(ty) = param_type {
-                    // Non-struct param - advance by its size
-                    param_offset += ty.size() as u8;
-                } else {
-                    // Fallback: assume 1 byte
-                    param_offset += 1;
-                }
+            // Check if this param has a local copy
+            if let Some(&local_addr) = metadata.struct_param_locals.get(param_name) {
+                let param_addr = param_base + param_offset;
+                emitter.emit_comment(&format!(
+                    "Copy '{}' pointer ${:02X} -> ${:02X}",
+                    param_name, param_addr, local_addr
+                ));
+                emitter.emit_inst("LDA", &format!("${:02X}", param_addr));
+                emitter.emit_inst("STA", &format!("${:02X}", local_addr));
+                emitter.emit_inst("LDA", &format!("${:02X}", param_addr + 1));
+                emitter.emit_inst("STA", &format!("${:02X}", local_addr + 1));
+                param_offset += 2; // Struct pointers are 2 bytes
+            } else if let Some(ty) = param_type {
+                // Non-struct param - advance by its size
+                param_offset += ty.size() as u8;
+            } else {
+                // Fallback: assume 1 byte
+                param_offset += 1;
             }
         }
+    }
 
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
-    let is_interrupt = func.attributes.iter().any(|attr| matches!(
-        attr,
-        FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
-    ));
+    let is_interrupt = func.attributes.iter().any(|attr| {
+        matches!(
+            attr,
+            FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
+        )
+    });
 
     // Emit interrupt prologue if needed
     if is_interrupt {
@@ -323,7 +345,9 @@ fn generate_static(
     emitter.emit_label(name);
 
     // Look up the symbol to get its type and size
-    let sym = info.table.lookup(name)
+    let sym = info
+        .table
+        .lookup(name)
         .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
     let type_size = sym.ty.size();
@@ -342,7 +366,7 @@ fn generate_static(
                 }
                 2 => {
                     // Two bytes (u16 or i16) - little-endian
-                    emitter.emit_byte((value & 0xFF) as u8);        // Low byte
+                    emitter.emit_byte((value & 0xFF) as u8); // Low byte
                     emitter.emit_byte(((value >> 8) & 0xFF) as u8); // High byte
                 }
                 _ => {
@@ -354,7 +378,11 @@ fn generate_static(
             }
         }
         crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) => {
-            emitter.emit_comment(&format!("static {} (array of {} elements)", name, elements.len()));
+            emitter.emit_comment(&format!(
+                "static {} (array of {} elements)",
+                name,
+                elements.len()
+            ));
 
             // Emit each element as a byte
             for elem in elements {
@@ -362,7 +390,8 @@ fn generate_static(
                     emitter.emit_byte(*val as u8);
                 } else {
                     return Err(CodegenError::UnsupportedOperation(
-                        "Only integer literals supported in static array initialization".to_string()
+                        "Only integer literals supported in static array initialization"
+                            .to_string(),
                     ));
                 }
             }
@@ -373,7 +402,7 @@ fn generate_static(
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(
-                "Only constant literal expressions supported in static initialization".to_string()
+                "Only constant literal expressions supported in static initialization".to_string(),
             ));
         }
     }
@@ -391,7 +420,9 @@ fn generate_address(
 
     // Get the actual address value from resolved_symbols (using span for correct lookup)
     // Fallback to global table for top-level addresses
-    let sym = info.resolved_symbols.get(&addr.name.span)
+    let sym = info
+        .resolved_symbols
+        .get(&addr.name.span)
         .or_else(|| info.table.lookup(name));
 
     if let Some(sym) = sym {
@@ -430,7 +461,7 @@ fn emit_const_array(
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(
-                "Const arrays must have literal initializers".to_string()
+                "Const arrays must have literal initializers".to_string(),
             ));
         }
     }
@@ -453,12 +484,12 @@ fn emit_array_fill_data(
             *n
         } else {
             return Err(CodegenError::UnsupportedOperation(
-                "Array fill value must be an integer".to_string()
+                "Array fill value must be an integer".to_string(),
             ));
         }
     } else {
         return Err(CodegenError::UnsupportedOperation(
-            "Array fill value must be a constant".to_string()
+            "Array fill value must be a constant".to_string(),
         ));
     };
 
@@ -490,12 +521,12 @@ fn emit_array_literal_data(
                 *n
             } else {
                 return Err(CodegenError::UnsupportedOperation(
-                    "Array elements must be integers".to_string()
+                    "Array elements must be integers".to_string(),
                 ));
             }
         } else {
             return Err(CodegenError::UnsupportedOperation(
-                "Array elements must be constants".to_string()
+                "Array elements must be constants".to_string(),
             ));
         };
         bytes.push(val as u8);
@@ -503,7 +534,8 @@ fn emit_array_literal_data(
 
     // Emit as .BYTE directives (max 16 per line for readability)
     for chunk in bytes.chunks(16) {
-        let byte_str = chunk.iter()
+        let byte_str = chunk
+            .iter()
             .map(|b| format!("${:02X}", b))
             .collect::<Vec<_>>()
             .join(", ");
@@ -518,7 +550,8 @@ fn emit_repeated_bytes(val: u8, count: usize, emitter: &mut Emitter) {
     // Emit as .BYTE directives (max 16 per line)
     let bytes = vec![val; count];
     for chunk in bytes.chunks(16) {
-        let byte_str = chunk.iter()
+        let byte_str = chunk
+            .iter()
             .map(|b| format!("${:02X}", b))
             .collect::<Vec<_>>()
             .join(", ");

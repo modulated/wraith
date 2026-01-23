@@ -12,7 +12,10 @@ use super::SemanticAnalyzer;
 impl SemanticAnalyzer {
     /// Analyze all functions for tail recursive calls
     /// This pass runs after all other analysis is complete
-    pub(super) fn analyze_tail_calls(&mut self, source: &SourceFile) -> HashMap<String, TailCallInfo> {
+    pub(super) fn analyze_tail_calls(
+        &mut self,
+        source: &SourceFile,
+    ) -> HashMap<String, TailCallInfo> {
         let mut tail_call_info = HashMap::new();
 
         for item in &source.items {
@@ -22,9 +25,10 @@ impl SemanticAnalyzer {
 
                 // Update function metadata if tail recursion detected
                 if !info.tail_recursive_returns.is_empty()
-                    && let Some(metadata) = self.function_metadata.get_mut(&func_name) {
-                        metadata.has_tail_recursion = true;
-                    }
+                    && let Some(metadata) = self.function_metadata.get_mut(&func_name)
+                {
+                    metadata.has_tail_recursion = true;
+                }
 
                 tail_call_info.insert(func_name, info);
             }
@@ -54,10 +58,11 @@ impl SemanticAnalyzer {
             Stmt::Return(Some(expr)) => {
                 // Check if this is a direct call to the same function
                 if let Expr::Call { function, .. } = &expr.node
-                    && function.node == func_name {
-                        // This is a tail recursive call!
-                        tail_recursive_returns.insert(stmt.span);
-                    }
+                    && function.node == func_name
+                {
+                    // This is a tail recursive call!
+                    tail_recursive_returns.insert(stmt.span);
+                }
             }
 
             // Recurse into block statements
@@ -68,7 +73,11 @@ impl SemanticAnalyzer {
             }
 
             // Recurse into if/else (both branches must be checked)
-            Stmt::If { then_branch, else_branch, .. } => {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.find_tail_recursive_returns(func_name, then_branch, tail_recursive_returns);
                 if let Some(alt) = else_branch {
                     self.find_tail_recursive_returns(func_name, alt, tail_recursive_returns);

@@ -32,7 +32,10 @@ impl ZeroPageAllocator {
             let addr = self.next_addr;
 
             // Check if this address is reserved
-            let is_reserved = self.reserved.iter().any(|(start, end)| addr >= *start && addr <= *end);
+            let is_reserved = self
+                .reserved
+                .iter()
+                .any(|(start, end)| addr >= *start && addr <= *end);
 
             if !is_reserved && addr != 0xFF {
                 self.next_addr = addr + 1;

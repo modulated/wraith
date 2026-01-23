@@ -36,7 +36,7 @@ impl Type {
             Type::Primitive(prim) => prim.size_bytes(),
             Type::Array(ty, len) => ty.size() * len,
             Type::Slice(_) => 4, // Fat pointer: 2 bytes base address + 2 bytes length
-            Type::String => 2, // String is represented as a pointer to length-prefixed data
+            Type::String => 2,   // String is represented as a pointer to length-prefixed data
             Type::Function(_, _) => 2, // Function pointer is 16-bit address
             Type::Void => 0,
             Type::Named(_) => 0, // Size depends on definition, needs lookup
@@ -59,12 +59,13 @@ impl Type {
             Type::Array(element_ty, size) => format!("[{}; {}]", element_ty.display_name(), size),
             Type::Slice(element_ty) => format!("&[{}]", element_ty.display_name()),
             Type::Function(params, ret) => {
-                let params_str = params.iter()
+                let params_str = params
+                    .iter()
                     .map(|p| p.display_name())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("fn({}) -> {}", params_str, ret.display_name())
-            },
+            }
             Type::Named(name) => name.clone(),
             Type::String => "string".to_string(),
             Type::Void => "void".to_string(),
@@ -86,7 +87,7 @@ impl Type {
         // BCD types: NO implicit conversion (require explicit casts)
         match (self, to) {
             (Type::Primitive(src), Type::Primitive(dst)) if src.is_bcd() || dst.is_bcd() => {
-                return false;  // Force explicit casts for all BCD conversions
+                return false; // Force explicit casts for all BCD conversions
             }
             _ => {}
         }

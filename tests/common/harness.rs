@@ -3,12 +3,12 @@
 //! Provides functions to compile programs at different stages
 //! and handle errors appropriately.
 
+use std::path::PathBuf;
 use wraith::ast::SourceFile;
-use wraith::codegen::{generate, CommentVerbosity};
+use wraith::codegen::{CommentVerbosity, generate};
 use wraith::lex;
 use wraith::parser::Parser;
-use wraith::sema::{analyze, analyze_with_path, ProgramInfo};
-use std::path::PathBuf;
+use wraith::sema::{ProgramInfo, analyze, analyze_with_path};
 
 /// Result of compiling a Wraith program
 #[derive(Debug)]
@@ -41,7 +41,8 @@ pub fn compile(source: &str) -> CompileResult {
     };
 
     // Format warnings
-    let warnings = program.warnings
+    let warnings = program
+        .warnings
         .iter()
         .map(|w| w.format_with_source_and_file(source, None))
         .collect::<Vec<_>>()
@@ -76,7 +77,8 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
     };
 
     // Format warnings
-    let warnings = program.warnings
+    let warnings = program
+        .warnings
         .iter()
         .map(|w| w.format_with_source_and_file(source, None))
         .collect::<Vec<_>>()
@@ -138,7 +140,10 @@ pub fn analyze_only(source: &str) -> Result<ProgramInfo, String> {
 pub fn assert_fails_at(source: &str, expected_phase: &str) {
     match compile(source) {
         CompileResult::Success(..) => {
-            panic!("Expected compilation to fail at {} but it succeeded", expected_phase)
+            panic!(
+                "Expected compilation to fail at {} but it succeeded",
+                expected_phase
+            )
         }
         CompileResult::LexError(_) if expected_phase == "lex" => {}
         CompileResult::ParseError(_) if expected_phase == "parse" => {}

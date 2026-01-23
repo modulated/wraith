@@ -10,14 +10,16 @@ use crate::common::*;
 
 #[test]
 fn eliminate_redundant_load() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const OUT: addr = 0x6000;
         fn main() {
             let x: u8 = 42;
             OUT = x;
             OUT = x;  // Should reuse loaded value
         }
-    "#);
+    "#,
+    );
 
     // Count LDA instructions - peephole should eliminate redundant loads
     let lda_count = asm.lines().filter(|line| line.contains("LDA")).count();
@@ -31,12 +33,14 @@ fn eliminate_redundant_load() {
 
 #[test]
 fn eliminate_redundant_store() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 10;
             x = 20;  // First store should be eliminated
         }
-    "#);
+    "#,
+    );
 
     // Should only store once
     let sta_count = asm.lines().filter(|line| line.contains("STA $40")).count();
@@ -49,14 +53,16 @@ fn eliminate_redundant_store() {
 
 #[test]
 fn eliminate_load_after_store() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const OUT: addr = 0x6000;
         fn main() {
             let x: u8 = 42;
             // Store then load same location
             OUT = x;
         }
-    "#);
+    "#,
+    );
 
     // Optimizer should work - just verify compilation succeeds
     assert!(asm.contains("STA"));
@@ -68,13 +74,15 @@ fn eliminate_load_after_store() {
 
 #[test]
 fn eliminate_dead_store() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 10;
             x = 20;
             x = 30;
         }
-    "#);
+    "#,
+    );
 
     // First two stores are dead, only last one should remain
     let sta_count = asm.lines().filter(|line| line.contains("STA $40")).count();
@@ -87,26 +95,32 @@ fn eliminate_dead_store() {
 
 #[test]
 fn eliminate_nop_operations() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 0;
             x = x + 0;  // Adding zero is a NOP
         }
-    "#);
+    "#,
+    );
 
     // Adding zero should be optimized away
     // Should not have redundant ADC #$00
-    assert!(!asm.contains("ADC #$00") || asm.lines().filter(|l| l.contains("ADC #$00")).count() == 0);
+    assert!(
+        !asm.contains("ADC #$00") || asm.lines().filter(|l| l.contains("ADC #$00")).count() == 0
+    );
 }
 
 #[test]
 fn eliminate_multiply_by_one() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 10;
             let y: u8 = x * 1;  // Multiply by 1 is a NOP
         }
-    "#);
+    "#,
+    );
 
     // Multiplication by 1 should be optimized
     assert!(asm.contains("STA"));
@@ -118,13 +132,15 @@ fn eliminate_multiply_by_one() {
 
 #[test]
 fn eliminate_redundant_tax_txa() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 10;
             let y: u8 = x;
             let z: u8 = y;
         }
-    "#);
+    "#,
+    );
 
     // Should optimize register transfers
     assert!(asm.contains("STA"));
@@ -136,12 +152,14 @@ fn eliminate_redundant_tax_txa() {
 
 #[test]
 fn constant_folding_arithmetic() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = (10 + 20) * 2;
         }
-    "#);
+    "#,
+    );
 
     // Should fold to 60 (0x3C)
     assert_asm_contains(&asm, "LDA #$3C");
@@ -151,12 +169,14 @@ fn constant_folding_arithmetic() {
 
 #[test]
 fn constant_folding_bitwise() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = (0xFF & 0x0F) | 0x80;
         }
-    "#);
+    "#,
+    );
 
     // Should fold to 0x8F
     assert_asm_contains(&asm, "LDA #$8F");
@@ -166,12 +186,14 @@ fn constant_folding_bitwise() {
 
 #[test]
 fn constant_folding_shifts() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = (1 << 4) >> 1;
         }
-    "#);
+    "#,
+    );
 
     // Should fold to 8 (0x08)
     assert_asm_contains(&asm, "LDA #$08");
@@ -185,7 +207,8 @@ fn constant_folding_shifts() {
 
 #[test]
 fn multiple_optimizations() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const OUT1: addr = 0x6000;
         const OUT2: addr = 0x6001;
         fn main() {
@@ -194,7 +217,8 @@ fn multiple_optimizations() {
             OUT2 = x;  // Eliminate redundant load
             x = x + 0;  // Eliminate NOP
         }
-    "#);
+    "#,
+    );
 
     // Should have constant folded to 15
     assert_asm_contains(&asm, "LDA #$0F");
@@ -204,7 +228,8 @@ fn multiple_optimizations() {
 
 #[test]
 fn optimization_preserves_correctness() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const OUT: addr = 0x6000;
         fn main() {
             let a: u8 = 10;
@@ -212,7 +237,8 @@ fn optimization_preserves_correctness() {
             let c: u8 = a + b;
             OUT = c;
         }
-    "#);
+    "#,
+    );
 
     // Should still produce correct result
     assert_asm_contains(&asm, "ADC");
@@ -225,12 +251,14 @@ fn optimization_preserves_correctness() {
 
 #[test]
 fn inc_optimization() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 10;
             x = x + 1;
         }
-    "#);
+    "#,
+    );
 
     // x + 1 should be optimized to INC
     assert_asm_contains(&asm, "INC");
@@ -239,12 +267,14 @@ fn inc_optimization() {
 
 #[test]
 fn dec_optimization() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 10;
             x = x - 1;
         }
-    "#);
+    "#,
+    );
 
     // x - 1 should be optimized to DEC
     assert_asm_contains(&asm, "DEC");
@@ -257,14 +287,16 @@ fn dec_optimization() {
 
 #[test]
 fn loop_counter_optimization() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         const OUT: addr = 0x6000;
         fn main() {
             for i: u8 in 0..10 {
                 OUT = i;
             }
         }
-    "#);
+    "#,
+    );
 
     // Loop should use X register efficiently
     assert_asm_contains(&asm, "INX");
@@ -277,19 +309,129 @@ fn loop_counter_optimization() {
 
 #[test]
 fn optimization_reduces_size() {
-    let optimized = compile_success(r#"
+    let optimized = compile_success(
+        r#"
         const OUT: addr = 0x6000;
         fn main() {
             let x: u8 = 10 + 20;
             OUT = x;
         }
-    "#);
+    "#,
+    );
 
     // Count total instructions
-    let optimized_size = optimized.lines()
+    let optimized_size = optimized
+        .lines()
         .filter(|line| line.trim_start().starts_with(|c: char| c.is_alphabetic()))
         .count();
 
     // Should be relatively small due to constant folding
     assert!(optimized_size < 10, "Optimized code should be compact");
+}
+
+// ============================================================================
+// Tail Call Optimization
+// ============================================================================
+
+#[test]
+fn tail_call_optimization() {
+    // When a function ends with a call followed by return,
+    // the JSR; RTS should be optimized to JMP
+    let asm = compile_success(
+        r#"
+        fn helper() -> u8 {
+            return 42;
+        }
+
+        fn tail_caller() -> u8 {
+            return helper();
+        }
+
+        fn main() {
+            let x: u8 = tail_caller();
+        }
+    "#,
+    );
+
+    // The tail_caller function should use JMP instead of JSR+RTS
+    // Count JMP instructions in the output
+    let jmp_count = asm
+        .lines()
+        .filter(|line| line.trim().starts_with("JMP"))
+        .count();
+
+    // Should have at least one JMP (from the tail call optimization)
+    assert!(
+        jmp_count >= 1,
+        "Expected tail call optimization (JMP), found {} JMPs\n{}",
+        jmp_count,
+        asm
+    );
+}
+
+// ============================================================================
+// Strength Reduction
+// ============================================================================
+
+#[test]
+fn multiply_by_power_of_two() {
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            let x: u8 = 5;
+            let y: u8 = x * 2;  // Should use ASL instead of full multiply
+            OUT = y;
+        }
+    "#,
+    );
+
+    // Should use ASL for multiply by 2
+    assert_asm_contains(&asm, "ASL");
+}
+
+#[test]
+fn multiply_by_four() {
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x6000;
+        fn main() {
+            let x: u8 = 3;
+            let y: u8 = x * 4;  // Should use shift left twice
+            OUT = y;
+        }
+    "#,
+    );
+
+    // Should use ASL for multiply by power of 2
+    assert_asm_contains(&asm, "ASL");
+}
+
+// ============================================================================
+// Address Loading Optimization
+// ============================================================================
+
+#[test]
+fn redundant_immediate_loads_eliminated() {
+    let asm = compile_success(
+        r#"
+        const OUT1: addr = 0x6000;
+        const OUT2: addr = 0x6001;
+        fn main() {
+            OUT1 = 0;
+            OUT2 = 0;  // Second LDA #$00 should be optimized away
+        }
+    "#,
+    );
+
+    // Count LDA #$00 instructions
+    let lda_zero_count = asm.lines().filter(|line| line.contains("LDA #$00")).count();
+
+    // Should only have one LDA #$00 due to optimization
+    assert!(
+        lda_zero_count <= 1,
+        "Expected at most 1 LDA #$00, found {}\n{}",
+        lda_zero_count,
+        asm
+    );
 }

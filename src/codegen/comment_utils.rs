@@ -79,11 +79,7 @@ pub fn describe_shift(direction: &str, count: u8) -> String {
             if count == 8 {
                 "Shift left 8 bits (multiply by 256, move to high byte)".to_string()
             } else {
-                format!(
-                    "Shift left {} bits (multiply by {})",
-                    count,
-                    1u16 << count
-                )
+                format!("Shift left {} bits (multiply by {})", count, 1u16 << count)
             }
         }
         "right" => {

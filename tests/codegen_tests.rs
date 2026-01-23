@@ -1,4 +1,4 @@
-use wraith::codegen::{generate, CommentVerbosity};
+use wraith::codegen::{CommentVerbosity, generate};
 use wraith::lex;
 use wraith::parser::Parser;
 use wraith::sema::analyze;
@@ -16,13 +16,12 @@ fn extract_instructions(asm: &str) -> Vec<String> {
 // Helper to find instruction sequence
 #[allow(dead_code)]
 fn find_sequence(instructions: &[String], pattern: &[&str]) -> Option<usize> {
-    instructions
-        .windows(pattern.len())
-        .position(|window| {
-            window.iter().zip(pattern.iter()).all(|(inst, pat)| {
-                inst.contains(pat)
-            })
-        })
+    instructions.windows(pattern.len()).position(|window| {
+        window
+            .iter()
+            .zip(pattern.iter())
+            .all(|(inst, pat)| inst.contains(pat))
+    })
 }
 
 // Helper to verify instruction appears before another
@@ -48,7 +47,10 @@ fn test_codegen_empty_function() {
     // Verify structure
     assert!(asm.contains("main:"), "Should have main label");
     assert!(asm.contains("RTS"), "Should have RTS instruction");
-    assert!(appears_before(&asm, "main:", "RTS"), "Label should appear before RTS");
+    assert!(
+        appears_before(&asm, "main:", "RTS"),
+        "Label should appear before RTS"
+    );
 }
 
 #[test]
@@ -67,12 +69,20 @@ fn test_codegen_simple_assignment() {
 
     // Should load 42 into A, then store to SCREEN (using symbolic name)
     assert!(asm.contains("SCREEN = $0400"), "Should have address label");
-    assert!(asm.contains("LDA #$2A"), "Should load immediate value 42 (0x2A)");
-    assert!(asm.contains("STA SCREEN"), "Should store to SCREEN using symbolic name");
+    assert!(
+        asm.contains("LDA #$2A"),
+        "Should load immediate value 42 (0x2A)"
+    );
+    assert!(
+        asm.contains("STA SCREEN"),
+        "Should store to SCREEN using symbolic name"
+    );
 
     // Verify ordering: LDA must come before STA
-    assert!(appears_before(&asm, "LDA #$2A", "STA SCREEN"),
-            "LDA should appear before STA");
+    assert!(
+        appears_before(&asm, "LDA #$2A", "STA SCREEN"),
+        "LDA should appear before STA"
+    );
 }
 
 #[test]
@@ -91,8 +101,14 @@ fn test_codegen_constant_folding() {
 
     // Should generate constant folded result
     assert!(asm.contains("RESULT = $0400"), "Should have address label");
-    assert!(asm.contains("LDA #$1E"), "Should load folded constant 30 (0x1E)");
-    assert!(asm.contains("STA RESULT"), "Should store to RESULT using symbolic name");
+    assert!(
+        asm.contains("LDA #$1E"),
+        "Should load folded constant 30 (0x1E)"
+    );
+    assert!(
+        asm.contains("STA RESULT"),
+        "Should store to RESULT using symbolic name"
+    );
 
     // Should NOT have addition instructions
     assert!(!asm.contains("ADC"), "Should not have ADC instruction");
@@ -129,7 +145,10 @@ fn test_codegen_binary_op() {
     // Check address labels
     assert!(asm.contains("X = $0401"), "Should have X address label");
     assert!(asm.contains("Y = $0402"), "Should have Y address label");
-    assert!(asm.contains("SCREEN = $0400"), "Should have SCREEN address label");
+    assert!(
+        asm.contains("SCREEN = $0400"),
+        "Should have SCREEN address label"
+    );
 
     // Check that assignments happen (using symbolic names)
     assert!(asm.contains("STA X"), "Should store to X");
@@ -143,9 +162,15 @@ fn test_codegen_binary_op() {
     assert!(asm.contains("STA SCREEN"), "Should store result to SCREEN");
 
     // Verify ordering of the addition
-    assert!(appears_before(&asm, "STA $20", "LDA X"), "Store temp before load X");
+    assert!(
+        appears_before(&asm, "STA $20", "LDA X"),
+        "Store temp before load X"
+    );
     assert!(appears_before(&asm, "CLC", "ADC"), "CLC before ADC");
-    assert!(appears_before(&asm, "ADC", "STA SCREEN"), "ADC before final STA");
+    assert!(
+        appears_before(&asm, "ADC", "STA SCREEN"),
+        "ADC before final STA"
+    );
 }
 
 #[test]
@@ -167,7 +192,10 @@ fn test_codegen_control_flow() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Check for branch instructions (BEQ or BNE - optimizer may invert branches)
-    assert!(asm.contains("BEQ") || asm.contains("BNE"), "Should have branch instruction");
+    assert!(
+        asm.contains("BEQ") || asm.contains("BNE"),
+        "Should have branch instruction"
+    );
     // Check for while loop labels
     assert!(asm.contains("wh_"), "While loop should have wh_ label");
 }
@@ -191,9 +219,12 @@ fn test_codegen_function_call() {
 
     // Function call should:
     // 1. Store arguments to zero page argument area (not using hardware stack)
-    // 2. JSR to function
+    // 2. JSR to function (or JMP if tail-call optimized)
     // 3. Function accesses args from parameter locations
-    assert!(asm.contains("JSR add"), "Should call function with JSR");
+    assert!(
+        asm.contains("JSR add") || asm.contains("JMP add"),
+        "Should call function with JSR or JMP (tail-call optimized)"
+    );
 
     // Our calling convention uses zero page, not hardware stack (PHA/PLA)
     // Arguments are stored to zero page locations before JSR
@@ -225,13 +256,25 @@ fn test_codegen_string_literal() {
     // 3. String bytes
     // 4. Load address in code
     assert!(asm.contains("str_"), "Should have string label");
-    assert!(asm.contains(".BYTE $05, $00"), "Should have length prefix (5)");
+    assert!(
+        asm.contains(".BYTE $05, $00"),
+        "Should have length prefix (5)"
+    );
     assert!(asm.contains("$48"), "Should contain 'H' (0x48)");
-    assert!(asm.contains("LDA #<str_"), "Should load low byte of address");
-    assert!(asm.contains("LDX #>str_"), "Should load high byte of address");
+    assert!(
+        asm.contains("LDA #<str_"),
+        "Should load low byte of address"
+    );
+    assert!(
+        asm.contains("LDX #>str_"),
+        "Should load high byte of address"
+    );
 
     // Verify ordering - string data comes after code (in DATA section)
-    assert!(appears_before(&asm, "main:", "str_0:"), "Code before data section");
+    assert!(
+        appears_before(&asm, "main:", "str_0:"),
+        "Code before data section"
+    );
 }
 
 #[test]
@@ -296,7 +339,10 @@ fn test_codegen_logical_and_short_circuit() {
     // LDA should come before BEQ
     let first_lda_x = asm.find("LDA X").unwrap();
     let first_beq = asm.find("BEQ ax_").unwrap();
-    assert!(first_lda_x < first_beq, "LDA X before BEQ for short-circuit");
+    assert!(
+        first_lda_x < first_beq,
+        "LDA X before BEQ for short-circuit"
+    );
 }
 
 #[test]
@@ -321,7 +367,10 @@ fn test_codegen_multiplication() {
     // 1. Save multiplicand to memory
     // 2. Initialize result to 0
     // 3. Loop 8 times: check multiplier bit, add if set, shift both values
-    assert!(asm.contains("LDX #$08"), "Should initialize loop counter to 8");
+    assert!(
+        asm.contains("LDX #$08"),
+        "Should initialize loop counter to 8"
+    );
     assert!(asm.contains("ml_"), "Should have multiply loop label");
     assert!(asm.contains("LSR"), "Should shift multiplier right");
     assert!(asm.contains("BCC"), "Should branch if bit clear (skip add)");
@@ -331,7 +380,10 @@ fn test_codegen_multiplication() {
 
     // Verify ordering
     assert!(appears_before(&asm, "LDX #$08", "ml_"), "Setup before loop");
-    assert!(appears_before(&asm, "ml_", "BNE ml_"), "Loop label before branch");
+    assert!(
+        appears_before(&asm, "ml_", "BNE ml_"),
+        "Loop label before branch"
+    );
 }
 
 #[test]
@@ -353,16 +405,28 @@ fn test_codegen_division() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Division uses repeated subtraction
-    assert!(asm.contains("CPX #$00"), "Should check for division by zero");
+    assert!(
+        asm.contains("CPX #$00"),
+        "Should check for division by zero"
+    );
     assert!(asm.contains("BEQ dx_"), "Should skip if divisor is zero");
     assert!(asm.contains("dl_"), "Should have division loop");
     assert!(asm.contains("SBC $20"), "Should subtract divisor");
     assert!(asm.contains("INC $22"), "Should increment quotient");
-    assert!(asm.contains("BCC dx_"), "Should exit when dividend < divisor");
+    assert!(
+        asm.contains("BCC dx_"),
+        "Should exit when dividend < divisor"
+    );
 
     // Verify ordering
-    assert!(appears_before(&asm, "CPX", "BEQ dx_"), "Zero check before skip");
-    assert!(appears_before(&asm, "dl_", "SBC"), "Loop before subtraction");
+    assert!(
+        appears_before(&asm, "CPX", "BEQ dx_"),
+        "Zero check before skip"
+    );
+    assert!(
+        appears_before(&asm, "dl_", "SBC"),
+        "Loop before subtraction"
+    );
 }
 
 #[test]
@@ -390,7 +454,10 @@ fn test_codegen_shift_operations() {
 
     // Verify ordering
     assert!(appears_before(&asm, "LDX", "sl_"), "Load count before loop");
-    assert!(appears_before(&asm, "ASL A", "DEX"), "Shift before decrement");
+    assert!(
+        appears_before(&asm, "ASL A", "DEX"),
+        "Shift before decrement"
+    );
 }
 
 #[test]
@@ -421,10 +488,22 @@ fn test_codegen_for_loop() {
     assert!(asm.contains("JMP fl_"), "Should jump back to start");
 
     // Verify ordering
-    assert!(appears_before(&asm, "TAX", "fl_"), "Transfer to X before loop");
-    assert!(appears_before(&asm, "STA $22", "fl_"), "Store end before loop");
-    assert!(appears_before(&asm, "fl_", "CPX"), "Loop label before check");
-    assert!(appears_before(&asm, "INX", "JMP fl_"), "Increment before jump");
+    assert!(
+        appears_before(&asm, "TAX", "fl_"),
+        "Transfer to X before loop"
+    );
+    assert!(
+        appears_before(&asm, "STA $22", "fl_"),
+        "Store end before loop"
+    );
+    assert!(
+        appears_before(&asm, "fl_", "CPX"),
+        "Loop label before check"
+    );
+    assert!(
+        appears_before(&asm, "INX", "JMP fl_"),
+        "Increment before jump"
+    );
 }
 
 #[test]
@@ -449,7 +528,10 @@ fn test_codegen_unary_operations() {
     assert!(asm.contains("ADC #$01"), "Should add 1");
 
     // Verify ordering
-    assert!(appears_before(&asm, "EOR #$FF", "CLC"), "Invert before clear");
+    assert!(
+        appears_before(&asm, "EOR #$FF", "CLC"),
+        "Invert before clear"
+    );
     assert!(appears_before(&asm, "CLC", "ADC #$01"), "Clear before add");
 }
 
@@ -480,7 +562,10 @@ fn test_codegen_nested_expressions() {
     // Addition should come before multiplication
     let add_pos = asm.find("ADC $20").unwrap();
     let mul_pos = asm.find("ml_").unwrap();
-    assert!(add_pos < mul_pos, "Addition (inner) should come before multiplication (outer)");
+    assert!(
+        add_pos < mul_pos,
+        "Addition (inner) should come before multiplication (outer)"
+    );
 }
 
 #[test]
@@ -505,14 +590,23 @@ fn test_codegen_enum_unit_variant() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum data with tag
-    assert!(asm.contains("; Enum variant: Direction::North"), "Should have enum comment");
+    assert!(
+        asm.contains("; Enum variant: Direction::North"),
+        "Should have enum comment"
+    );
     assert!(asm.contains("JMP es_"), "Should jump over data");
     assert!(asm.contains("en_"), "Should have enum label");
-    assert!(asm.contains(".BYTE $00"), "Should emit tag byte 0 for first variant");
+    assert!(
+        asm.contains(".BYTE $00"),
+        "Should emit tag byte 0 for first variant"
+    );
 
     // Should load address into A:X
     assert!(asm.contains("LDA #<en_"), "Should load low byte of address");
-    assert!(asm.contains("LDX #>en_"), "Should load high byte of address");
+    assert!(
+        asm.contains("LDX #>en_"),
+        "Should load high byte of address"
+    );
 }
 
 #[test]
@@ -533,16 +627,31 @@ fn test_codegen_enum_tuple_variant() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum data with tag and fields
-    assert!(asm.contains("; Enum variant: Color::RGB"), "Should have enum comment");
+    assert!(
+        asm.contains("; Enum variant: Color::RGB"),
+        "Should have enum comment"
+    );
     assert!(asm.contains("en_"), "Should have enum label");
     assert!(asm.contains(".BYTE $00"), "Should emit tag byte");
-    assert!(asm.contains(".BYTE $FF"), "Should emit 255 (0xFF) for first field");
-    assert!(asm.contains(".BYTE $80"), "Should emit 128 (0x80) for second field");
-    assert!(asm.contains(".BYTE $40"), "Should emit 64 (0x40) for third field");
+    assert!(
+        asm.contains(".BYTE $FF"),
+        "Should emit 255 (0xFF) for first field"
+    );
+    assert!(
+        asm.contains(".BYTE $80"),
+        "Should emit 128 (0x80) for second field"
+    );
+    assert!(
+        asm.contains(".BYTE $40"),
+        "Should emit 64 (0x40) for third field"
+    );
 
     // Should load address into A:X
     assert!(asm.contains("LDA #<en_"), "Should load low byte of address");
-    assert!(asm.contains("LDX #>en_"), "Should load high byte of address");
+    assert!(
+        asm.contains("LDX #>en_"),
+        "Should load high byte of address"
+    );
 }
 
 #[test]
@@ -563,11 +672,20 @@ fn test_codegen_enum_struct_variant() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum data with tag and named fields
-    assert!(asm.contains("; Enum variant: Message::Point"), "Should have enum comment");
+    assert!(
+        asm.contains("; Enum variant: Message::Point"),
+        "Should have enum comment"
+    );
     assert!(asm.contains("en_"), "Should have enum label");
     assert!(asm.contains(".BYTE $00"), "Should emit tag byte");
-    assert!(asm.contains(".BYTE $0A"), "Should emit 10 (0x0A) for x field");
-    assert!(asm.contains(".BYTE $14"), "Should emit 20 (0x14) for y field");
+    assert!(
+        asm.contains(".BYTE $0A"),
+        "Should emit 10 (0x0A) for x field"
+    );
+    assert!(
+        asm.contains(".BYTE $14"),
+        "Should emit 20 (0x14) for y field"
+    );
 }
 
 #[test]
@@ -618,13 +736,19 @@ fn test_codegen_enum_pattern_matching() {
     assert!(asm.contains("STA $22"), "Should store tag at $22");
 
     // Should have jump table dispatch
-    assert!(asm.contains("ASL"), "Should double tag for address indexing");
+    assert!(
+        asm.contains("ASL"),
+        "Should double tag for address indexing"
+    );
     assert!(asm.contains("TAX"), "Should transfer to X for indexing");
     assert!(
         asm.contains("LDA match_0_jt,X"),
         "Should load jump address low byte"
     );
-    assert!(asm.contains("STA $30"), "Should store jump address low byte");
+    assert!(
+        asm.contains("STA $30"),
+        "Should store jump address low byte"
+    );
     assert!(
         asm.contains("LDA match_0_jt+1,X"),
         "Should load jump address high byte"
@@ -681,9 +805,15 @@ fn test_codegen_enum_multiple_variants() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Should generate enum with tag 1 (second variant)
-    assert!(asm.contains("; Enum variant: Option::Some"), "Should have enum comment");
+    assert!(
+        asm.contains("; Enum variant: Option::Some"),
+        "Should have enum comment"
+    );
     assert!(asm.contains("en_"), "Should have enum label");
-    assert!(asm.contains(".BYTE $01"), "Should emit tag byte 1 for second variant");
+    assert!(
+        asm.contains(".BYTE $01"),
+        "Should emit tag byte 1 for second variant"
+    );
     assert!(asm.contains(".BYTE $2A"), "Should emit 42 (0x2A) for data");
 }
 
@@ -711,7 +841,10 @@ fn test_codegen_inline_function() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Inline functions are NOT emitted as separate functions
-    assert!(!asm.contains("add:"), "Should NOT have add label (inline function)");
+    assert!(
+        !asm.contains("add:"),
+        "Should NOT have add label (inline function)"
+    );
 
     // Regular function should be emitted normally
     assert!(asm.contains("regular_fn:"), "Should have regular_fn label");
@@ -721,20 +854,32 @@ fn test_codegen_inline_function() {
     let main_section = &asm[main_start..];
 
     // Should have comment indicating inline expansion
-    assert!(main_section.contains("; Inline: add"), "Should have inline comment");
+    assert!(
+        main_section.contains("; Inline: add"),
+        "Should have inline comment"
+    );
 
     // Should NOT have JSR to add in main
-    assert!(!main_section.contains("JSR add"), "Should not have JSR to add (inlined)");
+    assert!(
+        !main_section.contains("JSR add"),
+        "Should not have JSR to add (inlined)"
+    );
 
     // Should have JSR to regular_fn (not inlined)
-    assert!(main_section.contains("JSR regular_fn"), "Should have JSR to regular_fn");
+    assert!(
+        main_section.contains("JSR regular_fn"),
+        "Should have JSR to regular_fn"
+    );
 
     // Verify the inline expansion actually happened:
     // The add function loads params from $40, $41 and does ADC
     // The inlined version should do the same without JSR/RTS
     assert!(main_section.contains("LDA #$05"), "Should load immediate 5");
     assert!(main_section.contains("LDA #$03"), "Should load immediate 3");
-    assert!(main_section.contains("ADC"), "Should have ADC instruction from inlined add");
+    assert!(
+        main_section.contains("ADC"),
+        "Should have ADC instruction from inlined add"
+    );
 }
 
 #[test]
@@ -774,12 +919,20 @@ fn test_codegen_recursive_function() {
     // Check if parameters are saved using software stack
     // Push saves to $0200,X where X is loaded from $FF (stack pointer)
     let push_count = fib_section.matches("STA $0200,X").count();
-    assert!(push_count >= 1, "Should push parameters to software stack (found {})", push_count);
+    assert!(
+        push_count >= 1,
+        "Should push parameters to software stack (found {})",
+        push_count
+    );
 
     // Must also restore parameters before evaluating right operand
     // Pop loads from $0200,X and stores back to $80+
     let pop_count = fib_section.matches("LDA $0200,X").count();
-    assert!(pop_count >= 1, "Should pop parameters from software stack (found {})", pop_count);
+    assert!(
+        pop_count >= 1,
+        "Should pop parameters from software stack (found {})",
+        pop_count
+    );
 }
 
 #[test]
@@ -803,15 +956,22 @@ fn test_codegen_tail_call_optimization() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Tail recursive functions should have loop restart label
-    assert!(asm.contains("factorial_loop_start:"), "Should have loop restart label");
+    assert!(
+        asm.contains("factorial_loop_start:"),
+        "Should have loop restart label"
+    );
 
     // Should have tail call optimization comment
-    assert!(asm.contains("Tail recursive function - loop optimization enabled"),
-        "Should have tail recursion comment");
+    assert!(
+        asm.contains("Tail recursive function - loop optimization enabled"),
+        "Should have tail recursion comment"
+    );
 
     // Should optimize tail call to JMP instead of JSR
-    assert!(asm.contains("JMP factorial_loop_start"),
-        "Should have JMP to loop start for tail recursive call");
+    assert!(
+        asm.contains("JMP factorial_loop_start"),
+        "Should have JMP to loop start for tail recursive call"
+    );
 
     // The tail call should not use JSR factorial inside the factorial function
     // (JSR from main calling factorial is fine and expected)
@@ -828,11 +988,17 @@ fn test_codegen_tail_call_optimization() {
     // Count JSR factorial calls within the factorial function
     // Should be 0 (the tail call is converted to JMP)
     let jsr_count = factorial_section.matches("JSR factorial").count();
-    assert_eq!(jsr_count, 0,
-        "Tail recursive call should not use JSR (found {} JSR calls)", jsr_count);
+    assert_eq!(
+        jsr_count, 0,
+        "Tail recursive call should not use JSR (found {} JSR calls)",
+        jsr_count
+    );
 
     // Verify the function has a normal RTS for the base case
-    assert!(factorial_section.contains("RTS"), "Should still have RTS for base case return");
+    assert!(
+        factorial_section.contains("RTS"),
+        "Should still have RTS for base case return"
+    );
 }
 
 #[test]
@@ -860,7 +1026,9 @@ fn test_codegen_match_dead_code_elimination() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Find the get_value function section
-    let fn_start = asm.find("get_value:").expect("Should have get_value function");
+    let fn_start = asm
+        .find("get_value:")
+        .expect("Should have get_value function");
     let fn_end = asm[fn_start..]
         .find("\n; Function: ")
         .map(|pos| fn_start + pos)
@@ -869,7 +1037,11 @@ fn test_codegen_match_dead_code_elimination() {
 
     // Should have RTS instructions (one per match arm)
     let rts_count = fn_section.matches("RTS").count();
-    assert!(rts_count >= 3, "Should have at least 3 RTS instructions (one per arm), found {}", rts_count);
+    assert!(
+        rts_count >= 3,
+        "Should have at least 3 RTS instructions (one per arm), found {}",
+        rts_count
+    );
 
     // Should NOT have unreachable JMP after RTS pattern
     // Check that no JMP immediately follows RTS (with only whitespace/comments between)
@@ -908,9 +1080,6 @@ fn test_codegen_match_no_jmp_after_break() {
     // The Stop arm ends with break, so no JMP match_X_end should follow
     // The Continue arm doesn't terminate, so it SHOULD have JMP match_X_end
 
-    // Count total JMP match_X_end instructions
-    let _jmp_match_end_count = asm.matches("JMP match_").filter(|m| m.contains("_end") || asm[asm.find(m).unwrap()..].starts_with("JMP match_") && asm[asm.find(m).unwrap()..].contains("_end")).count();
-
     // Should have exactly 1 JMP to match end (from Continue arm only)
     // The Stop arm with break should NOT have a JMP
     let lines: Vec<&str> = asm.lines().collect();
@@ -920,17 +1089,19 @@ fn test_codegen_match_no_jmp_after_break() {
         
         // Look for the pattern where we jump out of loop (break) followed by JMP match_end
         if line.starts_with("JMP lp_") || line.starts_with("JMP lx_") {
-            // Find the next non-empty, non-comment line using an iterator
-            let next_meaningful_line = lines.iter()
-                .skip(i + 1)
-                .map(|l| l.trim())
-                .find(|l| !l.is_empty() && !l.starts_with(';'));
-
-            if let Some(next) = next_meaningful_line
-                && next.starts_with("JMP match_") && next.contains("_end") {
+            // This is a break - check if next non-comment line is JMP match_end
+            for next_line in lines.iter().skip(i + 1) {
+                let next = next_line.trim();
+                if next.is_empty() || next.starts_with(';') {
+                    continue;
+                }
+                if next.starts_with("JMP match_") && next.contains("_end") {
                     found_break_with_jmp = true;
                 }
         }
     }
-    assert!(!found_break_with_jmp, "Should not have JMP match_end after break");
+    assert!(
+        !found_break_with_jmp,
+        "Should not have JMP match_end after break"
+    );
 }

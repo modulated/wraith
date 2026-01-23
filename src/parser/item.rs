@@ -121,29 +121,39 @@ impl Parser<'_> {
                 let span = start.merge(self.previous_span());
 
                 // Check if this is an address declaration (type is addr)
-                if matches!(ty.node, TypeExpr::Primitive(crate::ast::PrimitiveType::Addr)) {
-                    Ok(Spanned::new(Item::Address(AddressDecl {
-                        name,
-                        address: init,
-                        access,
-                        is_pub,
-                    }), span))
+                if matches!(
+                    ty.node,
+                    TypeExpr::Primitive(crate::ast::PrimitiveType::Addr)
+                ) {
+                    Ok(Spanned::new(
+                        Item::Address(AddressDecl {
+                            name,
+                            address: init,
+                            access,
+                            is_pub,
+                        }),
+                        span,
+                    ))
                 } else {
                     // Access modifiers are only valid for addr types
                     if access != AccessMode::ReadWrite {
                         return Err(ParseError::custom(
                             ty.span,
-                            "access modifiers (read/write) are only valid for addr types".to_string(),
+                            "access modifiers (read/write) are only valid for addr types"
+                                .to_string(),
                         ));
                     }
-                    Ok(Spanned::new(Item::Static(Static {
-                        name,
-                        ty,
-                        init,
-                        mutable: false,
-                        zero_page: false,
-                        is_pub,
-                    }), span))
+                    Ok(Spanned::new(
+                        Item::Static(Static {
+                            name,
+                            ty,
+                            init,
+                            mutable: false,
+                            zero_page: false,
+                            is_pub,
+                        }),
+                        span,
+                    ))
                 }
             }
 
@@ -160,7 +170,7 @@ impl Parser<'_> {
                             self.advance(); // consume the semicolon
                             break;
                         }
-                        None => break, // EOF
+                        None => break,       // EOF
                         _ => self.advance(), // keep consuming
                     }
                 }
@@ -286,7 +296,11 @@ impl Parser<'_> {
     }
 
     /// Parse a function definition
-    fn parse_function(&mut self, attributes: Vec<FnAttribute>, is_pub: bool) -> ParseResult<Function> {
+    fn parse_function(
+        &mut self,
+        attributes: Vec<FnAttribute>,
+        is_pub: bool,
+    ) -> ParseResult<Function> {
         self.expect(&Token::Fn)?;
 
         let name = self.expect_ident()?;
@@ -473,6 +487,10 @@ impl Parser<'_> {
 
         self.expect(&Token::RBrace)?;
 
-        Ok(Enum { name, variants, is_pub })
+        Ok(Enum {
+            name,
+            variants,
+            is_pub,
+        })
     }
 }

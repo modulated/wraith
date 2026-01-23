@@ -4,20 +4,23 @@ use crate::common::*;
 
 #[test]
 fn if_statement() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             if true {
                 let x: u8 = 10;
             }
         }
-    "#);
+    "#,
+    );
 
     assert_asm_contains(&asm, "BEQ");
 }
 
 #[test]
 fn if_else() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             if false {
                 let x: u8 = 10;
@@ -25,7 +28,8 @@ fn if_else() {
                 let x: u8 = 20;
             }
         }
-    "#);
+    "#,
+    );
 
     assert_asm_contains(&asm, "BEQ");
     assert_asm_contains(&asm, "JMP");
@@ -33,14 +37,16 @@ fn if_else() {
 
 #[test]
 fn while_loop() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 0;
             while x < 10 {
                 x = x + 1;
             }
         }
-    "#);
+    "#,
+    );
 
     assert_asm_contains(&asm, "CMP");
     assert_asm_contains(&asm, "JMP");
@@ -48,13 +54,15 @@ fn while_loop() {
 
 #[test]
 fn for_range_loop() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             for i: u8 in 0..10 {
                 let x: u8 = i;
             }
         }
-    "#);
+    "#,
+    );
 
     assert_asm_contains(&asm, "INX");
     assert_asm_contains(&asm, "CPX");
@@ -66,7 +74,8 @@ fn for_range_loop() {
 
 #[test]
 fn while_loop_with_break() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 0;
             while x < 10 {
@@ -76,7 +85,8 @@ fn while_loop_with_break() {
                 x = x + 1;
             }
         }
-    "#);
+    "#,
+    );
 
     // Should have loop labels and JMP for break
     assert_asm_contains(&asm, "JMP");
@@ -85,7 +95,8 @@ fn while_loop_with_break() {
 
 #[test]
 fn while_loop_with_continue() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 0;
             while x < 10 {
@@ -96,7 +107,8 @@ fn while_loop_with_continue() {
                 let y: u8 = x;
             }
         }
-    "#);
+    "#,
+    );
 
     // Continue should jump back to loop condition
     assert_asm_contains(&asm, "JMP");
@@ -105,7 +117,8 @@ fn while_loop_with_continue() {
 
 #[test]
 fn for_loop_with_break() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             for i: u8 in 0..10 {
                 if i == 5 {
@@ -113,17 +126,19 @@ fn for_loop_with_break() {
                 }
             }
         }
-    "#);
+    "#,
+    );
 
     // Should exit loop early via JMP
-    assert_asm_contains(&asm, "INX");  // For loop uses X register
+    assert_asm_contains(&asm, "INX"); // For loop uses X register
     assert_asm_contains(&asm, "JMP");
-    assert_asm_contains(&asm, "BEQ");  // Conditional branch for if
+    assert_asm_contains(&asm, "BEQ"); // Conditional branch for if
 }
 
 #[test]
 fn for_loop_with_continue() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             for i: u8 in 0..10 {
                 if i == 5 {
@@ -132,7 +147,8 @@ fn for_loop_with_continue() {
                 let x: u8 = i;
             }
         }
-    "#);
+    "#,
+    );
 
     // Continue should jump to loop increment
     assert_asm_contains(&asm, "INX");
@@ -141,7 +157,8 @@ fn for_loop_with_continue() {
 
 #[test]
 fn nested_loop_break() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             for i: u8 in 0..10 {
                 for j: u8 in 0..10 {
@@ -151,7 +168,8 @@ fn nested_loop_break() {
                 }
             }
         }
-    "#);
+    "#,
+    );
 
     // Should have distinct loop labels for nested loops
     assert_asm_contains(&asm, "INX");
@@ -164,7 +182,8 @@ fn nested_loop_break() {
 
 #[test]
 fn match_literal_patterns() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 5;
             match x {
@@ -173,7 +192,8 @@ fn match_literal_patterns() {
                 _ => { let y: u8 = 30; }
             }
         }
-    "#);
+    "#,
+    );
 
     // Should generate comparisons and branches
     assert_asm_contains(&asm, "CMP");
@@ -182,7 +202,8 @@ fn match_literal_patterns() {
 
 #[test]
 fn match_enum_variants() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         enum Direction {
             North,
             South,
@@ -198,7 +219,8 @@ fn match_enum_variants() {
                 Direction::West => { let val: u8 = 4; }
             }
         }
-    "#);
+    "#,
+    );
 
     // With 4 variants, uses jump table dispatch (ASL/TAX/JMP indirect)
     assert_asm_contains(&asm, "LDA");
@@ -209,7 +231,8 @@ fn match_enum_variants() {
 
 #[test]
 fn match_expression_bodies() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 2;
             let y: u8 = 0;
@@ -219,7 +242,8 @@ fn match_expression_bodies() {
                 _ => { y = 30; }
             }
         }
-    "#);
+    "#,
+    );
 
     // Match arms with assignment statements
     assert_asm_contains(&asm, "CMP");
@@ -228,7 +252,8 @@ fn match_expression_bodies() {
 
 #[test]
 fn match_multiple_arms() {
-    let asm = compile_success(r#"
+    let asm = compile_success(
+        r#"
         fn main() {
             let x: u8 = 5;
             match x {
@@ -238,7 +263,8 @@ fn match_multiple_arms() {
                 _ => { let y: u8 = 0; }
             }
         }
-    "#);
+    "#,
+    );
 
     // Should have labels for each arm
     assert_asm_contains(&asm, "CMP");

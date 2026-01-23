@@ -176,7 +176,11 @@ impl Parser<'_> {
                 if is_anon_struct {
                     self.parse_anon_struct_init()
                 } else {
-                    Err(ParseError::unexpected_token(start, "expression", Some(Token::LBrace)))
+                    Err(ParseError::unexpected_token(
+                        start,
+                        "expression",
+                        Some(Token::LBrace),
+                    ))
                 }
             }
 
@@ -446,24 +450,24 @@ impl Parser<'_> {
                 VariantData::Unit
             } else {
                 self.expect(&Token::LBrace)?;
-            let mut fields = Vec::new();
+                let mut fields = Vec::new();
 
-            while !self.check(&Token::RBrace) {
-                let field_name = self.expect_ident()?;
-                self.expect(&Token::Colon)?;
-                let value = self.parse_expr()?;
-                fields.push(FieldInit {
-                    name: field_name,
-                    value,
-                });
-                if !self.check(&Token::Comma) {
-                    break;
+                while !self.check(&Token::RBrace) {
+                    let field_name = self.expect_ident()?;
+                    self.expect(&Token::Colon)?;
+                    let value = self.parse_expr()?;
+                    fields.push(FieldInit {
+                        name: field_name,
+                        value,
+                    });
+                    if !self.check(&Token::Comma) {
+                        break;
+                    }
+                    self.advance();
                 }
-                self.advance();
-            }
-            self.expect(&Token::RBrace)?;
+                self.expect(&Token::RBrace)?;
 
-            VariantData::Struct(fields)
+                VariantData::Struct(fields)
             }
         } else if self.check(&Token::LParen) {
             // Tuple variant: Enum::Variant(a, b)

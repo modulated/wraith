@@ -17,8 +17,7 @@ use section_allocator::SectionAllocator;
 use std::collections::HashMap;
 
 /// Controls the verbosity level of generated assembly comments
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommentVerbosity {
     /// Minimal comments - only function headers and critical info
     Minimal,
@@ -28,7 +27,6 @@ pub enum CommentVerbosity {
     /// Verbose - full register state, detailed explanations, memory layout
     Verbose,
 }
-
 
 #[derive(Debug, Clone)]
 pub enum CodegenError {
@@ -55,7 +53,7 @@ impl std::error::Error for CodegenError {}
 
 /// Collects and manages string literals for emission to DATA section
 pub struct StringCollector {
-    strings: HashMap<String, String>,  // content -> label
+    strings: HashMap<String, String>, // content -> label
     next_id: usize,
 }
 
@@ -87,7 +85,11 @@ impl StringCollector {
     }
 
     /// Emit all collected strings to DATA section
-    pub fn emit_strings(&self, emitter: &mut Emitter, section_alloc: &mut SectionAllocator) -> Result<(), CodegenError> {
+    pub fn emit_strings(
+        &self,
+        emitter: &mut Emitter,
+        section_alloc: &mut SectionAllocator,
+    ) -> Result<(), CodegenError> {
         if self.strings.is_empty() {
             return Ok(());
         }
@@ -98,8 +100,9 @@ impl StringCollector {
 
         for (content, label) in &self.strings {
             // Allocate in DATA section
-            let data_size = 2 + content.len() as u16;  // length prefix + bytes
-            let addr = section_alloc.allocate("DATA", data_size)
+            let data_size = 2 + content.len() as u16; // length prefix + bytes
+            let addr = section_alloc
+                .allocate("DATA", data_size)
                 .map_err(CodegenError::SectionError)?;
 
             emitter.emit_org(addr);
@@ -107,7 +110,12 @@ impl StringCollector {
 
             // Emit length as u16 little-endian
             let len = content.len() as u16;
-            emitter.emit_raw(&format!("    .BYTE ${:02X}, ${:02X}  ; length = {}", len & 0xFF, (len >> 8) & 0xFF, len));
+            emitter.emit_raw(&format!(
+                "    .BYTE ${:02X}, ${:02X}  ; length = {}",
+                len & 0xFF,
+                (len >> 8) & 0xFF,
+                len
+            ));
 
             // Emit string bytes
             if !content.is_empty() {
@@ -129,16 +137,26 @@ impl StringCollector {
 
                 // Emit bytes in groups of 16 for readability
                 for (i, chunk) in content.as_bytes().chunks(16).enumerate() {
-                    let bytes_str = chunk.iter()
+                    let bytes_str = chunk
+                        .iter()
                         .map(|b| format!("${:02X}", b))
                         .collect::<Vec<_>>()
                         .join(", ");
 
                     if i == 0 && chunk.len() < content.len() {
-                        emitter.emit_raw(&format!("    .BYTE {}  ; bytes 0-{}", bytes_str, chunk.len() - 1));
+                        emitter.emit_raw(&format!(
+                            "    .BYTE {}  ; bytes 0-{}",
+                            bytes_str,
+                            chunk.len() - 1
+                        ));
                     } else if chunk.len() < 16 {
                         let start = i * 16;
-                        emitter.emit_raw(&format!("    .BYTE {}  ; bytes {}-{}", bytes_str, start, start + chunk.len() - 1));
+                        emitter.emit_raw(&format!(
+                            "    .BYTE {}  ; bytes {}-{}",
+                            bytes_str,
+                            start,
+                            start + chunk.len() - 1
+                        ));
                     } else {
                         emitter.emit_raw(&format!("    .BYTE {}", bytes_str));
                     }
@@ -165,7 +183,8 @@ fn emit_stdlib_math_functions(
     emitter.emit_comment("============================================================");
 
     if emitter.needs_mul16 {
-        let org_addr = section_alloc.allocate("CODE", 74)
+        let org_addr = section_alloc
+            .allocate("CODE", 74)
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mul16");
@@ -178,18 +197,18 @@ fn emit_stdlib_math_functions(
         // Memory layout: $D0-$D1 multiplicand, $D2-$D3 result,
         //               $D4-$D5 multiplier, $D6 loop counter
         emitter.emit_raw("    LDA #$00");
-        emitter.emit_raw("    STA $D2");  // result_low at $D2
-        emitter.emit_raw("    STA $D3");  // result_high at $D3
+        emitter.emit_raw("    STA $D2"); // result_low at $D2
+        emitter.emit_raw("    STA $D3"); // result_high at $D3
         emitter.emit_raw("    LDA $80");
-        emitter.emit_raw("    STA $D0");  // param_a_low at $D0
+        emitter.emit_raw("    STA $D0"); // param_a_low at $D0
         emitter.emit_raw("    LDA $81");
-        emitter.emit_raw("    STA $D1");  // param_a_high at $D1
+        emitter.emit_raw("    STA $D1"); // param_a_high at $D1
         emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    STA $D4");  // param_b_low at $D4
+        emitter.emit_raw("    STA $D4"); // param_b_low at $D4
         emitter.emit_raw("    LDA $83");
-        emitter.emit_raw("    STA $D5");  // param_b_high at $D5
+        emitter.emit_raw("    STA $D5"); // param_b_high at $D5
         emitter.emit_raw("    LDX #$10");
-        emitter.emit_raw("    STX $D6");  // loop_counter at $D6
+        emitter.emit_raw("    STX $D6"); // loop_counter at $D6
         emitter.emit_raw("    mul16_loop:");
         emitter.emit_raw("    LDA $D4");
         emitter.emit_raw("    LSR A");
@@ -214,7 +233,8 @@ fn emit_stdlib_math_functions(
     }
 
     if emitter.needs_div16 {
-        let org_addr = section_alloc.allocate("CODE", 110)
+        let org_addr = section_alloc
+            .allocate("CODE", 110)
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: div16");
@@ -238,22 +258,22 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    div16_not_zero:");
         // Initialize quotient and remainder to 0
         emitter.emit_raw("    LDA #$00");
-        emitter.emit_raw("    STA $D4");  // quotient_low
-        emitter.emit_raw("    STA $D5");  // quotient_high
-        emitter.emit_raw("    STA $D6");  // remainder_low
-        emitter.emit_raw("    STA $D7");  // remainder_high
+        emitter.emit_raw("    STA $D4"); // quotient_low
+        emitter.emit_raw("    STA $D5"); // quotient_high
+        emitter.emit_raw("    STA $D6"); // remainder_low
+        emitter.emit_raw("    STA $D7"); // remainder_high
 
         // Copy dividend to working storage
         emitter.emit_raw("    LDA $80");
-        emitter.emit_raw("    STA $D0");  // dividend_low
+        emitter.emit_raw("    STA $D0"); // dividend_low
         emitter.emit_raw("    LDA $81");
-        emitter.emit_raw("    STA $D1");  // dividend_high
+        emitter.emit_raw("    STA $D1"); // dividend_high
 
         // Copy divisor to working storage
         emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    STA $D2");  // divisor_low
+        emitter.emit_raw("    STA $D2"); // divisor_low
         emitter.emit_raw("    LDA $83");
-        emitter.emit_raw("    STA $D3");  // divisor_high
+        emitter.emit_raw("    STA $D3"); // divisor_high
 
         // Loop counter = 16
         emitter.emit_raw("    LDA #$10");
@@ -263,7 +283,7 @@ fn emit_stdlib_math_functions(
         // Shift dividend left, high bit goes into remainder
         emitter.emit_raw("    ASL $D0");
         emitter.emit_raw("    ROL $D1");
-        emitter.emit_raw("    ROL $D6");  // Carry from dividend -> remainder
+        emitter.emit_raw("    ROL $D6"); // Carry from dividend -> remainder
         emitter.emit_raw("    ROL $D7");
 
         // Shift quotient left to make room for next bit
@@ -271,14 +291,14 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    ROL $D5");
 
         // Compare remainder with divisor (16-bit)
-        emitter.emit_raw("    LDA $D7");  // remainder_high
-        emitter.emit_raw("    CMP $D3");  // divisor_high
-        emitter.emit_raw("    BCC div16_skip");  // remainder < divisor
-        emitter.emit_raw("    BNE div16_sub");   // remainder > divisor
+        emitter.emit_raw("    LDA $D7"); // remainder_high
+        emitter.emit_raw("    CMP $D3"); // divisor_high
+        emitter.emit_raw("    BCC div16_skip"); // remainder < divisor
+        emitter.emit_raw("    BNE div16_sub"); // remainder > divisor
         // High bytes equal, compare low bytes
-        emitter.emit_raw("    LDA $D6");  // remainder_low
-        emitter.emit_raw("    CMP $D2");  // divisor_low
-        emitter.emit_raw("    BCC div16_skip");  // remainder < divisor
+        emitter.emit_raw("    LDA $D6"); // remainder_low
+        emitter.emit_raw("    CMP $D2"); // divisor_low
+        emitter.emit_raw("    BCC div16_skip"); // remainder < divisor
 
         emitter.emit_raw("    div16_sub:");
         // remainder -= divisor
@@ -305,7 +325,8 @@ fn emit_stdlib_math_functions(
     }
 
     if emitter.needs_mod16 {
-        let org_addr = section_alloc.allocate("CODE", 110)
+        let org_addr = section_alloc
+            .allocate("CODE", 110)
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mod16");
@@ -329,22 +350,22 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    mod16_not_zero:");
         // Initialize quotient and remainder to 0
         emitter.emit_raw("    LDA #$00");
-        emitter.emit_raw("    STA $D4");  // quotient_low
-        emitter.emit_raw("    STA $D5");  // quotient_high
-        emitter.emit_raw("    STA $D6");  // remainder_low
-        emitter.emit_raw("    STA $D7");  // remainder_high
+        emitter.emit_raw("    STA $D4"); // quotient_low
+        emitter.emit_raw("    STA $D5"); // quotient_high
+        emitter.emit_raw("    STA $D6"); // remainder_low
+        emitter.emit_raw("    STA $D7"); // remainder_high
 
         // Copy dividend to working storage
         emitter.emit_raw("    LDA $80");
-        emitter.emit_raw("    STA $D0");  // dividend_low
+        emitter.emit_raw("    STA $D0"); // dividend_low
         emitter.emit_raw("    LDA $81");
-        emitter.emit_raw("    STA $D1");  // dividend_high
+        emitter.emit_raw("    STA $D1"); // dividend_high
 
         // Copy divisor to working storage
         emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    STA $D2");  // divisor_low
+        emitter.emit_raw("    STA $D2"); // divisor_low
         emitter.emit_raw("    LDA $83");
-        emitter.emit_raw("    STA $D3");  // divisor_high
+        emitter.emit_raw("    STA $D3"); // divisor_high
 
         // Loop counter = 16
         emitter.emit_raw("    LDA #$10");
@@ -354,7 +375,7 @@ fn emit_stdlib_math_functions(
         // Shift dividend left, high bit goes into remainder
         emitter.emit_raw("    ASL $D0");
         emitter.emit_raw("    ROL $D1");
-        emitter.emit_raw("    ROL $D6");  // Carry from dividend -> remainder
+        emitter.emit_raw("    ROL $D6"); // Carry from dividend -> remainder
         emitter.emit_raw("    ROL $D7");
 
         // Shift quotient left to make room for next bit
@@ -362,14 +383,14 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    ROL $D5");
 
         // Compare remainder with divisor (16-bit)
-        emitter.emit_raw("    LDA $D7");  // remainder_high
-        emitter.emit_raw("    CMP $D3");  // divisor_high
-        emitter.emit_raw("    BCC mod16_skip");  // remainder < divisor
-        emitter.emit_raw("    BNE mod16_sub");   // remainder > divisor
+        emitter.emit_raw("    LDA $D7"); // remainder_high
+        emitter.emit_raw("    CMP $D3"); // divisor_high
+        emitter.emit_raw("    BCC mod16_skip"); // remainder < divisor
+        emitter.emit_raw("    BNE mod16_sub"); // remainder > divisor
         // High bytes equal, compare low bytes
-        emitter.emit_raw("    LDA $D6");  // remainder_low
-        emitter.emit_raw("    CMP $D2");  // divisor_low
-        emitter.emit_raw("    BCC mod16_skip");  // remainder < divisor
+        emitter.emit_raw("    LDA $D6"); // remainder_low
+        emitter.emit_raw("    CMP $D2"); // divisor_low
+        emitter.emit_raw("    BCC mod16_skip"); // remainder < divisor
 
         emitter.emit_raw("    mod16_sub:");
         // remainder -= divisor
@@ -404,7 +425,7 @@ pub fn generate(
     verbosity: CommentVerbosity,
 ) -> Result<(String, SectionAllocator), CodegenError> {
     use crate::sema::table::{SymbolKind, SymbolLocation};
-    use std::collections::{HashSet, HashMap};
+    use std::collections::{HashMap, HashSet};
 
     let mut emitter = Emitter::new(verbosity);
     let mut section_alloc = SectionAllocator::default();
@@ -428,13 +449,14 @@ pub fn generate(
     for symbol in program.resolved_symbols.values() {
         if symbol.kind == SymbolKind::Address
             && let SymbolLocation::Absolute(addr) = symbol.location
-                && emitted_addresses.insert(symbol.name.clone()) {
-                    // Emit comment if this address was imported
-                    if let Some(source) = import_sources.get(&symbol.name) {
-                        emitter.emit_comment(&format!("Imported from {}", source));
-                    }
-                    emitter.emit_raw(&format!("{} = ${:04X}", symbol.name, addr));
-                }
+            && emitted_addresses.insert(symbol.name.clone())
+        {
+            // Emit comment if this address was imported
+            if let Some(source) = import_sources.get(&symbol.name) {
+                emitter.emit_comment(&format!("Imported from {}", source));
+            }
+            emitter.emit_raw(&format!("{} = ${:04X}", symbol.name, addr));
+        }
     }
 
     // Track which items have been emitted to avoid duplicates
@@ -463,23 +485,39 @@ pub fn generate(
         // Emit const arrays from imported modules first
         for item in &program.imported_items {
             if let crate::ast::Item::Static(s) = &item.node
-                && !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. }) {
-                    let name = s.name.node.clone();
-                    if emitted_items.insert(name) {
-                        generate_item(item, &mut emitter, program, &mut section_alloc, &mut string_collector)?;
-                    }
+                && !s.mutable
+                && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
+            {
+                let name = s.name.node.clone();
+                if emitted_items.insert(name) {
+                    generate_item(
+                        item,
+                        &mut emitter,
+                        program,
+                        &mut section_alloc,
+                        &mut string_collector,
+                    )?;
                 }
+            }
         }
 
         // Emit const arrays from main module
         for item in &ast.items {
             if let crate::ast::Item::Static(s) = &item.node
-                && !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. }) {
-                    let name = s.name.node.clone();
-                    if emitted_items.insert(name) {
-                        generate_item(item, &mut emitter, program, &mut section_alloc, &mut string_collector)?;
-                    }
+                && !s.mutable
+                && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
+            {
+                let name = s.name.node.clone();
+                if emitted_items.insert(name) {
+                    generate_item(
+                        item,
+                        &mut emitter,
+                        program,
+                        &mut section_alloc,
+                        &mut string_collector,
+                    )?;
                 }
+            }
         }
 
         emitter.emit_raw("");
@@ -489,7 +527,12 @@ pub fn generate(
     // This ensures that imported functions are defined before they're called
     // Only emit section header if there are actually imported items to generate
     let has_imported_code = program.imported_items.iter().any(|item| {
-        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_) | crate::ast::Item::Static(_))
+        !matches!(
+            item.node,
+            crate::ast::Item::Import(_)
+                | crate::ast::Item::Address(_)
+                | crate::ast::Item::Static(_)
+        )
     });
 
     if has_imported_code {
@@ -523,13 +566,24 @@ pub fn generate(
             continue;
         }
 
-        generate_item(item, &mut emitter, program, &mut section_alloc, &mut string_collector)?;
+        generate_item(
+            item,
+            &mut emitter,
+            program,
+            &mut section_alloc,
+            &mut string_collector,
+        )?;
     }
 
     // Generate code for main module items
     // Only emit section header if there are actually main module items to generate
     let has_main_code = ast.items.iter().any(|item| {
-        !matches!(item.node, crate::ast::Item::Import(_) | crate::ast::Item::Address(_) | crate::ast::Item::Static(_))
+        !matches!(
+            item.node,
+            crate::ast::Item::Import(_)
+                | crate::ast::Item::Address(_)
+                | crate::ast::Item::Static(_)
+        )
     });
 
     if has_main_code {
@@ -560,7 +614,13 @@ pub fn generate(
         if matches!(item.node, crate::ast::Item::Address(_)) {
             continue;
         }
-        generate_item(item, &mut emitter, program, &mut section_alloc, &mut string_collector)?;
+        generate_item(
+            item,
+            &mut emitter,
+            program,
+            &mut section_alloc,
+            &mut string_collector,
+        )?;
     }
 
     // Check for address conflicts after all functions have been generated
@@ -623,7 +683,7 @@ fn generate_interrupt_vectors(ast: &SourceFile, emitter: &mut Emitter) -> Result
                     FnAttribute::Nmi => {
                         if nmi_handler.is_some() {
                             return Err(CodegenError::UnsupportedOperation(
-                                "Multiple NMI handlers defined".to_string()
+                                "Multiple NMI handlers defined".to_string(),
                             ));
                         }
                         nmi_handler = Some(name.clone());
@@ -631,7 +691,7 @@ fn generate_interrupt_vectors(ast: &SourceFile, emitter: &mut Emitter) -> Result
                     FnAttribute::Reset => {
                         if reset_handler.is_some() {
                             return Err(CodegenError::UnsupportedOperation(
-                                "Multiple RESET handlers defined".to_string()
+                                "Multiple RESET handlers defined".to_string(),
                             ));
                         }
                         reset_handler = Some(name.clone());
@@ -639,7 +699,7 @@ fn generate_interrupt_vectors(ast: &SourceFile, emitter: &mut Emitter) -> Result
                     FnAttribute::Irq => {
                         if irq_handler.is_some() {
                             return Err(CodegenError::UnsupportedOperation(
-                                "Multiple IRQ handlers defined".to_string()
+                                "Multiple IRQ handlers defined".to_string(),
                             ));
                         }
                         irq_handler = Some(name.clone());
