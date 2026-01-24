@@ -828,7 +828,8 @@ pub fn generate_stmt(
             let current_fn = emitter.current_function().map(|s| s.to_string());
             for line in lines {
                 // Substitute {var} patterns with actual addresses
-                let substituted = substitute_asm_vars(&line.instruction, info, current_fn.as_deref())?;
+                let substituted =
+                    substitute_asm_vars(&line.instruction, info, current_fn.as_deref())?;
 
                 // If we're inside an inline function expansion, uniquify labels
                 let final_line = if let Some(suffix) = emitter.inline_label_suffix() {

@@ -359,9 +359,10 @@ pub fn generate_expr(
             Ok(())
         }
 
-        Expr::Match { expr: match_expr, arms } => {
-            generate_match_expr(match_expr, arms, emitter, info, string_collector)
-        }
+        Expr::Match {
+            expr: match_expr,
+            arms,
+        } => generate_match_expr(match_expr, arms, emitter, info, string_collector),
     }
 }
 
@@ -408,29 +409,35 @@ fn generate_match_expr(
         let next_label = format!("mn_{}_{}", match_id, i);
 
         match &arm.pattern.node {
-            Pattern::EnumVariant { enum_name, variant, bindings } => {
+            Pattern::EnumVariant {
+                enum_name,
+                variant,
+                bindings,
+            } => {
                 // Look up the enum and get the tag for this variant
                 if let Some(enum_def) = info.type_registry.enums.get(&enum_name.node)
-                    && let Some(tag) = enum_def.variants.iter()
+                    && let Some(tag) = enum_def
+                        .variants
+                        .iter()
                         .position(|v| v.name == variant.node)
-                    {
-                        // Compare tag
-                        emitter.emit_inst("LDA", "$22");
-                        emitter.emit_inst("CMP", &format!("#${:02X}", tag));
-                        emitter.emit_inst("BNE", &next_label);
+                {
+                    // Compare tag
+                    emitter.emit_inst("LDA", "$22");
+                    emitter.emit_inst("CMP", &format!("#${:02X}", tag));
+                    emitter.emit_inst("BNE", &next_label);
 
-                        // For bindings, load the payload value into A
-                        // This is a simplified version - assumes single u8 binding
-                        if !bindings.is_empty() {
-                            emitter.emit_inst("LDY", "#$01"); // Offset 1 = first payload byte
-                            emitter.emit_inst("LDA", "($20),Y");
-                            // Value is now in A for the arm body to use
-                        }
-
-                        // Generate arm body (expression)
-                        generate_expr(&arm.body, emitter, info, string_collector)?;
-                        emitter.emit_inst("JMP", &end_label);
+                    // For bindings, load the payload value into A
+                    // This is a simplified version - assumes single u8 binding
+                    if !bindings.is_empty() {
+                        emitter.emit_inst("LDY", "#$01"); // Offset 1 = first payload byte
+                        emitter.emit_inst("LDA", "($20),Y");
+                        // Value is now in A for the arm body to use
                     }
+
+                    // Generate arm body (expression)
+                    generate_expr(&arm.body, emitter, info, string_collector)?;
+                    emitter.emit_inst("JMP", &end_label);
+                }
                 emitter.emit_label(&next_label);
             }
 

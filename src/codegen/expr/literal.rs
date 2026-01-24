@@ -183,10 +183,16 @@ pub(super) fn generate_literal(
                 }
             };
 
-            // Emit the value 'count' times using .BYTE for portability
-            emitter.emit_comment(&format!("Array data: {} bytes", count));
-            for _ in 0..*count {
-                emitter.emit_byte(byte_val);
+            // Zero-fill optimization: use .RES directive for zero arrays >= 16 bytes
+            if byte_val == 0 && *count >= 16 {
+                emitter.emit_comment(&format!("Zero-filled array optimized: {} bytes", count));
+                emitter.emit_data_directive(&format!(".RES {}", count));
+            } else {
+                // Emit the value 'count' times using .BYTE for portability
+                emitter.emit_comment(&format!("Array data: {} bytes", count));
+                for _ in 0..*count {
+                    emitter.emit_byte(byte_val);
+                }
             }
 
             // Skip label

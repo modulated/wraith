@@ -22,14 +22,10 @@ fn empty_function() {
 fn simple_assignment() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const SCREEN: addr = 0x0400;
         fn main() {
             SCREEN = 42;
         }
-    "#,
-    );
     "#,
     );
 
@@ -43,14 +39,10 @@ fn simple_assignment() {
 fn constant_folding() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 10 + 20;
         }
-    "#,
-    );
     "#,
     );
 
@@ -68,15 +60,11 @@ fn constant_folding() {
 fn binary_operations() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let a: u8 = 10;
             let b: u8 = 5;
             let x: u8 = a + b;
         }
-    "#,
-    );
     "#,
     );
 
@@ -88,14 +76,10 @@ fn binary_operations() {
 fn multiplication() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 3 * 4;
         }
-    "#,
-    );
     "#,
     );
 
@@ -107,14 +91,10 @@ fn multiplication() {
 fn division() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 12 / 3;
         }
-    "#,
-    );
     "#,
     );
 
@@ -126,14 +106,10 @@ fn division() {
 fn shift_operations() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = 8 << 1;
         }
-    "#,
-    );
     "#,
     );
 
@@ -145,14 +121,10 @@ fn shift_operations() {
 fn unary_operations() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const RESULT: addr = 0x0400;
         fn main() {
             RESULT = -10;
         }
-    "#,
-    );
     "#,
     );
 
@@ -168,15 +140,11 @@ fn unary_operations() {
 fn control_flow_if() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             if true {
                 let x: u8 = 10;
             }
         }
-    "#,
-    );
     "#,
     );
 
@@ -187,16 +155,12 @@ fn control_flow_if() {
 fn comparison_eq() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const RESULT: addr = 0x0400;
         const X: addr = 0x0401;
         fn main() {
             X = 5;
             RESULT = X == 5;
         }
-    "#,
-    );
     "#,
     );
 
@@ -208,8 +172,6 @@ fn comparison_eq() {
 fn logical_and_short_circuit() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let x: u8 = 10;
             let y: u8 = 20;
@@ -217,8 +179,6 @@ fn logical_and_short_circuit() {
                 let z: u8 = 30;
             }
         }
-    "#,
-    );
     "#,
     );
 
@@ -230,15 +190,11 @@ fn logical_and_short_circuit() {
 fn for_loop() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             for i: u8 in 0..10 {
                 let x: u8 = i;
             }
         }
-    "#,
-    );
     "#,
     );
 
@@ -255,16 +211,12 @@ fn for_loop() {
 fn function_call() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn foo() -> u8 {
             return 42;
         }
         fn main() {
             let x: u8 = foo();
         }
-    "#,
-    );
     "#,
     );
 
@@ -276,8 +228,6 @@ fn function_call() {
 fn inline_function() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         #[inline]
         fn add(a: u8, b: u8) -> u8 {
             return a + b;
@@ -285,8 +235,6 @@ fn inline_function() {
         fn main() {
             let result: u8 = add(5, 10);
         }
-    "#,
-    );
     "#,
     );
 
@@ -304,13 +252,9 @@ fn inline_function() {
 fn string_literal() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             "Hello";
         }
-    "#,
-    );
     "#,
     );
 
@@ -329,8 +273,6 @@ fn string_literal() {
 fn enum_unit_variant() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         enum Direction {
             North,
             South,
@@ -338,8 +280,6 @@ fn enum_unit_variant() {
         fn main() {
             let d: Direction = Direction::North;
         }
-    "#,
-    );
     "#,
     );
 
@@ -355,16 +295,12 @@ fn enum_unit_variant() {
 fn enum_tuple_variant() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         enum Color {
             RGB(u8, u8, u8),
         }
         fn main() {
             Color::RGB(255, 128, 64);
         }
-    "#,
-    );
     "#,
     );
 
@@ -380,16 +316,12 @@ fn enum_tuple_variant() {
 fn enum_struct_variant() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         enum Message {
             Point { x: u8, y: u8 },
         }
         fn main() {
             Message::Point { x: 10, y: 20 };
         }
-    "#,
-    );
     "#,
     );
 
@@ -401,8 +333,6 @@ fn enum_struct_variant() {
 
 #[test]
 fn enum_pattern_matching() {
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         enum Direction {
@@ -418,8 +348,6 @@ fn enum_pattern_matching() {
         }
     "#,
     );
-    "#,
-    );
 
     // Match generates comparison and branches
     assert_asm_contains(&asm, "CMP");
@@ -430,8 +358,6 @@ fn enum_pattern_matching() {
 fn enum_multiple_variants() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         enum Option {
             None,
             Some(u8),
@@ -439,8 +365,6 @@ fn enum_multiple_variants() {
         fn main() {
             let opt: Option = Option::Some(42);
         }
-    "#,
-    );
     "#,
     );
 
@@ -457,13 +381,9 @@ fn enum_multiple_variants() {
 fn nested_expressions() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let result: u8 = (10 + 20) * 2;
         }
-    "#,
-    );
     "#,
     );
 
@@ -479,8 +399,6 @@ fn nested_expressions() {
 fn many_local_variables() {
     // Test expanded variable capacity: $40-$7F = 64 bytes
     // This test would fail with old 16-byte limit ($40-$4F)
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         fn main() {
@@ -508,8 +426,6 @@ fn many_local_variables() {
         }
     "#,
     );
-    "#,
-    );
 
     // Verify the function compiled successfully
     assert_asm_contains(&asm, "main:");
@@ -521,8 +437,6 @@ fn multiple_array_variables() {
     // Arrays need 2 bytes per pointer
     // Old layout: 16 bytes = ~8 arrays max
     // New layout: 64 bytes = ~32 arrays max
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         fn main() {
@@ -539,8 +453,6 @@ fn multiple_array_variables() {
         }
     "#,
     );
-    "#,
-    );
 
     // Verify successful compilation with 10 arrays (20 bytes)
     assert_asm_contains(&asm, "main:");
@@ -551,8 +463,6 @@ fn multiple_array_variables() {
 fn loop_unrolling_small_constant_loop() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const DATA: addr = 0x6000;
         fn main() {
             for i: u8 in 0..3 {
@@ -561,21 +471,11 @@ fn loop_unrolling_small_constant_loop() {
         }
     "#,
     );
-    "#,
-    );
 
     // Verify loop was unrolled (should have "Loop unrolled" comment)
     assert_asm_contains(&asm, "Loop unrolled");
 
     // Should NOT have loop labels (fl, fx) or branch instructions for this simple loop
-    assert!(
-        !asm.contains("fl_"),
-        "Expected loop to be unrolled, not use loop labels"
-    );
-    assert!(
-        !asm.contains("BCS"),
-        "Expected loop to be unrolled, not use conditional branches"
-    );
     assert!(
         !asm.contains("fl_"),
         "Expected loop to be unrolled, not use loop labels"
@@ -595,16 +495,12 @@ fn loop_unrolling_small_constant_loop() {
 fn loop_unrolling_single_iteration() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const OUT: addr = 0x6000;
         fn main() {
             for i: u8 in 5..6 {
                 OUT = i;
             }
         }
-    "#,
-    );
     "#,
     );
 
@@ -617,16 +513,12 @@ fn loop_unrolling_single_iteration() {
 fn loop_unrolling_inclusive_range() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const OUT: addr = 0x6000;
         fn main() {
             for i: u8 in 0..=2 {
                 OUT = i;
             }
         }
-    "#,
-    );
     "#,
     );
 
@@ -638,8 +530,6 @@ fn loop_unrolling_inclusive_range() {
 fn no_loop_unrolling_large_count() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const OUT: addr = 0x6000;
         fn main() {
             for i: u8 in 0..20 {
@@ -648,14 +538,8 @@ fn no_loop_unrolling_large_count() {
         }
     "#,
     );
-    "#,
-    );
 
     // Large loop (20 iterations) should NOT be unrolled
-    assert!(
-        !asm.contains("Loop unrolled"),
-        "Large loops should not be unrolled"
-    );
     assert!(
         !asm.contains("Loop unrolled"),
         "Large loops should not be unrolled"
@@ -669,8 +553,6 @@ fn no_loop_unrolling_large_count() {
 fn no_loop_unrolling_non_constant() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const OUT: addr = 0x6000;
         fn main() {
             let n: u8 = 5;
@@ -680,14 +562,8 @@ fn no_loop_unrolling_non_constant() {
         }
     "#,
     );
-    "#,
-    );
 
     // Variable range end should NOT be unrolled
-    assert!(
-        !asm.contains("Loop unrolled"),
-        "Non-constant ranges should not be unrolled"
-    );
     assert!(
         !asm.contains("Loop unrolled"),
         "Non-constant ranges should not be unrolled"
@@ -702,15 +578,11 @@ fn no_loop_unrolling_non_constant() {
 fn dead_code_after_return() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let x: u8 = 1;
             return;
             let y: u8 = 2;  // Unreachable
         }
-    "#,
-    );
     "#,
     );
 
@@ -721,16 +593,10 @@ fn dead_code_after_return() {
         !asm.contains("LDA #$02"),
         "Dead code should not generate assembly"
     );
-    assert!(
-        !asm.contains("LDA #$02"),
-        "Dead code should not generate assembly"
-    );
 }
 
 #[test]
 fn dead_code_after_break() {
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         fn main() {
@@ -743,8 +609,6 @@ fn dead_code_after_break() {
         }
     "#,
     );
-    "#,
-    );
 
     // Should eliminate unreachable code after break
     assert_asm_contains(&asm, "Unreachable code eliminated");
@@ -752,8 +616,6 @@ fn dead_code_after_break() {
 
 #[test]
 fn dead_code_after_continue() {
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         fn main() {
@@ -766,8 +628,6 @@ fn dead_code_after_continue() {
         }
     "#,
     );
-    "#,
-    );
 
     // Should eliminate unreachable code after continue
     assert_asm_contains(&asm, "Unreachable code eliminated");
@@ -775,8 +635,6 @@ fn dead_code_after_continue() {
 
 #[test]
 fn multiple_dead_statements() {
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         fn main() {
@@ -787,16 +645,9 @@ fn multiple_dead_statements() {
         }
     "#,
     );
-    "#,
-    );
 
     // Should have multiple elimination comments
     let count = asm.matches("Unreachable code eliminated").count();
-    assert!(
-        count >= 3,
-        "Expected at least 3 unreachable code eliminations, got {}",
-        count
-    );
     assert!(
         count >= 3,
         "Expected at least 3 unreachable code eliminations, got {}",
@@ -812,25 +663,13 @@ fn multiple_dead_statements() {
 fn zero_array_small_no_optimization() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let buf: [u8; 8] = [0; 8];
         }
     "#,
     );
-    "#,
-    );
 
     // Small arrays (< 16 bytes) should NOT be optimized
-    assert!(
-        !asm.contains(".RES"),
-        "Small zero arrays should not use .RES"
-    );
-    assert!(
-        !asm.contains("Zero-filled array optimized"),
-        "Small arrays should not be optimized"
-    );
     assert!(
         !asm.contains(".RES"),
         "Small zero arrays should not use .RES"
@@ -845,25 +684,19 @@ fn zero_array_small_no_optimization() {
 fn zero_array_large_optimized() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let buf: [u8; 32] = [0; 32];
         }
     "#,
     );
-    "#,
-    );
 
-    // Large zero arrays emit .BYTE $00 for each element (portable format)
-    assert_asm_contains(&asm, ".BYTE $00");
-    assert_asm_contains(&asm, "Array data: 32 bytes");
+    // Large zero arrays (>= 16 bytes) should be optimized
+    assert_asm_contains(&asm, ".RES 32");
+    assert_asm_contains(&asm, "Zero-filled array optimized: 32 bytes");
 }
 
 #[test]
 fn zero_array_threshold_optimized() {
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         fn main() {
@@ -871,25 +704,19 @@ fn zero_array_threshold_optimized() {
         }
     "#,
     );
-    "#,
-    );
 
-    // Zero arrays emit .BYTE $00 for each element (portable format)
-    assert_asm_contains(&asm, ".BYTE $00");
-    assert_asm_contains(&asm, "Array data: 16 bytes");
+    // Exactly 16 bytes should be optimized
+    assert_asm_contains(&asm, ".RES 16");
+    assert_asm_contains(&asm, "Zero-filled array optimized");
 }
 
 #[test]
 fn non_zero_array_not_optimized() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let buf: [u8; 32] = [5; 32];
         }
-    "#,
-    );
     "#,
     );
 
@@ -903,24 +730,20 @@ fn non_zero_array_not_optimized() {
 fn very_large_zero_array() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         fn main() {
             let buf: [u8; 256] = [0; 256];
         }
     "#,
     );
-    "#,
-    );
 
-    // Very large zero arrays emit .BYTE $00 for each element (portable format)
-    assert_asm_contains(&asm, ".BYTE $00");
-    assert_asm_contains(&asm, "Array data: 256 bytes");
-    // Should have 256 .BYTE $00 directives
+    // Very large zero arrays should be optimized
+    assert_asm_contains(&asm, ".RES 256");
+    assert_asm_contains(&asm, "Zero-filled array optimized: 256 bytes");
+    // Should NOT have hundreds of .BYTE directives
     let byte_count = asm.matches(".BYTE $00").count();
-    assert_eq!(
-        byte_count, 256,
-        "Zero array should have 256 .BYTE $00 directives, found {}",
+    assert!(
+        byte_count < 10,
+        "Optimized arrays should have very few .BYTE directives, found {}",
         byte_count
     );
 }
@@ -933,15 +756,11 @@ fn very_large_zero_array() {
 fn const_array_lookup_table() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const LUT: [u8; 16] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225];
 
         fn main() {
             let x: u8 = LUT[5];
         }
-    "#,
-    );
     "#,
     );
 
@@ -957,10 +776,6 @@ fn const_array_lookup_table() {
         &asm,
         ".BYTE $00, $01, $04, $09, $10, $19, $24, $31, $40, $51, $64, $79, $90, $A9, $C4, $E1",
     );
-    assert_asm_contains(
-        &asm,
-        ".BYTE $00, $01, $04, $09, $10, $19, $24, $31, $40, $51, $64, $79, $90, $A9, $C4, $E1",
-    );
 
     // Data should come before code
     assert_asm_order(&asm, "Data Section (Const Arrays)", "Code from main module");
@@ -970,8 +785,6 @@ fn const_array_lookup_table() {
 fn const_array_zero_filled() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const BUFFER: [u8; 256] = [0; 256];
 
         fn main() {
@@ -979,12 +792,10 @@ fn const_array_zero_filled() {
         }
     "#,
     );
-    "#,
-    );
 
-    // Zero-filled const arrays emit .BYTE $00 for each element (portable format)
+    // Should use .RES optimization for large zero-filled arrays
     assert_asm_contains(&asm, "BUFFER:");
-    assert_asm_contains(&asm, ".BYTE $00");
+    assert_asm_contains(&asm, ".RES 256");
 
     // Should be in DATA section
     assert_asm_contains(&asm, "Data Section (Const Arrays)");
@@ -994,15 +805,11 @@ fn const_array_zero_filled() {
 fn const_array_sprite_data() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const SPRITE: [u8; 8] = [0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00];
 
         fn main() {
             let x: u8 = SPRITE[0];
         }
-    "#,
-    );
     "#,
     );
 
@@ -1015,15 +822,11 @@ fn const_array_sprite_data() {
 fn const_array_small_zero_fill() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const SMALL: [u8; 8] = [0; 8];
 
         fn main() {
             let x: u8 = SMALL[0];
         }
-    "#,
-    );
     "#,
     );
 
@@ -1036,16 +839,10 @@ fn const_array_small_zero_fill() {
         !asm.contains(".RES 8"),
         "Small arrays should not use .RES optimization"
     );
-    assert!(
-        !asm.contains(".RES 8"),
-        "Small arrays should not use .RES optimization"
-    );
 }
 
 #[test]
 fn multiple_const_arrays() {
-    let asm = compile_success(
-        r#"
     let asm = compile_success(
         r#"
         const FIRST: [u8; 4] = [1, 2, 3, 4];
@@ -1055,8 +852,6 @@ fn multiple_const_arrays() {
             let a: u8 = FIRST[0];
             let b: u8 = SECOND[0];
         }
-    "#,
-    );
     "#,
     );
 
@@ -1074,8 +869,6 @@ fn multiple_const_arrays() {
 fn const_array_separated_from_code() {
     let asm = compile_success(
         r#"
-    let asm = compile_success(
-        r#"
         const DATA: [u8; 4] = [1, 2, 3, 4];
 
         fn helper() {
@@ -1087,8 +880,6 @@ fn const_array_separated_from_code() {
         }
     "#,
     );
-    "#,
-    );
 
     // Data section should come before code section
     assert_asm_order(&asm, "Data Section (Const Arrays)", "Code from main module");
@@ -1098,10 +889,6 @@ fn const_array_separated_from_code() {
     let helper_pos = asm.find("helper:").expect("helper label not found");
     let main_pos = asm.find("main:").expect("main label not found");
 
-    assert!(
-        data_pos < helper_pos,
-        "DATA should come before helper function"
-    );
     assert!(
         data_pos < helper_pos,
         "DATA should come before helper function"

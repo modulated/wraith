@@ -177,7 +177,10 @@ impl SemanticAnalyzer {
             | Expr::CpuFlagNegative => Type::Primitive(PrimitiveType::Bool),
 
             // Match expression
-            Expr::Match { expr: match_expr, arms } => {
+            Expr::Match {
+                expr: match_expr,
+                arms,
+            } => {
                 // Check the matched expression
                 self.check_expr(match_expr)?;
 

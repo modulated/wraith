@@ -46,9 +46,6 @@ pub fn generate_item(
         Item::Function(func) => {
             generate_function(func, emitter, info, section_alloc, string_collector)
         }
-        Item::Function(func) => {
-            generate_function(func, emitter, info, section_alloc, string_collector)
-        }
         Item::Static(stat) => generate_static(stat, emitter, info, string_collector),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
@@ -73,12 +70,6 @@ fn generate_function(
 
     // Check if this is an interrupt handler (need to know for size calculation)
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
-    let is_interrupt = func.attributes.iter().any(|attr| {
-        matches!(
-            attr,
-            FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
-        )
-    });
     let is_interrupt = func.attributes.iter().any(|attr| {
         matches!(
             attr,
@@ -202,9 +193,6 @@ fn generate_function(
         let params_str: Vec<String> = func
             .params
             .iter()
-        let params_str: Vec<String> = func
-            .params
-            .iter()
             .map(|p| format!("{}: {}", p.name.node, format_type(&p.ty)))
             .collect();
         emitter.emit_comment(&format!("  Params: {}", params_str.join(", ")));
@@ -281,9 +269,6 @@ fn generate_function(
     let has_tail_recursion = info
         .function_metadata
         .get(name)
-    let has_tail_recursion = info
-        .function_metadata
-        .get(name)
         .map(|m| m.has_tail_recursion)
         .unwrap_or(false);
 
@@ -300,16 +285,7 @@ fn generate_function(
         emitter.emit_comment("Copy struct param pointers to local storage");
         let param_base = emitter.memory_layout.param_base;
         let mut param_offset = 0u8;
-        && !metadata.struct_param_locals.is_empty()
-    {
-        emitter.emit_comment("Copy struct param pointers to local storage");
-        let param_base = emitter.memory_layout.param_base;
-        let mut param_offset = 0u8;
 
-        // Iterate through params to find struct params and their offsets
-        for param in &func.params {
-            let param_name = &param.name.node;
-            let param_type = info.resolved_types.get(&param.ty.span);
         // Iterate through params to find struct params and their offsets
         for param in &func.params {
             let param_name = &param.name.node;
@@ -344,12 +320,6 @@ fn generate_function(
 
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
-    let is_interrupt = func.attributes.iter().any(|attr| {
-        matches!(
-            attr,
-            FnAttribute::Interrupt | FnAttribute::Nmi | FnAttribute::Irq
-        )
-    });
     let is_interrupt = func.attributes.iter().any(|attr| {
         matches!(
             attr,
@@ -427,9 +397,6 @@ fn generate_static(
     let sym = info
         .table
         .lookup(name)
-    let sym = info
-        .table
-        .lookup(name)
         .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
     let type_size = sym.ty.size();
@@ -480,8 +447,6 @@ fn generate_static(
                     return Err(CodegenError::UnsupportedOperation(
                         "Only integer literals supported in static array initialization"
                             .to_string(),
-                        "Only integer literals supported in static array initialization"
-                            .to_string(),
                     ));
                 }
             }
@@ -492,7 +457,6 @@ fn generate_static(
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(
-                "Only constant literal expressions supported in static initialization".to_string(),
                 "Only constant literal expressions supported in static initialization".to_string(),
             ));
         }
@@ -511,9 +475,6 @@ fn generate_address(
 
     // Get the actual address value from resolved_symbols (using span for correct lookup)
     // Fallback to global table for top-level addresses
-    let sym = info
-        .resolved_symbols
-        .get(&addr.name.span)
     let sym = info
         .resolved_symbols
         .get(&addr.name.span)
@@ -556,7 +517,6 @@ fn emit_const_array(
         _ => {
             return Err(CodegenError::UnsupportedOperation(
                 "Const arrays must have literal initializers".to_string(),
-                "Const arrays must have literal initializers".to_string(),
             ));
         }
     }
@@ -580,18 +540,22 @@ fn emit_array_fill_data(
         } else {
             return Err(CodegenError::UnsupportedOperation(
                 "Array fill value must be an integer".to_string(),
-                "Array fill value must be an integer".to_string(),
             ));
         }
     } else {
         return Err(CodegenError::UnsupportedOperation(
             "Array fill value must be a constant".to_string(),
-            "Array fill value must be a constant".to_string(),
         ));
     };
 
-    // Emit repeated bytes (using .BYTE for portability)
-    emit_repeated_bytes(val as u8, count, emitter);
+    // Zero-fill optimization: use .RES directive for zeros
+    if val == 0 && count >= 16 {
+        emitter.emit_comment(&format!("Zero-filled array optimized: {} bytes", count));
+        emitter.emit_data_directive(&format!(".RES {}", count));
+    } else {
+        // Emit repeated bytes (using .BYTE for portability)
+        emit_repeated_bytes(val as u8, count, emitter);
+    }
 
     Ok(())
 }
@@ -614,12 +578,10 @@ fn emit_array_literal_data(
             } else {
                 return Err(CodegenError::UnsupportedOperation(
                     "Array elements must be integers".to_string(),
-                    "Array elements must be integers".to_string(),
                 ));
             }
         } else {
             return Err(CodegenError::UnsupportedOperation(
-                "Array elements must be constants".to_string(),
                 "Array elements must be constants".to_string(),
             ));
         };
@@ -628,8 +590,6 @@ fn emit_array_literal_data(
 
     // Emit as .BYTE directives (max 16 per line for readability)
     for chunk in bytes.chunks(16) {
-        let byte_str = chunk
-            .iter()
         let byte_str = chunk
             .iter()
             .map(|b| format!("${:02X}", b))
@@ -646,8 +606,6 @@ fn emit_repeated_bytes(val: u8, count: usize, emitter: &mut Emitter) {
     // Emit as .BYTE directives (max 16 per line)
     let bytes = vec![val; count];
     for chunk in bytes.chunks(16) {
-        let byte_str = chunk
-            .iter()
         let byte_str = chunk
             .iter()
             .map(|b| format!("${:02X}", b))
