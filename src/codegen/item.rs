@@ -118,7 +118,7 @@ fn generate_function(
 
     // Determine function address
     // Priority: explicit org > section attribute > default section
-    let (function_addr, allocation_source) =
+    let (_function_addr, _allocation_source) =
         if let Some(metadata) = info.function_metadata.get(name) {
             if let Some(org_addr) = metadata.org_address {
                 // Explicit org address takes precedence
@@ -247,7 +247,7 @@ fn generate_function(
     emitter.emit_label(name);
 
     // Initialize software stack pointer for reset handler
-    let is_reset = func
+    let _is_reset = func
         .attributes
         .iter()
         .any(|attr| matches!(attr, FnAttribute::Reset));

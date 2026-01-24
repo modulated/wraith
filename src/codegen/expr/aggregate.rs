@@ -434,7 +434,7 @@ pub(super) fn generate_enum_variant(
 
     if all_constant {
         // Use inline data approach (original implementation)
-        generate_enum_variant_inline(enum_name, variant, data, emitter, &variant_info)
+        generate_enum_variant_inline(enum_name, variant, data, emitter, variant_info)
     } else {
         // Use runtime construction approach
         generate_enum_variant_runtime(
@@ -443,7 +443,7 @@ pub(super) fn generate_enum_variant(
             data,
             emitter,
             info,
-            &variant_info,
+            variant_info,
             string_collector,
         )
     }
