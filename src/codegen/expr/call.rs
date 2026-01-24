@@ -99,14 +99,17 @@ pub(super) fn generate_call(
                     | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
             )
         });
-        // Struct and array parameters take 2 bytes (pointer)
+        // Struct, array, and string parameters take 2 bytes (pointer)
         let is_struct = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::Named(_)));
         let is_array = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::Array(_, _)));
-        total_bytes += if is_16bit || is_struct || is_array {
+        let is_string = param_types
+            .get(i)
+            .is_some_and(|param_ty| matches!(param_ty, Type::String));
+        total_bytes += if is_16bit || is_struct || is_array || is_string {
             2
         } else {
             1
@@ -153,6 +156,27 @@ pub(super) fn generate_call(
             // Store to TEMPORARY location
             emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
             // Store high byte from X (enums use A:X convention)
+            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
+
+            temp_offset += 2;
+            arg_info.push((temp_addr, true));
+            continue;
+        }
+
+        // Check if argument is a string (2-byte pointer, stored in A:X)
+        let is_string_arg = arg_type.is_some_and(|ty| matches!(ty, Type::String));
+        let param_is_string = param_types
+            .get(i)
+            .is_some_and(|param_ty| matches!(param_ty, Type::String));
+
+        // Handle string passing (pass the 2-byte pointer, stored in A:X)
+        if is_string_arg && param_is_string {
+            // Generate expression (returns pointer in A:X)
+            generate_expr(arg, emitter, info, string_collector)?;
+
+            // Store to TEMPORARY location
+            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+            // Store high byte from X (strings use A:X convention like enums)
             emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
 
             temp_offset += 2;

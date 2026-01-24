@@ -401,6 +401,7 @@ pub(super) fn generate_enum_variant(
     data: &crate::ast::VariantData,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut crate::codegen::StringCollector,
 ) -> Result<(), CodegenError> {
     emitter.emit_comment(&format!(
         "Enum variant: {}::{}",
@@ -426,8 +427,57 @@ pub(super) fn generate_enum_variant(
         ))
     })?;
 
+    // Check if all values are constant expressions
+    // If so, we can use inline data (efficient, data in ROM)
+    // Otherwise, we need runtime construction (data in temp storage)
+    let all_constant = is_variant_data_constant(data);
+
+    if all_constant {
+        // Use inline data approach (original implementation)
+        generate_enum_variant_inline(enum_name, variant, data, emitter, &variant_info)
+    } else {
+        // Use runtime construction approach
+        generate_enum_variant_runtime(
+            enum_name,
+            variant,
+            data,
+            emitter,
+            info,
+            &variant_info,
+            string_collector,
+        )
+    }
+}
+
+/// Check if all values in variant data are constant expressions
+fn is_variant_data_constant(data: &crate::ast::VariantData) -> bool {
+    match data {
+        crate::ast::VariantData::Unit => true,
+        crate::ast::VariantData::Tuple(values) => values.iter().all(|v| is_expr_constant(&v.node)),
+        crate::ast::VariantData::Struct(fields) => {
+            fields.iter().all(|f| is_expr_constant(&f.value.node))
+        }
+    }
+}
+
+/// Check if an expression is a compile-time constant
+fn is_expr_constant(expr: &crate::ast::Expr) -> bool {
+    matches!(
+        expr,
+        crate::ast::Expr::Literal(crate::ast::Literal::Integer(_))
+            | crate::ast::Expr::Literal(crate::ast::Literal::Bool(_))
+    )
+}
+
+/// Generate enum variant with inline data (for constant values)
+fn generate_enum_variant_inline(
+    _enum_name: &Spanned<String>,
+    variant: &Spanned<String>,
+    data: &crate::ast::VariantData,
+    emitter: &mut Emitter,
+    variant_info: &crate::sema::type_defs::VariantInfo,
+) -> Result<(), CodegenError> {
     // Generate labels for enum data
-    // Use short label prefix to stay within 12-char assembler limit
     let enum_label = emitter.next_label("en");
     let skip_label = emitter.next_label("es");
 
@@ -449,7 +499,6 @@ pub(super) fn generate_enum_variant(
             crate::sema::type_defs::VariantData::Tuple(field_types),
             crate::ast::VariantData::Tuple(values),
         ) => {
-            // Tuple variant - emit each value
             if values.len() != field_types.len() {
                 return Err(CodegenError::UnsupportedOperation(format!(
                     "variant '{}' expects {} fields, got {}",
@@ -460,47 +509,13 @@ pub(super) fn generate_enum_variant(
             }
 
             for (value_expr, field_type) in values.iter().zip(field_types.iter()) {
-                // For now, only support constant expressions
-                if let crate::ast::Expr::Literal(lit) = &value_expr.node {
-                    match lit {
-                        crate::ast::Literal::Integer(val) => {
-                            let size = field_type.size();
-                            if size == 1 {
-                                emitter.emit_byte(*val as u8);
-                            } else if size == 2 {
-                                // Emit as little-endian u16
-                                emitter.emit_byte((*val & 0xFF) as u8);
-                                emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
-                            } else {
-                                return Err(CodegenError::UnsupportedOperation(format!(
-                                    "field type with size {} not yet supported",
-                                    size
-                                )));
-                            }
-                        }
-                        crate::ast::Literal::Bool(b) => {
-                            emitter.emit_byte(if *b { 1 } else { 0 });
-                        }
-                        _ => {
-                            return Err(CodegenError::UnsupportedOperation(
-                                "only integer and bool literals supported in enum variant data"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    return Err(CodegenError::UnsupportedOperation(
-                        "only constant expressions supported in enum variant construction"
-                            .to_string(),
-                    ));
-                }
+                emit_constant_value(&value_expr.node, field_type.size(), emitter)?;
             }
         }
         (
             crate::sema::type_defs::VariantData::Struct(field_infos),
             crate::ast::VariantData::Struct(field_inits),
         ) => {
-            // Struct variant - similar to struct initialization
             let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> =
                 field_inits
                     .iter()
@@ -509,38 +524,7 @@ pub(super) fn generate_enum_variant(
 
             for field_info in field_infos {
                 if let Some(value_expr) = field_values.get(&field_info.name) {
-                    if let crate::ast::Expr::Literal(lit) = &value_expr.node {
-                        match lit {
-                            crate::ast::Literal::Integer(val) => {
-                                let size = field_info.ty.size();
-                                if size == 1 {
-                                    emitter.emit_byte(*val as u8);
-                                } else if size == 2 {
-                                    emitter.emit_byte((*val & 0xFF) as u8);
-                                    emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
-                                } else {
-                                    return Err(CodegenError::UnsupportedOperation(format!(
-                                        "field type with size {} not yet supported",
-                                        size
-                                    )));
-                                }
-                            }
-                            crate::ast::Literal::Bool(b) => {
-                                emitter.emit_byte(if *b { 1 } else { 0 });
-                            }
-                            _ => {
-                                return Err(CodegenError::UnsupportedOperation(
-                                    "only integer and bool literals supported in enum variant"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    } else {
-                        return Err(CodegenError::UnsupportedOperation(
-                            "only constant expressions supported in enum variant construction"
-                                .to_string(),
-                        ));
-                    }
+                    emit_constant_value(&value_expr.node, field_info.ty.size(), emitter)?;
                 } else {
                     // Field not provided - initialize to zero
                     for _ in 0..field_info.ty.size() {
@@ -562,6 +546,186 @@ pub(super) fn generate_enum_variant(
     // Load the address of the enum into A (low byte) and X (high byte)
     emitter.emit_inst("LDA", &format!("#<{}", enum_label));
     emitter.emit_inst("LDX", &format!("#>{}", enum_label));
+
+    Ok(())
+}
+
+/// Emit a constant value as inline data bytes
+fn emit_constant_value(
+    expr: &crate::ast::Expr,
+    size: usize,
+    emitter: &mut Emitter,
+) -> Result<(), CodegenError> {
+    if let crate::ast::Expr::Literal(lit) = expr {
+        match lit {
+            crate::ast::Literal::Integer(val) => {
+                if size == 1 {
+                    emitter.emit_byte(*val as u8);
+                } else if size == 2 {
+                    emitter.emit_byte((*val & 0xFF) as u8);
+                    emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
+                } else {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "field type with size {} not yet supported",
+                        size
+                    )));
+                }
+            }
+            crate::ast::Literal::Bool(b) => {
+                emitter.emit_byte(if *b { 1 } else { 0 });
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    "only integer and bool literals supported in enum variant data".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Generate enum variant with runtime construction (for non-constant values)
+fn generate_enum_variant_runtime(
+    _enum_name: &Spanned<String>,
+    variant: &Spanned<String>,
+    data: &crate::ast::VariantData,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    variant_info: &crate::sema::type_defs::VariantInfo,
+    string_collector: &mut crate::codegen::StringCollector,
+) -> Result<(), CodegenError> {
+    emitter.emit_comment("Runtime enum construction");
+
+    // Calculate total size needed: 1 byte tag + field data
+    let data_size = match &variant_info.data {
+        crate::sema::type_defs::VariantData::Unit => 0,
+        crate::sema::type_defs::VariantData::Tuple(types) => {
+            types.iter().map(|t| t.size()).sum::<usize>()
+        }
+        crate::sema::type_defs::VariantData::Struct(fields) => {
+            fields.iter().map(|f| f.ty.size()).sum::<usize>()
+        }
+    };
+    let total_size = 1 + data_size; // tag + data
+
+    // Allocate temp storage from primary pool ($20-$3F)
+    let temp_base = emitter
+        .temp_alloc
+        .alloc_primary(total_size as u8)
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(
+                "not enough temp storage for runtime enum construction".to_string(),
+            )
+        })?;
+
+    // Write the tag byte
+    emitter.emit_inst("LDA", &format!("#${:02X}", variant_info.tag));
+    emitter.emit_inst("STA", &format!("${:02X}", temp_base));
+
+    // Invalidate register state - the tag load clobbered A, so any subsequent
+    // field value expressions must reload their values
+    emitter.reg_state.invalidate_all();
+
+    // Write field values
+    let mut offset = 1u8; // Start after the tag byte
+
+    match (&variant_info.data, data) {
+        (crate::sema::type_defs::VariantData::Unit, crate::ast::VariantData::Unit) => {
+            // Unit variant - no data to write
+        }
+        (
+            crate::sema::type_defs::VariantData::Tuple(field_types),
+            crate::ast::VariantData::Tuple(values),
+        ) => {
+            if values.len() != field_types.len() {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "variant '{}' expects {} fields, got {}",
+                    variant.node,
+                    field_types.len(),
+                    values.len()
+                )));
+            }
+
+            for (value_expr, field_type) in values.iter().zip(field_types.iter()) {
+                let field_size = field_type.size();
+                let field_addr = temp_base + offset;
+
+                // Generate code to evaluate the expression
+                generate_expr(value_expr, emitter, info, string_collector)?;
+
+                // Store the result to temp storage
+                if field_size == 1 {
+                    emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                } else if field_size == 2 {
+                    // 16-bit: A has low byte, Y has high byte
+                    emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                    emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+                } else {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "field type with size {} not yet supported",
+                        field_size
+                    )));
+                }
+
+                offset += field_size as u8;
+            }
+        }
+        (
+            crate::sema::type_defs::VariantData::Struct(field_infos),
+            crate::ast::VariantData::Struct(field_inits),
+        ) => {
+            let field_values: std::collections::HashMap<String, &Spanned<crate::ast::Expr>> =
+                field_inits
+                    .iter()
+                    .map(|f| (f.name.node.clone(), &f.value))
+                    .collect();
+
+            for field_info in field_infos {
+                let field_size = field_info.ty.size();
+                let field_addr = temp_base + offset;
+
+                if let Some(value_expr) = field_values.get(&field_info.name) {
+                    // Generate code to evaluate the expression
+                    generate_expr(value_expr, emitter, info, string_collector)?;
+
+                    // Store the result to temp storage
+                    if field_size == 1 {
+                        emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                    } else if field_size == 2 {
+                        emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                        emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+                    } else {
+                        return Err(CodegenError::UnsupportedOperation(format!(
+                            "field type with size {} not yet supported",
+                            field_size
+                        )));
+                    }
+                } else {
+                    // Field not provided - initialize to zero
+                    emitter.emit_inst("LDA", "#$00");
+                    for i in 0..field_size {
+                        emitter.emit_inst("STA", &format!("${:02X}", field_addr + i as u8));
+                    }
+                }
+
+                offset += field_size as u8;
+            }
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "variant data mismatch for '{}'",
+                variant.node
+            )));
+        }
+    }
+
+    // Load the address of the temp storage into A (low byte) and X (high byte)
+    // Since temp storage is in zero page, high byte is always 0
+    emitter.emit_inst("LDA", &format!("#${:02X}", temp_base));
+    emitter.emit_inst("LDX", "#$00");
+
+    // Note: We don't free the temp storage here because the caller needs
+    // to use the pointer. The temp allocator will be reset at function boundaries.
 
     Ok(())
 }

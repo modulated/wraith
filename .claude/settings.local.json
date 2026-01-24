@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cargo test:*)",
       "Bash(cargo clippy:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(cargo run:*)"
     ]
   },
   "hooks": {

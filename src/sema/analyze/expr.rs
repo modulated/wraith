@@ -175,6 +175,34 @@ impl SemanticAnalyzer {
             | Expr::CpuFlagZero
             | Expr::CpuFlagOverflow
             | Expr::CpuFlagNegative => Type::Primitive(PrimitiveType::Bool),
+
+            // Match expression
+            Expr::Match { expr: match_expr, arms } => {
+                // Check the matched expression
+                self.check_expr(match_expr)?;
+
+                // Check each arm's body expression and track their types
+                let mut arm_types = Vec::new();
+                for arm in arms {
+                    // Check pattern bindings are available in arm body scope
+                    // TODO: proper scoping for pattern bindings
+                    let arm_ty = self.check_expr(&arm.body)?;
+                    arm_types.push(arm_ty);
+                }
+
+                // All arms must have the same type (or be compatible)
+                if arm_types.is_empty() {
+                    return Err(SemaError::TypeMismatch {
+                        expected: "at least one match arm".to_string(),
+                        found: "no arms".to_string(),
+                        span: expr.span,
+                    });
+                }
+
+                // For now, just return the type of the first arm
+                // TODO: unify types across arms
+                arm_types.into_iter().next().unwrap()
+            }
         };
 
         // Store the resolved type for this expression so codegen can access it

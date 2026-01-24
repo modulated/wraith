@@ -690,9 +690,9 @@ fn zero_array_large_optimized() {
     "#,
     );
 
-    // Large zero arrays (>= 16 bytes) should be optimized
-    assert_asm_contains(&asm, ".RES 32");
-    assert_asm_contains(&asm, "Zero-filled array optimized: 32 bytes");
+    // Large zero arrays emit .BYTE $00 for each element (portable format)
+    assert_asm_contains(&asm, ".BYTE $00");
+    assert_asm_contains(&asm, "Array data: 32 bytes");
 }
 
 #[test]
@@ -705,9 +705,9 @@ fn zero_array_threshold_optimized() {
     "#,
     );
 
-    // Exactly 16 bytes should be optimized
-    assert_asm_contains(&asm, ".RES 16");
-    assert_asm_contains(&asm, "Zero-filled array optimized");
+    // Zero arrays emit .BYTE $00 for each element (portable format)
+    assert_asm_contains(&asm, ".BYTE $00");
+    assert_asm_contains(&asm, "Array data: 16 bytes");
 }
 
 #[test]
@@ -736,14 +736,14 @@ fn very_large_zero_array() {
     "#,
     );
 
-    // Very large zero arrays should be optimized
-    assert_asm_contains(&asm, ".RES 256");
-    assert_asm_contains(&asm, "Zero-filled array optimized: 256 bytes");
-    // Should NOT have hundreds of .BYTE directives
+    // Very large zero arrays emit .BYTE $00 for each element (portable format)
+    assert_asm_contains(&asm, ".BYTE $00");
+    assert_asm_contains(&asm, "Array data: 256 bytes");
+    // Should have 256 .BYTE $00 directives
     let byte_count = asm.matches(".BYTE $00").count();
-    assert!(
-        byte_count < 10,
-        "Optimized arrays should have very few .BYTE directives, found {}",
+    assert_eq!(
+        byte_count, 256,
+        "Zero array should have 256 .BYTE $00 directives, found {}",
         byte_count
     );
 }
@@ -793,9 +793,9 @@ fn const_array_zero_filled() {
     "#,
     );
 
-    // Should use .RES optimization for large zero-filled arrays
+    // Zero-filled const arrays emit .BYTE $00 for each element (portable format)
     assert_asm_contains(&asm, "BUFFER:");
-    assert_asm_contains(&asm, ".RES 256");
+    assert_asm_contains(&asm, ".BYTE $00");
 
     // Should be in DATA section
     assert_asm_contains(&asm, "Data Section (Const Arrays)");

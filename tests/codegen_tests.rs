@@ -725,15 +725,15 @@ fn test_codegen_enum_pattern_matching() {
         "Should have jump table match comment"
     );
 
-    // Should store enum pointer and load tag
-    assert!(asm.contains("STA $20"), "Should store pointer low byte");
-    assert!(asm.contains("STX $21"), "Should store pointer high byte");
+    // Should store enum pointer and load tag (using pointer ops area $30-$32)
+    assert!(asm.contains("STA $30"), "Should store pointer low byte");
+    assert!(asm.contains("STX $31"), "Should store pointer high byte");
     assert!(asm.contains("LDY #$00"), "Should set Y to 0");
     assert!(
-        asm.contains("LDA ($20),Y"),
+        asm.contains("LDA ($30),Y"),
         "Should load tag byte using indirect indexed"
     );
-    assert!(asm.contains("STA $22"), "Should store tag at $22");
+    assert!(asm.contains("STA $32"), "Should store tag at $32");
 
     // Should have jump table dispatch
     assert!(

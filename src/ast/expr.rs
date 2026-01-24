@@ -181,6 +181,19 @@ pub enum Expr {
 
     /// Parenthesized expression (for preserving source structure)
     Paren(Box<Spanned<Expr>>),
+
+    /// Match expression: match x { pattern => expr, ... }
+    Match {
+        expr: Box<Spanned<Expr>>,
+        arms: Vec<ExprMatchArm>,
+    },
+}
+
+/// A match arm for match expressions (body is an expression)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprMatchArm {
+    pub pattern: Spanned<crate::ast::Pattern>,
+    pub body: Box<Spanned<Expr>>,
 }
 
 impl Expr {

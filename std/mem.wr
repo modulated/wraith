@@ -42,20 +42,27 @@ pub fn memset(dest: u16, value: u8, len: u8) {
 /// - len: Number of bytes to compare
 /// Returns: 1 if equal, 0 if not equal (as u8 for simplicity)
 pub fn memcmp(a: u16, b: u16, len: u8) -> u8 {
-    asm {
-        "LDY #$00",
-        "loop_memcmp:",
-        "LDA {a},Y",
-        "CMP {b},Y",
-        "BNE not_equal",
-        "INY",
-        "CPY {len}",
-        "BNE loop_memcmp",
-        "LDA #$01",
-        "RTS",
-        "not_equal:",
-        "LDA #$00",
+    let i: u8 = 0;
+    loop {
+        if i >= len { break; }
+
+        let byte_a: u8 = 0;
+        let byte_b: u8 = 0;
+        asm {
+            "LDY {i}",
+            "LDA {a},Y",
+            "STA {byte_a}",
+            "LDA {b},Y",
+            "STA {byte_b}"
+        }
+
+        if byte_a != byte_b {
+            return 0;
+        }
+
+        i = i + 1;
     }
+    return 1;
 }
 
 // ============================================================================
@@ -110,4 +117,70 @@ pub fn mem_jump(address: u16) {
     asm {
         "JMP ({address})"
     }
+}
+
+// ============================================================================
+// String Operations
+// ============================================================================
+
+/// Copy string contents to a buffer with overflow protection
+/// - dest: Destination buffer address
+/// - dest_size: Size of destination buffer
+/// - s: Source string
+/// Returns: Number of bytes actually copied (may be less than s.len if buffer too small)
+pub fn str_copy(dest: u16, dest_size: u16, s: str) -> u16 {
+    // Determine how many bytes to copy (min of string length and buffer size)
+    let copy_len: u16 = s.len;
+    if copy_len > dest_size {
+        copy_len = dest_size;
+    }
+
+    if copy_len == 0 as u16 {
+        return 0 as u16;
+    }
+
+    // Fast path: use Y-indexed addressing for strings <= 255 bytes
+    if copy_len <= 255 as u16 {
+        let len8: u8 = copy_len as u8;
+        let i: u8 = 0;
+        loop {
+            if i >= len8 { break; }
+
+            let ch: u8 = s[i];
+            asm {
+                "LDY {i}",
+                "LDA {ch}",
+                "STA {dest},Y"
+            }
+            i = i + 1;
+        }
+    } else {
+        // Slow path: use mem_read/mem_write for strings > 255 bytes
+        let src_lo: u8 = 0;
+        let src_hi: u8 = 0;
+
+        asm {
+            "LDA {s}",
+            "CLC",
+            "ADC #$02",
+            "STA {src_lo}",
+            "LDA {s}+1",
+            "ADC #$00",
+            "STA {src_hi}"
+        }
+
+        let src: u16 = ((src_hi as u16) << 8) | (src_lo as u16);
+
+        let i: u16 = 0 as u16;
+        loop {
+            if i >= copy_len { break; }
+
+            let ch: u8 = mem_read(src + i);
+            mem_write(dest + i, ch);
+
+            i = i + 1 as u16;
+        }
+    }
+
+    return copy_len;
 }

@@ -221,6 +221,9 @@ impl Parser<'_> {
                 Ok(Spanned::new(Expr::Literal(Literal::String(s)), start))
             }
 
+            // Match expression
+            Some(Token::Match) => self.parse_match_expr(),
+
             // Identifier (variable, function call, struct init, enum variant)
             Some(Token::Ident(name)) => {
                 self.advance();
@@ -611,6 +614,69 @@ impl Parser<'_> {
             Some(tok) => Err(ParseError::unexpected_token(start, "type", Some(tok))),
             None => Err(ParseError::unexpected_eof(start, "type")),
         }
+    }
+
+    /// Parse match expression: match expr { pattern => expr, ... }
+    fn parse_match_expr(&mut self) -> ParseResult<Spanned<Expr>> {
+        use crate::ast::ExprMatchArm;
+
+        let start = self.current_span();
+        self.expect(&Token::Match)?;
+
+        let expr = self.parse_expr()?;
+        self.expect(&Token::LBrace)?;
+
+        let mut arms = Vec::new();
+        while !self.check(&Token::RBrace) {
+            let pattern = self.parse_pattern()?;
+            self.expect(&Token::FatArrow)?;
+
+            // Parse body - either a block expression or a single expression
+            let body = if self.check(&Token::LBrace) {
+                // Block expression: { stmts; final_expr }
+                self.parse_block_expr()?
+            } else {
+                // Single expression
+                self.parse_expr()?
+            };
+
+            arms.push(ExprMatchArm {
+                pattern,
+                body: Box::new(body),
+            });
+
+            // Optional comma between arms
+            if self.check(&Token::Comma) {
+                self.advance();
+            }
+        }
+
+        self.expect(&Token::RBrace)?;
+        let span = start.merge(self.previous_span());
+
+        Ok(Spanned::new(
+            Expr::Match {
+                expr: Box::new(expr),
+                arms,
+            },
+            span,
+        ))
+    }
+
+    /// Parse block expression: { stmts; final_expr }
+    /// Returns the value of the final expression
+    fn parse_block_expr(&mut self) -> ParseResult<Spanned<Expr>> {
+        let start = self.current_span();
+        self.expect(&Token::LBrace)?;
+
+        // For now, just parse a single expression in the block
+        // TODO: support multiple statements with final expression
+        let expr = self.parse_expr()?;
+
+        self.expect(&Token::RBrace)?;
+        let span = start.merge(self.previous_span());
+
+        Ok(Spanned::new(Expr::Paren(Box::new(expr)), span))
     }
 }
 

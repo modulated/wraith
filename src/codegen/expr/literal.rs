@@ -183,17 +183,10 @@ pub(super) fn generate_literal(
                 }
             };
 
-            // Optimization: For large zero-filled arrays, use .RES directive
-            const ZERO_FILL_THRESHOLD: usize = 16;
-            if byte_val == 0 && *count >= ZERO_FILL_THRESHOLD {
-                // Use efficient zero-fill directive
-                emitter.emit_comment(&format!("Zero-filled array optimized: {} bytes", count));
-                emitter.emit_raw(&format!("    .RES {}", count));
-            } else {
-                // Emit the value 'count' times
-                for _ in 0..*count {
-                    emitter.emit_byte(byte_val);
-                }
+            // Emit the value 'count' times using .BYTE for portability
+            emitter.emit_comment(&format!("Array data: {} bytes", count));
+            for _ in 0..*count {
+                emitter.emit_byte(byte_val);
             }
 
             // Skip label

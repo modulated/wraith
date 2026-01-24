@@ -1,0 +1,59 @@
+// String Buffer and Character Search Example
+// Demonstrates: buffer setup, string copying, character search
+
+// Output addresses for results
+const OUT0: addr = 0x6000;
+const OUT1: addr = 0x6001;
+const OUT2: addr = 0x6002;
+const OUT3: addr = 0x6003;
+
+// Test string
+const TEST_STRING: str = "Hello, Wraith world!";
+
+/// Search for a character in the buffer
+/// Returns: index if found, 0xFF if not found
+fn find_char(buf: [u8; 32], ch: u8, buf_len: u8) -> u8 {
+    let i: u8 = 0;
+
+    loop {
+        if i >= buf_len { break; }
+
+        if buf[i] == ch {
+            return i;
+        }
+
+        i += 1;
+    }
+
+    return 0xFF;  // Not found
+}
+
+#[reset]
+fn main() {
+    // Local buffer
+    let buffer: [u8; 32] = [0; 32];
+
+    // Copy string into buffer
+    let len: u8 = TEST_STRING.len as u8;
+    let i: u8 = 0;
+
+    loop {
+        if i >= len { break; }
+        buffer[i] = TEST_STRING[i];
+        i += 1;
+    }
+
+    OUT0 = len;  // $6000 = 20 (0x14) string length
+
+    // Search for 'W' - should find at position 7
+    let pos: u8 = find_char(buffer, 0x57, len);  // 'W' = 0x57
+    OUT1 = pos;  // $6001 = 7 (0x07)
+
+    // Search for 'w' - should find at position 14
+    pos = find_char(buffer, 0x77, len);  // 'w' = 0x77
+    OUT2 = pos;  // $6002 = 14 (0x0E)
+
+    // Search for 'z' - should not find (0xFF)
+    pos = find_char(buffer, 0x7A, len);  // 'z' = 0x7A
+    OUT3 = pos;  // $6003 = 0xFF
+}

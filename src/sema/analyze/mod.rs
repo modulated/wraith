@@ -65,6 +65,8 @@ pub struct SemanticAnalyzer {
     pub(super) resolved_struct_names: HashMap<Span, String>,
     /// Memory configuration from wraith.toml for overlap checking
     pub(super) memory_config: crate::config::MemoryConfig,
+    /// Current function being analyzed (for tracking symbol scope in inline asm)
+    pub(super) current_function: Option<String>,
 }
 
 impl Default for SemanticAnalyzer {
@@ -104,6 +106,7 @@ impl SemanticAnalyzer {
             expected_type: None,
             resolved_struct_names: HashMap::new(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
+            current_function: None,
         }
     }
 
@@ -137,6 +140,7 @@ impl SemanticAnalyzer {
             expected_type: None,
             resolved_struct_names: HashMap::new(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
+            current_function: None,
         }
     }
 
@@ -213,6 +217,9 @@ impl SemanticAnalyzer {
         if let Item::Function(func) = &item.node {
             let func_name = func.name.node.clone();
 
+            // Track current function for inline asm variable scoping
+            self.current_function = Some(func_name.clone());
+
             // Check if this is an inline function
             let is_inline = func
                 .attributes
@@ -285,7 +292,7 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // Struct and enum parameters are passed by reference (2-byte pointer)
+                // Struct, enum, and array parameters are passed by reference (2-byte pointer)
                 // Other types are passed by value
                 let is_struct_param = matches!(param_type, Type::Named(_))
                     && self
@@ -308,7 +315,10 @@ impl SemanticAnalyzer {
                         })
                         .is_some();
 
-                let param_size = if is_struct_param || is_enum_param {
+                // Array parameters are passed as 2-byte pointers (pass-by-reference)
+                let is_array_param = matches!(param_type, Type::Array(_, _));
+
+                let param_size = if is_struct_param || is_enum_param || is_array_param {
                     2 // Pointer size for pass-by-reference
                 } else {
                     param_type.size()
@@ -329,6 +339,7 @@ impl SemanticAnalyzer {
                     mutable: false,
                     access_mode: None,
                     is_pub: false, // Function parameters are never public
+                    containing_function: self.current_function.clone(),
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Add to resolved_symbols so codegen (especially inline asm) can find it
@@ -371,6 +382,7 @@ impl SemanticAnalyzer {
             self.check_unused_variables();
 
             self.current_return_type = None;
+            self.current_function = None;
             self.table.exit_scope();
         }
         Ok(())

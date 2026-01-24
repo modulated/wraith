@@ -142,7 +142,7 @@ pub fn generate_expr(
             enum_name,
             variant,
             data,
-        } => generate_enum_variant(enum_name, variant, data, emitter, info),
+        } => generate_enum_variant(enum_name, variant, data, emitter, info, string_collector),
         Expr::SliceLen(object) => {
             // Get the type of the object to determine how to access its length
             if let Some(obj_ty) = info.resolved_types.get(&object.span) {
@@ -358,5 +358,115 @@ pub fn generate_expr(
 
             Ok(())
         }
+
+        Expr::Match { expr: match_expr, arms } => {
+            generate_match_expr(match_expr, arms, emitter, info, string_collector)
+        }
     }
+}
+
+/// Generate code for match expression
+/// Unlike match statements, match expressions must return a value
+fn generate_match_expr(
+    match_expr: &Spanned<Expr>,
+    arms: &[crate::ast::ExprMatchArm],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::Pattern;
+
+    let match_id = emitter.next_match_id();
+    let end_label = format!("mx_{}", match_id);
+
+    emitter.emit_comment("Match expression");
+
+    // Check if we're matching on an enum
+    let is_enum_match = arms
+        .iter()
+        .any(|arm| matches!(arm.pattern.node, Pattern::EnumVariant { .. }));
+
+    // Evaluate the matched expression
+    generate_expr(match_expr, emitter, info, string_collector)?;
+
+    if is_enum_match {
+        // For enum matching, expression returns a pointer in A:X
+        emitter.emit_inst("STA", "$20");
+        emitter.emit_inst("STX", "$21");
+
+        // Load the discriminant tag from the enum (first byte)
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_inst("LDA", "($20),Y");
+        emitter.emit_inst("STA", "$22"); // Store tag at $22
+    } else {
+        // For simple value matching, store value at $20
+        emitter.emit_inst("STA", "$20");
+    }
+
+    // Generate code for each arm
+    for (i, arm) in arms.iter().enumerate() {
+        let next_label = format!("mn_{}_{}", match_id, i);
+
+        match &arm.pattern.node {
+            Pattern::EnumVariant { enum_name, variant, bindings } => {
+                // Look up the enum and get the tag for this variant
+                if let Some(enum_def) = info.type_registry.enums.get(&enum_name.node)
+                    && let Some(tag) = enum_def.variants.iter()
+                        .position(|v| v.name == variant.node)
+                    {
+                        // Compare tag
+                        emitter.emit_inst("LDA", "$22");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", tag));
+                        emitter.emit_inst("BNE", &next_label);
+
+                        // For bindings, load the payload value into A
+                        // This is a simplified version - assumes single u8 binding
+                        if !bindings.is_empty() {
+                            emitter.emit_inst("LDY", "#$01"); // Offset 1 = first payload byte
+                            emitter.emit_inst("LDA", "($20),Y");
+                            // Value is now in A for the arm body to use
+                        }
+
+                        // Generate arm body (expression)
+                        generate_expr(&arm.body, emitter, info, string_collector)?;
+                        emitter.emit_inst("JMP", &end_label);
+                    }
+                emitter.emit_label(&next_label);
+            }
+
+            Pattern::Wildcard => {
+                // Wildcard matches everything - just generate the body
+                generate_expr(&arm.body, emitter, info, string_collector)?;
+                emitter.emit_inst("JMP", &end_label);
+            }
+
+            Pattern::Variable(_name) => {
+                // Variable pattern binds the whole value
+                // Value is already in $20, body can use it
+                generate_expr(&arm.body, emitter, info, string_collector)?;
+                emitter.emit_inst("JMP", &end_label);
+            }
+
+            Pattern::Literal(lit_expr) => {
+                // Compare against literal
+                if let Expr::Literal(crate::ast::Literal::Integer(n)) = &lit_expr.node {
+                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("CMP", &format!("#${:02X}", *n as u8));
+                    emitter.emit_inst("BNE", &next_label);
+                    generate_expr(&arm.body, emitter, info, string_collector)?;
+                    emitter.emit_inst("JMP", &end_label);
+                }
+                emitter.emit_label(&next_label);
+            }
+
+            Pattern::Range { .. } => {
+                return Err(CodegenError::UnsupportedOperation(
+                    "Range patterns not yet supported in match expressions".to_string(),
+                ));
+            }
+        }
+    }
+
+    emitter.emit_label(&end_label);
+    Ok(())
 }

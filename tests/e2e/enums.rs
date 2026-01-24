@@ -193,9 +193,9 @@ fn match_tuple_variant_single_field_extract() {
 
     // Should have match structure with tag comparison
     assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "STA $20"); // Store pointer low
-    assert_asm_contains(&asm, "STX $21"); // Store pointer high
-    assert_asm_contains(&asm, "LDA ($20),Y"); // Load tag byte
+    assert_asm_contains(&asm, "STA $30"); // Store pointer low
+    assert_asm_contains(&asm, "STX $31"); // Store pointer high
+    assert_asm_contains(&asm, "LDA ($30),Y"); // Load tag byte
 
     // Should compare tags
     assert_asm_contains(&asm, "CMP #$01"); // Compare with Some tag
@@ -245,7 +245,7 @@ fn match_tuple_variant_multi_field_extract() {
     assert_asm_contains(&asm, "CMP #$01"); // Grayscale tag
 
     // Should extract multiple fields using indirect indexed addressing
-    assert_asm_contains(&asm, "($20),Y");
+    assert_asm_contains(&asm, "($30),Y");
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn match_tuple_variant_u16_extract() {
     assert_asm_contains(&asm, "; Match statement");
 
     // Should extract u16 value (2 bytes)
-    assert_asm_contains(&asm, "($20),Y");
+    assert_asm_contains(&asm, "($30),Y");
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn match_multiple_tuple_variants() {
     // With 4 variants, uses jump table dispatch
     assert_asm_contains(&asm, "; Match statement (jump table)");
     assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
-    assert_asm_contains(&asm, "($20),Y"); // Should extract fields using indirect indexed
+    assert_asm_contains(&asm, "($30),Y"); // Should extract fields using indirect indexed
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn tuple_variant_in_loop() {
 
     // Should handle pattern matching in loop context
     assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "($20),Y"); // Field extraction
+    assert_asm_contains(&asm, "($30),Y"); // Field extraction
     assert_asm_contains(&asm, "JMP"); // Loop structure
 }
 

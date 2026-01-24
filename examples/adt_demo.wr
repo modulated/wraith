@@ -1,0 +1,236 @@
+// Algebraic Data Types Demo
+// Demonstrates enums with data and pattern matching with value extraction
+//
+// Expected output at $6000-$600F:
+//   $6000: 42    - extracted value from Option::Some(42)
+//   $6001: 255   - default when matching Option::None
+//   $6002: 10    - x coordinate from Point tuple variant
+//   $6003: 20    - y coordinate from Point tuple variant
+//   $6004: 1     - extracted value from Result::Ok(1)
+//   $6005: 99    - error code from Result::Err(99)
+//   $6006: 50    - runtime value passed to make_some()
+//   $6007: 100   - computed value in enum (param * 2)
+//   $6008: 3     - message type tag from Message::Quit
+//   $6009: 0     - tag for Message::Move
+//   $600A: 5     - dx from Message::Move
+//   $600B: 7     - dy from Message::Move
+
+// Output addresses
+const OUT0: addr = 0x6000;
+const OUT1: addr = 0x6001;
+const OUT2: addr = 0x6002;
+const OUT3: addr = 0x6003;
+const OUT4: addr = 0x6004;
+const OUT5: addr = 0x6005;
+const OUT6: addr = 0x6006;
+const OUT7: addr = 0x6007;
+const OUT8: addr = 0x6008;
+const OUT9: addr = 0x6009;
+const OUTA: addr = 0x600A;
+const OUTB: addr = 0x600B;
+
+// ============================================================
+// Enum Definitions
+// ============================================================
+
+// Simple Option type - like Rust's Option<T>
+enum Option {
+    Some(u8),
+    None,
+}
+
+// Result type with Ok/Err variants
+enum Result {
+    Ok(u8),
+    Err(u8),
+}
+
+// Point as a tuple variant with two fields
+enum Shape {
+    Point(u8, u8),      // x, y coordinates
+    Circle(u8),         // radius only
+}
+
+// Message enum demonstrating different variant types
+enum Message {
+    Move(u8, u8),       // dx, dy
+    Write(u8),          // character code
+    ChangeColor(u8),    // color index
+    Quit,               // unit variant (no data)
+}
+
+// ============================================================
+// Functions that create and return enum values
+// ============================================================
+
+// Create Option::Some with a runtime value
+fn make_some(value: u8) -> Option {
+    return Option::Some(value);
+}
+
+// Create Option::Some with a computed value
+fn make_computed(x: u8) -> Option {
+    let doubled: u8 = x * 2;
+    return Option::Some(doubled);
+}
+
+// Create Result based on condition
+fn try_operation(succeed: bool) -> Result {
+    if succeed {
+        return Result::Ok(1);
+    } else {
+        return Result::Err(99);
+    }
+}
+
+// ============================================================
+// Functions that match and extract values
+// ============================================================
+
+// Extract value from Option, return default if None
+fn unwrap_or(opt: Option, default: u8) -> u8 {
+    match opt {
+        Option::Some(value) => {
+            return value;
+        }
+        Option::None => {
+            return default;
+        }
+    }
+}
+
+// Extract x coordinate from Shape::Point
+fn get_x(shape: Shape) -> u8 {
+    match shape {
+        Shape::Point(x, y) => {
+            return x;
+        }
+        Shape::Circle(r) => {
+            return 0;  // No x coordinate for circle
+        }
+    }
+}
+
+// Extract y coordinate from Shape::Point
+fn get_y(shape: Shape) -> u8 {
+    match shape {
+        Shape::Point(x, y) => {
+            return y;
+        }
+        Shape::Circle(r) => {
+            return 0;
+        }
+    }
+}
+
+// Check if Result is Ok and extract value
+fn get_ok_value(res: Result) -> u8 {
+    match res {
+        Result::Ok(val) => {
+            return val;
+        }
+        Result::Err(code) => {
+            return 0;
+        }
+    }
+}
+
+// Check if Result is Err and extract error code
+fn get_err_code(res: Result) -> u8 {
+    match res {
+        Result::Ok(val) => {
+            return 0;
+        }
+        Result::Err(code) => {
+            return code;
+        }
+    }
+}
+
+// Get the "tag" of a Message variant (for demo purposes)
+fn message_tag(msg: Message) -> u8 {
+    match msg {
+        Message::Move(dx, dy) => {
+            return 0;
+        }
+        Message::Write(ch) => {
+            return 1;
+        }
+        Message::ChangeColor(c) => {
+            return 2;
+        }
+        Message::Quit => {
+            return 3;
+        }
+    }
+}
+
+// Extract dx from Message::Move
+fn get_move_dx(msg: Message) -> u8 {
+    match msg {
+        Message::Move(dx, dy) => {
+            return dx;
+        }
+        _ => {
+            return 0;
+        }
+    }
+}
+
+// Extract dy from Message::Move
+fn get_move_dy(msg: Message) -> u8 {
+    match msg {
+        Message::Move(dx, dy) => {
+            return dy;
+        }
+        _ => {
+            return 0;
+        }
+    }
+}
+
+// ============================================================
+// Main - demonstrate all features
+// ============================================================
+
+#[reset]
+fn main() {
+    // Test 1: Option::Some with constant, extract value
+    let opt1: Option = Option::Some(42);
+    OUT0 = unwrap_or(opt1, 0);  // Expected: 42
+
+    // Test 2: Option::None, should return default
+    let opt2: Option = Option::None;
+    OUT1 = unwrap_or(opt2, 255);  // Expected: 255
+
+    // Test 3: Shape::Point - extract x and y
+    let point: Shape = Shape::Point(10, 20);
+    OUT2 = get_x(point);  // Expected: 10
+    OUT3 = get_y(point);  // Expected: 20
+
+    // Test 4: Result::Ok - extract success value
+    let res_ok: Result = try_operation(true);
+    OUT4 = get_ok_value(res_ok);  // Expected: 1
+
+    // Test 5: Result::Err - extract error code
+    let res_err: Result = try_operation(false);
+    OUT5 = get_err_code(res_err);  // Expected: 99
+
+    // Test 6: Runtime value in enum (the bug we just fixed!)
+    let opt3: Option = make_some(50);
+    OUT6 = unwrap_or(opt3, 0);  // Expected: 50
+
+    // Test 7: Computed value in enum
+    let opt4: Option = make_computed(50);
+    OUT7 = unwrap_or(opt4, 0);  // Expected: 100 (50 * 2)
+
+    // Test 8: Message::Quit - unit variant, check tag
+    let quit_msg: Message = Message::Quit;
+    OUT8 = message_tag(quit_msg);  // Expected: 3
+
+    // Test 9-11: Message::Move - tuple variant with two fields
+    let move_msg: Message = Message::Move(5, 7);
+    OUT9 = message_tag(move_msg);   // Expected: 0
+    OUTA = get_move_dx(move_msg);   // Expected: 5
+    OUTB = get_move_dy(move_msg);   // Expected: 7
+}

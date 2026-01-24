@@ -83,6 +83,7 @@ impl SemanticAnalyzer {
             mutable: false,
             access_mode: None,
             is_pub: func.is_pub,
+            containing_function: None, // Functions are global
         };
         self.table.insert(name.clone(), info);
 
@@ -244,6 +245,7 @@ impl SemanticAnalyzer {
             mutable: stat.mutable,
             access_mode: None,
             is_pub: stat.is_pub,
+            containing_function: None, // Constants are global
         };
         self.table.insert(name, info);
 
@@ -322,6 +324,7 @@ impl SemanticAnalyzer {
             ),
             access_mode: Some(addr.access),
             is_pub: addr.is_pub,
+            containing_function: None, // Addresses are global
         };
         self.table.insert(name, info);
 
@@ -559,6 +562,7 @@ impl SemanticAnalyzer {
                 mutable: false,
                 access_mode: None,
                 is_pub: struct_def.is_pub,
+                containing_function: None, // Types are global
             },
         );
 
@@ -721,6 +725,7 @@ impl SemanticAnalyzer {
                 mutable: false,
                 access_mode: None,
                 is_pub: enum_def.is_pub,
+                containing_function: None, // Types are global
             },
         );
 

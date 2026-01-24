@@ -34,6 +34,8 @@ pub struct SymbolInfo {
     pub access_mode: Option<AccessMode>,
     /// Visibility: true if marked with `pub`, false if private
     pub is_pub: bool,
+    /// The function this symbol is defined in (None for global symbols)
+    pub containing_function: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -84,6 +84,8 @@ fn generate_function(
         temp_emitter.reg_state = emitter.reg_state.clone();
         temp_emitter.label_counter = emitter.label_counter;
         temp_emitter.match_counter = emitter.match_counter;
+        // Set current function for inline asm variable scoping
+        temp_emitter.set_current_function(name.clone());
 
         // Include interrupt prologue size if needed (5 instructions = 10 bytes)
         if is_interrupt {
@@ -218,7 +220,7 @@ fn generate_function(
         emitter.emit_inst("STA", "$FF"); // Stack pointer at $FF, stack at $0200-$02FF
     }
 
-    // Set current function context for tail call detection
+    // Set current function context for tail call detection and inline asm scoping
     emitter.set_current_function(name.clone());
 
     // Check if function has tail recursion - if so, emit loop restart label
@@ -261,7 +263,12 @@ fn generate_function(
                 param_offset += 2; // Struct pointers are 2 bytes
             } else if let Some(ty) = param_type {
                 // Non-struct param - advance by its size
-                param_offset += ty.size() as u8;
+                // Arrays are passed as 2-byte pointers, not by value
+                if matches!(ty, crate::sema::types::Type::Array(_, _)) {
+                    param_offset += 2;
+                } else {
+                    param_offset += ty.size() as u8;
+                }
             } else {
                 // Fallback: assume 1 byte
                 param_offset += 1;
@@ -493,13 +500,8 @@ fn emit_array_fill_data(
         ));
     };
 
-    // Zero-fill optimization: use .RES directive for zeros
-    if val == 0 && count >= 16 {
-        emitter.emit_data_directive(&format!(".RES {}", count));
-    } else {
-        // Emit individual bytes
-        emit_repeated_bytes(val as u8, count, emitter);
-    }
+    // Emit repeated bytes (using .BYTE for portability)
+    emit_repeated_bytes(val as u8, count, emitter);
 
     Ok(())
 }

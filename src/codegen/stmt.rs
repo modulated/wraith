@@ -825,9 +825,10 @@ pub fn generate_stmt(
         }
         Stmt::Asm { lines } => {
             // Inline assembly - emit lines directly with variable substitution
+            let current_fn = emitter.current_function().map(|s| s.to_string());
             for line in lines {
                 // Substitute {var} patterns with actual addresses
-                let substituted = substitute_asm_vars(&line.instruction, info)?;
+                let substituted = substitute_asm_vars(&line.instruction, info, current_fn.as_deref())?;
 
                 // If we're inside an inline function expansion, uniquify labels
                 let final_line = if let Some(suffix) = emitter.inline_label_suffix() {
@@ -1282,16 +1283,19 @@ fn generate_match_sequential(
     // Evaluate the matched expression into accumulator
     generate_expr(expr, emitter, info, string_collector)?;
 
+    // Use pointer ops area for indirect addressing to avoid conflict with temp storage
+    let ptr_base = emitter.memory_layout.pointer_ops_start; // $30 by default
+
     if is_enum_match {
         // For enum matching, expression returns a pointer in A:X
-        // Store pointer at $20 (low) and $21 (high)
-        emitter.emit_inst("STA", "$20");
-        emitter.emit_inst("STX", "$21");
+        // Store pointer at pointer ops area (not $20 which is used by temp storage)
+        emitter.emit_inst("STA", &format!("${:02X}", ptr_base));
+        emitter.emit_inst("STX", &format!("${:02X}", ptr_base + 1));
 
         // Load the discriminant tag from the enum (first byte)
         emitter.emit_inst("LDY", "#$00");
-        emitter.emit_inst("LDA", "($20),Y");
-        emitter.emit_inst("STA", "$22"); // Store tag at $22
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+        emitter.emit_inst("STA", &format!("${:02X}", ptr_base + 2)); // Store tag
     } else {
         // For simple value matching, store value at $20
         emitter.emit_inst("STA", "$20");
@@ -1372,7 +1376,7 @@ fn generate_match_sequential(
                 })?;
 
                 // Compare the tag with the expected variant tag
-                emitter.emit_inst("LDA", "$22"); // Load stored tag
+                emitter.emit_inst("LDA", &format!("${:02X}", ptr_base + 2)); // Load stored tag
                 emitter.emit_inst("CMP", &format!("#${:02X}", variant_info.tag));
                 emitter.emit_inst("BEQ", &format!("match_{}_arm_{}", match_id, i));
 
@@ -1420,14 +1424,17 @@ fn generate_match_jump_table(
     // For enum matching, expression returns a pointer in A:X
     generate_expr(expr, emitter, info, string_collector)?;
 
-    // Store pointer at $20 (low) and $21 (high)
-    emitter.emit_inst("STA", "$20");
-    emitter.emit_inst("STX", "$21");
+    // Use pointer ops area for indirect addressing
+    let ptr_base = emitter.memory_layout.pointer_ops_start;
+
+    // Store pointer at pointer ops area (not $20 which conflicts with temp storage)
+    emitter.emit_inst("STA", &format!("${:02X}", ptr_base));
+    emitter.emit_inst("STX", &format!("${:02X}", ptr_base + 1));
 
     // Load the discriminant tag from the enum (first byte)
     emitter.emit_inst("LDY", "#$00");
-    emitter.emit_inst("LDA", "($20),Y");
-    emitter.emit_inst("STA", "$22"); // Store tag at $22 for binding extraction
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+    emitter.emit_inst("STA", &format!("${:02X}", ptr_base + 2)); // Store tag for binding extraction
 
     // Jump table dispatch:
     // 1. Double the tag (addresses are 2 bytes)
@@ -1549,8 +1556,9 @@ fn generate_match_arm_bodies(
 
             // Extract field values from enum data
             // Enum layout in memory: [tag: u8][field0][field1]...
-            // The pointer at ($20) points to the tag byte
+            // The pointer in pointer ops area points to the tag byte
             // Field data starts at offset 1
+            let ptr_base = emitter.memory_layout.pointer_ops_start;
 
             match &variant_info.data {
                 crate::sema::type_defs::VariantData::Tuple(field_types) => {
@@ -1567,7 +1575,7 @@ fn generate_match_arm_bodies(
                     for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
                         // Load field value using indirect indexed addressing
                         emitter.emit_inst("LDY", &format!("#${:02X}", offset));
-                        emitter.emit_inst("LDA", "($20),Y");
+                        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
 
                         // Store in the binding variable
                         // Look up the binding variable in resolved_symbols
@@ -1625,7 +1633,11 @@ fn generate_match_arm_bodies(
 }
 
 /// Substitute {variable} patterns in inline assembly with actual addresses
-fn substitute_asm_vars(instruction: &str, info: &ProgramInfo) -> Result<String, CodegenError> {
+fn substitute_asm_vars(
+    instruction: &str,
+    info: &ProgramInfo,
+    current_function: Option<&str>,
+) -> Result<String, CodegenError> {
     let mut result = instruction.to_string();
 
     // Find all {var} patterns
@@ -1637,10 +1649,21 @@ fn substitute_asm_vars(instruction: &str, info: &ProgramInfo) -> Result<String, 
             // Look up the variable in resolved_symbols (by name)
             // We search through resolved_symbols because the symbol table's scopes
             // have been exited after semantic analysis
+            // Priority: 1) Local variables in current function, 2) Global symbols
             let symbol = info
                 .resolved_symbols
                 .values()
-                .find(|s| s.name == var_name)
+                .find(|s| {
+                    s.name == var_name
+                        && (s.containing_function.as_deref() == current_function
+                            || s.containing_function.is_none())
+                })
+                // Prefer local over global if both exist with same name
+                .or_else(|| {
+                    info.resolved_symbols
+                        .values()
+                        .find(|s| s.name == var_name && s.containing_function.is_none())
+                })
                 .ok_or_else(|| CodegenError::SymbolNotFound(var_name.to_string()))?;
 
             // Convert the location to an address string

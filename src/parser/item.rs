@@ -400,7 +400,6 @@ impl Parser<'_> {
         self.expect(&Token::LBrace)?;
 
         let mut variants = Vec::new();
-        let mut next_value = 0i64;
 
         while !self.check(&Token::RBrace) {
             let variant_name = self.expect_ident()?;
@@ -449,12 +448,13 @@ impl Parser<'_> {
                 }
             } else {
                 // Unit variant
+                // Only set explicit value if `= number` syntax is used
+                // Otherwise let semantic analysis assign sequential tags
                 let value = if self.check(&Token::Eq) {
                     self.advance();
                     match self.peek().cloned() {
                         Some(Token::Integer(n)) => {
                             self.advance();
-                            next_value = n + 1;
                             Some(n)
                         }
                         tok => {
@@ -466,9 +466,8 @@ impl Parser<'_> {
                         }
                     }
                 } else {
-                    let v = next_value;
-                    next_value += 1;
-                    Some(v)
+                    // No explicit value - let semantic analyzer assign tag
+                    None
                 };
 
                 EnumVariant::Unit {

@@ -243,7 +243,7 @@ impl Parser<'_> {
     }
 
     /// Parse a pattern
-    fn parse_pattern(&mut self) -> ParseResult<Spanned<Pattern>> {
+    pub fn parse_pattern(&mut self) -> ParseResult<Spanned<Pattern>> {
         let start = self.current_span();
 
         match self.peek().cloned() {

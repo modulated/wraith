@@ -10,7 +10,7 @@ mod stmt;
 mod types;
 
 // Re-export all public types
-pub use expr::{BinaryOp, Expr, FieldInit, Literal, UnaryOp, VariantData};
+pub use expr::{BinaryOp, Expr, ExprMatchArm, FieldInit, Literal, UnaryOp, VariantData};
 pub use item::{
     AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Import, Item,
     SourceFile, Static, Struct, StructAttribute, StructField,
