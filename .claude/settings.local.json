@@ -1,23 +1,33 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)",
-      "Bash(git add:*)",
-      "Bash(cargo run:*)"
-    ]
-  },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cargo fmt --quiet 2>/dev/null || true"
-          }
+    "permissions": {
+        "allow": [
+            "Bash(cargo test:*)",
+            "Bash(cargo clippy:*)",
+            "Bash(cargo build:*)",
+            "Bash(git add:*)",
+            "Bash(cargo run:*)",
+            "Bash(cat:*)",
+            "Bash(ls:*)",
+            "Bash(git grep:*)",
+            "Bash(git add:*)",
+            "Bash(git stash:*)",
+            "Bash(grep:*)",
+            "Bash(wc:*)",
+            "Bash(find:*)",
+            "Bash(xxd:*)"
         ]
-      }
-    ]
-  }
+    },
+    "hooks": {
+        "PostToolUse": [
+            {
+                "matcher": "Edit|Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "cargo fmt --quiet 2>/dev/null || true"
+                    }
+                ]
+            }
+        ]
+    }
 }

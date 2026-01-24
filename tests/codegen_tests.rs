@@ -1084,8 +1084,9 @@ fn test_codegen_match_no_jmp_after_break() {
     // The Stop arm with break should NOT have a JMP
     let lines: Vec<&str> = asm.lines().collect();
     let mut found_break_with_jmp = false;
-    for i in 0..lines.len().saturating_sub(1) {
-        let line = lines[i].trim();
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        
         // Look for the pattern where we jump out of loop (break) followed by JMP match_end
         if line.starts_with("JMP lp_") || line.starts_with("JMP lx_") {
             // This is a break - check if next non-comment line is JMP match_end
@@ -1097,8 +1098,6 @@ fn test_codegen_match_no_jmp_after_break() {
                 if next.starts_with("JMP match_") && next.contains("_end") {
                     found_break_with_jmp = true;
                 }
-                break;
-            }
         }
     }
     assert!(

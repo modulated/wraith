@@ -18,6 +18,8 @@ use crate::common::*;
 fn simple_enum_creation() {
     let asm = compile_success(
         r#"
+    let asm = compile_success(
+        r#"
         enum Direction {
             North,
             South,
@@ -30,6 +32,8 @@ fn simple_enum_creation() {
         }
     "#,
     );
+    "#,
+    );
 
     assert_asm_contains(&asm, "Direction::North");
     assert_asm_contains(&asm, ".BYTE $00");
@@ -37,6 +41,8 @@ fn simple_enum_creation() {
 
 #[test]
 fn simple_enum_match() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Status {
@@ -61,6 +67,8 @@ fn simple_enum_match() {
         }
     "#,
     );
+    "#,
+    );
 
     // With 3 variants, uses jump table dispatch
     assert_asm_contains(&asm, "; Match statement (jump table)");
@@ -75,6 +83,8 @@ fn simple_enum_match() {
 fn tuple_variant_single_field_u8() {
     let asm = compile_success(
         r#"
+    let asm = compile_success(
+        r#"
         enum Option {
             None,
             Some(u8),
@@ -85,16 +95,22 @@ fn tuple_variant_single_field_u8() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should generate enum data with tag and field
     assert_asm_contains(&asm, "; Enum variant: Option::Some");
     assert_asm_contains(&asm, "en_");
     assert_asm_contains(&asm, ".BYTE $01"); // Tag for Some (second variant)
     assert_asm_contains(&asm, ".BYTE $2A"); // 42 in hex
+    assert_asm_contains(&asm, ".BYTE $01"); // Tag for Some (second variant)
+    assert_asm_contains(&asm, ".BYTE $2A"); // 42 in hex
 }
 
 #[test]
 fn tuple_variant_multi_field_u8() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Color {
@@ -106,9 +122,14 @@ fn tuple_variant_multi_field_u8() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should generate enum data with tag and three fields
     assert_asm_contains(&asm, "; Enum variant: Color::RGB");
+    assert_asm_contains(&asm, ".BYTE $00"); // Tag
+    assert_asm_contains(&asm, ".BYTE $FF"); // Red = 255
+    assert_asm_contains(&asm, ".BYTE $00"); // Green = 0
     assert_asm_contains(&asm, ".BYTE $00"); // Tag
     assert_asm_contains(&asm, ".BYTE $FF"); // Red = 255
     assert_asm_contains(&asm, ".BYTE $00"); // Green = 0
@@ -117,6 +138,8 @@ fn tuple_variant_multi_field_u8() {
 
 #[test]
 fn tuple_variant_u16_field() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Result {
@@ -129,17 +152,24 @@ fn tuple_variant_u16_field() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should generate enum with tag + 2 bytes for u16
     assert_asm_contains(&asm, "; Enum variant: Result::Ok");
     assert_asm_contains(&asm, ".BYTE $00"); // Tag
+    assert_asm_contains(&asm, ".BYTE $00"); // Tag
     // 1000 = 0x03E8, little-endian: E8 03
+    assert_asm_contains(&asm, ".BYTE $E8"); // Low byte
+    assert_asm_contains(&asm, ".BYTE $03"); // High byte
     assert_asm_contains(&asm, ".BYTE $E8"); // Low byte
     assert_asm_contains(&asm, ".BYTE $03"); // High byte
 }
 
 #[test]
 fn tuple_variant_mixed_types() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Message {
@@ -153,9 +183,15 @@ fn tuple_variant_mixed_types() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should generate enum with tag + three u8 fields
     assert_asm_contains(&asm, "; Enum variant: Message::SetColor");
+    assert_asm_contains(&asm, ".BYTE $02"); // Tag for third variant
+    assert_asm_contains(&asm, ".BYTE $80"); // 128
+    assert_asm_contains(&asm, ".BYTE $40"); // 64
+    assert_asm_contains(&asm, ".BYTE $20"); // 32
     assert_asm_contains(&asm, ".BYTE $02"); // Tag for third variant
     assert_asm_contains(&asm, ".BYTE $80"); // 128
     assert_asm_contains(&asm, ".BYTE $40"); // 64
@@ -168,6 +204,8 @@ fn tuple_variant_mixed_types() {
 
 #[test]
 fn match_tuple_variant_single_field_extract() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Option {
@@ -190,6 +228,8 @@ fn match_tuple_variant_single_field_extract() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should have match structure with tag comparison
     assert_asm_contains(&asm, "; Match statement");
@@ -198,6 +238,7 @@ fn match_tuple_variant_single_field_extract() {
     assert_asm_contains(&asm, "LDA ($30),Y"); // Load tag byte
 
     // Should compare tags
+    assert_asm_contains(&asm, "CMP #$01"); // Compare with Some tag
     assert_asm_contains(&asm, "CMP #$01"); // Compare with Some tag
     // Note: CMP #$00 is optimized away since LDA sets the Z flag
     // and BEQ can be used directly to check for zero (None)
@@ -208,6 +249,8 @@ fn match_tuple_variant_single_field_extract() {
 
 #[test]
 fn match_tuple_variant_multi_field_extract() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Color {
@@ -236,11 +279,15 @@ fn match_tuple_variant_multi_field_extract() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should have match structure
     assert_asm_contains(&asm, "; Match statement");
 
     // Should compare with both variant tags
+    assert_asm_contains(&asm, "CMP #$00"); // RGB tag
+    assert_asm_contains(&asm, "CMP #$01"); // Grayscale tag
     assert_asm_contains(&asm, "CMP #$00"); // RGB tag
     assert_asm_contains(&asm, "CMP #$01"); // Grayscale tag
 
@@ -250,6 +297,8 @@ fn match_tuple_variant_multi_field_extract() {
 
 #[test]
 fn match_tuple_variant_u16_extract() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Result {
@@ -276,6 +325,8 @@ fn match_tuple_variant_u16_extract() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should have match structure
     assert_asm_contains(&asm, "; Match statement");
@@ -286,6 +337,8 @@ fn match_tuple_variant_u16_extract() {
 
 #[test]
 fn match_tuple_variant_with_wildcard() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Option {
@@ -308,15 +361,21 @@ fn match_tuple_variant_with_wildcard() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should have match with wildcard pattern
     assert_asm_contains(&asm, "; Match statement");
+    assert_asm_contains(&asm, "CMP #$01"); // Check for Some
+    assert_asm_contains(&asm, "JMP"); // Wildcard jumps
     assert_asm_contains(&asm, "CMP #$01"); // Check for Some
     assert_asm_contains(&asm, "JMP"); // Wildcard jumps
 }
 
 #[test]
 fn match_tuple_variant_nested_enums() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Inner {
@@ -345,6 +404,8 @@ fn match_tuple_variant_nested_enums() {
         }
     "#,
     );
+    "#,
+    );
 
     // Both enums should compile and generate proper structures
     assert_asm_contains(&asm, "; Enum variant: Inner::Value");
@@ -358,6 +419,8 @@ fn match_tuple_variant_nested_enums() {
 
 #[test]
 fn match_tuple_variant_no_bindings() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Option {
@@ -381,6 +444,8 @@ fn match_tuple_variant_no_bindings() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should match but not extract
     assert_asm_contains(&asm, "; Match statement");
@@ -389,6 +454,8 @@ fn match_tuple_variant_no_bindings() {
 
 #[test]
 fn match_multiple_tuple_variants() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Input {
@@ -419,6 +486,8 @@ fn match_multiple_tuple_variants() {
         }
     "#,
     );
+    "#,
+    );
 
     // With 4 variants, uses jump table dispatch
     assert_asm_contains(&asm, "; Match statement (jump table)");
@@ -428,6 +497,8 @@ fn match_multiple_tuple_variants() {
 
 #[test]
 fn tuple_variant_return_from_function() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Option {
@@ -452,6 +523,8 @@ fn tuple_variant_return_from_function() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should compile function that takes enum and extracts value
     assert_asm_contains(&asm, "; Match statement");
@@ -460,6 +533,8 @@ fn tuple_variant_return_from_function() {
 
 #[test]
 fn tuple_variant_in_loop() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Option {
@@ -491,6 +566,8 @@ fn tuple_variant_in_loop() {
         }
     "#,
     );
+    "#,
+    );
 
     // Should handle pattern matching in loop context
     assert_asm_contains(&asm, "; Match statement");
@@ -500,6 +577,8 @@ fn tuple_variant_in_loop() {
 
 #[test]
 fn complex_tuple_variant_pattern() {
+    let asm = compile_success(
+        r#"
     let asm = compile_success(
         r#"
         enum Message {
@@ -531,6 +610,8 @@ fn complex_tuple_variant_pattern() {
                 }
             }
         }
+    "#,
+    );
     "#,
     );
 
