@@ -392,7 +392,7 @@ These may be changed in future versions.
 addr      asm       bool      break     const     else      enum
 fn        for       from      i8        i16       if        import
 in        inline    loop      match     return    struct    u8
-u16       while     zp        as        true      false
+u16       while     as        true      false
 ```
 
 ## Operators

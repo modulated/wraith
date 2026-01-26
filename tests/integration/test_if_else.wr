@@ -3,7 +3,7 @@ const BORDER: addr = 0xD021;
 
 #[org(0x8000)]
 fn main() {
-    zp u8 x = 10;
+    let x: u8 = 10;
 
     // Test equality
     if x == 10 {

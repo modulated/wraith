@@ -12,8 +12,8 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Variable declaration: let name: type = expr; or zp let name: type = expr;
-            Some(Token::Let) | Some(Token::Zp) => self.parse_var_decl(),
+            // Variable declaration: let name: type = expr;
+            Some(Token::Let) => self.parse_var_decl(),
 
             // Control flow
             Some(Token::If) => self.parse_if_stmt(),
@@ -49,15 +49,9 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse variable declaration: let name: type = expr; or zp let name: type = expr;
+    /// Parse variable declaration: let name: type = expr;
     fn parse_var_decl(&mut self) -> ParseResult<Spanned<Stmt>> {
         let start = self.current_span();
-
-        // Parse optional zero page modifier
-        let zero_page = self.check(&Token::Zp);
-        if zero_page {
-            self.advance();
-        }
 
         // Require 'let' keyword for variable declarations
         self.expect(&Token::Let)?;
@@ -82,7 +76,7 @@ impl Parser<'_> {
         let span = start.merge(self.previous_span());
 
         Ok(Spanned::new(
-            Stmt::var_decl(name, ty, init, mutable, zero_page),
+            Stmt::var_decl(name, ty, init, mutable),
             span,
         ))
     }

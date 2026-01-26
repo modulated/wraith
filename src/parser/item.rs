@@ -2,7 +2,7 @@
 
 use crate::ast::{
     AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Import, Item,
-    SourceFile, Spanned, Static, Struct, StructAttribute, StructField, TypeExpr,
+    SourceFile, Spanned, Static, Struct, StructField, TypeExpr,
 };
 use crate::lexer::Token;
 
@@ -149,7 +149,6 @@ impl Parser<'_> {
                             ty,
                             init,
                             mutable: false,
-                            zero_page: false,
                             is_pub,
                         }),
                         span,
@@ -269,11 +268,6 @@ impl Parser<'_> {
                         self.expect(&Token::RParen)?;
                         FnAttribute::Section(section_name)
                     }
-                    "zp_section" => {
-                        // This is a struct attribute, but we return it as NoReturn for now
-                        // In a real impl, we'd have separate attribute types
-                        FnAttribute::NoReturn
-                    }
                     other => {
                         return Err(ParseError::custom(
                             name_span,
@@ -375,14 +369,10 @@ impl Parser<'_> {
 
         self.expect(&Token::RBrace)?;
 
-        // Convert function attributes to struct attributes
-        let struct_attrs = attributes
-            .into_iter()
-            .filter_map(|a| match a {
-                FnAttribute::NoReturn => Some(StructAttribute::ZpSection), // Hack for zp_section
-                _ => None,
-            })
-            .collect();
+        // Convert function attributes to struct attributes (currently no supported attributes)
+        let struct_attrs = Vec::new();
+        // Avoid unused variable warning
+        let _ = attributes;
 
         Ok(Struct {
             name,

@@ -112,7 +112,6 @@ pub fn generate_stmt(
             ty: _,
             init,
             mutable: _,
-            zero_page: _,
         } => {
             // Look up variable info first
             if let Some(sym) = info.resolved_symbols.get(&name.span) {

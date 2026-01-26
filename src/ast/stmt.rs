@@ -63,13 +63,12 @@ pub struct AsmLine {
 /// A statement in the language
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// Variable declaration: u8 x = 42; or mut u8 x = 0; or zp u8 x = 0;
+    /// Variable declaration: let x: u8 = 42;
     VarDecl {
         name: Spanned<String>,
         ty: Spanned<TypeExpr>,
         init: Spanned<Expr>,
         mutable: bool,
-        zero_page: bool,
     },
 
     /// Assignment: x = 42; or compound: x += 1;
@@ -142,14 +141,12 @@ impl Stmt {
         ty: Spanned<TypeExpr>,
         init: Spanned<Expr>,
         mutable: bool,
-        zero_page: bool,
     ) -> Self {
         Stmt::VarDecl {
             name,
             ty,
             init,
             mutable,
-            zero_page,
         }
     }
 

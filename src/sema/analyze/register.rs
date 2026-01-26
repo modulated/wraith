@@ -536,17 +536,10 @@ impl SemanticAnalyzer {
             offset += size;
         }
 
-        // Check if struct should be in zero page
-        let zero_page = struct_def
-            .attributes
-            .iter()
-            .any(|attr| matches!(attr, crate::ast::StructAttribute::ZpSection));
-
         let struct_info = StructDef {
             name: name.clone(),
             fields,
             total_size: offset,
-            zero_page,
         };
 
         self.type_registry.add_struct(struct_info);

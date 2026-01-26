@@ -147,14 +147,13 @@ impl<'a> Parser<'a> {
                 Token::RBrace => {
                     return; // Don't consume the closing brace
                 }
-                // Top-level item starts (including Let and Zp to prevent cascading errors)
+                // Top-level item starts (including Let to prevent cascading errors)
                 Token::Fn
                 | Token::Struct
                 | Token::Enum
                 | Token::Const
                 | Token::Addr
-                | Token::Let
-                | Token::Zp => {
+                | Token::Let => {
                     return; // Don't consume, let item parser handle it
                 }
                 _ => {
@@ -222,7 +221,7 @@ mod tests {
         let source = r#"
             fn main() {
                 let x: u8 = 42;
-                zp let fast: u8 = 0;
+                let fast: u8 = 0;
             }
         "#;
         let file = parse(source).expect("parse error");

@@ -19,7 +19,6 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<FieldInfo>,
     pub total_size: usize,
-    pub zero_page: bool, // Whether this struct should be in zero page
 }
 
 impl StructDef {

@@ -242,7 +242,6 @@ fn format_token(token: &Token) -> String {
         Token::Import => "keyword 'import'".to_string(),
         Token::From => "keyword 'from'".to_string(),
         Token::Addr => "keyword 'addr'".to_string(),
-        Token::Zp => "keyword 'zp'".to_string(),
         Token::Read => "keyword 'read'".to_string(),
         Token::Write => "keyword 'write'".to_string(),
         Token::Pub => "keyword 'pub'".to_string(),

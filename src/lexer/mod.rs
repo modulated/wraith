@@ -37,8 +37,6 @@ pub enum Token {
     Const,
     #[token("let")]
     Let,
-    #[token("zp")]
-    Zp,
     #[token("as")]
     As,
     #[token("in")]

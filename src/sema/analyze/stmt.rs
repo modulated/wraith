@@ -41,7 +41,6 @@ impl SemanticAnalyzer {
                 ty,
                 init,
                 mutable,
-                zero_page: _,
             } => {
                 self.analyze_var_decl(name, ty, init, *mutable)?;
             }

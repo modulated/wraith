@@ -42,8 +42,6 @@ pub struct StructField {
 /// Struct attribute
 #[derive(Debug, Clone, PartialEq)]
 pub enum StructAttribute {
-    /// Place struct in zero page section
-    ZpSection,
     /// Pack struct tightly (no padding)
     Packed,
 }
@@ -136,7 +134,6 @@ pub struct Static {
     pub ty: Spanned<TypeExpr>,
     pub init: Spanned<super::expr::Expr>,
     pub mutable: bool,
-    pub zero_page: bool,
     pub is_pub: bool,
 }
 
