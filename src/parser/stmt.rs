@@ -3,8 +3,8 @@
 use crate::ast::{AsmLine, MatchArm, Pattern, PatternBinding, Range, Spanned, Stmt};
 use crate::lexer::Token;
 
-use super::Parser;
 use super::error::{ParseError, ParseResult};
+use super::Parser;
 
 impl Parser<'_> {
     /// Parse a statement
@@ -75,10 +75,7 @@ impl Parser<'_> {
 
         let span = start.merge(self.previous_span());
 
-        Ok(Spanned::new(
-            Stmt::var_decl(name, ty, init, mutable),
-            span,
-        ))
+        Ok(Spanned::new(Stmt::var_decl(name, ty, init, mutable), span))
     }
 
     /// Parse if statement
@@ -204,7 +201,7 @@ impl Parser<'_> {
         let expr = self.parse_expr()?;
         self.expect(&Token::LBrace)?;
 
-        let mut arms = Vec::new();
+        let mut arms = Vec::with_capacity(4);
         while !self.check(&Token::RBrace) {
             let pattern = self.parse_pattern()?;
             self.expect(&Token::FatArrow)?;
@@ -258,7 +255,7 @@ impl Parser<'_> {
 
                     let bindings = if self.check(&Token::LBrace) {
                         self.advance();
-                        let mut bindings = Vec::new();
+                        let mut bindings = Vec::with_capacity(4);
                         while !self.check(&Token::RBrace) {
                             bindings.push(PatternBinding {
                                 name: self.expect_ident()?,
@@ -272,7 +269,7 @@ impl Parser<'_> {
                         bindings
                     } else if self.check(&Token::LParen) {
                         self.advance();
-                        let mut bindings = Vec::new();
+                        let mut bindings = Vec::with_capacity(4);
                         while !self.check(&Token::RParen) {
                             bindings.push(PatternBinding {
                                 name: self.expect_ident()?,
@@ -353,7 +350,7 @@ impl Parser<'_> {
         self.expect(&Token::Asm)?;
         self.expect(&Token::LBrace)?;
 
-        let mut lines = Vec::new();
+        let mut lines = Vec::with_capacity(8);
 
         while !self.check(&Token::RBrace) {
             if let Some(Token::String(s)) = self.peek().cloned() {
@@ -388,7 +385,7 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::LBrace)?;
 
-        let mut stmts = Vec::new();
+        let mut stmts = Vec::with_capacity(8);
         while !self.check(&Token::RBrace) {
             stmts.push(self.parse_stmt()?);
         }

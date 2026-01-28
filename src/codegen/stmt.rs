@@ -6,6 +6,7 @@ use crate::ast::{Spanned, Stmt};
 use crate::codegen::expr::generate_expr;
 use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Strategy for generating match statement code
 #[derive(Debug)]
@@ -1033,7 +1034,7 @@ fn generate_slice_assignment(
     };
 
     // Try to evaluate slice bounds as constants
-    let const_env = std::collections::HashMap::new();
+    let const_env = HashMap::default();
     let start_val = eval_const_expr_with_env(start, &const_env)
         .ok()
         .and_then(|v| v.as_integer())

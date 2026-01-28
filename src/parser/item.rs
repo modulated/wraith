@@ -6,13 +6,13 @@ use crate::ast::{
 };
 use crate::lexer::Token;
 
-use super::Parser;
 use super::error::{ParseError, ParseResult};
+use super::Parser;
 
 impl Parser<'_> {
     /// Parse a complete source file
     pub fn parse_source_file(&mut self) -> ParseResult<SourceFile> {
-        let mut items = Vec::new();
+        let mut items = Vec::with_capacity(self.tokens.len() / 10);
 
         while self.peek().is_some() {
             let pos_before = self.position();
@@ -58,7 +58,7 @@ impl Parser<'_> {
         let start = self.current_span();
 
         // Parse optional attributes
-        let mut attributes = Vec::new();
+        let mut attributes = Vec::with_capacity(4);
         while self.check(&Token::Hash) {
             attributes.push(self.parse_attribute()?);
         }
@@ -193,7 +193,7 @@ impl Parser<'_> {
         self.expect(&Token::LBrace)?;
 
         // Parse comma-separated list of symbols
-        let mut symbols = Vec::new();
+        let mut symbols = Vec::with_capacity(4);
         loop {
             let sym = self.expect_ident()?;
             symbols.push(sym);
@@ -301,7 +301,7 @@ impl Parser<'_> {
 
         // Parse parameters
         self.expect(&Token::LParen)?;
-        let mut params = Vec::new();
+        let mut params = Vec::with_capacity(8);
 
         while !self.check(&Token::RParen) {
             let param_name = self.expect_ident()?;
@@ -349,7 +349,7 @@ impl Parser<'_> {
         let name = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
 
-        let mut fields = Vec::new();
+        let mut fields = Vec::with_capacity(8);
 
         while !self.check(&Token::RBrace) {
             let field_name = self.expect_ident()?;
@@ -370,7 +370,7 @@ impl Parser<'_> {
         self.expect(&Token::RBrace)?;
 
         // Convert function attributes to struct attributes (currently no supported attributes)
-        let struct_attrs = Vec::new();
+        let struct_attrs = Vec::with_capacity(0);
         // Avoid unused variable warning
         let _ = attributes;
 
@@ -389,7 +389,7 @@ impl Parser<'_> {
         let name = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
 
-        let mut variants = Vec::new();
+        let mut variants = Vec::with_capacity(8);
 
         while !self.check(&Token::RBrace) {
             let variant_name = self.expect_ident()?;
@@ -397,7 +397,7 @@ impl Parser<'_> {
             let variant = if self.check(&Token::LBrace) {
                 // Struct variant: Variant { field: type, ... }
                 self.advance();
-                let mut fields = Vec::new();
+                let mut fields = Vec::with_capacity(4);
 
                 while !self.check(&Token::RBrace) {
                     let field_name = self.expect_ident()?;
@@ -421,7 +421,7 @@ impl Parser<'_> {
             } else if self.check(&Token::LParen) {
                 // Tuple variant: Variant(type, ...)
                 self.advance();
-                let mut fields = Vec::new();
+                let mut fields = Vec::with_capacity(4);
 
                 while !self.check(&Token::RParen) {
                     fields.push(self.parse_type()?);

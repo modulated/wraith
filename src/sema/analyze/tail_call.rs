@@ -2,7 +2,7 @@
 //!
 //! Analyzes functions to detect tail recursive calls that can be optimized.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::ast::{Expr, Item, SourceFile, Span, Spanned, Stmt};
 use crate::sema::TailCallInfo;
@@ -16,7 +16,7 @@ impl SemanticAnalyzer {
         &mut self,
         source: &SourceFile,
     ) -> HashMap<String, TailCallInfo> {
-        let mut tail_call_info = HashMap::new();
+        let mut tail_call_info = HashMap::default();
 
         for item in &source.items {
             if let Item::Function(func) = &item.node {
@@ -39,7 +39,7 @@ impl SemanticAnalyzer {
 
     /// Detect tail recursive calls in a function body
     fn detect_tail_recursion(&self, func_name: &str, body: &Spanned<Stmt>) -> TailCallInfo {
-        let mut tail_recursive_returns = HashSet::new();
+        let mut tail_recursive_returns = HashSet::default();
         self.find_tail_recursive_returns(func_name, body, &mut tail_recursive_returns);
 
         TailCallInfo {

@@ -26,7 +26,7 @@ impl<'a> Parser<'a> {
         Self {
             tokens,
             pos: 0,
-            errors: Vec::new(),
+            errors: Vec::with_capacity(tokens.len() / 20),
         }
     }
 

@@ -3,11 +3,11 @@
 //! First pass of semantic analysis that registers all global items
 //! (functions, statics, structs, enums, imports) before analyzing bodies.
 
-use std::collections::HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 
 use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Spanned};
-use crate::sema::const_eval::{ConstValue, eval_const_expr_with_env};
+use crate::sema::const_eval::{eval_const_expr_with_env, ConstValue};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation};
 use crate::sema::type_defs::{EnumDef, FieldInfo, StructDef, VariantData, VariantInfo};
 use crate::sema::types::Type;
@@ -146,7 +146,7 @@ impl SemanticAnalyzer {
                 inline_param_symbols: None, // Will be populated in second pass
                 has_tail_recursion: false,  // Will be populated by tail call analysis
                 param_bytes_used,
-                struct_param_locals: std::collections::HashMap::new(), // Will be populated during second pass
+                struct_param_locals: HashMap::default(), // Will be populated during second pass
             },
         );
 
@@ -500,7 +500,7 @@ impl SemanticAnalyzer {
 
         let mut fields = Vec::new();
         let mut offset = 0;
-        let mut seen_fields = HashSet::new();
+        let mut seen_fields = HashSet::default();
 
         // Calculate field offsets
         for field in &struct_def.fields {
@@ -584,7 +584,7 @@ impl SemanticAnalyzer {
 
         let mut variants = Vec::new();
         let mut next_tag: u8 = 0;
-        let mut seen_variants = HashSet::new();
+        let mut seen_variants = HashSet::default();
 
         // Process each variant
         for variant in &enum_def.variants {

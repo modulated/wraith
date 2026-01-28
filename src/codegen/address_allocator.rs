@@ -7,7 +7,7 @@
 //! 4. Emit final assembly with ORG directives
 
 use crate::codegen::section_allocator::SectionAllocator;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Metadata about a function's placement requirements
 #[derive(Debug, Clone)]
@@ -99,7 +99,7 @@ impl AddressAllocator {
         metadata: &HashMap<String, FunctionMetadata>,
         compiled: &HashMap<String, CompiledFunction>,
     ) -> Result<HashMap<String, u16>, Vec<ConflictError>> {
-        let mut addresses = HashMap::new();
+        let mut addresses = HashMap::default();
         let mut errors = Vec::new();
 
         // Process functions with explicit org first, then the rest

@@ -648,7 +648,7 @@ impl Warning {
 
 use crate::ast::{FnParam, Span, Spanned, Stmt};
 use crate::sema::table::SymbolInfo;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 #[derive(Debug, Clone)]
 pub struct FunctionMetadata {

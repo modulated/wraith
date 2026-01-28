@@ -3,7 +3,7 @@
 //! Stores struct and enum definitions for semantic analysis and codegen.
 
 use crate::sema::types::Type;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Information about a struct field with computed offset
 #[derive(Debug, Clone)]

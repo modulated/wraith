@@ -3,8 +3,8 @@
 use crate::ast::{BinaryOp, Expr, FieldInit, Literal, Spanned, TypeExpr, UnaryOp, VariantData};
 use crate::lexer::Token;
 
-use super::Parser;
 use super::error::{ParseError, ParseResult};
+use super::Parser;
 
 impl Parser<'_> {
     /// Parse an expression
@@ -336,7 +336,7 @@ impl Parser<'_> {
     ) -> ParseResult<Spanned<Expr>> {
         self.expect(&Token::LBrace)?;
 
-        let mut fields = Vec::new();
+        let mut fields = Vec::with_capacity(8);
 
         while !self.check(&Token::RBrace) {
             let field_name = self.expect_ident()?;
@@ -372,7 +372,7 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::LBrace)?;
 
-        let mut fields = Vec::new();
+        let mut fields = Vec::with_capacity(8);
 
         while !self.check(&Token::RBrace) {
             let field_name = self.expect_ident()?;
@@ -404,7 +404,7 @@ impl Parser<'_> {
     ) -> ParseResult<Spanned<Expr>> {
         self.expect(&Token::LParen)?;
 
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(4);
 
         while !self.check(&Token::RParen) {
             args.push(self.parse_expr()?);
@@ -453,7 +453,7 @@ impl Parser<'_> {
                 VariantData::Unit
             } else {
                 self.expect(&Token::LBrace)?;
-                let mut fields = Vec::new();
+                let mut fields = Vec::with_capacity(4);
 
                 while !self.check(&Token::RBrace) {
                     let field_name = self.expect_ident()?;
@@ -475,7 +475,7 @@ impl Parser<'_> {
         } else if self.check(&Token::LParen) {
             // Tuple variant: Enum::Variant(a, b)
             self.expect(&Token::LParen)?;
-            let mut args = Vec::new();
+            let mut args = Vec::with_capacity(4);
 
             while !self.check(&Token::RParen) {
                 args.push(self.parse_expr()?);
@@ -626,7 +626,7 @@ impl Parser<'_> {
         let expr = self.parse_expr()?;
         self.expect(&Token::LBrace)?;
 
-        let mut arms = Vec::new();
+        let mut arms = Vec::with_capacity(4);
         while !self.check(&Token::RBrace) {
             let pattern = self.parse_pattern()?;
             self.expect(&Token::FatArrow)?;

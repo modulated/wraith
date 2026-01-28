@@ -18,7 +18,7 @@ use crate::sema::types::Type;
 use crate::sema::{FunctionMetadata, ProgramInfo, SemaError, Warning};
 
 use crate::ast::Span;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 
 use zp_alloc::ZeroPageAllocator;
@@ -79,32 +79,32 @@ impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
             table: SymbolTable::new(),
-            errors: Vec::new(),
-            warnings: Vec::new(),
+            errors: Vec::with_capacity(16),
+            warnings: Vec::with_capacity(16),
             current_return_type: None,
-            resolved_symbols: HashMap::new(),
-            function_metadata: HashMap::new(),
-            folded_constants: HashMap::new(),
-            resolved_types: HashMap::new(),
+            resolved_symbols: HashMap::default(),
+            function_metadata: HashMap::default(),
+            folded_constants: HashMap::default(),
+            resolved_types: HashMap::default(),
             type_registry: TypeRegistry::new(),
-            imported_items: Vec::new(),
+            imported_items: Vec::with_capacity(8),
             base_path: None,
-            imported_files: HashSet::new(),
+            imported_files: HashSet::default(),
             zp_allocator: ZeroPageAllocator::new(),
-            const_env: ConstEnv::new(),
+            const_env: ConstEnv::default(),
             loop_depth: 0,
-            used_variables: HashSet::new(),
-            all_used_symbols: HashSet::new(),
-            declared_variables: Vec::new(),
-            declared_parameters: Vec::new(),
-            imported_symbols: Vec::new(),
-            declared_functions: Vec::new(),
-            called_functions: HashSet::new(),
-            unreachable_stmts: HashSet::new(),
+            used_variables: HashSet::default(),
+            all_used_symbols: HashSet::default(),
+            declared_variables: Vec::with_capacity(16),
+            declared_parameters: Vec::with_capacity(8),
+            imported_symbols: Vec::with_capacity(8),
+            declared_functions: Vec::with_capacity(16),
+            called_functions: HashSet::default(),
+            unreachable_stmts: HashSet::default(),
             memory_layout: MemoryLayout::new(),
             checking_assignment_target: false,
             expected_type: None,
-            resolved_struct_names: HashMap::new(),
+            resolved_struct_names: HashMap::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
         }
@@ -113,32 +113,32 @@ impl SemanticAnalyzer {
     pub fn with_base_path(base_path: PathBuf) -> Self {
         Self {
             table: SymbolTable::new(),
-            errors: Vec::new(),
-            warnings: Vec::new(),
+            errors: Vec::with_capacity(16),
+            warnings: Vec::with_capacity(16),
             current_return_type: None,
-            resolved_symbols: HashMap::new(),
-            function_metadata: HashMap::new(),
-            folded_constants: HashMap::new(),
-            resolved_types: HashMap::new(),
+            resolved_symbols: HashMap::default(),
+            function_metadata: HashMap::default(),
+            folded_constants: HashMap::default(),
+            resolved_types: HashMap::default(),
             type_registry: TypeRegistry::new(),
-            imported_items: Vec::new(),
+            imported_items: Vec::with_capacity(8),
             base_path: Some(base_path),
-            imported_files: HashSet::new(),
+            imported_files: HashSet::default(),
             zp_allocator: ZeroPageAllocator::new(),
-            const_env: ConstEnv::new(),
+            const_env: ConstEnv::default(),
             loop_depth: 0,
-            used_variables: HashSet::new(),
-            all_used_symbols: HashSet::new(),
-            declared_variables: Vec::new(),
-            declared_parameters: Vec::new(),
-            imported_symbols: Vec::new(),
-            declared_functions: Vec::new(),
-            called_functions: HashSet::new(),
-            unreachable_stmts: HashSet::new(),
+            used_variables: HashSet::default(),
+            all_used_symbols: HashSet::default(),
+            declared_variables: Vec::with_capacity(16),
+            declared_parameters: Vec::with_capacity(8),
+            imported_symbols: Vec::with_capacity(8),
+            declared_functions: Vec::with_capacity(16),
+            called_functions: HashSet::default(),
+            unreachable_stmts: HashSet::default(),
             memory_layout: MemoryLayout::new(),
             checking_assignment_target: false,
             expected_type: None,
-            resolved_struct_names: HashMap::new(),
+            resolved_struct_names: HashMap::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
         }
@@ -258,8 +258,8 @@ impl SemanticAnalyzer {
             // Each parameter gets sequential bytes (16-bit params take 2 bytes)
             let layout = MemoryLayout::new();
             let mut byte_offset = 0u8;
-            let mut struct_param_locals: std::collections::HashMap<String, u8> =
-                std::collections::HashMap::new();
+            let mut struct_param_locals: HashMap<String, u8> =
+                HashMap::default();
 
             for param in func.params.iter() {
                 let name = param.name.node.clone();
@@ -366,7 +366,7 @@ impl SemanticAnalyzer {
             // This includes both parameter definitions and all references to them
             if is_inline && let Some(before) = resolved_before {
                 // Collect all NEW symbols that were added during parameter registration and body analysis
-                let mut inline_symbols = std::collections::HashMap::new();
+                let mut inline_symbols = std::collections::HashMap::default();
                 for (span, info) in &self.resolved_symbols {
                     if !before.contains_key(span) {
                         inline_symbols.insert(*span, info.clone());
@@ -424,7 +424,7 @@ impl SemanticAnalyzer {
     }
 
     pub(super) fn resolve_function_type(&self, func: &Function) -> Result<Type, SemaError> {
-        let mut param_types = Vec::new();
+        let mut param_types = Vec::with_capacity(func.params.len());
         for param in &func.params {
             param_types.push(self.resolve_type(&param.ty.node)?);
         }

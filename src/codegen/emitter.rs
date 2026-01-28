@@ -2,9 +2,9 @@
 //!
 //! Helper for generating formatted 6502 assembly code.
 
-use super::CommentVerbosity;
 use super::memory_layout::{MemoryLayout, TempAllocator};
 use super::regstate::{RegisterState, RegisterValue};
+use super::CommentVerbosity;
 
 /// Loop context for break/continue statements
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ impl Default for Emitter {
 impl Emitter {
     pub fn new(verbosity: CommentVerbosity) -> Self {
         Self {
-            output: String::new(),
+            output: String::with_capacity(4096),
             indent: 0,
             label_counter: 0,
             match_counter: 0,

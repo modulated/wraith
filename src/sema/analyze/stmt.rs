@@ -8,6 +8,7 @@ use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation};
 use crate::sema::type_defs::VariantData;
 use crate::sema::types::Type;
 use crate::sema::{SemaError, Warning};
+use rustc_hash::FxHashSet as HashSet;
 
 use super::SemanticAnalyzer;
 
@@ -504,7 +505,7 @@ impl SemanticAnalyzer {
         }
 
         // Collect covered variants
-        let mut covered_variants = std::collections::HashSet::new();
+        let mut covered_variants = HashSet::default();
         for arm in arms {
             if let Pattern::EnumVariant { variant, .. } = &arm.pattern.node {
                 covered_variants.insert(variant.node.clone());

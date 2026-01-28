@@ -265,7 +265,8 @@ pub struct SpannedToken {
 /// Lex source code into tokens
 pub fn lex(source: &str) -> Result<Vec<SpannedToken>, LexError> {
     let mut lexer = Token::lexer(source);
-    let mut tokens = Vec::new();
+    // Pre-allocate tokens vector: assume avg token length of 4 chars
+    let mut tokens = Vec::with_capacity(source.len() / 4);
 
     while let Some(result) = lexer.next() {
         match result {

@@ -4,7 +4,7 @@
 
 use crate::ast::{BinaryOp, Expr, Literal, Spanned, UnaryOp};
 use crate::sema::SemaError;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Result of constant evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +45,7 @@ impl ConstValue {
 
 /// Evaluates a constant expression at compile time
 pub fn eval_const_expr(expr: &Spanned<Expr>) -> Result<ConstValue, SemaError> {
-    eval_const_expr_with_env(expr, &ConstEnv::new())
+    eval_const_expr_with_env(expr, &ConstEnv::default())
 }
 
 /// Evaluates a constant expression with an environment of named constants

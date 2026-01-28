@@ -171,6 +171,15 @@ impl SourceFile {
     pub fn with_items(items: Vec<Spanned<Item>>) -> Self {
         Self { items }
     }
+
+    /// Create a source file with items and pre-allocate capacity
+    pub fn with_items_capacity(items: Vec<Spanned<Item>>, capacity: usize) -> Self {
+        let mut result = Self { items };
+        result
+            .items
+            .reserve(capacity.saturating_sub(result.items.len()));
+        result
+    }
 }
 
 impl Default for SourceFile {

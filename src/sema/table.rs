@@ -2,7 +2,7 @@
 //!
 //! Handles scoping and symbol lookups.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use super::types::Type;
 use crate::ast::AccessMode;
@@ -46,12 +46,12 @@ pub struct SymbolTable {
 impl SymbolTable {
     pub fn new() -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![HashMap::default()],
         }
     }
 
     pub fn enter_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
     }
 
     pub fn exit_scope(&mut self) {

@@ -3,7 +3,7 @@
 //! Manages allocation of addresses within memory sections.
 
 use crate::config::{MemoryConfig, Section};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Information about an allocated address range
 #[derive(Debug, Clone)]
@@ -42,7 +42,7 @@ pub struct SectionAllocator {
 
 impl SectionAllocator {
     pub fn new(config: MemoryConfig) -> Self {
-        let mut offsets = HashMap::new();
+        let mut offsets = HashMap::default();
         for section in &config.sections {
             offsets.insert(section.name.clone(), 0);
         }

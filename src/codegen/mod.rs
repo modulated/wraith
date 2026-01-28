@@ -14,7 +14,7 @@ use crate::sema::ProgramInfo;
 use emitter::Emitter;
 use item::generate_item;
 use section_allocator::SectionAllocator;
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 /// Controls the verbosity level of generated assembly comments
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -66,7 +66,7 @@ impl Default for StringCollector {
 impl StringCollector {
     pub fn new() -> Self {
         Self {
-            strings: HashMap::new(),
+            strings: HashMap::default(),
             next_id: 0,
         }
     }
@@ -425,14 +425,14 @@ pub fn generate(
     verbosity: CommentVerbosity,
 ) -> Result<(String, SectionAllocator), CodegenError> {
     use crate::sema::table::{SymbolKind, SymbolLocation};
-    use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap as HashMap;
 
     let mut emitter = Emitter::new(verbosity);
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
 
     // Build a map of symbol names to their import source file
-    let mut import_sources: HashMap<String, String> = HashMap::new();
+    let mut import_sources: HashMap<String, String> = HashMap::default();
     for item in &ast.items {
         if let crate::ast::Item::Import(import) = &item.node {
             for symbol in &import.symbols {
@@ -443,7 +443,7 @@ pub fn generate(
 
     // Emit address labels for all addresses (including imported ones)
     // Use resolved_symbols which contains all symbols that are actually used
-    let mut emitted_addresses = HashSet::new();
+    let mut emitted_addresses = HashSet::default();
 
     // Emit addresses from resolved_symbols (includes both local and imported addresses)
     for symbol in program.resolved_symbols.values() {
@@ -460,7 +460,7 @@ pub fn generate(
     }
 
     // Track which items have been emitted to avoid duplicates
-    let mut emitted_items: HashSet<String> = HashSet::new();
+    let mut emitted_items: HashSet<String> = HashSet::default();
 
     // Emit const arrays to DATA section FIRST
     // This separates read-only data from code
