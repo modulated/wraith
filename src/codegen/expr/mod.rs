@@ -149,10 +149,11 @@ pub fn generate_expr(
                 match obj_ty {
                     crate::sema::types::Type::String => {
                         // String .len access
-                        // String is a pointer to length-prefixed data: [u16 length][bytes...]
-                        emitter.emit_comment("String .len access");
+                        // String is a pointer to length-prefixed data: [u8 length][bytes...]
+                        // Strings are limited to 256 bytes max (u8 length)
+                        emitter.emit_comment("String .len access (u8 length)");
                         if emitter.is_verbose() {
-                            emitter.emit_comment("Load 2-byte length prefix (little-endian u16)");
+                            emitter.emit_comment("Load 1-byte length prefix");
                         }
 
                         // Get string address in A:X
@@ -162,16 +163,13 @@ pub fn generate_expr(
                         emitter.emit_inst("STA", "$F0");
                         emitter.emit_inst("STX", "$F1");
 
-                        // Load length (first 2 bytes) via indirect indexed
+                        // Load length (single byte) via indirect indexed
+                        // Result is u8 in A, zero-extended to u16 in Y:A
                         emitter.emit_inst("LDY", "#$00");
-                        emitter.emit_inst("LDA", "($F0),Y"); // Low byte of length
-                        emitter.emit_inst("TAX", ""); // Save low byte in X temporarily
-                        emitter.emit_inst("INY", "");
-                        emitter.emit_inst("LDA", "($F0),Y"); // High byte of length
-                        // Result: length in A (high) and X (low)
-                        // Swap them so A has low byte, Y has high byte (standard u16 convention)
-                        emitter.emit_inst("TAY", ""); // High byte to Y
-                        emitter.emit_inst("TXA", ""); // Low byte to A
+                        emitter.emit_inst("LDA", "($F0),Y"); // Load length byte
+                        // Length is always <= 255, so high byte is 0
+                        emitter.emit_inst("LDY", "#$00"); // High byte = 0
+                        // Result: length in A (low byte), Y = 0 (high byte)
 
                         Ok(())
                     }

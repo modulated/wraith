@@ -72,6 +72,7 @@ impl StringCollector {
     }
 
     /// Register a string and get its label (deduplicated automatically)
+    /// Strings are limited to 256 bytes maximum
     pub fn add_string(&mut self, content: String) -> String {
         if let Some(label) = self.strings.get(&content) {
             // Deduplication: return existing label
@@ -82,6 +83,19 @@ impl StringCollector {
             self.strings.insert(content, label.clone());
             label
         }
+    }
+
+    /// Validate that all strings are within the 256-byte limit
+    pub fn validate_strings(&self) -> Result<(), String> {
+        for (content, label) in &self.strings {
+            if content.len() > 255 {
+                return Err(format!(
+                    "String literal '{}' exceeds 256 byte limit: {} bytes",
+                    label, content.len()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Emit all collected strings to DATA section
@@ -100,7 +114,15 @@ impl StringCollector {
 
         for (content, label) in &self.strings {
             // Allocate in DATA section
-            let data_size = 2 + content.len() as u16; // length prefix + bytes
+            // Strings are limited to 256 bytes (u8 length prefix)
+            let content_len = content.len();
+            if content_len > 255 {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "String literal exceeds 256 byte limit: {} bytes",
+                    content_len
+                )));
+            }
+            let data_size = 1 + content_len as u16; // u8 length prefix + bytes
             let addr = section_alloc
                 .allocate("DATA", data_size)
                 .map_err(CodegenError::SectionError)?;
@@ -108,13 +130,11 @@ impl StringCollector {
             emitter.emit_org(addr);
             emitter.emit_label(label);
 
-            // Emit length as u16 little-endian
-            let len = content.len() as u16;
+            // Emit length as u8 (single byte, max 255)
+            let len = content_len as u8;
             emitter.emit_raw(&format!(
-                "    .BYTE ${:02X}, ${:02X}  ; length = {}",
-                len & 0xFF,
-                (len >> 8) & 0xFF,
-                len
+                "    .BYTE ${:02X}  ; length = {}",
+                len, len
             ));
 
             // Emit string bytes

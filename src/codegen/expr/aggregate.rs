@@ -27,17 +27,17 @@ pub(super) fn generate_index(
         && matches!(obj_ty, crate::sema::types::Type::String)
     {
         // String indexing: s[i]
-        // String format: [u16 length][bytes...]
+        // String format: [u8 length][bytes...] (max 256 bytes)
         // Strategy:
         // 1. Get string pointer in A:X
         // 2. Store to temp ($F0-$F1)
-        // 3. Add 2 to pointer (skip length prefix)
+        // 3. Add 1 to pointer (skip u8 length prefix)
         // 4. Get index in Y register
         // 5. Load byte: LDA ($F0),Y
 
         emitter.emit_comment("String indexing: s[i]");
         if emitter.is_verbose() {
-            emitter.emit_comment("Skip 2-byte length header to access character data");
+            emitter.emit_comment("Skip 1-byte length header to access character data");
         }
 
         // Get string pointer
@@ -45,17 +45,15 @@ pub(super) fn generate_index(
         emitter.emit_inst("STA", "$F0");
         emitter.emit_inst("STX", "$F1");
 
-        // Skip length prefix (add 2 to pointer)
+        // Skip length prefix (add 1 to pointer for u8 length)
         if emitter.is_verbose() {
-            emitter.emit_comment("Add 2 to pointer to skip length prefix");
+            emitter.emit_comment("Add 1 to pointer to skip u8 length prefix");
         }
-        emitter.emit_inst("LDA", "$F0");
-        emitter.emit_inst("CLC", "");
-        emitter.emit_inst("ADC", "#$02");
-        emitter.emit_inst("STA", "$F0");
-        emitter.emit_inst("LDA", "$F1");
-        emitter.emit_inst("ADC", "#$00");
-        emitter.emit_inst("STA", "$F1");
+        let skip_label = emitter.next_label("si");
+        emitter.emit_inst("INC", "$F0");
+        emitter.emit_inst("BNE", &skip_label);
+        emitter.emit_inst("INC", "$F1");
+        emitter.emit_label(&skip_label);
 
         // Get index in Y
         generate_expr(index, emitter, info, string_collector)?;

@@ -248,7 +248,19 @@ impl SemanticAnalyzer {
                 }
             }
             crate::ast::Literal::Bool(_) => Ok(Type::Primitive(PrimitiveType::Bool)),
-            crate::ast::Literal::String(_) => Ok(Type::String),
+            crate::ast::Literal::String(s) => {
+                // Validate string length (256 byte limit for 6502)
+                if s.len() > 255 {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "string literal exceeds 256 byte limit: {} bytes",
+                            s.len()
+                        ),
+                        span,
+                    });
+                }
+                Ok(Type::String)
+            }
             crate::ast::Literal::Array(elements) => {
                 if elements.is_empty() {
                     // Empty array - need type context to determine element type

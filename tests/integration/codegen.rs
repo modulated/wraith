@@ -258,9 +258,9 @@ fn string_literal() {
     "#,
     );
 
-    // String layout: label in DATA section, length (2 bytes), data, load address in code
+    // String layout: label in DATA section, length (1 byte), data, load address in code
     assert_asm_contains(&asm, "str_");
-    assert_asm_contains(&asm, ".BYTE $05, $00"); // Length 5
+    assert_asm_contains(&asm, ".BYTE $05  ; length = 5"); // Length 5 (now u8)
     assert_asm_contains(&asm, "$48"); // 'H'
     assert_asm_contains(&asm, "LDA #<str_");
     assert_asm_contains(&asm, "LDX #>str_");

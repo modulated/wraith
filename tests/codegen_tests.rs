@@ -1,4 +1,4 @@
-use wraith::codegen::{CommentVerbosity, generate};
+use wraith::codegen::{generate, CommentVerbosity};
 use wraith::lex;
 use wraith::parser::Parser;
 use wraith::sema::analyze;
@@ -252,12 +252,12 @@ fn test_codegen_string_literal() {
 
     // String should have:
     // 1. String label in DATA section
-    // 2. Length word (5, 0 for "Hello")
+    // 2. Length byte (5 for "Hello") - now u8 instead of u16
     // 3. String bytes
     // 4. Load address in code
     assert!(asm.contains("str_"), "Should have string label");
     assert!(
-        asm.contains(".BYTE $05, $00"),
+        asm.contains(".BYTE $05  ; length = 5"),
         "Should have length prefix (5)"
     );
     assert!(asm.contains("$48"), "Should contain 'H' (0x48)");
