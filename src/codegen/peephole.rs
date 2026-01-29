@@ -130,7 +130,9 @@ pub fn optimize(lines: &[Line]) -> Vec<Line> {
         result = eliminate_unreachable_after_terminator(&result);
         result = eliminate_redundant_cmp_zero(&result);
         result = eliminate_redundant_ldy_zero(&result);
-        result = eliminate_branch_over_jump(&result);
+        // DISABLED: eliminate_branch_over_jump breaks while loops with large bodies
+        // by inverting branches that exceed the 127-byte limit
+        // result = eliminate_branch_over_jump(&result);
         result = eliminate_redundant_ldx_zero(&result);
         result = eliminate_clc_adc_zero(&result);
         result = eliminate_sec_sbc_zero(&result);

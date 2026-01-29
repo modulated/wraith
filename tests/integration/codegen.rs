@@ -148,7 +148,7 @@ fn control_flow_if() {
     "#,
     );
 
-    assert_asm_contains(&asm, "BEQ");
+    assert_asm_contains(&asm, "BNE"); // Branch to then when condition is true
 }
 
 #[test]

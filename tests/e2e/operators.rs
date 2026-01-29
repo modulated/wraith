@@ -250,8 +250,8 @@ fn logical_and() {
     "#,
     );
 
-    // Should short-circuit
-    assert_asm_contains(&asm, "BEQ");
+    // Should short-circuit - now uses BNE to branch to then block
+    assert_asm_contains(&asm, "BNE");
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn logical_not() {
     "#,
     );
 
-    assert_asm_contains(&asm, "BEQ");
+    assert_asm_contains(&asm, "BNE"); // Branch to then when condition is true
 }
 
 // ============================================================================
