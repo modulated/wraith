@@ -523,19 +523,34 @@ pub fn generate_stmt(
             then_branch,
             else_branch,
         } => {
+            let then_label = emitter.next_label("then");
             let else_label = emitter.next_label("else");
             let end_label = emitter.next_label("end");
 
             // Condition
             generate_expr(condition, emitter, info, string_collector)?;
 
+            // For large if statements, we need to avoid forward branches
+            // that might exceed 127 bytes. Use this structure:
+            //   condition
+            //   BNE then      ; branch if true (short forward jump)
+            //   JMP else      ; jump if false
+            // then:
+            //   then_body
+            //   JMP end
+            // else:
+            //   else_body
+            // end:
+            
             if !emitter.is_minimal() {
-                emitter.emit_comment("Branch if condition is false (A == 0)");
+                emitter.emit_comment("Branch to then if condition is true");
             }
             emitter.emit_inst("CMP", "#$00");
-            emitter.emit_inst("BEQ", &else_label);
+            emitter.emit_inst("BNE", &then_label);
+            emitter.emit_inst("JMP", &else_label);
 
             // Then
+            emitter.emit_label(&then_label);
             generate_stmt(then_branch, emitter, info, string_collector)?;
             emitter.emit_inst("JMP", &end_label);
 
