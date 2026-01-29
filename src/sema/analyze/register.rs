@@ -147,6 +147,7 @@ impl SemanticAnalyzer {
                 has_tail_recursion: false,  // Will be populated by tail call analysis
                 param_bytes_used,
                 struct_param_locals: HashMap::default(), // Will be populated during second pass
+                string_cache: HashMap::default(), // Will be populated after function analysis
             },
         );
 

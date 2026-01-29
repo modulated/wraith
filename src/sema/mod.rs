@@ -669,6 +669,9 @@ pub struct FunctionMetadata {
     /// For struct parameters: maps param name to local ZP address where pointer copy is stored
     /// This allows nested calls without clobbering the struct pointer in parameter space
     pub struct_param_locals: HashMap<String, u8>,
+    /// String pointer cache: maps variable name to zero-page address (2 bytes)
+    /// Hot strings (accessed 3+ times) get cached for faster access
+    pub string_cache: HashMap<String, u8>,
 }
 
 /// Tail call information for a function

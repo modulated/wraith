@@ -67,6 +67,11 @@ pub struct SemanticAnalyzer {
     pub(super) memory_config: crate::config::MemoryConfig,
     /// Current function being analyzed (for tracking symbol scope in inline asm)
     pub(super) current_function: Option<String>,
+    /// Track string variable accesses per function for caching optimization
+    /// Maps function name -> (variable name -> access count)
+    pub(super) string_access_counts: HashMap<String, HashMap<String, usize>>,
+    /// Track which strings have been cached already (to avoid double-counting)
+    pub(super) cached_strings: HashSet<String>,
 }
 
 impl Default for SemanticAnalyzer {
@@ -107,6 +112,8 @@ impl SemanticAnalyzer {
             resolved_struct_names: HashMap::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
+            string_access_counts: HashMap::default(),
+            cached_strings: HashSet::default(),
         }
     }
 
@@ -141,6 +148,8 @@ impl SemanticAnalyzer {
             resolved_struct_names: HashMap::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
+            string_access_counts: HashMap::default(),
+            cached_strings: HashSet::default(),
         }
     }
 
@@ -362,6 +371,9 @@ impl SemanticAnalyzer {
             // Analyze body
             self.analyze_stmt(&func.body)?;
 
+            // After analyzing function body, allocate string cache slots for hot strings
+            self.allocate_string_cache(&func_name);
+
             // For inline functions, capture all symbols that were added during body analysis
             // This includes both parameter definitions and all references to them
             if is_inline && let Some(before) = resolved_before {
@@ -386,6 +398,55 @@ impl SemanticAnalyzer {
             self.table.exit_scope();
         }
         Ok(())
+    }
+
+    /// Allocate zero-page cache slots for frequently accessed strings
+    /// Strings accessed 3+ times are considered "hot" and get cached
+    fn allocate_string_cache(&mut self, func_name: &str) {
+        // Get access counts for this function
+        let access_counts = match self.string_access_counts.get(func_name) {
+            Some(counts) => counts,
+            None => return, // No strings accessed in this function
+        };
+
+        // Find hot strings (accessed 3+ times)
+        let hot_strings: Vec<(String, usize)> = access_counts
+            .iter()
+            .filter(|(_, count)| **count >= 3)
+            .map(|(name, count)| (name.clone(), *count))
+            .collect();
+
+        if hot_strings.is_empty() {
+            return; // No hot strings to cache
+        }
+
+        // Allocate cache slots for hot strings (2 bytes each for pointer)
+        let mut cache_map = HashMap::default();
+        for (var_name, count) in hot_strings {
+            // Allocate 2 bytes for the string pointer
+            match self.zp_allocator.allocate_range(2) {
+                Ok(addr) => {
+                    cache_map.insert(var_name.clone(), addr);
+                    // Mark this string as cached so we don't count it again
+                    self.cached_strings.insert(var_name);
+                }
+                Err(_) => {
+                    // Out of zero page space - can't cache this string
+                    // This is not a fatal error, just skip caching
+                    break;
+                }
+            }
+        }
+
+        // Store cache info in function metadata
+        if !cache_map.is_empty() {
+            if let Some(metadata) = self.function_metadata.get_mut(func_name) {
+                metadata.string_cache = cache_map;
+            }
+        }
+
+        // Clear access counts for this function to free memory
+        self.string_access_counts.remove(func_name);
     }
 
     pub(super) fn resolve_type(&self, ty: &TypeExpr) -> Result<Type, SemaError> {

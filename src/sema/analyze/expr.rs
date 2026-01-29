@@ -320,6 +320,17 @@ impl SemanticAnalyzer {
         // Also track in all_used_symbols (for unused import warnings)
         self.all_used_symbols.insert(name.to_string());
 
+        // Track string variable accesses for caching optimization
+        if matches!(info.ty, Type::String) {
+            if let Some(func_name) = &self.current_function {
+                let func_counts = self
+                    .string_access_counts
+                    .entry(func_name.clone())
+                    .or_default();
+                *func_counts.entry(name.to_string()).or_insert(0) += 1;
+            }
+        }
+
         Ok(info.ty)
     }
 

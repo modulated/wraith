@@ -340,6 +340,51 @@ fn generate_function(
         emitter.emit_inst("PHA", "");
     }
 
+    // Initialize string pointer cache for hot strings
+    // Strings accessed 3+ times get cached in zero page for faster access
+    if let Some(metadata) = info.function_metadata.get(name)
+        && !metadata.string_cache.is_empty()
+    {
+        emitter.emit_comment("Initialize string pointer cache");
+        for (var_name, cache_addr) in &metadata.string_cache {
+            // Look up the variable in resolved_symbols first (for parameters)
+            let location_opt = info.resolved_symbols.iter()
+                .find(|(_, sym)| sym.name == *var_name && sym.containing_function.as_ref() == Some(name))
+                .map(|(_, sym)| sym.location.clone())
+                .or_else(|| info.table.lookup(var_name).map(|sym| sym.location.clone()));
+            
+            if let Some(location) = location_opt {
+                match location {
+                    crate::sema::table::SymbolLocation::ZeroPage(var_addr) => {
+                        // Copy string pointer from variable to cache
+                        emitter.emit_comment(&format!(
+                            "Cache '{}' pointer ${:02X} -> ${:02X}",
+                            var_name, var_addr, cache_addr
+                        ));
+                        emitter.emit_inst("LDA", &format!("${:02X}", var_addr));
+                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr));
+                        emitter.emit_inst("LDA", &format!("${:02X}", var_addr + 1));
+                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr + 1));
+                    }
+                    crate::sema::table::SymbolLocation::Absolute(var_addr) => {
+                        // Copy string pointer from absolute address to cache
+                        emitter.emit_comment(&format!(
+                            "Cache '{}' pointer ${:04X} -> ${:02X}",
+                            var_name, var_addr, cache_addr
+                        ));
+                        emitter.emit_inst("LDA", &format!("${:04X}", var_addr));
+                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr));
+                        emitter.emit_inst("LDA", &format!("${:04X}", var_addr + 1));
+                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr + 1));
+                    }
+                    _ => {
+                        // Cannot cache - skip this string
+                    }
+                }
+            }
+        }
+    }
+
     // Body
     generate_stmt(&func.body, emitter, info, string_collector)?;
 
