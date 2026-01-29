@@ -702,6 +702,9 @@ pub struct ProgramInfo {
     pub tail_call_info: HashMap<String, TailCallInfo>,
     /// Map of anonymous struct init spans to their resolved struct names
     pub resolved_struct_names: HashMap<Span, String>,
+    /// Global string pool for cross-module string deduplication
+    /// Maps string content to a unique label (e.g., "Hello" -> "str_0")
+    pub string_pool: HashMap<String, String>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

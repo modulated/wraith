@@ -266,7 +266,11 @@ fn string_literal() {
     assert_asm_contains(&asm, "LDX #>str_");
 
     // Code comes before data section
-    assert_asm_order(&asm, "main:", "str_0:");
+    // Note: With content-based labels, string labels are now hashes like "str_a1b2c3d4:"
+    assert!(
+        asm.find("main:").unwrap() < asm.find("str_").unwrap(),
+        "Code before data section"
+    );
 }
 
 #[test]

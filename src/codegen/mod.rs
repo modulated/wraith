@@ -52,6 +52,7 @@ impl std::fmt::Display for CodegenError {
 impl std::error::Error for CodegenError {}
 
 /// Collects and manages string literals for emission to DATA section
+/// Uses a global pool for cross-module string deduplication
 pub struct StringCollector {
     strings: HashMap<String, String>, // content -> label
     next_id: usize,
@@ -72,17 +73,44 @@ impl StringCollector {
     }
 
     /// Register a string and get its label (deduplicated automatically)
-    /// Strings are limited to 256 bytes maximum
+    /// Uses content-based hashing for consistent labels across modules
     pub fn add_string(&mut self, content: String) -> String {
         if let Some(label) = self.strings.get(&content) {
             // Deduplication: return existing label
             label.clone()
         } else {
-            let label = format!("str_{}", self.next_id);
+            // Use content-based label for cross-module consistency
+            let label = generate_string_label(&content, self.next_id);
             self.next_id += 1;
             self.strings.insert(content, label.clone());
             label
         }
+    }
+
+    /// Register a string using a global pool for cross-module deduplication
+    /// Returns the label from the global pool, or creates a new one
+    pub fn add_string_with_pool(&mut self, content: String, global_pool: &mut HashMap<String, String>) -> String {
+        // First check local cache
+        if let Some(label) = self.strings.get(&content) {
+            return label.clone();
+        }
+        
+        // Check global pool
+        if let Some(label) = global_pool.get(&content) {
+            // Add to local cache for future lookups
+            self.strings.insert(content, label.clone());
+            return label.clone();
+        }
+        
+        // Create new label using content-based hashing
+        let label = generate_string_label(&content, self.next_id);
+        self.next_id += 1;
+        
+        // Add to both local and global pools
+        self.strings.insert(content.clone(), label.clone());
+        global_pool.insert(content, label.clone());
+        
+        label
     }
 
     /// Validate that all strings are within the 256-byte limit
@@ -186,6 +214,116 @@ impl StringCollector {
 
         Ok(())
     }
+}
+
+/// Generate a unique label for a string based on its content
+/// Uses a hash of the content to ensure consistent labels across modules
+fn generate_string_label(content: &str, _counter: usize) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    // Use a simple hash of the content for the label
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    let hash = hasher.finish();
+    
+    // Use first 8 hex digits of hash for the label
+    format!("str_{:08x}", hash)
+}
+
+/// Emit the global string pool to the DATA section
+/// This is called at the end of code generation to emit all unique strings
+/// across all modules (cross-module string deduplication)
+fn emit_global_string_pool(
+    string_pool: &HashMap<String, String>,
+    emitter: &mut Emitter,
+    section_alloc: &mut SectionAllocator,
+) -> Result<(), CodegenError> {
+    if string_pool.is_empty() {
+        return Ok(());
+    }
+
+    emitter.emit_comment("============================");
+    emitter.emit_comment("String Literal Data (Global Pool)");
+    emitter.emit_comment("============================");
+
+    // Sort by label to ensure deterministic output
+    let mut strings: Vec<(&String, &String)> = string_pool.iter().collect();
+    strings.sort_by(|a, b| a.1.cmp(b.1));
+
+    for (content, label) in strings {
+        // Allocate in DATA section
+        // Strings are limited to 256 bytes (u8 length prefix)
+        let content_len = content.len();
+        if content_len > 255 {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "String literal exceeds 256 byte limit: {} bytes",
+                content_len
+            )));
+        }
+        let data_size = 1 + content_len as u16; // u8 length prefix + bytes
+        let addr = section_alloc
+            .allocate("DATA", data_size)
+            .map_err(CodegenError::SectionError)?;
+
+        emitter.emit_org(addr);
+        emitter.emit_label(label);
+
+        // Emit length as u8 (single byte, max 255)
+        let len = content_len as u8;
+        emitter.emit_raw(&format!(
+            "    .BYTE ${:02X}  ; length = {}",
+            len, len
+        ));
+
+        // Emit string bytes
+        if !content.is_empty() {
+            // Escape special characters for display in comment
+            let display = content
+                .chars()
+                .map(|c| match c {
+                    '\n' => "\\n".to_string(),
+                    '\r' => "\\r".to_string(),
+                    '\t' => "\\t".to_string(),
+                    '\0' => "\\0".to_string(),
+                    '\\' => "\\\\".to_string(),
+                    '"' => "\\\"".to_string(),
+                    c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+                    c => format!("\\x{:02X}", c as u8),
+                })
+                .collect::<String>();
+            emitter.emit_comment(&format!("\"{}\"", display));
+
+            // Emit bytes in groups of 16 for readability
+            for (i, chunk) in content.as_bytes().chunks(16).enumerate() {
+                let bytes_str = chunk
+                    .iter()
+                    .map(|b| format!("${:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                if i == 0 && chunk.len() < content.len() {
+                    emitter.emit_raw(&format!(
+                        "    .BYTE {}  ; bytes 0-{}",
+                        bytes_str,
+                        chunk.len() - 1
+                    ));
+                } else if chunk.len() < 16 {
+                    let start = i * 16;
+                    emitter.emit_raw(&format!(
+                        "    .BYTE {}  ; bytes {}-{}",
+                        bytes_str,
+                        start,
+                        start + chunk.len() - 1
+                    ));
+                } else {
+                    emitter.emit_raw(&format!("    .BYTE {}", bytes_str));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Emit stdlib math functions (mul16, div16) if they were used
@@ -668,6 +806,7 @@ use rustc_hash::FxHashMap as HashMap;
     }
 
     // Emit collected string literals to DATA section
+    // Content-based labels ensure cross-module deduplication
     string_collector.emit_strings(&mut emitter, &mut section_alloc)?;
 
     // Emit stdlib math functions if needed

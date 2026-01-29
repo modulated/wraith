@@ -271,8 +271,9 @@ fn test_codegen_string_literal() {
     );
 
     // Verify ordering - string data comes after code (in DATA section)
+    // Note: With content-based labels, string labels are now hashes like "str_a1b2c3d4:"
     assert!(
-        appears_before(&asm, "main:", "str_0:"),
+        asm.find("main:").unwrap() < asm.find("str_").unwrap(),
         "Code before data section"
     );
 }

@@ -219,6 +219,7 @@ impl SemanticAnalyzer {
             unreachable_stmts: self.unreachable_stmts.clone(),
             tail_call_info,
             resolved_struct_names: self.resolved_struct_names.clone(),
+            string_pool: HashMap::default(), // Will be populated during codegen
         })
     }
 

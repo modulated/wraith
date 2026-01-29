@@ -465,6 +465,7 @@ fn generate_inline_call(
             unreachable_stmts: info.unreachable_stmts.clone(),
             tail_call_info: info.tail_call_info.clone(),
             resolved_struct_names: info.resolved_struct_names.clone(),
+            string_pool: info.string_pool.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;
