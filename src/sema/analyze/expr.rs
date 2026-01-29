@@ -872,8 +872,106 @@ impl SemanticAnalyzer {
                 // Slices return the same array type (for assignment compatibility)
                 Ok(object_ty.clone())
             }
+            Type::String => {
+                // COMPILE-TIME STRING SLICING
+                // For strings, slices must be compile-time evaluable
+                // Extract substring and create a new string constant
+
+                // Try to evaluate the string and bounds as constants
+                let string_val = eval_const_expr_with_env(object, &self.const_env)
+                    .ok()
+                    .and_then(|v| match v {
+                        crate::sema::const_eval::ConstValue::String(s) => Some(s),
+                        _ => None,
+                    });
+
+                let start_val = eval_const_expr_with_env(start, &self.const_env)
+                    .ok()
+                    .and_then(|v| v.as_integer());
+
+                let end_val = eval_const_expr_with_env(end, &self.const_env)
+                    .ok()
+                    .and_then(|v| v.as_integer());
+
+                match (string_val, start_val, end_val) {
+                    (Some(s), Some(start_idx), Some(end_idx)) => {
+                        let actual_end = if inclusive { end_idx + 1 } else { end_idx };
+
+                        // Validate bounds
+                        if start_idx < 0 {
+                            return Err(SemaError::Custom {
+                                message: format!(
+                                    "string slice start cannot be negative: {}",
+                                    start_idx
+                                ),
+                                span: start.span,
+                            });
+                        }
+
+                        if start_idx > actual_end {
+                            return Err(SemaError::Custom {
+                                message: format!(
+                                    "string slice start ({}) is greater than end ({})",
+                                    start_idx, actual_end
+                                ),
+                                span,
+                            });
+                        }
+
+                        let start_usize = start_idx as usize;
+                        let end_usize = actual_end as usize;
+
+                        if end_usize > s.len() {
+                            return Err(SemaError::Custom {
+                                message: format!(
+                                    "string slice end ({}) exceeds string length ({})",
+                                    actual_end, s.len()
+                                ),
+                                span: end.span,
+                            });
+                        }
+
+                        // Empty slice check
+                        if start_usize == end_usize {
+                            return Err(SemaError::Custom {
+                                message: "string slice cannot be empty".to_string(),
+                                span,
+                            });
+                        }
+
+                        // Extract substring
+                        let result = &s[start_usize..end_usize];
+
+                        // Validate 256-byte limit
+                        if result.len() > 255 {
+                            return Err(SemaError::Custom {
+                                message: format!(
+                                    "string slice result exceeds 256 byte limit: {} bytes",
+                                    result.len()
+                                ),
+                                span,
+                            });
+                        }
+
+                        // Store the folded constant
+                        self.folded_constants.insert(
+                            span,
+                            crate::sema::const_eval::ConstValue::String(result.to_string()),
+                        );
+
+                        Ok(Type::String)
+                    }
+                    _ => {
+                        // Cannot evaluate at compile time
+                        Err(SemaError::Custom {
+                            message: "string slices must use constant expressions".to_string(),
+                            span,
+                        })
+                    }
+                }
+            }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array".to_string(),
+                expected: "array or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),

@@ -376,12 +376,27 @@ fn generate_static(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    // Handle const arrays specially - they need to emit data
+    // Handle const declarations specially - they may need to emit data
     if !stat.mutable {
         // Check if this is a const array - if so, emit it to data section
         if matches!(stat.ty.node, TypeExpr::Array { .. }) {
             return emit_const_array(stat, emitter, info, string_collector);
         }
+        
+        // Handle const strings - register folded constants with string collector
+        if matches!(&stat.ty.node, TypeExpr::Named(name) if name == "str") {
+            // Check if the init expression was folded to a string constant
+            if let Some(const_val) = info.folded_constants.get(&stat.init.span) {
+                if let crate::sema::const_eval::ConstValue::String(s) = const_val {
+                    // Register the string so it gets emitted to the data section
+                    string_collector.add_string(s.clone());
+                }
+            } else if let crate::ast::Expr::Literal(crate::ast::Literal::String(s)) = &stat.init.node {
+                // Direct string literal - register it
+                string_collector.add_string(s.clone());
+            }
+        }
+        
         // Skip code generation for other const (non-mutable) statics
         // They are compile-time constants that get folded into the code
         return Ok(());

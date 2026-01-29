@@ -72,6 +72,88 @@ pub fn eval_const_expr_with_env(
             // Perform type conversion based on target type
             apply_type_cast(value, target_type, expr.span)
         }
+        Expr::Slice {
+            object,
+            start,
+            end,
+            inclusive,
+        } => {
+            // Evaluate slice on string constants at compile time
+            let object_val = eval_const_expr_with_env(object, env)?;
+            let start_val = eval_const_expr_with_env(start, env)?;
+            let end_val = eval_const_expr_with_env(end, env)?;
+
+            match (object_val, start_val, end_val) {
+                (
+                    ConstValue::String(s),
+                    ConstValue::Integer(start_idx),
+                    ConstValue::Integer(end_idx),
+                ) => {
+                    let actual_end = if *inclusive { end_idx + 1 } else { end_idx };
+
+                    // Validate bounds
+                    if start_idx < 0 {
+                        return Err(SemaError::Custom {
+                            message: format!("slice start cannot be negative: {}", start_idx),
+                            span: start.span,
+                        });
+                    }
+
+                    if start_idx > actual_end {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "slice start ({}) is greater than end ({})",
+                                start_idx, actual_end
+                            ),
+                            span: expr.span,
+                        });
+                    }
+
+                    let start_usize = start_idx as usize;
+                    let end_usize = actual_end as usize;
+
+                    if end_usize > s.len() {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "slice end ({}) exceeds string length ({})",
+                                actual_end,
+                                s.len()
+                            ),
+                            span: end.span,
+                        });
+                    }
+
+                    // Empty slice check
+                    if start_usize == end_usize {
+                        return Err(SemaError::Custom {
+                            message: "string slice cannot be empty".to_string(),
+                            span: expr.span,
+                        });
+                    }
+
+                    // Extract substring
+                    let result = s[start_usize..end_usize].to_string();
+
+                    // Validate 256-byte limit
+                    if result.len() > 255 {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "string slice result exceeds 256 byte limit: {} bytes",
+                                result.len()
+                            ),
+                            span: expr.span,
+                        });
+                    }
+
+                    Ok(ConstValue::String(result))
+                }
+                _ => Err(SemaError::Custom {
+                    message: "slice operations are only supported on strings with constant bounds"
+                        .to_string(),
+                    span: expr.span,
+                }),
+            }
+        }
         _ => Err(SemaError::Custom {
             message: "expression is not constant".to_string(),
             span: expr.span,
