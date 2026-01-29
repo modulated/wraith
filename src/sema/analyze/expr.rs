@@ -333,6 +333,24 @@ impl SemanticAnalyzer {
         let left_ty = self.check_expr(left)?;
         let right_ty = self.check_expr(right)?;
 
+        // String concatenation: str + str = str
+        if matches!((&left_ty, &right_ty), (Type::String, Type::String)) {
+            match op {
+                BinaryOp::Add => {
+                    // Result is also a string type
+                    return Ok(Type::String);
+                }
+                _ => {
+                    return Err(SemaError::InvalidBinaryOp {
+                        op: format!("{:?} (only '+' is supported for strings)", op),
+                        left_ty: left_ty.display_name(),
+                        right_ty: right_ty.display_name(),
+                        span,
+                    });
+                }
+            }
+        }
+
         // BCD type validation
         if let (Type::Primitive(left_prim), Type::Primitive(right_prim)) = (&left_ty, &right_ty)
             && (left_prim.is_bcd() || right_prim.is_bcd())

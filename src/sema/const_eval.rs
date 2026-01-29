@@ -169,6 +169,31 @@ fn eval_binary_with_env(
         }
     } else if matches!(op, BinaryOp::And | BinaryOp::Or) {
         eval_logical_binary(left_val, op, right_val, span)
+    } else if let (ConstValue::String(l), ConstValue::String(r)) = (&left_val, &right_val) {
+        // String concatenation: "hello" + "world"
+        match op {
+            BinaryOp::Add => {
+                let result = format!("{}{}", l, r);
+                // Validate 256-byte limit
+                if result.len() > 255 {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "string concatenation exceeds 256 byte limit: {} bytes",
+                            result.len()
+                        ),
+                        span,
+                    });
+                }
+                Ok(ConstValue::String(result))
+            }
+            _ => Err(SemaError::Custom {
+                message: format!(
+                    "cannot apply '{:?}' operator to strings (only '+' is supported)",
+                    op
+                ),
+                span,
+            }),
+        }
     } else {
         Err(SemaError::Custom {
             message: "cannot evaluate binary operation on non-integer constants".to_string(),
