@@ -110,8 +110,9 @@ impl SemanticAnalyzer {
                 var_type,
                 iterable,
                 body,
+                index_var,
             } => {
-                self.analyze_foreach_loop(var_name, var_type, iterable, body)?;
+                self.analyze_foreach_loop(var_name, var_type, iterable, body, index_var.as_ref())?;
             }
             Stmt::Loop { body } => {
                 self.loop_depth += 1;
@@ -410,19 +411,21 @@ impl SemanticAnalyzer {
         var_type: &Option<Spanned<crate::ast::TypeExpr>>,
         iterable: &Spanned<Expr>,
         body: &Spanned<Stmt>,
+        index_var: Option<&Spanned<String>>,
     ) -> Result<(), SemaError> {
-        // Create a new scope for the loop variable
+        // Create a new scope for the loop variables
         self.table.enter_scope();
 
-        // Check the iterable expression (should be an array)
+        // Check the iterable expression (should be an array or string)
         let iterable_ty = self.check_expr(iterable)?;
 
-        // Extract element type from array type
+        // Extract element type from array type or string
         let element_ty = match &iterable_ty {
             Type::Array(elem_ty, _size) => (**elem_ty).clone(),
+            Type::String => Type::Primitive(PrimitiveType::U8), // String elements are u8
             _ => {
                 return Err(SemaError::TypeMismatch {
-                    expected: "array".to_string(),
+                    expected: "array or string".to_string(),
                     found: iterable_ty.display_name(),
                     span: iterable.span,
                 });
@@ -444,6 +447,23 @@ impl SemanticAnalyzer {
         } else {
             element_ty
         };
+
+        // Allocate storage for index variable if present
+        if let Some(idx_var) = index_var {
+            let idx_addr = self.zp_allocator.allocate()?;
+            let idx_info = SymbolInfo {
+                name: idx_var.node.clone(),
+                kind: SymbolKind::Variable,
+                ty: Type::Primitive(PrimitiveType::U8),
+                location: SymbolLocation::ZeroPage(idx_addr),
+                mutable: true,
+                access_mode: None,
+                is_pub: false,
+                containing_function: self.current_function.clone(),
+            };
+            self.table.insert(idx_var.node.clone(), idx_info.clone());
+            self.resolved_symbols.insert(idx_var.span, idx_info);
+        }
 
         // Allocate storage for loop variable
         // u16/i16 types need 2 bytes

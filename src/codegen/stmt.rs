@@ -682,39 +682,34 @@ pub fn generate_stmt(
             var_type: _,
             iterable,
             body,
+            index_var,
         } => {
-            // ForEach loop: for item in array { ... }
+            // ForEach loop: for item in iterable { ... } or for (index, item) in iterable { ... }
+            // Supports arrays and strings
             // Strategy:
-            // 1. Evaluate iterable expression to get array pointer
-            // 2. Use X register as loop counter (0..array_length)
-            // 3. Load array[X] into the loop variable
-            // 4. Execute body
-            // 5. Increment X and loop
+            // 1. Evaluate iterable expression to get pointer
+            // 2. Use X register as loop counter (0..length)
+            // 3. Load iterable[X] into the loop variable
+            // 4. Store X in index variable if present
+            // 5. Execute body
+            // 6. Increment X and loop
 
             emitter.emit_comment("ForEach loop");
 
-            // Generate the iterable expression (should be an array)
-            // For now, only support array variables
-            let (array_base, array_size) = match &iterable.node {
+            // Generate the iterable expression (can be array or string variable)
+            let (iterable_info, is_string) = match &iterable.node {
                 crate::ast::Expr::Variable(name) => {
-                    // Look up the array to get its pointer location and size
+                    // Look up the variable to get its pointer location and type
                     let sym = info
                         .resolved_symbols
                         .get(&iterable.span)
                         .or_else(|| info.table.lookup(name))
                         .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
-                    // Get array size from type
-                    let size = match &sym.ty {
-                        crate::sema::types::Type::Array(_, sz) => *sz,
-                        _ => {
-                            return Err(CodegenError::UnsupportedOperation(
-                                "ForEach requires array type".to_string(),
-                            ));
-                        }
-                    };
+                    // Check if it's an array or string
+                    let is_str = matches!(sym.ty, crate::sema::types::Type::String);
 
-                    // Get the location where the array pointer is stored
+                    // Get the location where the pointer is stored
                     let ptr_loc = match sym.location {
                         crate::sema::table::SymbolLocation::ZeroPage(addr) => addr,
                         crate::sema::table::SymbolLocation::Absolute(addr) if addr < 256 => {
@@ -722,19 +717,21 @@ pub fn generate_stmt(
                         }
                         _ => {
                             return Err(CodegenError::UnsupportedOperation(
-                                "ForEach requires array pointer in zero page".to_string(),
+                                "ForEach requires pointer in zero page".to_string(),
                             ));
                         }
                     };
 
-                    (ptr_loc, size)
+                    ((ptr_loc, sym.ty.clone()), is_str)
                 }
                 _ => {
                     return Err(CodegenError::UnsupportedOperation(
-                        "ForEach only supports array variables currently".to_string(),
+                        "ForEach only supports variables currently".to_string(),
                     ));
                 }
             };
+
+            let (iterable_base, iterable_ty) = iterable_info;
 
             let loop_label = emitter.next_label("fe");
             let end_label = emitter.next_label("fz");
@@ -745,24 +742,82 @@ pub fn generate_stmt(
                 .reg_state
                 .set_x(crate::codegen::regstate::RegisterValue::Immediate(0));
 
+            // For strings, we need to load the length first
+            // For arrays, the size is known at compile time
+            let array_size = if is_string {
+                // For strings, get length at runtime
+                emitter.emit_comment("String iteration - load length");
+                // Load string pointer to temp location
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base));
+                emitter.emit_inst("STA", "$F0");
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 1));
+                emitter.emit_inst("STA", "$F1");
+                // Load length (first byte)
+                emitter.emit_inst("LDY", "#$00");
+                emitter.emit_inst("LDA", "($F0),Y");
+                // Store length in temp location for comparison
+                emitter.emit_inst("STA", "$F2");
+                None // Will compare against $F2
+            } else {
+                // For arrays, size is known at compile time
+                match &iterable_ty {
+                    crate::sema::types::Type::Array(_, sz) => Some(*sz),
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "ForEach requires array or string type".to_string(),
+                        ));
+                    }
+                }
+            };
+
             // Loop start
             emitter.emit_label(&loop_label);
 
-            // Check if counter (X) >= array_size
-            emitter.emit_inst("CPX", &format!("#${:02X}", array_size));
+            // Check if counter (X) >= length
+            if is_string {
+                // Compare X against string length in $F2
+                emitter.emit_inst("CPX", "$F2");
+            } else if let Some(size) = array_size {
+                // Compare X against known array size
+                emitter.emit_inst("CPX", &format!("#${:02X}", size));
+            }
             emitter.emit_inst("BCS", &end_label); // Branch if X >= size
 
             // Push loop context for break/continue
             emitter.push_loop(loop_label.clone(), end_label.clone());
 
-            // Load array[X] into A using indirect indexed: LDA (ptr),Y
+            // Store index in index variable if present
+            if let Some(idx_var) = index_var {
+                if let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span) {
+                    match idx_sym.location {
+                        crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                            emitter.emit_comment(&format!("Store index in {}", idx_var.node));
+                            emitter.emit_inst("STX", &format!("${:02X}", addr));
+                        }
+                        _ => {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "ForEach index variable must be in zero page".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Load iterable[X] into A using indirect indexed: LDA (ptr),Y
             // Transfer X to Y for indexing
             emitter.emit_inst("TXA", "");
             emitter.emit_inst("TAY", "");
-            emitter.emit_inst("LDA", &format!("(${:02X}),Y", array_base));
+
+            if is_string {
+                // For strings, add 1 to skip length byte
+                emitter.emit_inst("INY", "");
+                emitter.emit_inst("LDA", "($F0),Y");
+            } else {
+                // For arrays, direct indexed access
+                emitter.emit_inst("LDA", &format!("(${:02X}),Y", iterable_base));
+            }
 
             // Store the element in the loop variable
-            // Look up the loop variable (it should be in the current scope)
             if let Some(loop_var) = info.resolved_symbols.get(&var_name.span) {
                 match loop_var.location {
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {

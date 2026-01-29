@@ -134,19 +134,44 @@ impl Parser<'_> {
     }
 
     /// Parse for statement
+    /// Supports:
+    ///   - for i in 0..10 { }  (range loop)
+    ///   - for item in slice { }  (for-each)
+    ///   - for (i, item) in slice { }  (for-each with index)
     fn parse_for_stmt(&mut self) -> ParseResult<Spanned<Stmt>> {
         let start = self.current_span();
         self.expect(&Token::For)?;
 
-        // Parse loop variable name
-        let var_name = self.expect_ident()?;
+        // Check for tuple destructuring syntax: for (index, value) in ...
+        let (index_var, var_name, var_type) = if self.check(&Token::LParen) {
+            self.advance(); // consume '('
+            let idx_var = self.expect_ident()?;
+            self.expect(&Token::Comma)?;
+            let val_var = self.expect_ident()?;
+            self.expect(&Token::RParen)?;
 
-        // Check for optional type annotation: for i: u8 in ...
-        let var_type = if self.check(&Token::Colon) {
-            self.advance();
-            Some(self.parse_type()?)
+            // Type annotation comes after the tuple: for (i, c): u8 in ...
+            let var_type = if self.check(&Token::Colon) {
+                self.advance();
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+
+            (Some(idx_var), val_var, var_type)
         } else {
-            None
+            // Simple variable: for i in ...
+            let name = self.expect_ident()?;
+
+            // Check for optional type annotation: for i: u8 in ...
+            let var_type = if self.check(&Token::Colon) {
+                self.advance();
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+
+            (None, name, var_type)
         };
 
         self.expect(&Token::In)?;
@@ -177,7 +202,7 @@ impl Parser<'_> {
                 span,
             ))
         } else {
-            // Iterating over slice/array
+            // Iterating over slice/array/string
             let body = Box::new(self.parse_block()?);
             let span = start.merge(self.previous_span());
 
@@ -187,6 +212,7 @@ impl Parser<'_> {
                     var_type,
                     iterable: first_expr,
                     body,
+                    index_var,
                 },
                 span,
             ))

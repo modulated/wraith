@@ -107,12 +107,15 @@ pub enum Stmt {
         body: Box<Spanned<Stmt>>,
     },
 
-    /// For-each over slice: for item in data { } or for item: u8 in data { }
+    /// For-each over slice/string: for item in data { } or for item: u8 in data { }
+    /// Also supports: for (index, item) in data { }
     ForEach {
         var_name: Spanned<String>,
         var_type: Option<Spanned<TypeExpr>>,
         iterable: Spanned<Expr>,
         body: Box<Spanned<Stmt>>,
+        /// Optional index variable name for tuple destructuring: for (i, c) in msg { }
+        index_var: Option<Spanned<String>>,
     },
 
     /// Match statement
