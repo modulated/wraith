@@ -1,0 +1,62 @@
+// String Slicing Example
+// Demonstrates compile-time string slicing
+
+// Output addresses
+const OUT_GREETING: addr = 0x6000;
+const OUT_NAME: addr = 0x6002;
+const OUT_DOMAIN: addr = 0x6004;
+const OUT_EXTENSION: addr = 0x6006;
+
+// Compile-time string slicing
+// These operations are performed entirely at compile time
+
+const FULL_MESSAGE: str = "Hello, World! Welcome to Wraith!";
+
+// Extract "Hello" from positions 0-4
+const GREETING: str = FULL_MESSAGE[0..5];
+
+// Extract "World" from positions 7-11
+const NAME: str = FULL_MESSAGE[7..12];
+
+// Path parsing example
+const FULL_PATH: str = "roms/game.nes";
+
+// Extract "game" from positions 5-8
+const DOMAIN: str = FULL_PATH[5..9];
+
+// Extract "nes" from positions 9-11
+const EXTENSION: str = FULL_PATH[9..12];
+
+// Combining slicing with concatenation
+const PREFIX: str = "User: ";
+const USER_NAME: str = "Alice";
+const FULL_GREETING: str = PREFIX + USER_NAME;
+
+// Extract just the name part from a formatted string
+const FORMATTED: str = "Score: 1000 points";
+const SCORE_PART: str = FORMATTED[7..11];  // "1000"
+
+#[reset]
+fn main() {
+    // Store lengths of sliced strings
+    // All slicing was done at compile time
+    let greeting_len: u16 = GREETING.len;  // 5
+    let name_len: u16 = NAME.len;          // 5
+    let domain_len: u16 = DOMAIN.len;      // 4
+    let ext_len: u16 = EXTENSION.len;      // 3
+    
+    OUT_GREETING = greeting_len as u8;
+    OUT_NAME = name_len as u8;
+    OUT_DOMAIN = domain_len as u8;
+    OUT_EXTENSION = ext_len as u8;
+    
+    // Access individual characters from sliced strings
+    let first_char: u8 = GREETING[0];  // 'H'
+    let last_char: u8 = NAME[4];       // 'd'
+}
+
+// Expected results:
+// $6000-$6001: Pointer to "Hello"
+// $6002-$6003: Pointer to "World"
+// $6004-$6005: Pointer to "game"
+// $6006-$6007: Pointer to "nes"

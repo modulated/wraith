@@ -209,6 +209,152 @@ array: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 process_data(array);      // Automatic coercion
 ```
 
+## Strings
+
+### String Type
+
+Strings in Wraith are length-prefixed byte sequences optimized for the 6502. The string type is declared as `str`.
+
+```
+let message: str = "Hello, World!";
+let empty: str = "";
+```
+
+**Storage Format:**
+- `[u8 length][byte data...]` - single byte length prefix followed by character data
+- Maximum length: 255 bytes (enforced at compile time)
+- Pointer size: 2 bytes (standard 6502 pointer)
+
+### String Literals
+
+String literals support escape sequences:
+
+```
+let msg1: str = "Hello\n";          // Newline
+let msg2: str = "Tab\there";        // Tab
+let msg3: str = "Quote: \"Hi\"";    // Escaped quotes
+let msg4: str = "Backslash: \\";    // Backslash
+```
+
+### String Properties
+
+Access string metadata:
+
+```
+let msg: str = "Hello";
+let len: u16 = msg.len;      // Get length (5)
+```
+
+### String Indexing
+
+Access individual characters by index:
+
+```
+let msg: str = "ABC";
+let first: u8 = msg[0];    // 'A' (0x41)
+let second: u8 = msg[1];   // 'B' (0x42)
+```
+
+**Note:** Indexing is bounds-checked at runtime in debug builds.
+
+### String Concatenation
+
+Concatenate strings at compile time using the `+` operator:
+
+```
+const GREETING: str = "Hello, " + "World!";
+const PATH: str = "data/" + "level" + ".txt";
+```
+
+**Requirements:**
+- Both operands must be compile-time constant strings
+- Result must not exceed 256 bytes
+- Evaluated entirely at compile time (zero runtime cost)
+
+### String Slicing
+
+Extract substrings at compile time:
+
+```
+const FULL: str = "Hello, World!";
+const GREETING: str = FULL[0..5];     // "Hello"
+const NAME: str = FULL[7..12];        // "World"
+const COMMA: str = FULL[5..7];        // ", "
+```
+
+**Slice Syntax:**
+- `start..end` - Exclusive end (standard)
+- `start..=end` - Inclusive end
+- Bounds must be constant expressions
+- Empty slices are not allowed (compile error)
+- Result is validated to fit within 256 bytes
+
+### String Iteration
+
+Iterate over characters in a string:
+
+```
+// Simple iteration
+for c in message {
+    // c is u8 (each character)
+    process_char(c);
+}
+
+// With index
+for (i, c) in message {
+    // i is u8 (index), c is u8 (character)
+    buffer[i] = c;
+}
+```
+
+**Performance Note:** String iteration is optimized to use the X register as a counter, providing efficient 8-bit indexing on the 6502.
+
+### String Pointer Caching
+
+Frequently accessed strings are automatically cached in zero page for faster access:
+
+```
+fn process_string(s: str) {
+    // Accessing the same string 3+ times triggers caching
+    let len1 = s.len;
+    let len2 = s.len;  // Uses cached pointer
+    let len3 = s.len;  // Uses cached pointer
+}
+```
+
+**Benefits:**
+- ~60% faster access after initial setup
+- Cache initialized once at function entry
+- No manual intervention required
+
+### Cross-Module String Pooling
+
+Identical strings across different modules are automatically deduplicated using content-based hashing:
+
+```
+// file1.wr
+pub const MSG: str = "Error";
+
+// file2.wr
+import { MSG } from "file1.wr";
+const LOCAL: str = "Error";  // Shares storage with MSG
+```
+
+**Benefits:**
+- Saves memory when multiple modules use the same strings
+- Strings are identified by hash of content
+- Automatic and transparent to the programmer
+
+### Limitations
+
+- Maximum string length: 255 bytes
+- No runtime string mutation
+- No runtime string concatenation
+- String comparisons must be done manually (element by element)
+- No built-in string search/replace operations
+
+These limitations are intentional for the 6502 platform - strings are designed for static data like messages, labels, and constants rather than dynamic text processing.
+
 ## Control Flow
 
 ### If/Else

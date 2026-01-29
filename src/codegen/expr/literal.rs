@@ -230,7 +230,7 @@ pub(super) fn generate_variable(
     // Check if this is a cached string variable
     if matches!(
         emitter.current_function(),
-        Some(func_name) if info.function_metadata.get(func_name).map_or(false, |m| m.string_cache.contains_key(name))
+        Some(func_name) if info.function_metadata.get(func_name).is_some_and(|m| m.string_cache.contains_key(name))
     ) && matches!(
         info.resolved_symbols.get(&span).map(|s| &s.ty),
         Some(Type::String)

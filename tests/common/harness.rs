@@ -5,10 +5,10 @@
 
 use std::path::PathBuf;
 use wraith::ast::SourceFile;
-use wraith::codegen::{CommentVerbosity, generate};
+use wraith::codegen::{generate, CommentVerbosity};
 use wraith::lex;
 use wraith::parser::Parser;
-use wraith::sema::{ProgramInfo, analyze, analyze_with_path};
+use wraith::sema::{analyze, analyze_with_path, ProgramInfo};
 
 /// Result of compiling a Wraith program
 #[derive(Debug)]

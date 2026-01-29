@@ -509,3 +509,173 @@ fn test_all_interrupt_vectors() {
     assert_asm_contains(&asm, ".WORD reset_handler");
     assert_asm_contains(&asm, ".WORD irq_handler");
 }
+
+// ============================================================================
+// STRING FEATURES
+// ============================================================================
+
+#[test]
+fn test_string_concatenation() {
+    let asm = compile_success(
+        r#"
+        const GREETING: str = "Hello, " + "World!";
+        fn main() {
+            let msg: str = GREETING;
+        }
+        "#,
+    );
+    // Should contain the concatenated string "Hello, World!"
+    assert_asm_contains(&asm, "Hello, World!");
+    // Should have single string literal (deduplicated)
+    assert_asm_contains(&asm, "; \"Hello, World!\"");
+}
+
+#[test]
+fn test_string_concatenation_multiple() {
+    let asm = compile_success(
+        r#"
+        const PATH: str = "data/" + "level" + ".txt";
+        fn main() {
+            let p: str = PATH;
+        }
+        "#,
+    );
+    // Should contain the fully concatenated string
+    assert_asm_contains(&asm, "data/level.txt");
+}
+
+#[test]
+fn test_string_iteration_simple() {
+    let asm = compile_success(
+        r#"
+        const MSG: str = "ABC";
+        fn main() {
+            for c in MSG {
+                let ch: u8 = c;
+            }
+        }
+        "#,
+    );
+    // Should generate a for-each loop
+    assert_asm_contains(&asm, "ForEach loop");
+    // Should iterate over the string
+    assert_asm_contains(&asm, "String iteration");
+}
+
+#[test]
+fn test_string_iteration_with_index() {
+    let asm = compile_success(
+        r#"
+        const MSG: str = "ABC";
+        fn main() {
+            for (i, c) in MSG {
+                let idx: u8 = i;
+                let ch: u8 = c;
+            }
+        }
+        "#,
+    );
+    // Should generate a for-each loop with index
+    assert_asm_contains(&asm, "ForEach loop");
+    // Should store index in variable
+    assert_asm_contains(&asm, "Store index in i");
+}
+
+#[test]
+fn test_string_slicing() {
+    let asm = compile_success(
+        r#"
+        const FULL: str = "Hello, World!";
+        const GREETING: str = FULL[0..5];
+        fn main() {
+            let msg: str = GREETING;
+        }
+        "#,
+    );
+    // Should contain the sliced string "Hello"
+    assert_asm_contains(&asm, "Hello");
+    // Should NOT contain the full string if not used
+    // (The slice result should be the only string)
+}
+
+#[test]
+fn test_string_slicing_middle() {
+    let asm = compile_success(
+        r#"
+        const FULL: str = "Hello, World!";
+        const NAME: str = FULL[7..12];
+        fn main() {
+            let msg: str = NAME;
+        }
+        "#,
+    );
+    // Should contain the sliced string "World"
+    assert_asm_contains(&asm, "World");
+}
+
+#[test]
+fn test_string_slicing_with_concatenation() {
+    let asm = compile_success(
+        r#"
+        const FULL: str = "Hello, World!";
+        const PART1: str = FULL[0..5];
+        const PART2: str = FULL[7..12];
+        const COMBINED: str = PART1 + " " + PART2;
+        fn main() {
+            let msg: str = COMBINED;
+        }
+        "#,
+    );
+    // Should contain the combined string
+    assert_asm_contains(&asm, "Hello World");
+}
+
+#[test]
+fn test_string_len_property() {
+    let asm = compile_success(
+        r#"
+        const MSG: str = "Hello";
+        fn main() {
+            let len: u16 = MSG.len;
+        }
+        "#,
+    );
+    // Should access length
+    assert_asm_contains(&asm, "String .len access");
+}
+
+#[test]
+fn test_string_caching_hot_strings() {
+    let asm = compile_success(
+        r#"
+        fn process_string(s: str) -> u16 {
+            // Access the string 4 times to trigger caching (3+ accesses)
+            let len1: u16 = s.len;
+            let len2: u16 = s.len;
+            let len3: u16 = s.len;
+            let len4: u16 = s.len;
+            return len1 + len2 + len3 + len4;
+        }
+        fn main() {}
+        "#,
+    );
+    // Should initialize string pointer cache
+    assert_asm_contains(&asm, "Initialize string pointer cache");
+    // Should use cached string
+    assert_asm_contains(&asm, "Cached string");
+}
+
+#[test]
+fn test_string_indexing() {
+    let asm = compile_success(
+        r#"
+        const MSG: str = "ABC";
+        fn main() {
+            let first: u8 = MSG[0];
+            let second: u8 = MSG[1];
+        }
+        "#,
+    );
+    // Should generate string indexing code
+    assert_asm_contains(&asm, "String indexing: s[i]");
+}

@@ -1,0 +1,98 @@
+// String Iteration Example
+// Demonstrates iterating over strings with and without index
+
+// Output addresses
+const OUT_SUM: addr = 0x6000;      // Sum of all character values
+const OUT_COUNT: addr = 0x6002;    // Character count
+const OUT_FIRST: addr = 0x6004;    // First character found
+const OUT_LAST: addr = 0x6006;     // Last character position
+
+// Test strings
+const MESSAGE: str = "Hello";
+const NUMBERS: str = "12345";
+
+/// Calculate sum of all character values in a string
+fn sum_chars(s: str) -> u16 {
+    let sum: u16 = 0 as u16;
+    
+    // Simple iteration: for c in string
+    for c in s {
+        sum = sum + (c as u16);
+    }
+    
+    return sum;
+}
+
+/// Count occurrences of a character in a string
+fn count_char(s: str, target: u8) -> u8 {
+    let count: u8 = 0;
+    
+    // Simple iteration
+    for c in s {
+        if c == target {
+            count = count + 1;
+        }
+    }
+    
+    return count;
+}
+
+/// Find first occurrence of a character
+fn find_first(s: str, target: u8) -> u8 {
+    // Iteration with index: for (i, c) in string
+    for (i, c) in s {
+        if c == target {
+            return i;  // Return position where found
+        }
+    }
+    
+    return 0xFF;  // Not found
+}
+
+/// Copy string to buffer with position tracking
+fn copy_with_positions(source: str, dest: [u8; 32]) {
+    // Iteration with index - useful for copying to specific positions
+    for (i, c) in source {
+        dest[i] = c;
+    }
+}
+
+/// Find the last position of a specific character
+fn find_last(s: str, target: u8) -> u8 {
+    let last_pos: u8 = 0xFF;
+    
+    // Track last position during iteration
+    for (i, c) in s {
+        if c == target {
+            last_pos = i;  // Keep updating to get last occurrence
+        }
+    }
+    
+    return last_pos;
+}
+
+#[reset]
+fn main() {
+    // Example 1: Sum all characters (store low byte only)
+    // 'H'(72) + 'e'(101) + 'l'(108) + 'l'(108) + 'o'(111) = 500
+    let sum: u16 = sum_chars(MESSAGE);
+    OUT_SUM = sum as u8;
+    
+    // Example 2: Count 'l' in "Hello" - should be 2
+    let count: u8 = count_char(MESSAGE, 0x6C);  // 'l' = 0x6C
+    OUT_COUNT = count;
+    
+    // Example 3: Find first 'l' in "Hello" - should be 2
+    let first: u8 = find_first(MESSAGE, 0x6C);
+    OUT_FIRST = first;
+    
+    // Example 4: Find last 'l' in "Hello" - should be 3
+    let last: u8 = find_last(MESSAGE, 0x6C);
+    OUT_LAST = last;
+}
+
+// Expected results:
+// $6000-$6001: 500 (0x01F4) - sum of character values
+// $6002-$6003: 2 (0x0002) - count of 'l'
+// $6004-$6005: 2 (0x0002) - first position of 'l'
+// $6006-$6007: 3 (0x0003) - last position of 'l'

@@ -423,7 +423,7 @@ impl SemanticAnalyzer {
 
         // Allocate cache slots for hot strings (2 bytes each for pointer)
         let mut cache_map = HashMap::default();
-        for (var_name, count) in hot_strings {
+        for (var_name, _count) in hot_strings {
             // Allocate 2 bytes for the string pointer
             match self.zp_allocator.allocate_range(2) {
                 Ok(addr) => {
@@ -440,11 +440,10 @@ impl SemanticAnalyzer {
         }
 
         // Store cache info in function metadata
-        if !cache_map.is_empty() {
-            if let Some(metadata) = self.function_metadata.get_mut(func_name) {
+        if !cache_map.is_empty()
+            && let Some(metadata) = self.function_metadata.get_mut(func_name) {
                 metadata.string_cache = cache_map;
             }
-        }
 
         // Clear access counts for this function to free memory
         self.string_access_counts.remove(func_name);

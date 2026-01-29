@@ -1,0 +1,37 @@
+// String Concatenation Example
+// Demonstrates compile-time string concatenation
+
+// Output addresses for results
+const OUT0: addr = 0x6000;  // Will contain pointer to full greeting
+const OUT1: addr = 0x6002;  // Will contain pointer to path
+const OUT2: addr = 0x6004;  // Will contain pointer to error message
+
+// Compile-time string concatenation
+// These are evaluated entirely at compile time (zero runtime cost)
+const GREETING: str = "Hello, " + "World!";
+const PATH: str = "data/" + "level" + ".txt";
+const ERROR_PREFIX: str = "Error: ";
+const ERROR_MSG: str = ERROR_PREFIX + "file not found";
+
+#[reset]
+fn main() {
+    // Get the lengths of concatenated strings
+    let greeting_len: u16 = GREETING.len;  // 13
+    let path_len: u16 = PATH.len;          // 14
+    let error_len: u16 = ERROR_MSG.len;    // 20
+    
+    // Store the lengths (low byte only) to output addresses
+    // In a real program, you might pass these to a print function
+    OUT0 = greeting_len as u8;
+    OUT1 = path_len as u8;
+    OUT2 = error_len as u8;
+    
+    // Access individual characters
+    let first_char: u8 = GREETING[0];  // 'H' (0x48)
+    let space_pos: u8 = GREETING[6];   // ' ' (0x20)
+}
+
+// Expected results in memory:
+// $6000-$6001: 13 (0x000D) - length of "Hello, World!"
+// $6002-$6003: 14 (0x000E) - length of "data/level.txt"
+// $6004-$6005: 20 (0x0014) - length of "Error: file not found"

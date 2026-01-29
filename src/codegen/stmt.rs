@@ -787,8 +787,8 @@ pub fn generate_stmt(
             emitter.push_loop(loop_label.clone(), end_label.clone());
 
             // Store index in index variable if present
-            if let Some(idx_var) = index_var {
-                if let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span) {
+            if let Some(idx_var) = index_var
+                && let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span) {
                     match idx_sym.location {
                         crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                             emitter.emit_comment(&format!("Store index in {}", idx_var.node));
@@ -801,7 +801,6 @@ pub fn generate_stmt(
                         }
                     }
                 }
-            }
 
             // Load iterable[X] into A using indirect indexed: LDA (ptr),Y
             // Transfer X to Y for indexing

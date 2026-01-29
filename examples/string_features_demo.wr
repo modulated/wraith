@@ -1,0 +1,163 @@
+// String Features Demo
+// Comprehensive example demonstrating all string features
+
+// Output addresses for various results
+const OUT_STATUS: addr = 0x6000;
+const OUT_SUM: addr = 0x6002;
+const OUT_COUNT: addr = 0x6004;
+const OUT_FOUND: addr = 0x6006;
+
+// String constants with concatenation
+const APP_NAME: str = "Wraith" + " " + "6502";
+const VERSION: str = "v" + "1.0";
+const FULL_TITLE: str = APP_NAME + " " + VERSION;
+
+// Message templates with slicing
+const TEMPLATE: str = "Error: file.txt not found";
+const ERROR_TYPE: str = TEMPLATE[0..5];      // "Error"
+const FILE_NAME: str = TEMPLATE[7..15];      // "file.txt"
+
+/// Calculate checksum by summing all characters
+fn checksum(s: str) -> u16 {
+    let sum: u16 = 0 as u16;
+    
+    // String iteration
+    for c in s {
+        sum = sum + (c as u16);
+    }
+    
+    return sum;
+}
+
+/// Count printable characters
+fn count_printable(s: str) -> u8 {
+    let count: u8 = 0;
+    
+    // Iteration with index
+    for (i, c) in s {
+        // Count non-space printable characters
+        if c >= 0x21 && c <= 0x7E {
+            count = count + 1;
+        }
+    }
+    
+    return count;
+}
+
+/// Search for a substring pattern (naive implementation)
+fn find_substring(haystack: str, needle: str) -> u8 {
+    let h_len: u16 = haystack.len;
+    let n_len: u16 = needle.len;
+    
+    // Edge cases
+    if n_len == (0 as u16) {
+        return 0;  // Empty needle found at start
+    }
+    if n_len > h_len {
+        return 0xFF;  // Needle longer than haystack
+    }
+    
+    // Search through haystack
+    let max_pos: u16 = h_len - n_len;
+    let pos: u16 = 0;
+    
+    while pos <= max_pos {
+        // Check if substring matches at this position
+        let match_pos: u8 = 0;
+        let is_match: bool = true;
+        
+        while (match_pos as u16) < n_len {
+            let h_idx: u16 = pos + (match_pos as u16);
+            if haystack[h_idx as u8] != needle[match_pos] {
+                is_match = false;
+                break;
+            }
+            match_pos = match_pos + 1;
+        }
+        
+        if is_match {
+            return pos as u8;
+        }
+        
+        pos = pos + (1 as u16);
+    }
+    
+    return 0xFF;  // Not found
+}
+
+/// Copy string with transformation (uppercase conversion)
+fn to_uppercase(source: str, dest: [u8; 32]) -> u8 {
+    let i: u8 = 0;
+    let len: u8 = source.len as u8;
+    
+    while i < len {
+        let c: u8 = source[i];
+        // Convert lowercase to uppercase
+        if c >= 0x61 && c <= 0x7A {  // 'a' to 'z'
+            c = c - 0x20;  // Convert to uppercase
+        }
+        dest[i] = c;
+        i = i + 1;
+    }
+    
+    return len;
+}
+
+/// String comparison (equality check)
+fn strings_equal(a: str, b: str) -> bool {
+    // Check length first
+    if a.len != b.len {
+        return false;
+    }
+    
+    // Compare each character
+    let i: u8 = 0;
+    let len: u8 = a.len as u8;
+    
+    while i < len {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    
+    return true;
+}
+
+#[reset]
+fn main() {
+    // Test 1: Concatenation
+    let title: str = FULL_TITLE;  // "Wraith 6502 v1.0"
+    
+    // Test 2: Slicing
+    let app: str = ERROR_TYPE;  // "Error"
+    let file: str = FILE_NAME;  // "file.txt"
+    
+    // Test 3: Calculate checksum
+    let sum: u16 = checksum(title);
+    OUT_SUM = sum as u8;
+    
+    // Test 4: Count printable characters
+    let count: u8 = count_printable(title);
+    OUT_COUNT = count;
+    
+    // Test 5: String comparison
+    let is_same: bool = strings_equal("Test", "Test");
+    
+    // Test 6: Find substring
+    let pos: u8 = find_substring("Hello World", "World");
+    OUT_FOUND = pos;
+    
+    // Test 7: Access individual characters
+    let first: u8 = title[0];  // 'W'
+    let len: u16 = title.len;  // Length of full title
+    
+    OUT_STATUS = 0x01;  // Success
+}
+
+// This demo shows:
+// 1. String concatenation at compile time
+// 2. String slicing at compile time
+// 3. String iteration (simple and with index)
+// 4. String indexing
+// 5. Building higher-level operations from primitives
