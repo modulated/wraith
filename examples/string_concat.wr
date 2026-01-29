@@ -34,4 +34,4 @@ fn main() {
 // Expected results in memory:
 // $6000-$6001: 13 (0x000D) - length of "Hello, World!"
 // $6002-$6003: 14 (0x000E) - length of "data/level.txt"
-// $6004-$6005: 20 (0x0014) - length of "Error: file not found"
+// $6004-$6005: 21 (0x0015) - length of "Error: file not found"

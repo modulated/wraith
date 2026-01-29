@@ -553,22 +553,27 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::While { condition, body } => {
-            let start_label = emitter.next_label("wh");
+            let body_label = emitter.next_label("wb");
+            let check_label = emitter.next_label("wc");
             let end_label = emitter.next_label("we");
 
-            emitter.emit_label(&start_label);
+            // For potentially large loops, use a structure that avoids
+            // forward branches that might exceed 127 bytes:
+            //   JMP check
+            // body:
+            //   ...body...
+            //   JMP check
+            // check:
+            //   ...condition...
+            //   BNE body  (backward branch, always short)
+            // end:
+            
+            emitter.emit_inst("JMP", &check_label);
 
-            // Condition
-            generate_expr(condition, emitter, info, string_collector)?;
-
-            if !emitter.is_minimal() {
-                emitter.emit_comment("Exit loop if condition is false (A == 0)");
-            }
-            emitter.emit_inst("CMP", "#$00");
-            emitter.emit_inst("BEQ", &end_label);
+            emitter.emit_label(&body_label);
 
             // Push loop context for break/continue
-            emitter.push_loop(start_label.clone(), end_label.clone());
+            emitter.push_loop(check_label.clone(), end_label.clone());
 
             // Body
             generate_stmt(body, emitter, info, string_collector)?;
@@ -576,7 +581,20 @@ pub fn generate_stmt(
             // Pop loop context
             emitter.pop_loop();
 
-            emitter.emit_inst("JMP", &start_label);
+            // Jump back to condition check
+            emitter.emit_inst("JMP", &check_label);
+
+            // Condition check
+            emitter.emit_label(&check_label);
+            generate_expr(condition, emitter, info, string_collector)?;
+
+            if !emitter.is_minimal() {
+                emitter.emit_comment("Continue loop if condition is true (A != 0)");
+            }
+            emitter.emit_inst("CMP", "#$00");
+            // Use BNE to branch backward to body - this is always within range
+            // since the body starts immediately after the initial JMP
+            emitter.emit_inst("BNE", &body_label);
 
             emitter.emit_label(&end_label);
             // Invalidate register state after loop end

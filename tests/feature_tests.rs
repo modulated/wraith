@@ -224,7 +224,8 @@ fn test_while_loop() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "wh_");
+    assert_asm_contains(&asm, "wb_"); // While body label
+    assert_asm_contains(&asm, "wc_"); // While check label
     assert_asm_contains(&asm, "JMP");
 }
 

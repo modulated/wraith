@@ -196,8 +196,8 @@ fn test_codegen_control_flow() {
         asm.contains("BEQ") || asm.contains("BNE"),
         "Should have branch instruction"
     );
-    // Check for while loop labels
-    assert!(asm.contains("wh_"), "While loop should have wh_ label");
+    // Check for while loop labels (wb_ = while body, wc_ = while check)
+    assert!(asm.contains("wb_"), "While loop should have wb_ label");
 }
 
 #[test]
