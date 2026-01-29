@@ -402,7 +402,7 @@ impl SemanticAnalyzer {
     }
 
     /// Allocate zero-page cache slots for frequently accessed strings
-    /// Strings accessed 3+ times are considered "hot" and get cached
+    /// Only parameters are cached since locals are initialized in the body
     fn allocate_string_cache(&mut self, func_name: &str) {
         // Get access counts for this function
         let access_counts = match self.string_access_counts.get(func_name) {
@@ -410,18 +410,25 @@ impl SemanticAnalyzer {
             None => return, // No strings accessed in this function
         };
 
-        // Find hot strings (accessed 3+ times)
+        // Get parameter names from metadata
+        let param_names = self.function_metadata
+            .get(func_name)
+            .map(|m| m.param_names.clone())
+            .unwrap_or_default();
+
+        // Find hot strings (accessed 3+ times) that are PARAMETERS
+        // Only cache parameters, not local variables (locals aren't initialized yet)
         let hot_strings: Vec<(String, usize)> = access_counts
             .iter()
-            .filter(|(_, count)| **count >= 3)
+            .filter(|(name, count)| **count >= 3 && param_names.contains(*name))
             .map(|(name, count)| (name.clone(), *count))
             .collect();
 
         if hot_strings.is_empty() {
-            return; // No hot strings to cache
+            return; // No hot parameter strings to cache
         }
 
-        // Allocate cache slots for hot strings (2 bytes each for pointer)
+        // Allocate cache slots for hot parameter strings (2 bytes each for pointer)
         let mut cache_map = HashMap::default();
         for (var_name, _count) in hot_strings {
             // Allocate 2 bytes for the string pointer

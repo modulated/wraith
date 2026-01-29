@@ -135,6 +135,16 @@ impl SemanticAnalyzer {
             });
         }
 
+        // Track string parameter names for cache eligibility
+        let mut param_names: HashSet<String> = HashSet::default();
+        for param in &func.params {
+            if let Ok(ty) = self.resolve_type(&param.ty.node) {
+                if matches!(ty, Type::String) {
+                    param_names.insert(param.name.node.clone());
+                }
+            }
+        }
+
         self.function_metadata.insert(
             name.clone(),
             FunctionMetadata {
@@ -148,6 +158,7 @@ impl SemanticAnalyzer {
                 param_bytes_used,
                 struct_param_locals: HashMap::default(), // Will be populated during second pass
                 string_cache: HashMap::default(), // Will be populated after function analysis
+                param_names,
             },
         );
 

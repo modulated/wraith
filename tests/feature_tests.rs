@@ -645,27 +645,26 @@ fn test_string_len_property() {
     assert_asm_contains(&asm, "String .len access");
 }
 
-// DISABLED: String caching temporarily disabled due to initialization order issues
-// #[test]
-// fn test_string_caching_hot_strings() {
-//     let asm = compile_success(
-//         r#"
-//         fn process_string(s: str) -> u16 {
-//             // Access the string 4 times to trigger caching (3+ accesses)
-//             let len1: u16 = s.len;
-//             let len2: u16 = s.len;
-//             let len3: u16 = s.len;
-//             let len4: u16 = s.len;
-//             return len1 + len2 + len3 + len4;
-//         }
-//         fn main() {}
-//         "#,
-//     );
-//     // Should initialize string pointer cache
-//     assert_asm_contains(&asm, "Initialize string pointer cache");
-//     // Should use cached string
-//     assert_asm_contains(&asm, "Cached string");
-// }
+#[test]
+fn test_string_caching_hot_strings() {
+    let asm = compile_success(
+        r#"
+        fn process_string(s: str) -> u16 {
+            // Access the string 4 times to trigger caching (3+ accesses)
+            let len1: u16 = s.len;
+            let len2: u16 = s.len;
+            let len3: u16 = s.len;
+            let len4: u16 = s.len;
+            return len1 + len2 + len3 + len4;
+        }
+        fn main() {}
+        "#,
+    );
+    // Should initialize string pointer cache
+    assert_asm_contains(&asm, "Initialize string pointer cache");
+    // Should use cached string
+    assert_asm_contains(&asm, "Cached string");
+}
 
 #[test]
 fn test_string_indexing() {

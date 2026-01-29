@@ -672,6 +672,9 @@ pub struct FunctionMetadata {
     /// String pointer cache: maps variable name to zero-page address (2 bytes)
     /// Hot strings (accessed 3+ times) get cached for faster access
     pub string_cache: HashMap<String, u8>,
+    /// Names of string parameters (for cache eligibility)
+    /// Only parameters are cached since locals are initialized in the body
+    pub param_names: HashSet<String>,
 }
 
 /// Tail call information for a function
