@@ -1,0 +1,13 @@
+// Simple test for string operations
+const OUT: addr = 0x6000;
+
+fn test_len(s: str) -> u16 {
+    return s.len;
+}
+
+#[reset]
+fn main() {
+    let msg: str = "ABC";
+    let len: u16 = test_len(msg);
+    OUT = len as u8;  // Should be 3
+}

@@ -223,14 +223,15 @@ pub fn generate_stmt(
                 let is_multibyte = matches!(
                     sym.ty,
                     Type::Array(_, _)
+                        | Type::String
                         | Type::Primitive(crate::ast::PrimitiveType::U16)
                         | Type::Primitive(crate::ast::PrimitiveType::I16)
                         | Type::Primitive(crate::ast::PrimitiveType::B16)
                 ) || is_enum;
 
-                // Arrays and enums store address in A (low) and X (high)
+                // Arrays, enums, and strings store address in A (low) and X (high)
                 // Other u16 types store in A (low) and Y (high)
-                let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
+                let is_array_or_enum = matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
