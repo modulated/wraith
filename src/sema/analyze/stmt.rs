@@ -160,6 +160,11 @@ impl SemanticAnalyzer {
                 // Variables are referenced as {var_name} or {struct.field}
                 for line in lines {
                     self.extract_asm_variables(&line.instruction);
+                    // Also record hand-written JSR/JMP calls to wraith functions as
+                    // call-graph edges, so finalize_frames colors the target's frame
+                    // above this function's frame (a function reachable only via
+                    // inline asm would otherwise overlap its caller).
+                    self.record_asm_call_edges(&line.instruction);
                 }
             }
         }
