@@ -469,6 +469,15 @@ impl SemanticAnalyzer {
         // Track function call for unused function detection
         self.called_functions.insert(function.node.clone());
 
+        // Record a call-graph edge (caller -> callee) for frame coloring and
+        // recursion detection. Covers direct and inline calls alike.
+        if let Some(caller) = &self.current_function {
+            self.call_edges
+                .entry(caller.clone())
+                .or_default()
+                .insert(function.node.clone());
+        }
+
         // Verify function signature: check that it's a function and get param/return types
         let (param_types, ret_type) = if let Some(info) = self.table.lookup(&function.node) {
             if let Type::Function(param_types, ret_type) = &info.ty {

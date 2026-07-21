@@ -682,9 +682,22 @@ pub fn generate_stmt(
                         if count == 1 { "" } else { "s" }
                     ));
 
-                    // Use first variable slot for loop variable (same as normal loops)
-                    // This matches the allocation strategy in semantic analysis
-                    let loop_var_addr = emitter.memory_layout.variable_alloc_start;
+                    // Resolve the loop variable's actual frame slot (registered at
+                    // its declaration span during analysis) rather than assuming the
+                    // first variable address.
+                    let loop_var_addr = match info
+                        .resolved_symbols
+                        .get(&var_name.span)
+                        .map(|s| &s.location)
+                    {
+                        Some(crate::sema::table::SymbolLocation::ZeroPage(addr)) => *addr,
+                        _ => {
+                            return Err(CodegenError::Internal(format!(
+                                "unrolled loop variable '{}' has no zero-page frame slot",
+                                var_name.node
+                            )));
+                        }
+                    };
 
                     // Create end label for break statements
                     let end_label = emitter.next_label("ux");
@@ -1220,6 +1233,7 @@ fn generate_field_assignment(
             .ok_or_else(|| CodegenError::SymbolNotFound(var_name.clone()))?;
 
         // Get the base address of the struct
+        let sym_is_param = sym.is_param;
         let base_addr = match sym.location {
             SymbolLocation::ZeroPage(addr) => addr as u16,
             SymbolLocation::Absolute(addr) => addr,
@@ -1267,11 +1281,8 @@ fn generate_field_assignment(
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
 
-        // Check if this is a parameter (pass-by-reference)
-        // Parameters are in the param region ($80-$BF)
-        let param_base = emitter.memory_layout.param_base;
-        let param_end = emitter.memory_layout.param_end;
-        let is_parameter = base_addr >= param_base as u16 && base_addr <= param_end as u16;
+        // Check if this is a parameter (pass-by-reference) via the explicit flag.
+        let is_parameter = sym_is_param;
 
         // Generate value expression (result in A, or A/Y for u16)
         generate_expr(value, emitter, info, string_collector)?;

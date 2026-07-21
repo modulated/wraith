@@ -93,6 +93,10 @@ pub enum SemaError {
     /// Out of zero page memory
     OutOfZeroPage { span: Span },
 
+    /// The colored per-function frames do not fit in the zero-page frame region.
+    /// `chain` describes the deepest call chain and its cumulative frame usage.
+    FrameRegionOverflow { chain: String, needed: usize },
+
     /// Identifier conflicts with 6502 instruction mnemonic
     InstructionConflict { name: String, span: Span },
 
@@ -273,6 +277,14 @@ impl SemaError {
                 format!(
                     "error: out of zero page memory\n{}",
                     span.format_error_context(source, filename, &msg)
+                )
+            }
+            SemaError::FrameRegionOverflow { chain, needed } => {
+                format!(
+                    "error: zero-page frame region overflow\n  \
+                     the deepest call chain needs {} bytes but only the frame region \
+                     ($40-$CF, 144 bytes) is available:\n  {}",
+                    needed, chain
                 )
             }
             SemaError::InstructionConflict { name, span } => {
@@ -480,6 +492,13 @@ impl std::fmt::Display for SemaError {
                     span.start, span.end
                 )
             }
+            SemaError::FrameRegionOverflow { chain, needed } => {
+                write!(
+                    f,
+                    "zero-page frame region overflow: deepest call chain needs {} bytes (max 144): {}",
+                    needed, chain
+                )
+            }
             SemaError::InstructionConflict { name, span } => {
                 write!(
                     f,
@@ -684,6 +703,36 @@ pub struct TailCallInfo {
     pub tail_recursive_returns: HashSet<Span>,
 }
 
+/// A function's zero-page frame, assigned by `finalize_frames`.
+///
+/// Frames are colored by the call graph so that functions which cannot be
+/// simultaneously active share addresses. A function reads its parameters and
+/// locals at `base + offset`; a caller writes a callee's arguments starting at
+/// the callee's `base`.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameInfo {
+    /// Absolute zero-page base address of the frame.
+    pub base: u8,
+    /// Total frame size in bytes (parameters + locals + temp slots).
+    pub size: u8,
+    /// Size in bytes of the contiguous parameter block at the bottom of the frame.
+    pub param_size: u8,
+}
+
+/// Zero-page state an interrupt handler must save/restore so it cannot corrupt
+/// interrupted main-thread code. Computed by `finalize_frames` per handler.
+#[derive(Debug, Clone, Default)]
+pub struct InterruptSaveInfo {
+    /// Save the shared codegen scratch ($20-$3F, $F0-$FE) around the handler body.
+    pub save_scratch: bool,
+    /// Save the mul16/div16 working storage ($D0-$DC) — set if the handler graph
+    /// performs 16-bit multiply/divide/modulo.
+    pub save_math: bool,
+    /// (base, size) of frames belonging to functions shared between this handler
+    /// and main-thread code, which must be preserved across the handler.
+    pub shared_frames: Vec<(u8, u8)>,
+}
+
 pub struct ProgramInfo {
     // Placeholder for analyzed program data
     pub table: table::SymbolTable,
@@ -708,6 +757,14 @@ pub struct ProgramInfo {
     /// Global string pool for cross-module string deduplication
     /// Maps string content to a unique label (e.g., "Hello" -> "str_0")
     pub string_pool: HashMap<String, String>,
+    /// Per-function zero-page frame assignment (base + size), colored by the
+    /// call graph. Populated by `finalize_frames`.
+    pub function_frames: HashMap<String, FrameInfo>,
+    /// Call-graph edges (caller, callee) that lie within a recursion cycle.
+    /// A call across such an edge must save/restore the callee's frame.
+    pub recursive_call_edges: HashSet<(String, String)>,
+    /// Per-interrupt-handler zero-page save requirements.
+    pub interrupt_save_info: HashMap<String, InterruptSaveInfo>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

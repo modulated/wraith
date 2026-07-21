@@ -154,16 +154,12 @@ pub(super) fn generate_binary(
     if use_stack {
         // Complex left expression: must save to memory for u16, or can use Y for u8
         // For u16: BOTH bytes must be saved since right expr may overwrite A and Y
-
-        // CRITICAL: If left is a function call, it may corrupt the parameter area.
-        // We need to save parameters so the right operand can still evaluate correctly.
-        // Use software stack to handle nested recursive calls properly.
-        let needs_param_save = matches!(left.node, Expr::Call { .. });
-
-        if needs_param_save {
-            // Push parameters to software stack (handles recursion correctly)
-            emitter.push_params();
-        }
+        //
+        // Note: with static frame allocation, a callee never clobbers the caller's
+        // frame (params/locals), so the old param push/pop around a left-operand
+        // call is unnecessary. Recursive calls save/restore their own frame in
+        // generate_call. (The remaining left-in-Y/$F0 save is hardened against a
+        // right-operand call by the frame-temp save below.)
 
         // 1. Generate left operand -> A (and Y if u16)
         generate_expr(left, emitter, info, string_collector)?;
@@ -177,12 +173,6 @@ pub(super) fn generate_binary(
             // 2b. For u8: Save A to Y register (faster)
             emitter.emit_inst("TAY", "");
             emitter.reg_state.transfer_a_to_y();
-        }
-
-        // Restore parameters before evaluating right operand
-        if needs_param_save {
-            // Pop parameters from software stack
-            emitter.pop_params();
         }
 
         // 3. Generate right operand -> A (and Y if u16)
@@ -570,17 +560,17 @@ fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Mark that we need mul16 function
     emitter.needs_mul16 = true;
 
-    // mul16 expects parameters at $80-$83
-    // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80"); // Store low byte
-    emitter.emit_inst("STY", "$81"); // Store high byte
+    // mul16 expects parameters at $D9-$DC
+    // Store left operand (A:Y) to $D9-$DA
+    emitter.emit_inst("STA", "$D9"); // Store low byte
+    emitter.emit_inst("STY", "$DA"); // Store high byte
 
-    // Store right operand (TEMP:TEMP+1) to $82-$83
+    // Store right operand (TEMP:TEMP+1) to $DB-$DC
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
-    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("STA", "$DB");
     emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
-    emitter.emit_inst("STA", "$83");
+    emitter.emit_inst("STA", "$DC");
 
     // Call mul16
     emitter.emit_inst("JSR", "mul16");
@@ -655,17 +645,17 @@ fn generate_divide_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Mark that we need div16 function
     emitter.needs_div16 = true;
 
-    // div16 expects parameters at $80-$83
-    // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80"); // Store low byte
-    emitter.emit_inst("STY", "$81"); // Store high byte
+    // div16 expects parameters at $D9-$DC
+    // Store left operand (A:Y) to $D9-$DA
+    emitter.emit_inst("STA", "$D9"); // Store low byte
+    emitter.emit_inst("STY", "$DA"); // Store high byte
 
-    // Store right operand (TEMP:TEMP+1) to $82-$83
+    // Store right operand (TEMP:TEMP+1) to $DB-$DC
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
-    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("STA", "$DB");
     emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
-    emitter.emit_inst("STA", "$83");
+    emitter.emit_inst("STA", "$DC");
 
     // Call div16
     emitter.emit_inst("JSR", "div16");
@@ -732,17 +722,17 @@ fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Mark that we need mod16 function
     emitter.needs_mod16 = true;
 
-    // mod16 expects parameters at $80-$83
-    // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80"); // Store low byte
-    emitter.emit_inst("STY", "$81"); // Store high byte
+    // mod16 expects parameters at $D9-$DC
+    // Store left operand (A:Y) to $D9-$DA
+    emitter.emit_inst("STA", "$D9"); // Store low byte
+    emitter.emit_inst("STY", "$DA"); // Store high byte
 
-    // Store right operand (TEMP:TEMP+1) to $82-$83
+    // Store right operand (TEMP:TEMP+1) to $DB-$DC
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
-    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("STA", "$DB");
     emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
-    emitter.emit_inst("STA", "$83");
+    emitter.emit_inst("STA", "$DC");
 
     // Call mod16
     emitter.emit_inst("JSR", "mod16");

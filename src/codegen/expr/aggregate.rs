@@ -328,6 +328,11 @@ pub(super) fn generate_field_access(
                     )));
                 }
             };
+            // Parameters are pass-by-reference (the slot holds a pointer); locals
+            // hold the struct inline. Distinguish via the explicit is_param flag
+            // (frames put params and locals in the same region, so an address
+            // range test no longer works).
+            let sym_is_param = sym.is_param;
 
             emitter.emit_comment(&format!("Field access: {}.{}", var_name, field.node));
 
@@ -358,10 +363,7 @@ pub(super) fn generate_field_access(
             })?;
 
             // Check if this is a parameter (pass-by-reference)
-            // Parameters are in the param region ($80-$BF)
-            let param_base = emitter.memory_layout.param_base;
-            let param_end = emitter.memory_layout.param_end;
-            let is_parameter = base_addr >= param_base as u16 && base_addr <= param_end as u16;
+            let is_parameter = sym_is_param;
 
             if is_parameter {
                 // Check if this struct param has a local pointer copy

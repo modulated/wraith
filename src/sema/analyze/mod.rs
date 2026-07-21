@@ -3,6 +3,7 @@
 //! Traverses the AST to populate the symbol table and perform type checking.
 
 mod expr;
+mod frames;
 mod register;
 mod stmt;
 mod tail_call;
@@ -72,6 +73,16 @@ pub struct SemanticAnalyzer {
     pub(super) string_access_counts: HashMap<String, HashMap<String, usize>>,
     /// Track which strings have been cached already (to avoid double-counting)
     pub(super) cached_strings: HashSet<String>,
+    /// Bump cursor for the current function's frame (offset from frame base).
+    /// Reset to 0 at the start of each function; params then locals allocate upward.
+    pub(super) frame_cursor: u8,
+    /// Per-function frame size in bytes (params + locals), the high-water mark of
+    /// `frame_cursor` after analyzing each function. Consumed by `finalize_frames`.
+    pub(super) frame_sizes: HashMap<String, u8>,
+    /// Call graph edges: caller name -> set of callee names. Built during body
+    /// analysis (direct calls and inline calls) and consumed by `finalize_frames`
+    /// to color frames and detect recursion.
+    pub(super) call_edges: HashMap<String, HashSet<String>>,
 }
 
 impl Default for SemanticAnalyzer {
@@ -114,6 +125,9 @@ impl SemanticAnalyzer {
             current_function: None,
             string_access_counts: HashMap::default(),
             cached_strings: HashSet::default(),
+            frame_cursor: 0,
+            frame_sizes: HashMap::default(),
+            call_edges: HashMap::default(),
         }
     }
 
@@ -150,6 +164,9 @@ impl SemanticAnalyzer {
             current_function: None,
             string_access_counts: HashMap::default(),
             cached_strings: HashSet::default(),
+            frame_cursor: 0,
+            frame_sizes: HashMap::default(),
+            call_edges: HashMap::default(),
         }
     }
 
@@ -185,7 +202,18 @@ impl SemanticAnalyzer {
         }
     }
 
-    pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
+    /// Analyze a module without finalizing frames.
+    ///
+    /// This runs registration, body analysis, unused checks, and tail-call
+    /// analysis, leaving every parameter/local at a `FrameOffset` and the call
+    /// graph in `call_edges`. Frame finalization is deferred to the root
+    /// analyzer so that imported functions are colored together with the main
+    /// module (a child module must NOT assign its own frame bases). Returns the
+    /// tail-call info for the module.
+    pub(super) fn analyze_module(
+        &mut self,
+        source: &SourceFile,
+    ) -> Result<HashMap<String, crate::sema::TailCallInfo>, SemaError> {
         // First pass: Register all global items (functions, statics, structs)
         for item in &source.items {
             self.register_item(item)?;
@@ -205,7 +233,18 @@ impl SemanticAnalyzer {
         self.check_unused_functions();
 
         // Analyze tail calls after all other analysis is complete
-        let tail_call_info = self.analyze_tail_calls(source);
+        Ok(self.analyze_tail_calls(source))
+    }
+
+    pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
+        let tail_call_info = self.analyze_module(source)?;
+
+        // Finalize frames once, over the merged program (main module plus every
+        // imported module whose call graph and frame sizes were merged in during
+        // import processing). This assigns concrete zero-page frame bases and
+        // rewrites all FrameOffset locations to ZeroPage.
+        let (function_frames, recursive_call_edges) = self.finalize_frames()?;
+        let interrupt_save_info = HashMap::default();
 
         Ok(ProgramInfo {
             table: self.table.clone(),
@@ -220,7 +259,19 @@ impl SemanticAnalyzer {
             tail_call_info,
             resolved_struct_names: self.resolved_struct_names.clone(),
             string_pool: HashMap::default(), // Will be populated during codegen
+            function_frames,
+            recursive_call_edges,
+            interrupt_save_info,
         })
+    }
+
+    /// Allocate `size` bytes in the current function's frame, returning the offset
+    /// from the (not-yet-known) frame base. `finalize_frames` later assigns each
+    /// function a base and rewrites these offsets into concrete zero-page addresses.
+    pub(super) fn frame_alloc(&mut self, size: u8) -> u8 {
+        let offset = self.frame_cursor;
+        self.frame_cursor = self.frame_cursor.saturating_add(size);
+        offset
     }
 
     fn analyze_item(&mut self, item: &Spanned<Item>) -> Result<(), SemaError> {
@@ -229,6 +280,10 @@ impl SemanticAnalyzer {
 
             // Track current function for inline asm variable scoping
             self.current_function = Some(func_name.clone());
+
+            // Each function gets a fresh frame; params then locals allocate upward
+            // from offset 0. finalize_frames assigns the concrete base later.
+            self.frame_cursor = 0;
 
             // Check if this is an inline function
             let is_inline = func
@@ -263,12 +318,12 @@ impl SemanticAnalyzer {
                 None
             };
 
-            // Register parameters
-            // Parameters are passed via the param region ($80+), not regular variable space
-            // Each parameter gets sequential bytes (16-bit params take 2 bytes)
-            let layout = MemoryLayout::new();
-            let mut byte_offset = 0u8;
-            let mut struct_param_locals: HashMap<String, u8> = HashMap::default();
+            // Register parameters. Parameters occupy the bottom of the function's
+            // frame as a contiguous block (offsets 0..param_bytes); locals follow.
+            // finalize_frames assigns the concrete frame base. The contiguity is
+            // relied upon by call.rs, which computes each argument's destination by
+            // summing parameter sizes in order.
+            let mut struct_param_names: Vec<String> = Vec::new();
 
             for param in func.params.iter() {
                 let name = param.name.node.clone();
@@ -282,15 +337,6 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // Allocate parameter in the param region ($80 + byte_offset)
-                let addr = layout.param_base + byte_offset;
-                if addr > layout.param_end {
-                    return Err(SemaError::OutOfZeroPage {
-                        span: param.name.span,
-                    });
-                }
-
-                let location = SymbolLocation::ZeroPage(addr);
                 let param_type = self.resolve_type(&param.ty.node)?;
 
                 // Check for invalid addr usage in function parameters
@@ -333,11 +379,12 @@ impl SemanticAnalyzer {
                     param_type.size()
                 };
 
-                // For struct parameters, allocate local storage to copy the pointer
-                // This prevents nested calls from clobbering the struct pointer in param space
+                // Parameter occupies a contiguous slot at the current frame offset.
+                let offset = self.frame_alloc(param_size as u8);
+                let location = SymbolLocation::FrameOffset(offset);
+
                 if is_struct_param {
-                    let local_addr = self.zp_allocator.allocate_range(2)?;
-                    struct_param_locals.insert(name.clone(), local_addr);
+                    struct_param_names.push(name.clone());
                 }
 
                 let info = SymbolInfo {
@@ -357,16 +404,27 @@ impl SemanticAnalyzer {
 
                 // Track parameter for unused parameter detection
                 self.declared_parameters.push((name, param.name.span));
-
-                // Advance byte offset by parameter size (16-bit params take 2 bytes)
-                byte_offset += param_size as u8;
             }
 
-            // Store struct param locals mapping in function metadata
-            if !struct_param_locals.is_empty()
-                && let Some(metadata) = self.function_metadata.get_mut(&func_name)
-            {
-                metadata.struct_param_locals = struct_param_locals;
+            // Record the contiguous parameter block size (used by recursion save/restore
+            // and by call.rs for argument placement).
+            let param_bytes = self.frame_cursor;
+            if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+                metadata.param_bytes_used = param_bytes;
+            }
+
+            // For struct parameters, allocate a frame-local slot (after the parameter
+            // block) to hold a private copy of the pointer. finalize_frames rebases
+            // these offsets to concrete addresses.
+            if !struct_param_names.is_empty() {
+                let mut struct_param_locals: HashMap<String, u8> = HashMap::default();
+                for name in &struct_param_names {
+                    let local_off = self.frame_alloc(2);
+                    struct_param_locals.insert(name.clone(), local_off);
+                }
+                if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
+                    metadata.struct_param_locals = struct_param_locals;
+                }
             }
 
             // Analyze body
@@ -374,6 +432,11 @@ impl SemanticAnalyzer {
 
             // After analyzing function body, allocate string cache slots for hot strings
             self.allocate_string_cache(&func_name);
+
+            // Record this function's frame size (params + locals + any temp slots).
+            // finalize_frames uses these to color frames across the call graph.
+            self.frame_sizes
+                .insert(func_name.clone(), self.frame_cursor);
 
             // For inline functions, capture all symbols that were added during body analysis
             // This includes both parameter definitions and all references to them
@@ -430,21 +493,14 @@ impl SemanticAnalyzer {
         }
 
         // Allocate cache slots for hot parameter strings (2 bytes each for pointer)
+        // as frame offsets, following the parameter/local block. finalize_frames
+        // rebases these to concrete zero-page addresses.
         let mut cache_map = HashMap::default();
         for (var_name, _count) in hot_strings {
-            // Allocate 2 bytes for the string pointer
-            match self.zp_allocator.allocate_range(2) {
-                Ok(addr) => {
-                    cache_map.insert(var_name.clone(), addr);
-                    // Mark this string as cached so we don't count it again
-                    self.cached_strings.insert(var_name);
-                }
-                Err(_) => {
-                    // Out of zero page space - can't cache this string
-                    // This is not a fatal error, just skip caching
-                    break;
-                }
-            }
+            let off = self.frame_alloc(2);
+            cache_map.insert(var_name.clone(), off);
+            // Mark this string as cached so we don't count it again
+            self.cached_strings.insert(var_name);
         }
 
         // Store cache info in function metadata

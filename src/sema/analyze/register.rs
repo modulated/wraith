@@ -396,10 +396,15 @@ impl SemanticAnalyzer {
             span: import.path.span,
         })?;
 
-        // Analyze the imported file
+        // Analyze the imported file WITHOUT finalizing frames: frame bases must
+        // be assigned once, by the root analyzer, over the merged program. The
+        // child leaves its symbols at FrameOffset and exposes its call graph and
+        // frame sizes, which we merge below so the root's finalize_frames colors
+        // imported functions together with this module (fixing the historical
+        // collision where a child allocator also started at $40).
         let mut imported_analyzer = SemanticAnalyzer::with_base_path(import_path.clone());
         imported_analyzer.imported_files = self.imported_files.clone();
-        let imported_info = imported_analyzer.analyze(&ast)?;
+        imported_analyzer.analyze_module(&ast)?;
 
         // Collect all items from the imported file for codegen
         // We collect ALL items, not just the imported symbols, because functions
@@ -408,12 +413,12 @@ impl SemanticAnalyzer {
 
         // Also collect items from transitively imported modules
         self.imported_items
-            .extend(imported_info.imported_items.clone());
+            .extend(imported_analyzer.imported_items.clone());
 
         // Import the requested symbols into our table
         for symbol_name in &import.symbols {
             let name = &symbol_name.node;
-            if let Some(symbol) = imported_info.table.lookup(name) {
+            if let Some(symbol) = imported_analyzer.table.lookup(name) {
                 // Check if the symbol is public
                 if !symbol.is_pub {
                     return Err(SemaError::ImportError {
@@ -429,16 +434,16 @@ impl SemanticAnalyzer {
                 self.imported_symbols.push((name.clone(), symbol_name.span));
 
                 // Also import function metadata if this is a function
-                if let Some(metadata) = imported_info.function_metadata.get(name) {
+                if let Some(metadata) = imported_analyzer.function_metadata.get(name) {
                     self.function_metadata
                         .insert(name.clone(), metadata.clone());
                 }
 
                 // Also import type definitions (struct/enum) if this is a type
                 if symbol.kind == SymbolKind::Type {
-                    if let Some(struct_info) = imported_info.type_registry.get_struct(name) {
+                    if let Some(struct_info) = imported_analyzer.type_registry.get_struct(name) {
                         self.type_registry.add_struct(struct_info.clone());
-                    } else if let Some(enum_info) = imported_info.type_registry.get_enum(name) {
+                    } else if let Some(enum_info) = imported_analyzer.type_registry.get_enum(name) {
                         self.type_registry.add_enum(enum_info.clone());
                     }
                 }
@@ -454,7 +459,7 @@ impl SemanticAnalyzer {
         // Merge ALL resolved_symbols from the imported module
         // This is necessary because when we emit imported functions during codegen,
         // they reference symbols (variables, constants, addresses) using their original spans
-        for (span, symbol) in &imported_info.resolved_symbols {
+        for (span, symbol) in &imported_analyzer.resolved_symbols {
             self.resolved_symbols.insert(*span, symbol.clone());
 
             // Also add constants and addresses to the symbol table so they're visible
@@ -467,21 +472,34 @@ impl SemanticAnalyzer {
         }
 
         // Merge folded_constants so constant expressions from imported modules are available
-        for (span, value) in &imported_info.folded_constants {
+        for (span, value) in &imported_analyzer.folded_constants {
             self.folded_constants.insert(*span, value.clone());
         }
 
         // Merge resolved_types so type information from imported modules is available
-        for (span, ty) in &imported_info.resolved_types {
+        for (span, ty) in &imported_analyzer.resolved_types {
             self.resolved_types.insert(*span, ty.clone());
         }
 
         // Merge function_metadata (already done above in the loop, but ensure transitives)
-        for (name, metadata) in &imported_info.function_metadata {
+        for (name, metadata) in &imported_analyzer.function_metadata {
             if !self.function_metadata.contains_key(name) {
                 self.function_metadata
                     .insert(name.clone(), metadata.clone());
             }
+        }
+
+        // Merge frame sizes and call-graph edges so the root finalize_frames
+        // colors imported functions together with this module. Symbols stay at
+        // FrameOffset until that single finalize pass rewrites them.
+        for (name, size) in &imported_analyzer.frame_sizes {
+            self.frame_sizes.entry(name.clone()).or_insert(*size);
+        }
+        for (caller, callees) in &imported_analyzer.call_edges {
+            self.call_edges
+                .entry(caller.clone())
+                .or_default()
+                .extend(callees.iter().cloned());
         }
 
         // Merge the imported files set

@@ -256,7 +256,7 @@ fn emit_stdlib_math_functions(
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mul16");
-        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
         emitter.emit_comment("  Returns: u16 in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("mul16");
@@ -267,13 +267,13 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    LDA #$00");
         emitter.emit_raw("    STA $D2"); // result_low at $D2
         emitter.emit_raw("    STA $D3"); // result_high at $D3
-        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    LDA $D9");
         emitter.emit_raw("    STA $D0"); // param_a_low at $D0
-        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    LDA $DA");
         emitter.emit_raw("    STA $D1"); // param_a_high at $D1
-        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    LDA $DB");
         emitter.emit_raw("    STA $D4"); // param_b_low at $D4
-        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    LDA $DC");
         emitter.emit_raw("    STA $D5"); // param_b_high at $D5
         emitter.emit_raw("    LDX #$10");
         emitter.emit_raw("    STX $D6"); // loop_counter at $D6
@@ -306,7 +306,7 @@ fn emit_stdlib_math_functions(
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: div16");
-        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
         emitter.emit_comment("  Returns: u16 in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("div16");
@@ -316,8 +316,8 @@ fn emit_stdlib_math_functions(
         //               $D6-$D7 remainder, $D8 loop counter
 
         // Zero check - return 0xFFFF for division by zero
-        emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    ORA $83");
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    ORA $DC");
         emitter.emit_raw("    BNE div16_not_zero");
         emitter.emit_raw("    LDA #$FF");
         emitter.emit_raw("    TAY");
@@ -332,15 +332,15 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    STA $D7"); // remainder_high
 
         // Copy dividend to working storage
-        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    LDA $D9");
         emitter.emit_raw("    STA $D0"); // dividend_low
-        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    LDA $DA");
         emitter.emit_raw("    STA $D1"); // dividend_high
 
         // Copy divisor to working storage
-        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    LDA $DB");
         emitter.emit_raw("    STA $D2"); // divisor_low
-        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    LDA $DC");
         emitter.emit_raw("    STA $D3"); // divisor_high
 
         // Loop counter = 16
@@ -398,7 +398,7 @@ fn emit_stdlib_math_functions(
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mod16");
-        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
         emitter.emit_comment("  Returns: u16 remainder in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("mod16");
@@ -408,8 +408,8 @@ fn emit_stdlib_math_functions(
         //               $D6-$D7 remainder, $D8 loop counter
 
         // Zero check - return 0xFFFF for modulo by zero
-        emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    ORA $83");
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    ORA $DC");
         emitter.emit_raw("    BNE mod16_not_zero");
         emitter.emit_raw("    LDA #$FF");
         emitter.emit_raw("    TAY");
@@ -424,15 +424,15 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    STA $D7"); // remainder_high
 
         // Copy dividend to working storage
-        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    LDA $D9");
         emitter.emit_raw("    STA $D0"); // dividend_low
-        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    LDA $DA");
         emitter.emit_raw("    STA $D1"); // dividend_high
 
         // Copy divisor to working storage
-        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    LDA $DB");
         emitter.emit_raw("    STA $D2"); // divisor_low
-        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    LDA $DC");
         emitter.emit_raw("    STA $D3"); // divisor_high
 
         // Loop counter = 16
