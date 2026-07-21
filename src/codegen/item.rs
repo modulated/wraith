@@ -328,45 +328,6 @@ fn generate_function(
         emitter.emit_label(&format!("{}_loop_start", name));
     }
 
-    // Copy struct parameter pointers to local storage
-    // This ensures nested calls don't clobber the struct pointer in param space
-    if let Some(metadata) = info.function_metadata.get(name)
-        && !metadata.struct_param_locals.is_empty()
-    {
-        emitter.emit_comment("Copy struct param pointers to local storage");
-
-        // Iterate through params to find struct params. The source is each
-        // parameter's actual frame slot (from resolved_symbols), not a fixed
-        // parameter region.
-        for param in &func.params {
-            let param_name = &param.name.node;
-
-            if let Some(&local_addr) = metadata.struct_param_locals.get(param_name) {
-                let param_addr = match info
-                    .resolved_symbols
-                    .get(&param.name.span)
-                    .map(|s| &s.location)
-                {
-                    Some(crate::sema::table::SymbolLocation::ZeroPage(a)) => *a,
-                    _ => {
-                        return Err(CodegenError::Internal(format!(
-                            "struct parameter '{}' has no zero-page frame slot",
-                            param_name
-                        )));
-                    }
-                };
-                emitter.emit_comment(&format!(
-                    "Copy '{}' pointer ${:02X} -> ${:02X}",
-                    param_name, param_addr, local_addr
-                ));
-                emitter.emit_inst("LDA", &format!("${:02X}", param_addr));
-                emitter.emit_inst("STA", &format!("${:02X}", local_addr));
-                emitter.emit_inst("LDA", &format!("${:02X}", param_addr + 1));
-                emitter.emit_inst("STA", &format!("${:02X}", local_addr + 1));
-            }
-        }
-    }
-
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
     let is_interrupt = func.attributes.iter().any(|attr| {
@@ -388,54 +349,6 @@ fn generate_function(
         emitter.emit_inst("TYA", "");
         emitter.emit_inst("PHA", "");
         emit_interrupt_zp_save(emitter, &interrupt_zp);
-    }
-
-    // Initialize string pointer cache for hot parameters
-    // Only parameters are cached since locals are initialized in the body
-    if let Some(metadata) = info.function_metadata.get(name)
-        && !metadata.string_cache.is_empty()
-    {
-        emitter.emit_comment("Initialize string pointer cache");
-        for (var_name, cache_addr) in &metadata.string_cache {
-            // Look up the parameter in resolved_symbols
-            let location_opt = info
-                .resolved_symbols
-                .iter()
-                .find(|(_, sym)| {
-                    sym.name == *var_name && sym.containing_function.as_ref() == Some(name)
-                })
-                .map(|(_, sym)| sym.location.clone());
-
-            if let Some(location) = location_opt {
-                match location {
-                    crate::sema::table::SymbolLocation::ZeroPage(var_addr) => {
-                        // Copy string pointer from parameter to cache
-                        emitter.emit_comment(&format!(
-                            "Cache '{}' pointer ${:02X} -> ${:02X}",
-                            var_name, var_addr, cache_addr
-                        ));
-                        emitter.emit_inst("LDA", &format!("${:02X}", var_addr));
-                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr));
-                        emitter.emit_inst("LDA", &format!("${:02X}", var_addr + 1));
-                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr + 1));
-                    }
-                    crate::sema::table::SymbolLocation::Absolute(var_addr) => {
-                        // Copy string pointer from parameter to cache
-                        emitter.emit_comment(&format!(
-                            "Cache '{}' pointer ${:04X} -> ${:02X}",
-                            var_name, var_addr, cache_addr
-                        ));
-                        emitter.emit_inst("LDA", &format!("${:04X}", var_addr));
-                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr));
-                        emitter.emit_inst("LDA", &format!("${:04X}", var_addr + 1));
-                        emitter.emit_inst("STA", &format!("${:02X}", *cache_addr + 1));
-                    }
-                    _ => {
-                        // Cannot cache - skip this string
-                    }
-                }
-            }
-        }
     }
 
     // Body

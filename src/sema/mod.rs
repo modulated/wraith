@@ -689,15 +689,6 @@ pub struct FunctionMetadata {
     /// Total bytes used by function parameters in zero page
     /// Used for optimized parameter save/restore in recursive calls
     pub param_bytes_used: u8,
-    /// For struct parameters: maps param name to local ZP address where pointer copy is stored
-    /// This allows nested calls without clobbering the struct pointer in parameter space
-    pub struct_param_locals: HashMap<String, u8>,
-    /// String pointer cache: maps variable name to zero-page address (2 bytes)
-    /// Hot strings (accessed 3+ times) get cached for faster access
-    pub string_cache: HashMap<String, u8>,
-    /// Names of string parameters (for cache eligibility)
-    /// Only parameters are cached since locals are initialized in the body
-    pub param_names: HashSet<String>,
 }
 
 /// Tail call information for a function

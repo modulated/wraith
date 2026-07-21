@@ -51,7 +51,6 @@ pub struct SemanticAnalyzer {
     pub(super) called_functions: HashSet<String>,
     /// Track unreachable statements for dead code elimination
     pub(super) unreachable_stmts: HashSet<Span>,
-    /// Memory layout configuration for parameter space checking
     /// True when checking an assignment target (not reading a value)
     pub(super) checking_assignment_target: bool,
     /// Expected type for type inference (e.g., for anonymous struct literals)
@@ -62,11 +61,6 @@ pub struct SemanticAnalyzer {
     pub(super) memory_config: crate::config::MemoryConfig,
     /// Current function being analyzed (for tracking symbol scope in inline asm)
     pub(super) current_function: Option<String>,
-    /// Track string variable accesses per function for caching optimization
-    /// Maps function name -> (variable name -> access count)
-    pub(super) string_access_counts: HashMap<String, HashMap<String, usize>>,
-    /// Track which strings have been cached already (to avoid double-counting)
-    pub(super) cached_strings: HashSet<String>,
     /// Bump cursor for the current function's frame (offset from frame base).
     /// Reset to 0 at the start of each function; params then locals allocate upward.
     pub(super) frame_cursor: u8,
@@ -115,8 +109,6 @@ impl SemanticAnalyzer {
             resolved_struct_names: HashMap::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
-            string_access_counts: HashMap::default(),
-            cached_strings: HashSet::default(),
             frame_cursor: 0,
             frame_sizes: HashMap::default(),
             call_edges: HashMap::default(),
@@ -152,8 +144,6 @@ impl SemanticAnalyzer {
             resolved_struct_names: HashMap::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
-            string_access_counts: HashMap::default(),
-            cached_strings: HashSet::default(),
             frame_cursor: 0,
             frame_sizes: HashMap::default(),
             call_edges: HashMap::default(),
@@ -315,8 +305,6 @@ impl SemanticAnalyzer {
             // finalize_frames assigns the concrete frame base. The contiguity is
             // relied upon by call.rs, which computes each argument's destination by
             // summing parameter sizes in order.
-            let mut struct_param_names: Vec<String> = Vec::new();
-
             for param in func.params.iter() {
                 let name = param.name.node.clone();
 
@@ -375,10 +363,6 @@ impl SemanticAnalyzer {
                 let offset = self.frame_alloc(param_size as u8);
                 let location = SymbolLocation::FrameOffset(offset);
 
-                if is_struct_param {
-                    struct_param_names.push(name.clone());
-                }
-
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Variable,
@@ -405,25 +389,8 @@ impl SemanticAnalyzer {
                 metadata.param_bytes_used = param_bytes;
             }
 
-            // For struct parameters, allocate a frame-local slot (after the parameter
-            // block) to hold a private copy of the pointer. finalize_frames rebases
-            // these offsets to concrete addresses.
-            if !struct_param_names.is_empty() {
-                let mut struct_param_locals: HashMap<String, u8> = HashMap::default();
-                for name in &struct_param_names {
-                    let local_off = self.frame_alloc(2);
-                    struct_param_locals.insert(name.clone(), local_off);
-                }
-                if let Some(metadata) = self.function_metadata.get_mut(&func_name) {
-                    metadata.struct_param_locals = struct_param_locals;
-                }
-            }
-
             // Analyze body
             self.analyze_stmt(&func.body)?;
-
-            // After analyzing function body, allocate string cache slots for hot strings
-            self.allocate_string_cache(&func_name);
 
             // Record this function's frame size (params + locals + any temp slots).
             // finalize_frames uses these to color frames across the call graph.
@@ -454,56 +421,6 @@ impl SemanticAnalyzer {
             self.table.exit_scope();
         }
         Ok(())
-    }
-
-    /// Allocate zero-page cache slots for frequently accessed strings
-    /// Only parameters are cached since locals are initialized in the body
-    fn allocate_string_cache(&mut self, func_name: &str) {
-        // Get access counts for this function
-        let access_counts = match self.string_access_counts.get(func_name) {
-            Some(counts) => counts,
-            None => return, // No strings accessed in this function
-        };
-
-        // Get parameter names from metadata
-        let param_names = self
-            .function_metadata
-            .get(func_name)
-            .map(|m| m.param_names.clone())
-            .unwrap_or_default();
-
-        // Find hot strings (accessed 3+ times) that are PARAMETERS
-        // Only cache parameters, not local variables (locals aren't initialized yet)
-        let hot_strings: Vec<(String, usize)> = access_counts
-            .iter()
-            .filter(|(name, count)| **count >= 3 && param_names.contains(*name))
-            .map(|(name, count)| (name.clone(), *count))
-            .collect();
-
-        if hot_strings.is_empty() {
-            return; // No hot parameter strings to cache
-        }
-
-        // Allocate cache slots for hot parameter strings (2 bytes each for pointer)
-        // as frame offsets, following the parameter/local block. finalize_frames
-        // rebases these to concrete zero-page addresses.
-        let mut cache_map = HashMap::default();
-        for (var_name, _count) in hot_strings {
-            let off = self.frame_alloc(2);
-            cache_map.insert(var_name.clone(), off);
-            // Mark this string as cached so we don't count it again
-            self.cached_strings.insert(var_name);
-        }
-
-        // Store cache info in function metadata
-        if !cache_map.is_empty()
-            && let Some(metadata) = self.function_metadata.get_mut(func_name)
-        {
-            metadata.string_cache = cache_map;
-        }
-
-        // Clear access counts for this function to free memory
-        self.string_access_counts.remove(func_name);
     }
 
     pub(super) fn resolve_type(&self, ty: &TypeExpr) -> Result<Type, SemaError> {
