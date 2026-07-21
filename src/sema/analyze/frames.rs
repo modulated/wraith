@@ -16,9 +16,16 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::codegen::memory_layout::{FRAME_REGION_END, FRAME_REGION_START};
 use crate::sema::table::SymbolLocation;
-use crate::sema::{FrameInfo, SemaError};
+use crate::sema::{FrameInfo, InterruptSaveInfo, SemaError};
 
 use super::SemanticAnalyzer;
+
+/// Result of frame finalization.
+pub(super) struct FinalizedFrames {
+    pub frames: HashMap<String, FrameInfo>,
+    pub recursive_call_edges: HashSet<(String, String)>,
+    pub interrupt_save_info: HashMap<String, InterruptSaveInfo>,
+}
 
 impl SemanticAnalyzer {
     /// Assign every function a zero-page frame and rewrite all `FrameOffset`
@@ -27,9 +34,7 @@ impl SemanticAnalyzer {
     /// Returns the frame map and the set of call-graph edges that lie within a
     /// recursion cycle (a call across such an edge must save/restore the callee
     /// frame at runtime).
-    pub(super) fn finalize_frames(
-        &mut self,
-    ) -> Result<(HashMap<String, FrameInfo>, HashSet<(String, String)>), SemaError> {
+    pub(super) fn finalize_frames(&mut self) -> Result<FinalizedFrames, SemaError> {
         // Deterministic node ordering (HashMap iteration order is not stable).
         let mut nodes: Vec<String> = self.frame_sizes.keys().cloned().collect();
         nodes.sort();
@@ -141,9 +146,70 @@ impl SemanticAnalyzer {
             }
         }
 
+        // Interrupt-handler zero-page safety. A handler can preempt main code at
+        // any point, so it must preserve every zero-page location the interrupted
+        // code might be using. We save the shared codegen scratch/pools/math region
+        // plus the contiguous frame span the handler's own call graph touches (its
+        // frames overlap main frames under unified coloring). The handler prologue
+        // (item.rs) emits the save/restore on the hardware stack.
+        let handlers: Vec<String> = self
+            .function_metadata
+            .iter()
+            .filter(|(name, m)| m.is_interrupt_handler && self.frame_sizes.contains_key(*name))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        let mut interrupt_save_info: HashMap<String, InterruptSaveInfo> = HashMap::default();
+        for handler in &handlers {
+            let reachable = reachable_from(handler, &adj);
+
+            // Recursion in interrupt context is forbidden: the software stack used
+            // by frame save/restore is not reentrant with respect to preemption.
+            for (caller, callee) in &recursive_call_edges {
+                if reachable.contains(caller) || reachable.contains(callee) {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "recursion is not allowed in interrupt handler '{}' (call cycle through '{}'): \
+                             the frame save/restore stack is not reentrant",
+                            handler, caller
+                        ),
+                        span: crate::ast::Span { start: 0, end: 0 },
+                    });
+                }
+            }
+
+            // Contiguous zero-page span covering every frame the handler touches.
+            let mut span_start = u16::MAX;
+            let mut span_end = 0u16;
+            for f in &reachable {
+                if let Some(frame) = function_frames.get(f) {
+                    span_start = span_start.min(frame.base as u16);
+                    span_end = span_end.max(frame.base as u16 + frame.size as u16);
+                }
+            }
+            let shared_frames = if span_end > span_start {
+                vec![(span_start as u8, (span_end - span_start) as u8)]
+            } else {
+                Vec::new()
+            };
+
+            interrupt_save_info.insert(
+                handler.clone(),
+                InterruptSaveInfo {
+                    save_scratch: true,
+                    save_math: true,
+                    shared_frames,
+                },
+            );
+        }
+
         self.rewrite_frame_offsets(&function_frames)?;
 
-        Ok((function_frames, recursive_call_edges))
+        Ok(FinalizedFrames {
+            frames: function_frames,
+            recursive_call_edges,
+            interrupt_save_info,
+        })
     }
 
     /// Rewrite every `FrameOffset(off)` into `ZeroPage(base + off)` across all
@@ -200,6 +266,25 @@ fn frame_base(frames: &HashMap<String, FrameInfo>, func: Option<&str>) -> Result
             message: format!("internal: no frame assigned for function '{}'", name),
             span: crate::ast::Span { start: 0, end: 0 },
         })
+}
+
+/// Set of functions reachable from `start` (inclusive) over the call graph.
+fn reachable_from(start: &str, adj: &HashMap<String, Vec<String>>) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::default();
+    let mut stack = vec![start.to_string()];
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        if let Some(succ) = adj.get(&n) {
+            for s in succ {
+                if !seen.contains(s) {
+                    stack.push(s.clone());
+                }
+            }
+        }
+    }
+    seen
 }
 
 /// Recursive Tarjan SCC. Returns components in reverse-topological order

@@ -146,12 +146,22 @@ impl SemanticAnalyzer {
             }
         }
 
+        let is_interrupt_handler = func.attributes.iter().any(|attr| {
+            matches!(
+                attr,
+                crate::ast::FnAttribute::Interrupt
+                    | crate::ast::FnAttribute::Nmi
+                    | crate::ast::FnAttribute::Irq
+            )
+        });
+
         self.function_metadata.insert(
             name.clone(),
             FunctionMetadata {
                 org_address,
                 section,
                 is_inline,
+                is_interrupt_handler,
                 inline_body,
                 inline_params,
                 inline_param_symbols: None, // Will be populated in second pass

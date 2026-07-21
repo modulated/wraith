@@ -674,6 +674,10 @@ pub struct FunctionMetadata {
     pub org_address: Option<u16>,
     pub section: Option<String>,
     pub is_inline: bool,
+    /// True if this function is an interrupt handler (#[irq]/#[nmi]/#[interrupt]).
+    /// Handlers can preempt main code, so `finalize_frames` computes the zero-page
+    /// state they must save; reset is NOT a handler.
+    pub is_interrupt_handler: bool,
     /// For inline functions, store the body and parameters for expansion
     pub inline_body: Option<Spanned<Stmt>>,
     pub inline_params: Option<Vec<FnParam>>,

@@ -243,8 +243,10 @@ impl SemanticAnalyzer {
         // imported module whose call graph and frame sizes were merged in during
         // import processing). This assigns concrete zero-page frame bases and
         // rewrites all FrameOffset locations to ZeroPage.
-        let (function_frames, recursive_call_edges) = self.finalize_frames()?;
-        let interrupt_save_info = HashMap::default();
+        let finalized = self.finalize_frames()?;
+        let function_frames = finalized.frames;
+        let recursive_call_edges = finalized.recursive_call_edges;
+        let interrupt_save_info = finalized.interrupt_save_info;
 
         Ok(ProgramInfo {
             table: self.table.clone(),

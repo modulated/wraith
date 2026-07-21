@@ -52,6 +52,53 @@ pub fn generate_item(
     }
 }
 
+/// Zero-page addresses an interrupt handler must preserve, in save order. The
+/// list is pushed forward (LDA/PHA) in the prologue and popped in reverse
+/// (PLA/STA) in the epilogue, wrapping the register save/restore. Because a
+/// handler can preempt main code mid-expression, it must preserve the shared
+/// codegen scratch/pools/math region plus the frame span its own call graph
+/// touches (frames overlap main frames under unified coloring).
+fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
+    let mut addrs = Vec::new();
+    if let Some(si) = info.interrupt_save_info.get(name) {
+        if si.save_scratch {
+            addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
+            addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
+        }
+        if si.save_math {
+            addrs.extend(0xD0u8..=0xDC); // mul16/div16 working storage + params
+        }
+        for (base, len) in &si.shared_frames {
+            for i in 0..*len {
+                addrs.push(base.wrapping_add(i));
+            }
+        }
+    }
+    addrs
+}
+
+fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
+    if addrs.is_empty() {
+        return;
+    }
+    emitter.emit_comment("Save zero-page state the handler may clobber");
+    for a in addrs {
+        emitter.emit_inst("LDA", &format!("${:02X}", a));
+        emitter.emit_inst("PHA", "");
+    }
+}
+
+fn emit_interrupt_zp_restore(emitter: &mut Emitter, addrs: &[u8]) {
+    if addrs.is_empty() {
+        return;
+    }
+    emitter.emit_comment("Restore zero-page state (reverse order)");
+    for a in addrs.iter().rev() {
+        emitter.emit_inst("PLA", "");
+        emitter.emit_inst("STA", &format!("${:02X}", a));
+    }
+}
+
 fn generate_function(
     func: &Function,
     emitter: &mut Emitter,
@@ -77,6 +124,14 @@ fn generate_function(
         )
     });
 
+    // Zero-page locations this handler must preserve (empty for non-handlers).
+    // Computed once and emitted identically in the size-measuring and real passes.
+    let interrupt_zp = if is_interrupt {
+        interrupt_zp_save_addrs(info, name)
+    } else {
+        Vec::new()
+    };
+
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
         let mut temp_emitter = Emitter::new(emitter.verbosity);
@@ -94,6 +149,7 @@ fn generate_function(
             temp_emitter.emit_inst("PHA", "");
             temp_emitter.emit_inst("TYA", "");
             temp_emitter.emit_inst("PHA", "");
+            emit_interrupt_zp_save(&mut temp_emitter, &interrupt_zp);
         }
 
         // Generate function body to measure size
@@ -101,6 +157,7 @@ fn generate_function(
 
         // Include epilogue size
         if is_interrupt {
+            emit_interrupt_zp_restore(&mut temp_emitter, &interrupt_zp);
             // 6 instructions for epilogue
             temp_emitter.emit_inst("PLA", "");
             temp_emitter.emit_inst("TAY", "");
@@ -338,6 +395,7 @@ fn generate_function(
         emitter.emit_inst("PHA", "");
         emitter.emit_inst("TYA", "");
         emitter.emit_inst("PHA", "");
+        emit_interrupt_zp_save(emitter, &interrupt_zp);
     }
 
     // Initialize string pointer cache for hot parameters
@@ -400,6 +458,7 @@ fn generate_function(
         if emitter.is_verbose() {
             emitter.emit_comment("Restore Y, X, A in reverse order (LIFO)");
         }
+        emit_interrupt_zp_restore(emitter, &interrupt_zp);
         emitter.emit_inst("PLA", "");
         emitter.emit_inst("TAY", "");
         emitter.emit_inst("PLA", "");
