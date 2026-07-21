@@ -8,10 +8,8 @@ mod register;
 mod stmt;
 mod tail_call;
 mod unused;
-mod zp_alloc;
 
 use crate::ast::{Function, Item, PrimitiveType, SourceFile, Spanned, TypeExpr};
-use crate::codegen::memory_layout::MemoryLayout;
 use crate::sema::const_eval::ConstEnv;
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation, SymbolTable};
 use crate::sema::type_defs::TypeRegistry;
@@ -21,8 +19,6 @@ use crate::sema::{FunctionMetadata, ProgramInfo, SemaError, Warning};
 use crate::ast::Span;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
-
-use zp_alloc::ZeroPageAllocator;
 
 pub struct SemanticAnalyzer {
     pub table: SymbolTable,
@@ -37,7 +33,6 @@ pub struct SemanticAnalyzer {
     pub(super) imported_items: Vec<Spanned<Item>>,
     pub(super) base_path: Option<PathBuf>,
     pub(super) imported_files: HashSet<PathBuf>,
-    zp_allocator: ZeroPageAllocator,
     pub(super) const_env: ConstEnv,
     pub(super) loop_depth: usize,
     /// Track variable usage for unused variable warnings (per-function, cleared after each function)
@@ -57,7 +52,6 @@ pub struct SemanticAnalyzer {
     /// Track unreachable statements for dead code elimination
     pub(super) unreachable_stmts: HashSet<Span>,
     /// Memory layout configuration for parameter space checking
-    pub(super) memory_layout: MemoryLayout,
     /// True when checking an assignment target (not reading a value)
     pub(super) checking_assignment_target: bool,
     /// Expected type for type inference (e.g., for anonymous struct literals)
@@ -106,7 +100,6 @@ impl SemanticAnalyzer {
             imported_items: Vec::with_capacity(8),
             base_path: None,
             imported_files: HashSet::default(),
-            zp_allocator: ZeroPageAllocator::new(),
             const_env: ConstEnv::default(),
             loop_depth: 0,
             used_variables: HashSet::default(),
@@ -117,7 +110,6 @@ impl SemanticAnalyzer {
             declared_functions: Vec::with_capacity(16),
             called_functions: HashSet::default(),
             unreachable_stmts: HashSet::default(),
-            memory_layout: MemoryLayout::new(),
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::default(),
@@ -145,7 +137,6 @@ impl SemanticAnalyzer {
             imported_items: Vec::with_capacity(8),
             base_path: Some(base_path),
             imported_files: HashSet::default(),
-            zp_allocator: ZeroPageAllocator::new(),
             const_env: ConstEnv::default(),
             loop_depth: 0,
             used_variables: HashSet::default(),
@@ -156,7 +147,6 @@ impl SemanticAnalyzer {
             declared_functions: Vec::with_capacity(16),
             called_functions: HashSet::default(),
             unreachable_stmts: HashSet::default(),
-            memory_layout: MemoryLayout::new(),
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::default(),

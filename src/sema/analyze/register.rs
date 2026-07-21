@@ -125,16 +125,9 @@ impl SemanticAnalyzer {
             })
             .sum();
 
-        // Warn if parameters exceed available space (64 bytes: $80-$BF)
-        let param_space = self.memory_layout.param_space();
-        if param_bytes_used > param_space {
-            self.warnings.push(Warning::ParameterOverflow {
-                function_name: name.clone(),
-                bytes_used: param_bytes_used,
-                bytes_available: param_space,
-                span: func.name.span,
-            });
-        }
+        // Parameters now live in the function frame; overall zero-page capacity is
+        // enforced by finalize_frames (SemaError::FrameRegionOverflow), so the old
+        // per-function $80-$BF parameter-space warning no longer applies.
 
         // Track string parameter names for cache eligibility
         let mut param_names: HashSet<String> = HashSet::default();

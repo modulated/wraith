@@ -269,22 +269,16 @@ fn generate_function(
 
     // Document zero-page usage in verbose mode
     if emitter.is_verbose() {
-        emitter.emit_comment(&format!(
-            "  Temps: $20-${:02X}=available scratch",
-            emitter.memory_layout.param_base - 1
-        ));
-        emitter.emit_comment(&format!(
-            "  Params: ${:02X}-$81=parameter area",
-            emitter.memory_layout.param_base
-        ));
-        emitter.emit_comment(&format!(
-            "  Temps: $20-${:02X}=available scratch",
-            emitter.memory_layout.param_base - 1
-        ));
-        emitter.emit_comment(&format!(
-            "  Params: ${:02X}-$81=parameter area",
-            emitter.memory_layout.param_base
-        ));
+        if let Some(frame) = info.function_frames.get(name) {
+            emitter.emit_comment(&format!(
+                "  Frame: ${:02X}-${:02X} ({} bytes: {} params + locals)",
+                frame.base,
+                frame.base.wrapping_add(frame.size.saturating_sub(1)),
+                frame.size,
+                frame.param_size
+            ));
+        }
+        emitter.emit_comment("  Temps: $20-$3F=codegen scratch");
     }
 
     // Attributes
@@ -340,17 +334,27 @@ fn generate_function(
         && !metadata.struct_param_locals.is_empty()
     {
         emitter.emit_comment("Copy struct param pointers to local storage");
-        let param_base = emitter.memory_layout.param_base;
-        let mut param_offset = 0u8;
 
-        // Iterate through params to find struct params and their offsets
+        // Iterate through params to find struct params. The source is each
+        // parameter's actual frame slot (from resolved_symbols), not a fixed
+        // parameter region.
         for param in &func.params {
             let param_name = &param.name.node;
-            let param_type = info.resolved_types.get(&param.ty.span);
 
-            // Check if this param has a local copy
             if let Some(&local_addr) = metadata.struct_param_locals.get(param_name) {
-                let param_addr = param_base + param_offset;
+                let param_addr = match info
+                    .resolved_symbols
+                    .get(&param.name.span)
+                    .map(|s| &s.location)
+                {
+                    Some(crate::sema::table::SymbolLocation::ZeroPage(a)) => *a,
+                    _ => {
+                        return Err(CodegenError::Internal(format!(
+                            "struct parameter '{}' has no zero-page frame slot",
+                            param_name
+                        )));
+                    }
+                };
                 emitter.emit_comment(&format!(
                     "Copy '{}' pointer ${:02X} -> ${:02X}",
                     param_name, param_addr, local_addr
@@ -359,18 +363,6 @@ fn generate_function(
                 emitter.emit_inst("STA", &format!("${:02X}", local_addr));
                 emitter.emit_inst("LDA", &format!("${:02X}", param_addr + 1));
                 emitter.emit_inst("STA", &format!("${:02X}", local_addr + 1));
-                param_offset += 2; // Struct pointers are 2 bytes
-            } else if let Some(ty) = param_type {
-                // Non-struct param - advance by its size
-                // Arrays are passed as 2-byte pointers, not by value
-                if matches!(ty, crate::sema::types::Type::Array(_, _)) {
-                    param_offset += 2;
-                } else {
-                    param_offset += ty.size() as u8;
-                }
-            } else {
-                // Fallback: assume 1 byte
-                param_offset += 1;
             }
         }
     }
