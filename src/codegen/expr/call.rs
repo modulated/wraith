@@ -40,11 +40,28 @@ pub(super) fn generate_call(
         return generate_inline_call(function, args, emitter, info, metadata, string_collector);
     }
 
-    // 6502 calling convention: Arguments are passed in zero page locations
-    // Parameters are allocated starting at param_base (from memory layout)
-    // This avoids using the hardware stack which is limited and slow to access
+    // 6502 calling convention: arguments are passed in the callee's zero-page
+    // frame (its parameter block sits at the frame base). This avoids the small,
+    // slow hardware stack and, because frames are colored by the call graph, a
+    // callee's parameter writes never touch the caller's live frame.
+    let callee_frame = info.function_frames.get(&function.node).copied();
+    let param_base = match callee_frame {
+        Some(f) => f.base,
+        None => {
+            return Err(CodegenError::Internal(format!(
+                "no frame assigned for called function '{}'",
+                function.node
+            )));
+        }
+    };
 
-    let param_base = emitter.memory_layout.param_base;
+    // A recursive call (an edge inside a call-graph cycle) must save and restore
+    // the callee's frame so re-entry cannot destroy values the caller still needs.
+    let caller_name = emitter.current_function().map(|s| s.to_string());
+    let is_recursive_edge = caller_name.as_ref().is_some_and(|c| {
+        info.recursive_call_edges
+            .contains(&(c.clone(), function.node.clone()))
+    });
 
     // Emit descriptive call comment
     if args.is_empty() {
@@ -117,7 +134,20 @@ pub(super) fn generate_call(
     }
 
     // Allocate temp storage for all arguments at once
-    let temp_base = emitter.temp_alloc.alloc_arg(total_bytes).unwrap_or(0xF4);
+    let temp_base = if total_bytes == 0 {
+        0 // No arguments: base is unused (the copy loop below runs zero times).
+    } else {
+        match emitter.temp_alloc.alloc_arg(total_bytes) {
+            Some(addr) => addr,
+            None => {
+                return Err(CodegenError::Internal(format!(
+                    "argument-evaluation pool exhausted calling '{}' ({} bytes of args); \
+                     expression nesting is too deep",
+                    function.node, total_bytes
+                )));
+            }
+        }
+    };
     let mut temp_offset = 0u8;
     let mut arg_info = Vec::new(); // Track argument sizes and temp locations
 
@@ -284,8 +314,15 @@ pub(super) fn generate_call(
         arg_info.push((temp_addr, is_16bit));
     }
 
-    // STEP 2: Copy arguments from temporary storage to parameter locations
-    // (No parameter save here - caller's responsibility if needed)
+    // RECURSION SAVE: for a call inside a cycle, preserve the callee's frame
+    // (which may hold the live values of an outer invocation) before we overwrite
+    // its parameter slots. Done after argument evaluation and before the copy, so
+    // the arguments (already parked in the temp pool) are unaffected.
+    if is_recursive_edge && let Some(frame) = callee_frame {
+        emitter.push_frame(frame.base, frame.size);
+    }
+
+    // STEP 2: Copy arguments from temporary storage to the callee's parameter slots.
     let mut byte_offset = 0u8;
     for (temp_addr, is_16bit) in arg_info.iter() {
         let param_addr = param_base + byte_offset;
@@ -315,6 +352,18 @@ pub(super) fn generate_call(
     // Invalidate register state after function call
     // (called function may modify any register; only A/Y contain known return value)
     emitter.reg_state.invalidate_all();
+
+    // RECURSION RESTORE: restore the callee frame saved above. pop_frame clobbers
+    // A and X, so stash the return low byte in $20 across the pop and reload it
+    // (the high byte, if any, is in Y, which pop_frame leaves untouched). No
+    // hardware stack is used.
+    if is_recursive_edge && let Some(frame) = callee_frame {
+        let tmp = emitter.memory_layout.temp_reg();
+        emitter.emit_inst("STA", &format!("${:02X}", tmp));
+        emitter.pop_frame(frame.base, frame.size);
+        emitter.emit_inst("LDA", &format!("${:02X}", tmp));
+        emitter.reg_state.invalidate_all();
+    }
 
     // Result is returned in A register (no cleanup needed)
     if !emitter.is_minimal() {
@@ -466,6 +515,9 @@ fn generate_inline_call(
             tail_call_info: info.tail_call_info.clone(),
             resolved_struct_names: info.resolved_struct_names.clone(),
             string_pool: info.string_pool.clone(),
+            function_frames: info.function_frames.clone(),
+            recursive_call_edges: info.recursive_call_edges.clone(),
+            interrupt_save_info: info.interrupt_save_info.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;
@@ -497,7 +549,19 @@ pub fn generate_tail_recursive_update(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    let param_base = emitter.memory_layout.param_base;
+    // A tail-recursive call rebinds the current function's own parameters, so the
+    // destination is this function's own frame base.
+    let param_base = match emitter
+        .current_function()
+        .and_then(|f| info.function_frames.get(f))
+    {
+        Some(frame) => frame.base,
+        None => {
+            return Err(CodegenError::Internal(
+                "tail-recursive update outside any framed function".to_string(),
+            ));
+        }
+    };
 
     // STEP 1: Evaluate all arguments into TEMPORARY storage
     // This prevents arguments from overwriting parameters they depend on
@@ -524,7 +588,18 @@ pub fn generate_tail_recursive_update(
     }
 
     // Allocate temp storage for all arguments at once
-    let temp_base = emitter.temp_alloc.alloc_arg(total_bytes).unwrap_or(0xF4);
+    let temp_base = if total_bytes == 0 {
+        0
+    } else {
+        match emitter.temp_alloc.alloc_arg(total_bytes) {
+            Some(addr) => addr,
+            None => {
+                return Err(CodegenError::Internal(
+                    "argument-evaluation pool exhausted in tail-recursive update".to_string(),
+                ));
+            }
+        }
+    };
     let mut temp_offset = 0u8;
     let mut arg_info = Vec::new();
 

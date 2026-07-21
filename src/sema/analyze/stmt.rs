@@ -227,12 +227,8 @@ impl SemanticAnalyzer {
             }
             _ => 1,
         };
-        let addr = if alloc_size > 1 {
-            self.zp_allocator.allocate_range(alloc_size as u8)?
-        } else {
-            self.zp_allocator.allocate()?
-        };
-        let location = SymbolLocation::ZeroPage(addr);
+        let offset = self.frame_alloc(alloc_size as u8);
+        let location = SymbolLocation::FrameOffset(offset);
 
         let info = SymbolInfo {
             name: name.node.clone(),
@@ -243,6 +239,7 @@ impl SemanticAnalyzer {
             access_mode: None,
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
+            is_param: false,
         };
         self.table.insert(name.node.clone(), info.clone());
         // Also add to resolved_symbols so codegen can find it
@@ -376,18 +373,22 @@ impl SemanticAnalyzer {
             });
         }
 
-        let addr = self.zp_allocator.allocate()?;
+        let offset = self.frame_alloc(1);
         let info = SymbolInfo {
             name: var_name.node.clone(),
             kind: SymbolKind::Variable,
             ty: var_ty,
-            location: SymbolLocation::ZeroPage(addr),
+            location: SymbolLocation::FrameOffset(offset),
             mutable: true,
             access_mode: None,
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
+            is_param: false,
         };
-        self.table.insert(var_name.node.clone(), info);
+        self.table.insert(var_name.node.clone(), info.clone());
+        // Register the loop variable at its own declaration span so codegen can
+        // resolve its address directly (instead of the old body-span hack).
+        self.resolved_symbols.insert(var_name.span, info);
 
         // Check range bounds if not already checked
         if var_type.is_some() {
@@ -450,16 +451,17 @@ impl SemanticAnalyzer {
 
         // Allocate storage for index variable if present
         if let Some(idx_var) = index_var {
-            let idx_addr = self.zp_allocator.allocate()?;
+            let idx_off = self.frame_alloc(1);
             let idx_info = SymbolInfo {
                 name: idx_var.node.clone(),
                 kind: SymbolKind::Variable,
                 ty: Type::Primitive(PrimitiveType::U8),
-                location: SymbolLocation::ZeroPage(idx_addr),
+                location: SymbolLocation::FrameOffset(idx_off),
                 mutable: true,
                 access_mode: None,
                 is_pub: false,
                 containing_function: self.current_function.clone(),
+                is_param: false,
             };
             self.table.insert(idx_var.node.clone(), idx_info.clone());
             self.resolved_symbols.insert(idx_var.span, idx_info);
@@ -467,23 +469,25 @@ impl SemanticAnalyzer {
 
         // Allocate storage for loop variable
         // u16/i16 types need 2 bytes
-        let addr = if matches!(
+        let elem_size = if matches!(
             var_ty,
             Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16)
         ) {
-            self.zp_allocator.allocate_range(2)?
+            2
         } else {
-            self.zp_allocator.allocate()?
+            1
         };
+        let offset = self.frame_alloc(elem_size);
         let info = SymbolInfo {
             name: var_name.node.clone(),
             kind: SymbolKind::Variable,
             ty: var_ty,
-            location: SymbolLocation::ZeroPage(addr),
+            location: SymbolLocation::FrameOffset(offset),
             mutable: true,
             access_mode: None,
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
+            is_param: false,
         };
         self.table.insert(var_name.node.clone(), info.clone());
         // Add to resolved_symbols so codegen can find it
@@ -563,51 +567,55 @@ impl SemanticAnalyzer {
                 variant,
                 bindings,
             } => {
-                // Get enum definition to find variant field types
-                if let Some(enum_def) = self.type_registry.get_enum(&enum_name.node)
-                    && let Some(variant_def) =
-                        enum_def.variants.iter().find(|v| v.name == variant.node)
-                {
-                    // Add bindings for tuple variant fields
-                    match &variant_def.data {
-                        VariantData::Tuple(field_types) => {
-                            for (i, binding) in bindings.iter().enumerate() {
-                                if let Some(field_ty) = field_types.get(i) {
-                                    let addr = self.zp_allocator.allocate()?;
-                                    let info = SymbolInfo {
-                                        name: binding.name.node.clone(),
-                                        kind: SymbolKind::Variable,
-                                        ty: field_ty.clone(),
-                                        location: SymbolLocation::ZeroPage(addr),
-                                        mutable: false,
-                                        access_mode: None,
-                                        is_pub: false, // Pattern bindings are never public
-                                        containing_function: self.current_function.clone(),
-                                    };
-                                    self.table.insert(binding.name.node.clone(), info.clone());
-                                    // Also add to resolved_symbols so codegen can find it
-                                    self.resolved_symbols.insert(binding.name.span, info);
-                                }
-                            }
-                        }
-                        _ => {
-                            // Unit and Struct variants don't have tuple-style bindings
+                // Get enum definition to find variant field types. Clone the tuple
+                // field types out first so the type_registry borrow is released
+                // before allocating frame slots (which needs &mut self).
+                let tuple_field_types: Option<Vec<Type>> = self
+                    .type_registry
+                    .get_enum(&enum_name.node)
+                    .and_then(|enum_def| enum_def.variants.iter().find(|v| v.name == variant.node))
+                    .and_then(|variant_def| match &variant_def.data {
+                        VariantData::Tuple(field_types) => Some(field_types.clone()),
+                        _ => None,
+                    });
+
+                if let Some(field_types) = tuple_field_types {
+                    for (i, binding) in bindings.iter().enumerate() {
+                        if let Some(field_ty) = field_types.get(i) {
+                            let field_size = self.type_size(field_ty) as u8;
+                            let off = self.frame_alloc(field_size.max(1));
+                            let info = SymbolInfo {
+                                name: binding.name.node.clone(),
+                                kind: SymbolKind::Variable,
+                                ty: field_ty.clone(),
+                                location: SymbolLocation::FrameOffset(off),
+                                mutable: false,
+                                access_mode: None,
+                                is_pub: false, // Pattern bindings are never public
+                                containing_function: self.current_function.clone(),
+                                is_param: false,
+                            };
+                            self.table.insert(binding.name.node.clone(), info.clone());
+                            // Also add to resolved_symbols so codegen can find it
+                            self.resolved_symbols.insert(binding.name.span, info);
                         }
                     }
                 }
             }
             Pattern::Variable(name) => {
                 // Bind the entire matched value
-                let addr = self.zp_allocator.allocate()?;
+                let bind_size = self.type_size(&match_ty) as u8;
+                let off = self.frame_alloc(bind_size.max(1));
                 let info = SymbolInfo {
                     name: name.clone(),
                     kind: SymbolKind::Variable,
                     ty: match_ty.clone(),
-                    location: SymbolLocation::ZeroPage(addr),
+                    location: SymbolLocation::FrameOffset(off),
                     mutable: false,
                     access_mode: None,
                     is_pub: false, // Pattern bindings are never public
                     containing_function: self.current_function.clone(),
+                    is_param: false,
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Also add to resolved_symbols so codegen can find it

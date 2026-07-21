@@ -52,6 +52,53 @@ pub fn generate_item(
     }
 }
 
+/// Zero-page addresses an interrupt handler must preserve, in save order. The
+/// list is pushed forward (LDA/PHA) in the prologue and popped in reverse
+/// (PLA/STA) in the epilogue, wrapping the register save/restore. Because a
+/// handler can preempt main code mid-expression, it must preserve the shared
+/// codegen scratch/pools/math region plus the frame span its own call graph
+/// touches (frames overlap main frames under unified coloring).
+fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
+    let mut addrs = Vec::new();
+    if let Some(si) = info.interrupt_save_info.get(name) {
+        if si.save_scratch {
+            addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
+            addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
+        }
+        if si.save_math {
+            addrs.extend(0xD0u8..=0xDC); // mul16/div16 working storage + params
+        }
+        for (base, len) in &si.shared_frames {
+            for i in 0..*len {
+                addrs.push(base.wrapping_add(i));
+            }
+        }
+    }
+    addrs
+}
+
+fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
+    if addrs.is_empty() {
+        return;
+    }
+    emitter.emit_comment("Save zero-page state the handler may clobber");
+    for a in addrs {
+        emitter.emit_inst("LDA", &format!("${:02X}", a));
+        emitter.emit_inst("PHA", "");
+    }
+}
+
+fn emit_interrupt_zp_restore(emitter: &mut Emitter, addrs: &[u8]) {
+    if addrs.is_empty() {
+        return;
+    }
+    emitter.emit_comment("Restore zero-page state (reverse order)");
+    for a in addrs.iter().rev() {
+        emitter.emit_inst("PLA", "");
+        emitter.emit_inst("STA", &format!("${:02X}", a));
+    }
+}
+
 fn generate_function(
     func: &Function,
     emitter: &mut Emitter,
@@ -77,6 +124,14 @@ fn generate_function(
         )
     });
 
+    // Zero-page locations this handler must preserve (empty for non-handlers).
+    // Computed once and emitted identically in the size-measuring and real passes.
+    let interrupt_zp = if is_interrupt {
+        interrupt_zp_save_addrs(info, name)
+    } else {
+        Vec::new()
+    };
+
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
         let mut temp_emitter = Emitter::new(emitter.verbosity);
@@ -94,6 +149,7 @@ fn generate_function(
             temp_emitter.emit_inst("PHA", "");
             temp_emitter.emit_inst("TYA", "");
             temp_emitter.emit_inst("PHA", "");
+            emit_interrupt_zp_save(&mut temp_emitter, &interrupt_zp);
         }
 
         // Generate function body to measure size
@@ -101,6 +157,7 @@ fn generate_function(
 
         // Include epilogue size
         if is_interrupt {
+            emit_interrupt_zp_restore(&mut temp_emitter, &interrupt_zp);
             // 6 instructions for epilogue
             temp_emitter.emit_inst("PLA", "");
             temp_emitter.emit_inst("TAY", "");
@@ -212,22 +269,16 @@ fn generate_function(
 
     // Document zero-page usage in verbose mode
     if emitter.is_verbose() {
-        emitter.emit_comment(&format!(
-            "  Temps: $20-${:02X}=available scratch",
-            emitter.memory_layout.param_base - 1
-        ));
-        emitter.emit_comment(&format!(
-            "  Params: ${:02X}-$81=parameter area",
-            emitter.memory_layout.param_base
-        ));
-        emitter.emit_comment(&format!(
-            "  Temps: $20-${:02X}=available scratch",
-            emitter.memory_layout.param_base - 1
-        ));
-        emitter.emit_comment(&format!(
-            "  Params: ${:02X}-$81=parameter area",
-            emitter.memory_layout.param_base
-        ));
+        if let Some(frame) = info.function_frames.get(name) {
+            emitter.emit_comment(&format!(
+                "  Frame: ${:02X}-${:02X} ({} bytes: {} params + locals)",
+                frame.base,
+                frame.base.wrapping_add(frame.size.saturating_sub(1)),
+                frame.size,
+                frame.param_size
+            ));
+        }
+        emitter.emit_comment("  Temps: $20-$3F=codegen scratch");
     }
 
     // Attributes
@@ -283,17 +334,27 @@ fn generate_function(
         && !metadata.struct_param_locals.is_empty()
     {
         emitter.emit_comment("Copy struct param pointers to local storage");
-        let param_base = emitter.memory_layout.param_base;
-        let mut param_offset = 0u8;
 
-        // Iterate through params to find struct params and their offsets
+        // Iterate through params to find struct params. The source is each
+        // parameter's actual frame slot (from resolved_symbols), not a fixed
+        // parameter region.
         for param in &func.params {
             let param_name = &param.name.node;
-            let param_type = info.resolved_types.get(&param.ty.span);
 
-            // Check if this param has a local copy
             if let Some(&local_addr) = metadata.struct_param_locals.get(param_name) {
-                let param_addr = param_base + param_offset;
+                let param_addr = match info
+                    .resolved_symbols
+                    .get(&param.name.span)
+                    .map(|s| &s.location)
+                {
+                    Some(crate::sema::table::SymbolLocation::ZeroPage(a)) => *a,
+                    _ => {
+                        return Err(CodegenError::Internal(format!(
+                            "struct parameter '{}' has no zero-page frame slot",
+                            param_name
+                        )));
+                    }
+                };
                 emitter.emit_comment(&format!(
                     "Copy '{}' pointer ${:02X} -> ${:02X}",
                     param_name, param_addr, local_addr
@@ -302,18 +363,6 @@ fn generate_function(
                 emitter.emit_inst("STA", &format!("${:02X}", local_addr));
                 emitter.emit_inst("LDA", &format!("${:02X}", param_addr + 1));
                 emitter.emit_inst("STA", &format!("${:02X}", local_addr + 1));
-                param_offset += 2; // Struct pointers are 2 bytes
-            } else if let Some(ty) = param_type {
-                // Non-struct param - advance by its size
-                // Arrays are passed as 2-byte pointers, not by value
-                if matches!(ty, crate::sema::types::Type::Array(_, _)) {
-                    param_offset += 2;
-                } else {
-                    param_offset += ty.size() as u8;
-                }
-            } else {
-                // Fallback: assume 1 byte
-                param_offset += 1;
             }
         }
     }
@@ -338,6 +387,7 @@ fn generate_function(
         emitter.emit_inst("PHA", "");
         emitter.emit_inst("TYA", "");
         emitter.emit_inst("PHA", "");
+        emit_interrupt_zp_save(emitter, &interrupt_zp);
     }
 
     // Initialize string pointer cache for hot parameters
@@ -348,13 +398,14 @@ fn generate_function(
         emitter.emit_comment("Initialize string pointer cache");
         for (var_name, cache_addr) in &metadata.string_cache {
             // Look up the parameter in resolved_symbols
-            let location_opt = info.resolved_symbols.iter()
+            let location_opt = info
+                .resolved_symbols
+                .iter()
                 .find(|(_, sym)| {
-                    sym.name == *var_name 
-                    && sym.containing_function.as_ref() == Some(name)
+                    sym.name == *var_name && sym.containing_function.as_ref() == Some(name)
                 })
                 .map(|(_, sym)| sym.location.clone());
-            
+
             if let Some(location) = location_opt {
                 match location {
                     crate::sema::table::SymbolLocation::ZeroPage(var_addr) => {
@@ -399,6 +450,7 @@ fn generate_function(
         if emitter.is_verbose() {
             emitter.emit_comment("Restore Y, X, A in reverse order (LIFO)");
         }
+        emit_interrupt_zp_restore(emitter, &interrupt_zp);
         emitter.emit_inst("PLA", "");
         emitter.emit_inst("TAY", "");
         emitter.emit_inst("PLA", "");
@@ -429,7 +481,7 @@ fn generate_static(
         if matches!(stat.ty.node, TypeExpr::Array { .. }) {
             return emit_const_array(stat, emitter, info, string_collector);
         }
-        
+
         // Handle const strings - register folded constants with string collector
         if matches!(&stat.ty.node, TypeExpr::Named(name) if name == "str") {
             // Check if the init expression was folded to a string constant
@@ -438,12 +490,14 @@ fn generate_static(
                     // Register the string so it gets emitted to the data section
                     string_collector.add_string(s.clone());
                 }
-            } else if let crate::ast::Expr::Literal(crate::ast::Literal::String(s)) = &stat.init.node {
+            } else if let crate::ast::Expr::Literal(crate::ast::Literal::String(s)) =
+                &stat.init.node
+            {
                 // Direct string literal - register it
                 string_collector.add_string(s.clone());
             }
         }
-        
+
         // Skip code generation for other const (non-mutable) statics
         // They are compile-time constants that get folded into the code
         return Ok(());

@@ -6,8 +6,8 @@ use crate::ast::{
 };
 use crate::lexer::Token;
 
-use super::error::{ParseError, ParseResult};
 use super::Parser;
+use super::error::{ParseError, ParseResult};
 
 impl Parser<'_> {
     /// Parse a complete source file

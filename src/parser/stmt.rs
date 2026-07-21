@@ -3,8 +3,8 @@
 use crate::ast::{AsmLine, MatchArm, Pattern, PatternBinding, Range, Spanned, Stmt};
 use crate::lexer::Token;
 
-use super::error::{ParseError, ParseResult};
 use super::Parser;
+use super::error::{ParseError, ParseResult};
 
 impl Parser<'_> {
     /// Parse a statement

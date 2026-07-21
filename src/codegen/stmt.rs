@@ -231,9 +231,16 @@ pub fn generate_stmt(
 
                 // Arrays, enums, and strings store address in A (low) and X (high)
                 // Other u16 types store in A (low) and Y (high)
-                let is_array_or_enum = matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
+                let is_array_or_enum =
+                    matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
 
                 match sym.location {
+                    crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                        return Err(CodegenError::Internal(
+                            "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                                .to_string(),
+                        ));
+                    }
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
                         // Check if this is an address declaration - use symbolic name
                         if sym.kind == SymbolKind::Address {
@@ -438,6 +445,12 @@ pub fn generate_stmt(
                         let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
 
                         match sym.location {
+                            crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                                return Err(CodegenError::Internal(
+                                    "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                                        .to_string(),
+                                ));
+                            }
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
                                 // Check if this is an address declaration - use symbolic name
                                 if sym.kind == SymbolKind::Address {
@@ -542,7 +555,7 @@ pub fn generate_stmt(
             // else:
             //   else_body
             // end:
-            
+
             if !emitter.is_minimal() {
                 emitter.emit_comment("Branch to then if condition is true");
             }
@@ -585,7 +598,7 @@ pub fn generate_stmt(
             //
             // The BNE only needs to jump 3 bytes forward (past the JMP),
             // so it's always within the 127-byte limit regardless of body size.
-            
+
             // Condition check
             emitter.emit_label(&check_label);
             generate_expr(condition, emitter, info, string_collector)?;
@@ -669,9 +682,22 @@ pub fn generate_stmt(
                         if count == 1 { "" } else { "s" }
                     ));
 
-                    // Use first variable slot for loop variable (same as normal loops)
-                    // This matches the allocation strategy in semantic analysis
-                    let loop_var_addr = emitter.memory_layout.variable_alloc_start;
+                    // Resolve the loop variable's actual frame slot (registered at
+                    // its declaration span during analysis) rather than assuming the
+                    // first variable address.
+                    let loop_var_addr = match info
+                        .resolved_symbols
+                        .get(&var_name.span)
+                        .map(|s| &s.location)
+                    {
+                        Some(crate::sema::table::SymbolLocation::ZeroPage(addr)) => *addr,
+                        _ => {
+                            return Err(CodegenError::Internal(format!(
+                                "unrolled loop variable '{}' has no zero-page frame slot",
+                                var_name.node
+                            )));
+                        }
+                    };
 
                     // Create end label for break statements
                     let end_label = emitter.next_label("ux");
@@ -823,19 +849,20 @@ pub fn generate_stmt(
 
             // Store index in index variable if present
             if let Some(idx_var) = index_var
-                && let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span) {
-                    match idx_sym.location {
-                        crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                            emitter.emit_comment(&format!("Store index in {}", idx_var.node));
-                            emitter.emit_inst("STX", &format!("${:02X}", addr));
-                        }
-                        _ => {
-                            return Err(CodegenError::UnsupportedOperation(
-                                "ForEach index variable must be in zero page".to_string(),
-                            ));
-                        }
+                && let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span)
+            {
+                match idx_sym.location {
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                        emitter.emit_comment(&format!("Store index in {}", idx_var.node));
+                        emitter.emit_inst("STX", &format!("${:02X}", addr));
+                    }
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "ForEach index variable must be in zero page".to_string(),
+                        ));
                     }
                 }
+            }
 
             // Load iterable[X] into A using indirect indexed: LDA (ptr),Y
             // Transfer X to Y for indexing
@@ -1206,6 +1233,7 @@ fn generate_field_assignment(
             .ok_or_else(|| CodegenError::SymbolNotFound(var_name.clone()))?;
 
         // Get the base address of the struct
+        let sym_is_param = sym.is_param;
         let base_addr = match sym.location {
             SymbolLocation::ZeroPage(addr) => addr as u16,
             SymbolLocation::Absolute(addr) => addr,
@@ -1253,11 +1281,8 @@ fn generate_field_assignment(
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
 
-        // Check if this is a parameter (pass-by-reference)
-        // Parameters are in the param region ($80-$BF)
-        let param_base = emitter.memory_layout.param_base;
-        let param_end = emitter.memory_layout.param_end;
-        let is_parameter = base_addr >= param_base as u16 && base_addr <= param_end as u16;
+        // Check if this is a parameter (pass-by-reference) via the explicit flag.
+        let is_parameter = sym_is_param;
 
         // Generate value expression (result in A, or A/Y for u16)
         generate_expr(value, emitter, info, string_collector)?;
@@ -1765,6 +1790,12 @@ fn substitute_asm_vars(
                         "{} has no memory location",
                         var_name
                     )));
+                }
+                crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                    return Err(CodegenError::Internal(
+                        "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                            .to_string(),
+                    ));
                 }
             };
 

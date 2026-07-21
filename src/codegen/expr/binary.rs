@@ -25,6 +25,25 @@ fn is_simple_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_) | Expr::Variable(_))
 }
 
+/// Does evaluating this expression involve a function call (direct or nested)?
+/// A call clobbers Y and the $F0 scratch pool, so a live left operand held there
+/// must instead be spilled across the call.
+fn contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } => true,
+        Expr::Binary { left, right, .. } => contains_call(&left.node) || contains_call(&right.node),
+        Expr::Unary { operand, .. } => contains_call(&operand.node),
+        Expr::Paren(inner) => contains_call(&inner.node),
+        Expr::Cast { expr: inner, .. } => contains_call(&inner.node),
+        Expr::Index { object, index } => contains_call(&object.node) || contains_call(&index.node),
+        Expr::Field { object, .. } => contains_call(&object.node),
+        Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner) => {
+            contains_call(&inner.node)
+        }
+        _ => false,
+    }
+}
+
 /// Check if a value is a power of 2, return the shift amount (exponent) if it is
 fn is_power_of_2(val: u64) -> Option<u8> {
     if val == 0 || (val & (val - 1)) != 0 {
@@ -144,26 +163,42 @@ pub(super) fn generate_binary(
     // Optimization: Avoid stack if left operand is simple (variable or literal)
     let use_stack = !is_simple_expr(&left.node);
 
-    // Allocate temp storage for u16 left operand save (if needed)
-    let left_save_addr = if use_stack && is_u16 {
+    // If the right operand contains a call, the fast left-operand saves (Y for u8,
+    // the $F0 pool for u16) would be clobbered by the JSR. In that case spill the
+    // left operand to the software stack instead — no hardware stack, and it nests
+    // correctly (LIFO) with the recursion frame saves in generate_call.
+    let right_has_call = contains_call(&right.node);
+
+    // Allocate temp storage for the u16 fast-path left-operand save (if needed)
+    let left_save_addr = if use_stack && is_u16 && !right_has_call {
         emitter.temp_alloc.alloc_high(2)
     } else {
         None
     };
 
-    if use_stack {
-        // Complex left expression: must save to memory for u16, or can use Y for u8
-        // For u16: BOTH bytes must be saved since right expr may overwrite A and Y
+    if use_stack && right_has_call {
+        // Right operand contains a call: spill the left operand across it.
+        let spill_size = if is_u16 { 2 } else { 1 };
 
-        // CRITICAL: If left is a function call, it may corrupt the parameter area.
-        // We need to save parameters so the right operand can still evaluate correctly.
-        // Use software stack to handle nested recursive calls properly.
-        let needs_param_save = matches!(left.node, Expr::Call { .. });
+        // 1. Generate left operand -> A (and Y if u16), then spill it.
+        generate_expr(left, emitter, info, string_collector)?;
+        emitter.spill_scalar(spill_size);
 
-        if needs_param_save {
-            // Push parameters to software stack (handles recursion correctly)
-            emitter.push_params();
+        // 2. Generate right operand -> A (and Y if u16).
+        generate_expr(right, emitter, info, string_collector)?;
+
+        // 3. Store right operand in TEMP (both bytes if u16).
+        let temp_reg = emitter.memory_layout.temp_reg();
+        emitter.emit_sta_zp(temp_reg);
+        if is_u16 {
+            emitter.emit_inst("STY", &format!("${:02X}", temp_reg + 1));
         }
+
+        // 4. Reload the left operand into A (and Y if u16).
+        emitter.reload_scalar(spill_size);
+    } else if use_stack {
+        // Complex left expression, call-free right operand: use the fast saves
+        // (Y for u8, the $F0 pool for u16).
 
         // 1. Generate left operand -> A (and Y if u16)
         generate_expr(left, emitter, info, string_collector)?;
@@ -179,14 +214,7 @@ pub(super) fn generate_binary(
             emitter.reg_state.transfer_a_to_y();
         }
 
-        // Restore parameters before evaluating right operand
-        if needs_param_save {
-            // Pop parameters from software stack
-            emitter.pop_params();
-        }
-
         // 3. Generate right operand -> A (and Y if u16)
-        // WARNING: This may overwrite ALL registers (e.g., function calls)
         generate_expr(right, emitter, info, string_collector)?;
 
         // 4. Store right operand in TEMP (both bytes if u16)
@@ -570,17 +598,17 @@ fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Mark that we need mul16 function
     emitter.needs_mul16 = true;
 
-    // mul16 expects parameters at $80-$83
-    // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80"); // Store low byte
-    emitter.emit_inst("STY", "$81"); // Store high byte
+    // mul16 expects parameters at $D9-$DC
+    // Store left operand (A:Y) to $D9-$DA
+    emitter.emit_inst("STA", "$D9"); // Store low byte
+    emitter.emit_inst("STY", "$DA"); // Store high byte
 
-    // Store right operand (TEMP:TEMP+1) to $82-$83
+    // Store right operand (TEMP:TEMP+1) to $DB-$DC
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
-    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("STA", "$DB");
     emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
-    emitter.emit_inst("STA", "$83");
+    emitter.emit_inst("STA", "$DC");
 
     // Call mul16
     emitter.emit_inst("JSR", "mul16");
@@ -655,17 +683,17 @@ fn generate_divide_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Mark that we need div16 function
     emitter.needs_div16 = true;
 
-    // div16 expects parameters at $80-$83
-    // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80"); // Store low byte
-    emitter.emit_inst("STY", "$81"); // Store high byte
+    // div16 expects parameters at $D9-$DC
+    // Store left operand (A:Y) to $D9-$DA
+    emitter.emit_inst("STA", "$D9"); // Store low byte
+    emitter.emit_inst("STY", "$DA"); // Store high byte
 
-    // Store right operand (TEMP:TEMP+1) to $82-$83
+    // Store right operand (TEMP:TEMP+1) to $DB-$DC
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
-    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("STA", "$DB");
     emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
-    emitter.emit_inst("STA", "$83");
+    emitter.emit_inst("STA", "$DC");
 
     // Call div16
     emitter.emit_inst("JSR", "div16");
@@ -732,17 +760,17 @@ fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Mark that we need mod16 function
     emitter.needs_mod16 = true;
 
-    // mod16 expects parameters at $80-$83
-    // Store left operand (A:Y) to $80-$81
-    emitter.emit_inst("STA", "$80"); // Store low byte
-    emitter.emit_inst("STY", "$81"); // Store high byte
+    // mod16 expects parameters at $D9-$DC
+    // Store left operand (A:Y) to $D9-$DA
+    emitter.emit_inst("STA", "$D9"); // Store low byte
+    emitter.emit_inst("STY", "$DA"); // Store high byte
 
-    // Store right operand (TEMP:TEMP+1) to $82-$83
+    // Store right operand (TEMP:TEMP+1) to $DB-$DC
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("LDA", &format!("${:02X}", temp)); // Load right.low
-    emitter.emit_inst("STA", "$82");
+    emitter.emit_inst("STA", "$DB");
     emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // Load right.high
-    emitter.emit_inst("STA", "$83");
+    emitter.emit_inst("STA", "$DC");
 
     // Call mod16
     emitter.emit_inst("JSR", "mod16");

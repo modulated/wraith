@@ -322,13 +322,14 @@ impl SemanticAnalyzer {
 
         // Track string variable accesses for caching optimization
         if matches!(info.ty, Type::String)
-            && let Some(func_name) = &self.current_function {
-                let func_counts = self
-                    .string_access_counts
-                    .entry(func_name.clone())
-                    .or_default();
-                *func_counts.entry(name.to_string()).or_insert(0) += 1;
-            }
+            && let Some(func_name) = &self.current_function
+        {
+            let func_counts = self
+                .string_access_counts
+                .entry(func_name.clone())
+                .or_default();
+            *func_counts.entry(name.to_string()).or_insert(0) += 1;
+        }
 
         Ok(info.ty)
     }
@@ -467,6 +468,15 @@ impl SemanticAnalyzer {
 
         // Track function call for unused function detection
         self.called_functions.insert(function.node.clone());
+
+        // Record a call-graph edge (caller -> callee) for frame coloring and
+        // recursion detection. Covers direct and inline calls alike.
+        if let Some(caller) = &self.current_function {
+            self.call_edges
+                .entry(caller.clone())
+                .or_default()
+                .insert(function.node.clone());
+        }
 
         // Verify function signature: check that it's a function and get param/return types
         let (param_types, ret_type) = if let Some(info) = self.table.lookup(&function.node) {
@@ -935,7 +945,8 @@ impl SemanticAnalyzer {
                             return Err(SemaError::Custom {
                                 message: format!(
                                     "string slice end ({}) exceeds string length ({})",
-                                    actual_end, s.len()
+                                    actual_end,
+                                    s.len()
                                 ),
                                 span: end.span,
                             });

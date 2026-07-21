@@ -22,6 +22,17 @@
 //! $FF:                Software stack pointer
 //! ```
 
+/// Frame region: per-function frames (parameters + locals) are allocated here,
+/// colored by the call graph so functions that cannot be simultaneously active
+/// share addresses. Replaces the old split of $40-$7F locals / $80-$BF params.
+pub const FRAME_REGION_START: u8 = 0x40;
+/// Last byte usable by frames. $D0+ is reserved for math scratch/params.
+pub const FRAME_REGION_END: u8 = 0xCF;
+/// Base address for mul16/div16/mod16 call parameters, moved out of the former
+/// $80-$83 param region (which now belongs to the frame region) into $D9-$DC,
+/// adjacent to the $D0-$D8 math working storage.
+pub const MATH_PARAM_BASE: u8 = 0xD9;
+
 /// Memory layout configuration for 6502 code generation
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {

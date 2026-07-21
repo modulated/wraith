@@ -13,8 +13,8 @@ use crate::ast::SourceFile;
 use crate::sema::ProgramInfo;
 use emitter::Emitter;
 use item::generate_item;
-use section_allocator::SectionAllocator;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use section_allocator::SectionAllocator;
 
 /// Controls the verbosity level of generated assembly comments
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +35,8 @@ pub enum CodegenError {
     SymbolNotFound(String),
     SectionError(String),
     AddressConflict(String),
+    /// An internal compiler invariant was violated (a bug in the compiler, not the input).
+    Internal(String),
 }
 
 impl std::fmt::Display for CodegenError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for CodegenError {
             CodegenError::SymbolNotFound(name) => write!(f, "undefined symbol '{}'", name),
             CodegenError::SectionError(msg) => write!(f, "section error: {}", msg),
             CodegenError::AddressConflict(msg) => write!(f, "{}", msg),
+            CodegenError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
         }
     }
 }
@@ -89,27 +92,31 @@ impl StringCollector {
 
     /// Register a string using a global pool for cross-module deduplication
     /// Returns the label from the global pool, or creates a new one
-    pub fn add_string_with_pool(&mut self, content: String, global_pool: &mut HashMap<String, String>) -> String {
+    pub fn add_string_with_pool(
+        &mut self,
+        content: String,
+        global_pool: &mut HashMap<String, String>,
+    ) -> String {
         // First check local cache
         if let Some(label) = self.strings.get(&content) {
             return label.clone();
         }
-        
+
         // Check global pool
         if let Some(label) = global_pool.get(&content) {
             // Add to local cache for future lookups
             self.strings.insert(content, label.clone());
             return label.clone();
         }
-        
+
         // Create new label using content-based hashing
         let label = generate_string_label(&content, self.next_id);
         self.next_id += 1;
-        
+
         // Add to both local and global pools
         self.strings.insert(content.clone(), label.clone());
         global_pool.insert(content, label.clone());
-        
+
         label
     }
 
@@ -119,7 +126,8 @@ impl StringCollector {
             if content.len() > 255 {
                 return Err(format!(
                     "String literal '{}' exceeds 256 byte limit: {} bytes",
-                    label, content.len()
+                    label,
+                    content.len()
                 ));
             }
         }
@@ -160,10 +168,7 @@ impl StringCollector {
 
             // Emit length as u8 (single byte, max 255)
             let len = content_len as u8;
-            emitter.emit_raw(&format!(
-                "    .BYTE ${:02X}  ; length = {}",
-                len, len
-            ));
+            emitter.emit_raw(&format!("    .BYTE ${:02X}  ; length = {}", len, len));
 
             // Emit string bytes
             if !content.is_empty() {
@@ -221,12 +226,12 @@ impl StringCollector {
 fn generate_string_label(content: &str, _counter: usize) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     // Use a simple hash of the content for the label
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     let hash = hasher.finish();
-    
+
     // Use first 8 hex digits of hash for the label
     format!("str_{:08x}", hash)
 }
@@ -251,7 +256,7 @@ fn emit_stdlib_math_functions(
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mul16");
-        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
         emitter.emit_comment("  Returns: u16 in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("mul16");
@@ -262,13 +267,13 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    LDA #$00");
         emitter.emit_raw("    STA $D2"); // result_low at $D2
         emitter.emit_raw("    STA $D3"); // result_high at $D3
-        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    LDA $D9");
         emitter.emit_raw("    STA $D0"); // param_a_low at $D0
-        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    LDA $DA");
         emitter.emit_raw("    STA $D1"); // param_a_high at $D1
-        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    LDA $DB");
         emitter.emit_raw("    STA $D4"); // param_b_low at $D4
-        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    LDA $DC");
         emitter.emit_raw("    STA $D5"); // param_b_high at $D5
         emitter.emit_raw("    LDX #$10");
         emitter.emit_raw("    STX $D6"); // loop_counter at $D6
@@ -301,7 +306,7 @@ fn emit_stdlib_math_functions(
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: div16");
-        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
         emitter.emit_comment("  Returns: u16 in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("div16");
@@ -311,8 +316,8 @@ fn emit_stdlib_math_functions(
         //               $D6-$D7 remainder, $D8 loop counter
 
         // Zero check - return 0xFFFF for division by zero
-        emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    ORA $83");
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    ORA $DC");
         emitter.emit_raw("    BNE div16_not_zero");
         emitter.emit_raw("    LDA #$FF");
         emitter.emit_raw("    TAY");
@@ -327,15 +332,15 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    STA $D7"); // remainder_high
 
         // Copy dividend to working storage
-        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    LDA $D9");
         emitter.emit_raw("    STA $D0"); // dividend_low
-        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    LDA $DA");
         emitter.emit_raw("    STA $D1"); // dividend_high
 
         // Copy divisor to working storage
-        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    LDA $DB");
         emitter.emit_raw("    STA $D2"); // divisor_low
-        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    LDA $DC");
         emitter.emit_raw("    STA $D3"); // divisor_high
 
         // Loop counter = 16
@@ -393,7 +398,7 @@ fn emit_stdlib_math_functions(
             .map_err(CodegenError::SectionError)?;
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mod16");
-        emitter.emit_comment("  Params: a: u16 in $80-$81, b: u16 in $82-$83");
+        emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
         emitter.emit_comment("  Returns: u16 remainder in A/Y (low/high)");
         emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
         emitter.emit_label("mod16");
@@ -403,8 +408,8 @@ fn emit_stdlib_math_functions(
         //               $D6-$D7 remainder, $D8 loop counter
 
         // Zero check - return 0xFFFF for modulo by zero
-        emitter.emit_raw("    LDA $82");
-        emitter.emit_raw("    ORA $83");
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    ORA $DC");
         emitter.emit_raw("    BNE mod16_not_zero");
         emitter.emit_raw("    LDA #$FF");
         emitter.emit_raw("    TAY");
@@ -419,15 +424,15 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    STA $D7"); // remainder_high
 
         // Copy dividend to working storage
-        emitter.emit_raw("    LDA $80");
+        emitter.emit_raw("    LDA $D9");
         emitter.emit_raw("    STA $D0"); // dividend_low
-        emitter.emit_raw("    LDA $81");
+        emitter.emit_raw("    LDA $DA");
         emitter.emit_raw("    STA $D1"); // dividend_high
 
         // Copy divisor to working storage
-        emitter.emit_raw("    LDA $82");
+        emitter.emit_raw("    LDA $DB");
         emitter.emit_raw("    STA $D2"); // divisor_low
-        emitter.emit_raw("    LDA $83");
+        emitter.emit_raw("    LDA $DC");
         emitter.emit_raw("    STA $D3"); // divisor_high
 
         // Loop counter = 16
@@ -488,7 +493,7 @@ pub fn generate(
     verbosity: CommentVerbosity,
 ) -> Result<(String, SectionAllocator), CodegenError> {
     use crate::sema::table::{SymbolKind, SymbolLocation};
-use rustc_hash::FxHashMap as HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     let mut emitter = Emitter::new(verbosity);
     let mut section_alloc = SectionAllocator::default();

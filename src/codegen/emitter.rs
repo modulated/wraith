@@ -2,9 +2,9 @@
 //!
 //! Helper for generating formatted 6502 assembly code.
 
+use super::CommentVerbosity;
 use super::memory_layout::{MemoryLayout, TempAllocator};
 use super::regstate::{RegisterState, RegisterValue};
-use super::CommentVerbosity;
 
 /// Loop context for break/continue statements
 #[derive(Debug, Clone)]
@@ -500,55 +500,90 @@ impl Emitter {
     // SOFTWARE STACK FOR PARAMETER PRESERVATION IN RECURSION
     // ========================================================================
 
-    /// Push parameter area ($80-$87, 8 bytes) to software stack
-    /// Stack grows upward from $0200, pointer at $FF (zero-page)
-    /// After push, $FF is incremented by 8
-    pub fn push_params(&mut self) {
-        let param_base = self.memory_layout.param_base;
-
-        // X will be used as index for the push loop
-        // Load stack pointer into X
+    /// Spill a live scalar onto the software stack so it survives evaluation of a
+    /// sub-expression that contains a call. `size` is 1 (value in A) or 2 (low in
+    /// A, high in Y). This uses the software stack ($0200/$FF), NOT the 6502
+    /// hardware stack, and nests correctly (LIFO) with `push_frame`. Clobbers X;
+    /// A/Y are preserved.
+    pub fn spill_scalar(&mut self, size: u8) {
         self.emit_inst("LDX", "$FF");
-
-        // Push all 8 parameter bytes
-        for i in 0..8u8 {
-            self.emit_inst("LDA", &format!("${:02X}", param_base + i));
+        self.emit_inst("STA", "$0200,X"); // low byte / u8 value
+        if size >= 2 {
+            self.emit_inst("INX", "");
+            self.emit_inst("TYA", ""); // A = high byte
             self.emit_inst("STA", "$0200,X");
-            if i < 7 {
-                self.emit_inst("INX", "");
-            }
         }
-
-        // Increment stack pointer by 8
-        self.emit_inst("INX", ""); // One more to point to next free spot
+        self.emit_inst("INX", "");
         self.emit_inst("STX", "$FF");
-
-        // Invalidate register state after stack operations
+        // A/Y are not relied upon after a spill (the caller reloads later).
         self.reg_state.invalidate_all();
     }
 
-    /// Pop parameter area from software stack back to $80-$87
-    /// Decrements stack pointer by 8, then loads 8 bytes
-    pub fn pop_params(&mut self) {
-        let param_base = self.memory_layout.param_base;
-
-        // Decrement stack pointer by 8
+    /// Reload a scalar previously saved by [`spill_scalar`] into A (and Y if
+    /// `size` == 2). Clobbers X.
+    pub fn reload_scalar(&mut self, size: u8) {
         self.emit_inst("LDX", "$FF");
-        for _ in 0..8 {
+        for _ in 0..size {
+            self.emit_inst("DEX", "");
+        }
+        self.emit_inst("STX", "$FF");
+        if size >= 2 {
+            // High byte was stored second (at higher offset), low byte first.
+            self.emit_inst("LDA", "$0201,X");
+            self.emit_inst("TAY", "");
+            self.emit_inst("LDA", "$0200,X");
+        } else {
+            self.emit_inst("LDA", "$0200,X");
+        }
+        self.reg_state.invalidate_all();
+    }
+
+    /// Push `size` bytes of a function frame (starting at `base`) to the software
+    /// stack. The stack grows upward from $0200 with its pointer in $FF. Used to
+    /// preserve a callee's frame across a recursive call so re-entry cannot
+    /// destroy the values the caller still needs. Clobbers A and X.
+    pub fn push_frame(&mut self, base: u8, size: u8) {
+        if size == 0 {
+            return;
+        }
+        // Load stack pointer into X, then push `size` bytes.
+        self.emit_inst("LDX", "$FF");
+        for i in 0..size {
+            self.emit_inst("LDA", &format!("${:02X}", base + i));
+            self.emit_inst("STA", "$0200,X");
+            if i + 1 < size {
+                self.emit_inst("INX", "");
+            }
+        }
+        // Advance the stack pointer past the pushed block.
+        self.emit_inst("INX", "");
+        self.emit_inst("STX", "$FF");
+
+        self.reg_state.invalidate_all();
+    }
+
+    /// Pop `size` bytes previously pushed by [`push_frame`] back to `base`.
+    /// Clobbers A and X (callers must preserve any live return value first).
+    pub fn pop_frame(&mut self, base: u8, size: u8) {
+        if size == 0 {
+            return;
+        }
+        // Rewind the stack pointer by `size`.
+        self.emit_inst("LDX", "$FF");
+        for _ in 0..size {
             self.emit_inst("DEX", "");
         }
         self.emit_inst("STX", "$FF");
 
-        // Pop all 8 parameter bytes
-        for i in 0..8u8 {
+        // Restore the frame bytes.
+        for i in 0..size {
             self.emit_inst("LDA", "$0200,X");
-            self.emit_inst("STA", &format!("${:02X}", param_base + i));
-            if i < 7 {
+            self.emit_inst("STA", &format!("${:02X}", base + i));
+            if i + 1 < size {
                 self.emit_inst("INX", "");
             }
         }
 
-        // Invalidate register state after stack operations
         self.reg_state.invalidate_all();
     }
 }

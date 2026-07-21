@@ -10,9 +10,9 @@
 
 use crate::ast::{Expr, Span};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
+use crate::sema::ProgramInfo;
 use crate::sema::table::SymbolLocation;
 use crate::sema::types::Type;
-use crate::sema::ProgramInfo;
 
 /// Generate code for literal values
 ///
@@ -266,6 +266,12 @@ pub(super) fn generate_variable(
         let is_pointer_like = matches!(sym.ty, Type::Array(..) | Type::String) || is_enum;
 
         match sym.location {
+            SymbolLocation::FrameOffset(_) => {
+                return Err(CodegenError::Internal(
+                    "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                        .to_string(),
+                ));
+            }
             SymbolLocation::Absolute(_addr) => {
                 // Check if this is an address declaration - use symbolic name
                 if sym.kind == SymbolKind::Address {
