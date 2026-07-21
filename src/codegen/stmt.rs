@@ -235,6 +235,12 @@ pub fn generate_stmt(
                     matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
 
                 match sym.location {
+                    crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                        return Err(CodegenError::Internal(
+                            "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                                .to_string(),
+                        ));
+                    }
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
                         // Check if this is an address declaration - use symbolic name
                         if sym.kind == SymbolKind::Address {
@@ -439,6 +445,12 @@ pub fn generate_stmt(
                         let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
 
                         match sym.location {
+                            crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                                return Err(CodegenError::Internal(
+                                    "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                                        .to_string(),
+                                ));
+                            }
                             crate::sema::table::SymbolLocation::Absolute(addr) => {
                                 // Check if this is an address declaration - use symbolic name
                                 if sym.kind == SymbolKind::Address {
@@ -1767,6 +1779,12 @@ fn substitute_asm_vars(
                         "{} has no memory location",
                         var_name
                     )));
+                }
+                crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                    return Err(CodegenError::Internal(
+                        "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                            .to_string(),
+                    ));
                 }
             };
 

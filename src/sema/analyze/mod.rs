@@ -349,6 +349,7 @@ impl SemanticAnalyzer {
                     access_mode: None,
                     is_pub: false, // Function parameters are never public
                     containing_function: self.current_function.clone(),
+                    is_param: true,
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Add to resolved_symbols so codegen (especially inline asm) can find it

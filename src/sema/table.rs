@@ -21,6 +21,11 @@ pub enum SymbolLocation {
     ZeroPage(u8),
     Absolute(u16),
     None, // For types or compile-time constants
+    /// Offset within the enclosing function's frame, assigned during analysis.
+    /// The `finalize_frames` pass rewrites every `FrameOffset` into a concrete
+    /// `ZeroPage(frame_base + offset)` before code generation. Encountering a
+    /// `FrameOffset` in codegen is an internal error (frame finalization was skipped).
+    FrameOffset(u8),
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +41,10 @@ pub struct SymbolInfo {
     pub is_pub: bool,
     /// The function this symbol is defined in (None for global symbols)
     pub containing_function: Option<String>,
+    /// True if this symbol is a function parameter (distinguishes params from
+    /// locals now that both live in the function frame). Replaces the old
+    /// address-range test that assumed parameters occupied $80-$BF.
+    pub is_param: bool,
 }
 
 #[derive(Debug, Clone)]

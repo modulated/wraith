@@ -243,6 +243,7 @@ impl SemanticAnalyzer {
             access_mode: None,
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
+            is_param: false,
         };
         self.table.insert(name.node.clone(), info.clone());
         // Also add to resolved_symbols so codegen can find it
@@ -386,6 +387,7 @@ impl SemanticAnalyzer {
             access_mode: None,
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
+            is_param: false,
         };
         self.table.insert(var_name.node.clone(), info);
 
@@ -460,6 +462,7 @@ impl SemanticAnalyzer {
                 access_mode: None,
                 is_pub: false,
                 containing_function: self.current_function.clone(),
+                is_param: false,
             };
             self.table.insert(idx_var.node.clone(), idx_info.clone());
             self.resolved_symbols.insert(idx_var.span, idx_info);
@@ -484,6 +487,7 @@ impl SemanticAnalyzer {
             access_mode: None,
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
+            is_param: false,
         };
         self.table.insert(var_name.node.clone(), info.clone());
         // Add to resolved_symbols so codegen can find it
@@ -583,6 +587,7 @@ impl SemanticAnalyzer {
                                         access_mode: None,
                                         is_pub: false, // Pattern bindings are never public
                                         containing_function: self.current_function.clone(),
+                                        is_param: false,
                                     };
                                     self.table.insert(binding.name.node.clone(), info.clone());
                                     // Also add to resolved_symbols so codegen can find it
@@ -608,6 +613,7 @@ impl SemanticAnalyzer {
                     access_mode: None,
                     is_pub: false, // Pattern bindings are never public
                     containing_function: self.current_function.clone(),
+                    is_param: false,
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Also add to resolved_symbols so codegen can find it

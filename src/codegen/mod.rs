@@ -35,6 +35,8 @@ pub enum CodegenError {
     SymbolNotFound(String),
     SectionError(String),
     AddressConflict(String),
+    /// An internal compiler invariant was violated (a bug in the compiler, not the input).
+    Internal(String),
 }
 
 impl std::fmt::Display for CodegenError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for CodegenError {
             CodegenError::SymbolNotFound(name) => write!(f, "undefined symbol '{}'", name),
             CodegenError::SectionError(msg) => write!(f, "section error: {}", msg),
             CodegenError::AddressConflict(msg) => write!(f, "{}", msg),
+            CodegenError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
         }
     }
 }
