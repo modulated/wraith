@@ -13,8 +13,8 @@ use crate::ast::SourceFile;
 use crate::sema::ProgramInfo;
 use emitter::Emitter;
 use item::generate_item;
-use section_allocator::SectionAllocator;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use section_allocator::SectionAllocator;
 
 /// Controls the verbosity level of generated assembly comments
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,27 +89,31 @@ impl StringCollector {
 
     /// Register a string using a global pool for cross-module deduplication
     /// Returns the label from the global pool, or creates a new one
-    pub fn add_string_with_pool(&mut self, content: String, global_pool: &mut HashMap<String, String>) -> String {
+    pub fn add_string_with_pool(
+        &mut self,
+        content: String,
+        global_pool: &mut HashMap<String, String>,
+    ) -> String {
         // First check local cache
         if let Some(label) = self.strings.get(&content) {
             return label.clone();
         }
-        
+
         // Check global pool
         if let Some(label) = global_pool.get(&content) {
             // Add to local cache for future lookups
             self.strings.insert(content, label.clone());
             return label.clone();
         }
-        
+
         // Create new label using content-based hashing
         let label = generate_string_label(&content, self.next_id);
         self.next_id += 1;
-        
+
         // Add to both local and global pools
         self.strings.insert(content.clone(), label.clone());
         global_pool.insert(content, label.clone());
-        
+
         label
     }
 
@@ -119,7 +123,8 @@ impl StringCollector {
             if content.len() > 255 {
                 return Err(format!(
                     "String literal '{}' exceeds 256 byte limit: {} bytes",
-                    label, content.len()
+                    label,
+                    content.len()
                 ));
             }
         }
@@ -160,10 +165,7 @@ impl StringCollector {
 
             // Emit length as u8 (single byte, max 255)
             let len = content_len as u8;
-            emitter.emit_raw(&format!(
-                "    .BYTE ${:02X}  ; length = {}",
-                len, len
-            ));
+            emitter.emit_raw(&format!("    .BYTE ${:02X}  ; length = {}", len, len));
 
             // Emit string bytes
             if !content.is_empty() {
@@ -221,12 +223,12 @@ impl StringCollector {
 fn generate_string_label(content: &str, _counter: usize) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     // Use a simple hash of the content for the label
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     let hash = hasher.finish();
-    
+
     // Use first 8 hex digits of hash for the label
     format!("str_{:08x}", hash)
 }
@@ -488,7 +490,7 @@ pub fn generate(
     verbosity: CommentVerbosity,
 ) -> Result<(String, SectionAllocator), CodegenError> {
     use crate::sema::table::{SymbolKind, SymbolLocation};
-use rustc_hash::FxHashMap as HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     let mut emitter = Emitter::new(verbosity);
     let mut section_alloc = SectionAllocator::default();

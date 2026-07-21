@@ -348,13 +348,14 @@ fn generate_function(
         emitter.emit_comment("Initialize string pointer cache");
         for (var_name, cache_addr) in &metadata.string_cache {
             // Look up the parameter in resolved_symbols
-            let location_opt = info.resolved_symbols.iter()
+            let location_opt = info
+                .resolved_symbols
+                .iter()
                 .find(|(_, sym)| {
-                    sym.name == *var_name 
-                    && sym.containing_function.as_ref() == Some(name)
+                    sym.name == *var_name && sym.containing_function.as_ref() == Some(name)
                 })
                 .map(|(_, sym)| sym.location.clone());
-            
+
             if let Some(location) = location_opt {
                 match location {
                     crate::sema::table::SymbolLocation::ZeroPage(var_addr) => {
@@ -429,7 +430,7 @@ fn generate_static(
         if matches!(stat.ty.node, TypeExpr::Array { .. }) {
             return emit_const_array(stat, emitter, info, string_collector);
         }
-        
+
         // Handle const strings - register folded constants with string collector
         if matches!(&stat.ty.node, TypeExpr::Named(name) if name == "str") {
             // Check if the init expression was folded to a string constant
@@ -438,12 +439,14 @@ fn generate_static(
                     // Register the string so it gets emitted to the data section
                     string_collector.add_string(s.clone());
                 }
-            } else if let crate::ast::Expr::Literal(crate::ast::Literal::String(s)) = &stat.init.node {
+            } else if let crate::ast::Expr::Literal(crate::ast::Literal::String(s)) =
+                &stat.init.node
+            {
                 // Direct string literal - register it
                 string_collector.add_string(s.clone());
             }
         }
-        
+
         // Skip code generation for other const (non-mutable) statics
         // They are compile-time constants that get folded into the code
         return Ok(());

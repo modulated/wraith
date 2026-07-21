@@ -1,4 +1,4 @@
-use wraith::codegen::{generate, CommentVerbosity};
+use wraith::codegen::{CommentVerbosity, generate};
 use wraith::lex;
 use wraith::parser::Parser;
 use wraith::sema::analyze;

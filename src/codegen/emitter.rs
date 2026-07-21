@@ -2,9 +2,9 @@
 //!
 //! Helper for generating formatted 6502 assembly code.
 
+use super::CommentVerbosity;
 use super::memory_layout::{MemoryLayout, TempAllocator};
 use super::regstate::{RegisterState, RegisterValue};
-use super::CommentVerbosity;
 
 /// Loop context for break/continue statements
 #[derive(Debug, Clone)]

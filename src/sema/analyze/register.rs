@@ -7,7 +7,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 
 use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Spanned};
-use crate::sema::const_eval::{eval_const_expr_with_env, ConstValue};
+use crate::sema::const_eval::{ConstValue, eval_const_expr_with_env};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation};
 use crate::sema::type_defs::{EnumDef, FieldInfo, StructDef, VariantData, VariantInfo};
 use crate::sema::types::Type;

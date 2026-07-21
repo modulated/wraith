@@ -231,7 +231,8 @@ pub fn generate_stmt(
 
                 // Arrays, enums, and strings store address in A (low) and X (high)
                 // Other u16 types store in A (low) and Y (high)
-                let is_array_or_enum = matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
+                let is_array_or_enum =
+                    matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
@@ -542,7 +543,7 @@ pub fn generate_stmt(
             // else:
             //   else_body
             // end:
-            
+
             if !emitter.is_minimal() {
                 emitter.emit_comment("Branch to then if condition is true");
             }
@@ -585,7 +586,7 @@ pub fn generate_stmt(
             //
             // The BNE only needs to jump 3 bytes forward (past the JMP),
             // so it's always within the 127-byte limit regardless of body size.
-            
+
             // Condition check
             emitter.emit_label(&check_label);
             generate_expr(condition, emitter, info, string_collector)?;
@@ -823,19 +824,20 @@ pub fn generate_stmt(
 
             // Store index in index variable if present
             if let Some(idx_var) = index_var
-                && let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span) {
-                    match idx_sym.location {
-                        crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                            emitter.emit_comment(&format!("Store index in {}", idx_var.node));
-                            emitter.emit_inst("STX", &format!("${:02X}", addr));
-                        }
-                        _ => {
-                            return Err(CodegenError::UnsupportedOperation(
-                                "ForEach index variable must be in zero page".to_string(),
-                            ));
-                        }
+                && let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span)
+            {
+                match idx_sym.location {
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                        emitter.emit_comment(&format!("Store index in {}", idx_var.node));
+                        emitter.emit_inst("STX", &format!("${:02X}", addr));
+                    }
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "ForEach index variable must be in zero page".to_string(),
+                        ));
                     }
                 }
+            }
 
             // Load iterable[X] into A using indirect indexed: LDA (ptr),Y
             // Transfer X to Y for indexing

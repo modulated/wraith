@@ -3,8 +3,8 @@
 use crate::ast::{BinaryOp, Expr, FieldInit, Literal, Spanned, TypeExpr, UnaryOp, VariantData};
 use crate::lexer::Token;
 
-use super::error::{ParseError, ParseResult};
 use super::Parser;
+use super::error::{ParseError, ParseResult};
 
 impl Parser<'_> {
     /// Parse an expression

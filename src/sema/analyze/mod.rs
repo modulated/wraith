@@ -268,8 +268,7 @@ impl SemanticAnalyzer {
             // Each parameter gets sequential bytes (16-bit params take 2 bytes)
             let layout = MemoryLayout::new();
             let mut byte_offset = 0u8;
-            let mut struct_param_locals: HashMap<String, u8> =
-                HashMap::default();
+            let mut struct_param_locals: HashMap<String, u8> = HashMap::default();
 
             for param in func.params.iter() {
                 let name = param.name.node.clone();
@@ -411,7 +410,8 @@ impl SemanticAnalyzer {
         };
 
         // Get parameter names from metadata
-        let param_names = self.function_metadata
+        let param_names = self
+            .function_metadata
             .get(func_name)
             .map(|m| m.param_names.clone())
             .unwrap_or_default();
@@ -448,9 +448,10 @@ impl SemanticAnalyzer {
 
         // Store cache info in function metadata
         if !cache_map.is_empty()
-            && let Some(metadata) = self.function_metadata.get_mut(func_name) {
-                metadata.string_cache = cache_map;
-            }
+            && let Some(metadata) = self.function_metadata.get_mut(func_name)
+        {
+            metadata.string_cache = cache_map;
+        }
 
         // Clear access counts for this function to free memory
         self.string_access_counts.remove(func_name);

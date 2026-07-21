@@ -10,9 +10,9 @@
 
 use crate::ast::{Expr, Span};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
+use crate::sema::ProgramInfo;
 use crate::sema::table::SymbolLocation;
 use crate::sema::types::Type;
-use crate::sema::ProgramInfo;
 
 /// Generate code for literal values
 ///

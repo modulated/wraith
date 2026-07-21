@@ -322,13 +322,14 @@ impl SemanticAnalyzer {
 
         // Track string variable accesses for caching optimization
         if matches!(info.ty, Type::String)
-            && let Some(func_name) = &self.current_function {
-                let func_counts = self
-                    .string_access_counts
-                    .entry(func_name.clone())
-                    .or_default();
-                *func_counts.entry(name.to_string()).or_insert(0) += 1;
-            }
+            && let Some(func_name) = &self.current_function
+        {
+            let func_counts = self
+                .string_access_counts
+                .entry(func_name.clone())
+                .or_default();
+            *func_counts.entry(name.to_string()).or_insert(0) += 1;
+        }
 
         Ok(info.ty)
     }
@@ -935,7 +936,8 @@ impl SemanticAnalyzer {
                             return Err(SemaError::Custom {
                                 message: format!(
                                     "string slice end ({}) exceeds string length ({})",
-                                    actual_end, s.len()
+                                    actual_end,
+                                    s.len()
                                 ),
                                 span: end.span,
                             });
