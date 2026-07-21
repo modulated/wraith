@@ -25,6 +25,25 @@ fn is_simple_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_) | Expr::Variable(_))
 }
 
+/// Does evaluating this expression involve a function call (direct or nested)?
+/// A call clobbers Y and the $F0 scratch pool, so a live left operand held there
+/// must instead be spilled across the call.
+fn contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } => true,
+        Expr::Binary { left, right, .. } => contains_call(&left.node) || contains_call(&right.node),
+        Expr::Unary { operand, .. } => contains_call(&operand.node),
+        Expr::Paren(inner) => contains_call(&inner.node),
+        Expr::Cast { expr: inner, .. } => contains_call(&inner.node),
+        Expr::Index { object, index } => contains_call(&object.node) || contains_call(&index.node),
+        Expr::Field { object, .. } => contains_call(&object.node),
+        Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner) => {
+            contains_call(&inner.node)
+        }
+        _ => false,
+    }
+}
+
 /// Check if a value is a power of 2, return the shift amount (exponent) if it is
 fn is_power_of_2(val: u64) -> Option<u8> {
     if val == 0 || (val & (val - 1)) != 0 {
@@ -144,22 +163,42 @@ pub(super) fn generate_binary(
     // Optimization: Avoid stack if left operand is simple (variable or literal)
     let use_stack = !is_simple_expr(&left.node);
 
-    // Allocate temp storage for u16 left operand save (if needed)
-    let left_save_addr = if use_stack && is_u16 {
+    // If the right operand contains a call, the fast left-operand saves (Y for u8,
+    // the $F0 pool for u16) would be clobbered by the JSR. In that case spill the
+    // left operand to the software stack instead — no hardware stack, and it nests
+    // correctly (LIFO) with the recursion frame saves in generate_call.
+    let right_has_call = contains_call(&right.node);
+
+    // Allocate temp storage for the u16 fast-path left-operand save (if needed)
+    let left_save_addr = if use_stack && is_u16 && !right_has_call {
         emitter.temp_alloc.alloc_high(2)
     } else {
         None
     };
 
-    if use_stack {
-        // Complex left expression: must save to memory for u16, or can use Y for u8
-        // For u16: BOTH bytes must be saved since right expr may overwrite A and Y
-        //
-        // Note: with static frame allocation, a callee never clobbers the caller's
-        // frame (params/locals), so the old param push/pop around a left-operand
-        // call is unnecessary. Recursive calls save/restore their own frame in
-        // generate_call. (The remaining left-in-Y/$F0 save is hardened against a
-        // right-operand call by the frame-temp save below.)
+    if use_stack && right_has_call {
+        // Right operand contains a call: spill the left operand across it.
+        let spill_size = if is_u16 { 2 } else { 1 };
+
+        // 1. Generate left operand -> A (and Y if u16), then spill it.
+        generate_expr(left, emitter, info, string_collector)?;
+        emitter.spill_scalar(spill_size);
+
+        // 2. Generate right operand -> A (and Y if u16).
+        generate_expr(right, emitter, info, string_collector)?;
+
+        // 3. Store right operand in TEMP (both bytes if u16).
+        let temp_reg = emitter.memory_layout.temp_reg();
+        emitter.emit_sta_zp(temp_reg);
+        if is_u16 {
+            emitter.emit_inst("STY", &format!("${:02X}", temp_reg + 1));
+        }
+
+        // 4. Reload the left operand into A (and Y if u16).
+        emitter.reload_scalar(spill_size);
+    } else if use_stack {
+        // Complex left expression, call-free right operand: use the fast saves
+        // (Y for u8, the $F0 pool for u16).
 
         // 1. Generate left operand -> A (and Y if u16)
         generate_expr(left, emitter, info, string_collector)?;
@@ -176,7 +215,6 @@ pub(super) fn generate_binary(
         }
 
         // 3. Generate right operand -> A (and Y if u16)
-        // WARNING: This may overwrite ALL registers (e.g., function calls)
         generate_expr(right, emitter, info, string_collector)?;
 
         // 4. Store right operand in TEMP (both bytes if u16)

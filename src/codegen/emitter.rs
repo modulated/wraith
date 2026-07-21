@@ -500,6 +500,44 @@ impl Emitter {
     // SOFTWARE STACK FOR PARAMETER PRESERVATION IN RECURSION
     // ========================================================================
 
+    /// Spill a live scalar onto the software stack so it survives evaluation of a
+    /// sub-expression that contains a call. `size` is 1 (value in A) or 2 (low in
+    /// A, high in Y). This uses the software stack ($0200/$FF), NOT the 6502
+    /// hardware stack, and nests correctly (LIFO) with `push_frame`. Clobbers X;
+    /// A/Y are preserved.
+    pub fn spill_scalar(&mut self, size: u8) {
+        self.emit_inst("LDX", "$FF");
+        self.emit_inst("STA", "$0200,X"); // low byte / u8 value
+        if size >= 2 {
+            self.emit_inst("INX", "");
+            self.emit_inst("TYA", ""); // A = high byte
+            self.emit_inst("STA", "$0200,X");
+        }
+        self.emit_inst("INX", "");
+        self.emit_inst("STX", "$FF");
+        // A/Y are not relied upon after a spill (the caller reloads later).
+        self.reg_state.invalidate_all();
+    }
+
+    /// Reload a scalar previously saved by [`spill_scalar`] into A (and Y if
+    /// `size` == 2). Clobbers X.
+    pub fn reload_scalar(&mut self, size: u8) {
+        self.emit_inst("LDX", "$FF");
+        for _ in 0..size {
+            self.emit_inst("DEX", "");
+        }
+        self.emit_inst("STX", "$FF");
+        if size >= 2 {
+            // High byte was stored second (at higher offset), low byte first.
+            self.emit_inst("LDA", "$0201,X");
+            self.emit_inst("TAY", "");
+            self.emit_inst("LDA", "$0200,X");
+        } else {
+            self.emit_inst("LDA", "$0200,X");
+        }
+        self.reg_state.invalidate_all();
+    }
+
     /// Push `size` bytes of a function frame (starting at `base`) to the software
     /// stack. The stack grows upward from $0200 with its pointer in $FF. Used to
     /// preserve a callee's frame across a recursive call so re-entry cannot
