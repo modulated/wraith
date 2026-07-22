@@ -342,9 +342,10 @@ pub fn swap_nibbles(value: u8) -> u8 {
 /// Returns: a * b (lower 16 bits if result overflows)
 /// Note: Uses zero page $20-$27 for temporary storage
 ///
-/// Memory map (parameters):
-/// $80-$81: parameter a (multiplicand)
-/// $82-$83: parameter b (multiplier)
+/// Parameters a and b are read via {a}/{b} substitution, which resolves to
+/// each parameter's actual zero-page frame slot (assigned by the compiler's
+/// call-graph frame allocator) rather than a fixed address - the same
+/// convention used throughout this file (see min/max above).
 ///
 /// Memory map (working):
 /// $20-$21: multiplicand (shifted left each iteration)
@@ -358,16 +359,16 @@ pub fn mul16(a: u16, b: u16) -> u16 {
         "STA $22",
         "STA $23",
 
-        // Load multiplicand from parameter a ($80-$81) into $20-$21
-        "LDA $80",      // a.low
+        // Load multiplicand from parameter a into $20-$21
+        "LDA {a}",      // a.low
         "STA $20",
-        "LDA $81",      // a.high
+        "LDA {a}+1",    // a.high
         "STA $21",
 
-        // Load multiplier from parameter b ($82-$83) into $24-$25
-        "LDA $82",      // b.low
+        // Load multiplier from parameter b into $24-$25
+        "LDA {b}",      // b.low
         "STA $24",
-        "LDA $83",      // b.high
+        "LDA {b}+1",    // b.high
         "STA $25",
 
         // Initialize loop counter to 16
@@ -414,9 +415,10 @@ pub fn mul16(a: u16, b: u16) -> u16 {
 /// Returns: a / b (quotient), or 0xFFFF if b == 0
 /// Note: Uses zero page $20-$27 for temporary storage
 ///
-/// Memory map (parameters):
-/// $80-$81: parameter a (dividend)
-/// $82-$83: parameter b (divisor)
+/// Parameters a and b are read via {a}/{b} substitution, which resolves to
+/// each parameter's actual zero-page frame slot (assigned by the compiler's
+/// call-graph frame allocator) rather than a fixed address - the same
+/// convention used throughout this file (see min/max above).
 ///
 /// Memory map (working):
 /// $20-$21: dividend/remainder (modified during division)
@@ -427,8 +429,8 @@ pub fn mul16(a: u16, b: u16) -> u16 {
 pub fn div16(a: u16, b: u16) -> u16 {
     asm {
         // Check for division by zero (b == 0)
-        "LDA $82",      // b.low
-        "ORA $83",      // OR with b.high
+        "LDA {b}",      // b.low
+        "ORA {b}+1",    // OR with b.high
         "BNE div16_not_zero",
         // Return 0xFFFF for division by zero
         "LDA #$FF",
@@ -441,16 +443,16 @@ pub fn div16(a: u16, b: u16) -> u16 {
         "STA $24",
         "STA $25",
 
-        // Load dividend from parameter a ($80-$81) into $20-$21
-        "LDA $80",      // a.low
+        // Load dividend from parameter a into $20-$21
+        "LDA {a}",      // a.low
         "STA $20",
-        "LDA $81",      // a.high
+        "LDA {a}+1",    // a.high
         "STA $21",
 
-        // Load divisor from parameter b ($82-$83) into $22-$23
-        "LDA $82",      // b.low
+        // Load divisor from parameter b into $22-$23
+        "LDA {b}",      // b.low
         "STA $22",
-        "LDA $83",      // b.high
+        "LDA {b}+1",    // b.high
         "STA $23",
 
         // Initialize loop counter to 16

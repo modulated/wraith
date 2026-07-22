@@ -24,8 +24,8 @@ A systems programming language designed specifically for the 6502 processor, tak
 
 ## Overview
 
-- [ ] Explain memory model and zero page usage
-- [ ] Document calling conventions
+- [x] Explain memory model and zero page usage (see [Zero Page Allocation](#zero-page-allocation))
+- [x] Document calling conventions (see [Parameter Passing and Return Values](#parameter-passing-and-return-values), [Appendix C](#appendix-c-calling-convention))
 
 ### Design Philosophy
 
@@ -59,7 +59,7 @@ The compiler generates 6502 assembly code compatible with standard assemblers:
 - Function labels for each `fn` declaration
 - Memory-mapped addresses as absolute addressing
 - Optimized register usage (A, X, Y)
-- Stack-based parameter passing for complex types
+- Zero-page frame-based parameter passing for all types, including structs, arrays, and enums (passed as 2-byte pointers)
 - Section directives based on `wraith.toml` configuration
 
 Wraith compiles directly to 6502 assembly code, providing:
@@ -298,34 +298,34 @@ fn calculate() {
 
 ### Zero Page Allocation
 
-The 6502's zero page ($0000-$00FF) provides faster access and more addressing modes. Wraith allows explicit zero page allocation:
+The 6502's zero page ($0000-$00FF) provides faster access (one fewer cycle than absolute addressing), shorter instruction encoding, and is required for indirect/indexed addressing modes. **Every local variable and function parameter is automatically allocated to zero page** - there is no `zp` keyword or manual opt-in; the compiler handles placement for you.
 
 ```rust
 fn fast_loop() {
-    zp let counter: u8 = 0;   // Allocated in zero page
-    zp let temp: u16 = 0;     // Uses 2 bytes: $00xx and $00xx+1
+    let counter: u8 = 0;   // Automatically allocated in zero page
+    let temp: u16 = 0;     // 2 bytes, automatically allocated in zero page
 
-    // Zero page variables enable faster addressing modes
-    counter = counter + 1;     // Uses zero page addressing (faster)
+    counter = counter + 1;  // Uses zero page addressing (faster)
 }
 ```
 
-**Zero Page Benefits:**
-- Faster access (1 fewer cycle than absolute addressing)
-- Shorter instruction encoding (saves ROM space)
-- Required for some addressing modes (indirect, indexed)
+#### Frame Allocation and Call-Graph Coloring
+
+Each function gets a **frame**: a contiguous block of zero page holding its parameters followed by its local variables, sized to exactly what that function uses. Frames are placed using a static allocation strategy based on the program's call graph:
+
+- If function `B` can be called from function `A` (directly or transitively), `B`'s frame is placed **above** `A`'s frame, so a callee can never overwrite its caller's live variables.
+- If two functions can never be active at the same time (e.g. sibling functions that are never in the same call chain), their frames are allowed to **share the same addresses**. This is why a program with many small functions doesn't need one zero-page byte per variable in the whole program - only enough for the deepest call chain.
+- This coloring is computed once at compile time; there is no runtime allocation or garbage collection involved, and non-recursive calls have zero overhead beyond the normal argument copy and `JSR`.
+
+**Recursion:** a function that calls itself (directly or through a cycle of mutually recursive functions) is a special case - its own frame would otherwise be overwritten by the nested call before the outer call finishes using it. For these calls only, the compiler automatically saves the callee's frame to a small software stack before the call and restores it afterward. This is fully automatic and invisible to the programmer; see [Tail Call Optimization](#tail-call-optimization) for the (zero-overhead) tail-recursive case, which does not need this save/restore at all.
+
+**Interrupt handlers** (`#[irq]`/`#[nmi]`) can preempt main-line code at any point, including mid-expression. The compiler tracks which zero-page scratch and frames a handler's call graph can touch and automatically saves/restores that state in the handler's prologue/epilogue, so an interrupt firing during an in-progress calculation cannot corrupt it. See [Appendix C: Calling Convention](#appendix-c-calling-convention).
 
 **Zero Page Limitations:**
-- Only 256 bytes total (including stack, which uses $0100-$01FF)
-- Compiler automatically allocates temporary storage
-- Manual ZP allocation may conflict with compiler usage
-- Use sparingly for hot path variables only
-
-**Strategy:**
-- Compiler reserves $20-$7F for temporary storage
-- User ZP variables should avoid compiler's range
-- Function parameters may use zero page for small types
-- Configuration for ZP ranges not yet implemented (future feature)
+- Only 256 bytes total; the frame region is a fixed 144-byte window (see [Appendix B](#appendix-b-memory-layout)) shared, via coloring, by every function in the program
+- A single function's parameters + locals must fit in that window along with everything reachable from its callers - a function with very large local arrays/structs, or an unusually deep call chain of large frames, can exceed it
+- If the coloring cannot fit the program, compilation fails with a "zero-page frame region overflow" error naming the offending call chain, rather than silently corrupting memory - reduce local buffer sizes or restructure the call graph to fix it
+- There is no manual override to place a specific variable outside its frame; use an `addr` declaration (see [Memory-Mapped Addresses](#memory-mapped-addresses)) for state that must live at a fixed absolute address instead
 
 ### Completion Status
 
@@ -576,15 +576,17 @@ return_acc:
 ### Parameter Passing and Return Values
 
 **Parameter Passing:**
-- `u8`, `i8`, `b8`, `bool`: Via accumulator (A register) for first parameter, zero page for additional
-- `u16`, `i16`, `b16`: Via A (low) and Y (high) registers for first parameter, zero page for additional
-- Larger types (structs, arrays): Via zero page or stack
-- Multiple parameters: First in registers, rest in zero page
+
+Every parameter, of every type and in every position (including the first), is passed via zero page - there is no register-based fast path for a lone leading argument. This is what makes the calling convention uniform and safe under [frame allocation](#zero-page-allocation): a call site evaluates each argument expression, stages the results in a temporary pool, then copies them into the callee's own frame immediately before `JSR`.
+
+- `u8`, `i8`, `b8`, `bool`: 1 byte in the callee's frame
+- `u16`, `i16`, `b16`: 2 bytes (low byte, then high byte) in the callee's frame
+- Structs, arrays, and enums: passed by reference as a 2-byte pointer in the callee's frame, pointing at the caller's storage for that value
 
 **Return Values:**
-- `u8` types: Accumulator (A register)
-- `u16` types: A (low byte) and Y (high byte)
-- Larger types: Via pointer passed as parameter (out parameter pattern)
+- `u8`, `i8`, `b8`, `bool`: Accumulator (A register)
+- `u16`, `i16`, `b16`: A (low byte) and Y (high byte)
+- Arrays, strings, and enum values: a 2-byte pointer in A (low byte) and X (high byte)
 
 **Example:**
 ```rust
@@ -597,10 +599,12 @@ fn add16(a: u16, b: u16) -> u16 {
 }
 
 fn main() {
-    let sum: u8 = add(5, 3);        // a in A, b in ZP, result in A
-    let sum16: u16 = add16(100, 200); // a in A/Y, b in ZP, result in A/Y
+    let sum: u8 = add(5, 3);          // a and b both in add's frame, result in A
+    let sum16: u16 = add16(100, 200); // a and b both in add16's frame, result in A/Y
 }
 ```
+
+Because parameters live in the callee's own frame rather than shared fixed registers or a fixed address range, a caller's own parameters and locals are never at risk of being overwritten by a call it makes - see [Zero Page Allocation](#zero-page-allocation) for how frames are placed to guarantee this, and [Appendix C](#appendix-c-calling-convention) for the full call sequence.
 
 ### Completion Status
 
@@ -2487,7 +2491,7 @@ fn mul16(a: u16, b: u16) -> u16
 **Algorithm:** Shift-and-add method (optimized for 6502)
 **Cycles:** ~800-1000 (depends on number of set bits in multiplier)
 **Returns:** a × b (lower 16 bits if result overflows)
-**Temporary Storage:** Zero page $20-$27, parameters in $80-$83
+**Temporary Storage:** Zero page $20-$27 (parameters `a`/`b` are read from their normal zero-page frame slots like any other function parameter - see [Zero Page Allocation](#zero-page-allocation))
 
 **Example:**
 ```rust
@@ -2505,7 +2509,7 @@ fn div16(a: u16, b: u16) -> u16
 **Algorithm:** Non-restoring division (optimized for 6502)
 **Cycles:** ~1200-1400 (16 iterations of shift-subtract)
 **Returns:** a ÷ b (quotient), or 0xFFFF if b == 0
-**Temporary Storage:** Zero page $20-$27, parameters in $80-$83
+**Temporary Storage:** Zero page $20-$27 (parameters `a`/`b` are read from their normal zero-page frame slots like any other function parameter - see [Zero Page Allocation](#zero-page-allocation))
 
 **Example:**
 ```rust
@@ -2549,7 +2553,7 @@ carry     const     continue  else      enum      false     fn
 for       from      i8        i16       if        import    in
 let       loop      match     negative  overflow  pub       read
 return    str       struct    true      u8        u16       while
-write     zero      zp
+write     zero
 ```
 
 ### Keywords by Category
@@ -2560,9 +2564,9 @@ if        else      while     loop      for
 match     return    break     continue
 ```
 
-**Variable Declaration (3 keywords):**
+**Variable Declaration (2 keywords):**
 ```
-let       const     zp
+let       const
 ```
 
 **Type Keywords (8 keywords):**
@@ -2617,9 +2621,8 @@ let flag: bool = true;      // Boolean
 
 **Variable Declaration:**
 ```rust
-let x: u8 = 42;             // Mutable variable
+let x: u8 = 42;             // Mutable variable (automatically zero-page allocated)
 const MAX: u8 = 100;        // Compile-time constant
-zp let counter: u8 = 0;     // Zero-page variable (faster access)
 ```
 
 **CPU Status Flags:**
@@ -2940,22 +2943,152 @@ All items completed.
 
 ### Appendix A: Code Generation
 
-- [ ] Document register allocation strategy
-- [ ] Explain zero page usage
-- [ ] Document stack usage
-- [ ] Add optimization passes overview
+- [x] Document register allocation strategy
+- [x] Explain zero page usage
+- [x] Document stack usage
+- [x] Add optimization passes overview
+
+#### Register Allocation Strategy
+
+Wraith does not use a general-purpose register allocator; the 6502's three registers are assigned fixed roles by convention, and anything that doesn't fit is spilled to zero page:
+
+- **A (accumulator)**: The primary value register. Holds the result of almost every expression, the low byte of 16-bit values, and the low byte of pointer-like return values (arrays, strings, enums).
+- **Y**: The high byte of a 16-bit value in registers (parameter evaluation, return values), or the loop index in indexed-addressing code (`(ptr),Y`).
+- **X**: The high byte of a pointer-like return value (A:X convention), a loop counter, or the index register when reading/writing the software stack at $0200,X.
+
+Because there's no allocator to spill "extra" live values, the compiler uses small dedicated zero-page pools instead - see the next section.
+
+#### Zero Page Usage
+
+See [Appendix B](#appendix-b-memory-layout) for the full byte-level map. In summary:
+- $00-$1F is left untouched (system/platform reserved)
+- $20-$3F is a pool of codegen scratch temporaries (binary operation operands, pointer dereferencing, enum tag/data access)
+- $40-$CF is the **frame region**: every function's parameters and locals, statically colored by the call graph (see [Zero Page Allocation](#zero-page-allocation))
+- $D0-$DC is working storage and call parameters for the compiler-generated 16-bit math routines (`mul16`/`div16`/`mod16`)
+- $F0-$F3 and $F4-$FE are small pools for a binary operation's left-operand save and for staging function-call arguments before they're copied into the callee's frame
+- $FF holds the software stack pointer described below
+
+#### Stack Usage
+
+Wraith uses **two** stacks, for different purposes:
+
+1. **Hardware stack ($0100-$01FF)** - used exactly as the 6502 uses it natively: `JSR`/`RTS` return addresses, and (in interrupt handlers only) `PHA`/`PLA` save/restore of the A, X, and Y registers around the handler body.
+2. **Software stack ($0200-$02FF, indexed by zero-page $FF)** - a compiler-managed stack used for two things, both invisible to the programmer:
+   - Saving and restoring a function's own frame across a **recursive** call (a call to itself, or to another function that can call back into it), so the nested invocation cannot destroy values the outer invocation still needs. Non-recursive calls never touch this stack - they have no save/restore overhead at all.
+   - Spilling a binary operation's left operand when its right operand contains a function call (e.g. `f(a) + f(b)`), since the fast register-based save (Y for `u8`, a small zero-page pool for `u16`) would otherwise be clobbered by the call.
+
+Recursion inside an interrupt handler's call graph is a compile error, because the software stack is not safe to use reentrantly if an interrupt can fire in the middle of a push/pop sequence.
+
+#### Optimization Passes Overview
+
+Applied roughly in this order during compilation:
+
+1. **Constant folding** - compile-time evaluation of constant expressions (including const-only casts, BCD range validation)
+2. **Tail call optimization** - a function's tail-recursive self-call is rewritten to update its own parameters and `JMP` back to the top of the function instead of `JSR`, giving constant stack usage regardless of recursion depth
+3. **Dead code elimination** - statements after a `return`/`break`/`continue` in the same block are dropped
+4. **Strength reduction** - e.g. multiplication/division by a power of two becomes a shift
+5. **Peephole optimization** - a pass over the emitted instruction stream that removes redundant loads/stores, dead stores, no-op register transfers, unreachable code after a terminator, and simplifies comparison-against-zero and branch-over-jump patterns
 
 ### Appendix B: Memory Layout
 
-- [ ] Document default memory map
-- [ ] Explain section placement
-- [ ] Add examples of custom memory layouts
+- [x] Document default memory map
+- [x] Explain section placement
+- [x] Add examples of custom memory layouts
+
+#### Default Memory Map
+
+**Zero page ($0000-$00FF):**
+
+| Range | Size | Purpose |
+|-------|------|---------|
+| $00-$1F | 32 bytes | System/platform reserved |
+| $20-$3F | 32 bytes | Codegen scratch temporaries |
+| $40-$CF | 144 bytes | Frame region (all function parameters and locals) |
+| $D0-$D8 | 9 bytes | `mul16`/`div16`/`mod16` working storage |
+| $D9-$DC | 4 bytes | `mul16`/`div16`/`mod16` call parameters |
+| $DD-$EF | 19 bytes | Reserved (future frame-spill region) |
+| $F0-$F3 | 4 bytes | Binary operation left-operand save |
+| $F4-$FE | 11 bytes | Function-call argument staging |
+| $FF | 1 byte | Software stack pointer |
+
+**Other memory:**
+
+| Range | Purpose |
+|-------|---------|
+| $0100-$01FF | Hardware stack (JSR/RTS, interrupt register save) |
+| $0200-$02FF | Software stack (recursion frame save/restore, operand spill) |
+| $8000-$BFFF | Default `CODE` section (16KB) |
+| $D000-$EFFF | Default `DATA` section (8KB) |
+| $FFFA-$FFFF | 6502 hardware vectors (NMI, RESET, IRQ) |
+
+#### Section Placement
+
+Code and data are placed into named **sections**, either the default `CODE`/`DATA` sections above or sections you define in `wraith.toml` (see the `#[section]` and `#[org]` function attributes under [Function Attributes](#function-attributes)). A function with no placement attribute goes into the configured default section; `#[section("NAME")]` places it in a named section; `#[org(address)]` places it at an exact address, overriding section placement entirely.
+
+#### Custom Memory Layout Example
+
+```toml
+[[sections]]
+name = "STDLIB"
+start = 0x8000
+end = 0x8FFF
+description = "Standard library functions (4KB)"
+
+[[sections]]
+name = "CODE"
+start = 0x9000
+end = 0xBFFF
+description = "User code (12KB)"
+
+[[sections]]
+name = "DATA"
+start = 0xC000
+end = 0xCFFF
+description = "Constants and data (4KB)"
+
+default_section = "CODE"
+```
 
 ### Appendix C: Calling Convention
 
-- [ ] Document parameter passing
-- [ ] Explain return value handling
-- [ ] Add calling convention for interrupt handlers
+- [x] Document parameter passing
+- [x] Explain return value handling
+- [x] Add calling convention for interrupt handlers
+
+#### The Full Call Sequence
+
+For a call `f(arg1, arg2, ...)`:
+
+1. **Evaluate arguments** - each argument expression is evaluated in turn and its result staged into the $F4-$FE temp pool (not directly into `f`'s frame yet - this lets an argument's own evaluation freely use zero-page scratch, and lets a later argument be a call to `f` itself, without corrupting an already-evaluated earlier argument)
+2. **Save the callee's frame, if this is a recursive call** - if `f` can (transitively) call back to the current function, the current contents of `f`'s frame are pushed to the software stack, so a nested/re-entrant invocation cannot destroy the outer invocation's still-needed values
+3. **Copy staged arguments into `f`'s frame** - from the temp pool into `f`'s actual parameter slots
+4. **`JSR f`**
+5. **Restore the callee's frame, if step 2 saved one** - popped back from the software stack, with the return value preserved across the pop
+6. **Read the return value** - from A, A+Y, or A+X depending on the return type (see below)
+
+A tail-recursive self-call (`return f(...)` where `f` is the enclosing function) skips this entirely: arguments are copied straight into the function's own frame and control jumps back to the top of the function with `JMP` - no `JSR`, no frame save, no stack growth.
+
+#### Return Value Handling
+
+| Return type | Location |
+|---|---|
+| `u8`, `i8`, `b8`, `bool` | A |
+| `u16`, `i16`, `b16` | A (low byte), Y (high byte) |
+| Array, string, enum | A (low byte of pointer), X (high byte of pointer) |
+| Void | (no value) |
+
+#### Calling Convention for Interrupt Handlers
+
+A function marked `#[irq]` or `#[nmi]` is installed at the corresponding hardware vector and compiled with an automatic prologue/epilogue:
+
+1. **Prologue**: `PHA`; `TXA`/`PHA`; `TYA`/`PHA` (save A, X, Y to the hardware stack), followed by saving any zero-page scratch/frame state the handler's call graph can touch (see below)
+2. **Handler body**
+3. **Epilogue**: restore the zero-page state saved above, then `PLA`/`TAY`; `PLA`/`TAX`; `PLA` (restore Y, X, A in reverse order), then `RTI` instead of `RTS`
+
+Because an interrupt can preempt main-line code at any point - including in the middle of an expression that has live values in the shared zero-page scratch pools - the compiler computes, per handler, which of that scratch and which other functions' frames the handler's own call graph reaches, and saves/restores exactly that state around the handler body. This makes interrupt handlers safe to write using the same language features as regular code, with two restrictions:
+
+- **No recursion** is allowed anywhere in an interrupt handler's call graph (the software stack used for frame save/restore is not reentrant)
+- The save/restore adds latency proportional to how much state the handler's call graph touches; handlers that call few/simple functions have a smaller, cheaper save set
 
 ### Appendix D: Examples
 
