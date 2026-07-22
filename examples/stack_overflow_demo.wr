@@ -28,6 +28,12 @@
 // (1 byte of frame + a 2-byte u16 operand spill for the `n + ...`), so the
 // software stack overflows first, at roughly level ~85; the hardware stack
 // follows at ~128. deep_sum(200) blows through both.
+//
+// Note: the compiler emits a compile-time WARNING when a non-tail recursive
+// function has a *large* frame (so `256 / frame_size` is a shallow depth).
+// deep_sum's frame is tiny (1 byte), so it is NOT warned about here - its
+// overflow comes from the hardware stack and operand spills, not frame size.
+// A recursive function with big local arrays/structs would be flagged.
 
 const OUT_LO: addr = 0x0400;
 const OUT_HI: addr = 0x0401;

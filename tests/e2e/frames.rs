@@ -235,3 +235,82 @@ fn recursion_in_interrupt_is_rejected() {
         "interrupt handler",
     );
 }
+
+/// Return the formatted warnings from a successful compile (panics otherwise).
+fn warnings_of(source: &str) -> String {
+    match compile(source) {
+        CompileResult::Success(warnings, _) => warnings,
+        other => panic!("expected successful compilation, got {:?}", other),
+    }
+}
+
+/// A non-tail recursive function with a large frame is flagged: each recursive
+/// call saves the whole frame to the 256-byte software stack, so the safe
+/// recursion depth is shallow and deep recursion would silently overflow it.
+#[test]
+fn large_frame_recursion_warns() {
+    let warnings = warnings_of(
+        r#"
+        fn walk(n: u8) -> u16 {
+            let a: u16 = 1 as u16; let b: u16 = 2 as u16; let c: u16 = 3 as u16;
+            let d: u16 = 4 as u16; let e: u16 = 5 as u16; let f: u16 = 6 as u16;
+            let g: u16 = 7 as u16; let h: u16 = 8 as u16; let i: u16 = 9 as u16;
+            if n == 0 { return a + b + c + d + e + f + g + h + i; }
+            return (n as u16) + walk(n - 1);
+        }
+        #[reset]
+        fn main() { let x: u16 = walk(50); loop {} }
+        "#,
+    );
+    assert!(
+        warnings.contains("recursive function `walk`") && warnings.contains("software stack"),
+        "expected a deep-recursion warning for the large-frame recursive function, got:\n{}",
+        warnings
+    );
+}
+
+/// A tail-recursive function is optimized into a loop and never saves a frame,
+/// so it must NOT be flagged even with a large frame.
+#[test]
+fn tail_recursion_not_flagged_even_with_large_frame() {
+    let warnings = warnings_of(
+        r#"
+        fn walk(n: u8, acc: u16) -> u16 {
+            let a: u16 = 1 as u16; let b: u16 = 2 as u16; let c: u16 = 3 as u16;
+            let d: u16 = 4 as u16; let e: u16 = 5 as u16; let f: u16 = 6 as u16;
+            let g: u16 = 7 as u16; let h: u16 = 8 as u16; let i: u16 = 9 as u16;
+            if n == 0 { return acc + a + b + c + d + e + f + g + h + i; }
+            return walk(n - 1, acc + (n as u16));
+        }
+        #[reset]
+        fn main() { let x: u16 = walk(50, 0); loop {} }
+        "#,
+    );
+    assert!(
+        !warnings.contains("software stack"),
+        "tail-recursive function should not get a deep-recursion warning, got:\n{}",
+        warnings
+    );
+}
+
+/// A small-frame recursive function is bounded by the ~128-level hardware-stack
+/// limit shared by all non-tail recursion, not by frame size, so it is not
+/// flagged by the (frame-size-specific) deep-recursion warning.
+#[test]
+fn small_frame_recursion_not_flagged() {
+    let warnings = warnings_of(
+        r#"
+        fn deep_sum(n: u8) -> u16 {
+            if n == 0 { return 0; }
+            return (n as u16) + deep_sum(n - 1);
+        }
+        #[reset]
+        fn main() { let x: u16 = deep_sum(200); loop {} }
+        "#,
+    );
+    assert!(
+        !warnings.contains("software stack"),
+        "small-frame recursion should not get a deep-recursion warning, got:\n{}",
+        warnings
+    );
+}

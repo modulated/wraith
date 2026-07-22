@@ -14,9 +14,9 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::codegen::memory_layout::{FRAME_REGION_END, FRAME_REGION_START};
+use crate::codegen::memory_layout::{FRAME_REGION_END, FRAME_REGION_START, SOFTWARE_STACK_BYTES};
 use crate::sema::table::SymbolLocation;
-use crate::sema::{FrameInfo, InterruptSaveInfo, SemaError};
+use crate::sema::{FrameInfo, InterruptSaveInfo, SemaError, Warning};
 
 use super::SemanticAnalyzer;
 
@@ -203,6 +203,8 @@ impl SemanticAnalyzer {
             );
         }
 
+        self.warn_deep_recursion(&recursive_call_edges, &function_frames);
+
         self.rewrite_frame_offsets(&function_frames)?;
 
         Ok(FinalizedFrames {
@@ -210,6 +212,66 @@ impl SemanticAnalyzer {
             recursive_call_edges,
             interrupt_save_info,
         })
+    }
+
+    /// Warn about recursive functions whose frame is large enough that the
+    /// software stack (used to save/restore frames across recursion) allows only
+    /// a shallow recursion depth before it silently overflows. Small-frame
+    /// recursion is left unflagged: it is bounded instead by the ~128-level
+    /// hardware-stack limit shared by all non-tail recursion, which is not
+    /// frame-size-specific.
+    fn warn_deep_recursion(
+        &mut self,
+        recursive_call_edges: &HashSet<(String, String)>,
+        frames: &HashMap<String, FrameInfo>,
+    ) {
+        // Only flag when the estimated safe depth drops below this many levels,
+        // to target genuinely risky large-frame recursion rather than every
+        // small recursive helper.
+        const MIN_SAFE_RECURSION_DEPTH: usize = 32;
+
+        // Functions that participate in recursion (either endpoint of a cycle edge).
+        let mut recursive_fns: Vec<String> = recursive_call_edges
+            .iter()
+            .flat_map(|(a, b)| [a.clone(), b.clone()])
+            .collect();
+        recursive_fns.sort();
+        recursive_fns.dedup();
+
+        for f in recursive_fns {
+            // Tail-recursive functions are optimized into a loop (JMP, no JSR) and
+            // never push their frame, so they cannot overflow the software stack.
+            // (A function mixing tail and non-tail self-calls is conservatively
+            // skipped too - a rare false negative, preferred over warning on the
+            // common tail-recursive accumulator pattern.)
+            if self
+                .function_metadata
+                .get(&f)
+                .is_some_and(|m| m.has_tail_recursion)
+            {
+                continue;
+            }
+
+            let Some(frame) = frames.get(&f) else {
+                continue;
+            };
+            if frame.size == 0 {
+                continue; // No per-call software-stack cost from the frame itself.
+            }
+            let safe_depth = SOFTWARE_STACK_BYTES / frame.size as usize;
+            if safe_depth < MIN_SAFE_RECURSION_DEPTH {
+                // Attribute the warning to the function's declaration span, if known
+                // (imported functions may not be in declared_functions - skip those).
+                if let Some((_, span)) = self.declared_functions.iter().find(|(n, _)| *n == f) {
+                    self.warnings.push(Warning::DeepRecursionRisk {
+                        function: f.clone(),
+                        frame_bytes: frame.size,
+                        safe_depth,
+                        span: *span,
+                    });
+                }
+            }
+        }
     }
 
     /// Rewrite every `FrameOffset(off)` into `ZeroPage(base + off)` across all
