@@ -8,12 +8,11 @@ const SCREEN_START: addr = 0x0400;
 const lowercaseConst: u8 = 42;  // WARNING: constant name should be uppercase
 
 fn main() {
-    // Local variables must be declared with 'let'
+    // Local variables must be declared with 'let'. Every local is
+    // automatically allocated to zero page - there is no separate keyword
+    // or opt-in for it (see "Zero Page Allocation" in specification.md).
     let x: u8 = 10;
     let y: u16 = 1000;
-
-    // Zero-page variables also use 'let'
-    zp let fast: u8 = 0;
 
     // Array initialization
     let data: [u8; 5] = [1, 2, 3, 4, 5];

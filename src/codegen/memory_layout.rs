@@ -6,20 +6,27 @@
 //! # Default Zero Page Layout
 //!
 //! ```text
-//! $00-$1F (32 bytes): System reserved
-//! $20-$3F (32 bytes): Temporary storage for codegen (managed by TempAllocator)
+//! $00-$1F (32 bytes):  System reserved
+//! $20-$3F (32 bytes):  Temporary storage for codegen (managed by TempAllocator)
 //!   $20-$21: Primary temp register (binary ops, u16)
 //!   $22-$23: Secondary temp (arithmetic/enum)
 //!   $24-$2F: General temp pool
 //!   $30-$3F: Pointer operations / overflow temp
-//! $40-$7F (64 bytes): Variable allocation space
-//! $80-$BF (64 bytes): Function parameter passing region
-//! $C0-$CF (16 bytes): Extended variable space
-//! $D0-$D8 (9 bytes):  Stdlib math working storage (mul16/div16)
-//! $D9-$EF (23 bytes): Extended variable space (continued)
-//! $F0-$F3 (4 bytes):  Binary op left operand save
-//! $F4-$FE (11 bytes): Function argument evaluation temp
-//! $FF:                Software stack pointer
+//! $40-$CF (144 bytes): FRAME REGION - per-function frames (parameters + locals),
+//!                      colored by call-graph analysis (see sema::analyze::frames)
+//!                      so functions that can never be simultaneously active
+//!                      share addresses. A function's own frame is never
+//!                      overwritten by a callee's frame.
+//! $D0-$D8 (9 bytes):   Stdlib math working storage (mul16/div16/mod16 scratch)
+//! $D9-$DC (4 bytes):   Math routine call parameters (a.lo, a.hi, b.lo, b.hi)
+//! $DD-$EF (19 bytes):  Reserved (future frame-spill region)
+//! $F0-$F3 (4 bytes):   Binary op left-operand save (only when the right
+//!                      operand is call-free; see expr/binary.rs)
+//! $F4-$FE (11 bytes):  Function argument evaluation temp
+//! $FF:                 Software stack pointer (data at $0200-$02FF), used to
+//!                      save/restore a callee's frame across a recursive call
+//!                      and to spill a binary op's left operand across a
+//!                      call-bearing right operand
 //! ```
 
 /// Frame region: per-function frames (parameters + locals) are allocated here,
