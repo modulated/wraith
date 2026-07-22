@@ -136,6 +136,35 @@ fn interrupt_handler_preserves_zero_page() {
     assert_asm_contains(&asm, "RTI");
 }
 
+/// A function invoked only via a hand-written `JSR` in an inline-asm block still
+/// gets a call-graph edge, so its frame is colored above the asm caller's frame
+/// (without the edge it would be a root at $40 and overlap the caller).
+#[test]
+fn asm_jsr_creates_frame_edge() {
+    let program = analyze_only(
+        r#"
+        fn helper() -> u8 { let h: u8 = 9; return h; }
+        fn caller() {
+            let c: u8 = 1;
+            asm { "JSR helper" }
+        }
+        fn main() { caller(); }
+        "#,
+    )
+    .expect("program should analyze");
+
+    let caller = *program.function_frames.get("caller").expect("caller frame");
+    let helper = *program.function_frames.get("helper").expect("helper frame");
+
+    assert!(
+        helper.base >= caller.base + caller.size,
+        "asm JSR edge should place helper (base ${:02X}) above caller (base ${:02X}, size {})",
+        helper.base,
+        caller.base,
+        caller.size
+    );
+}
+
 /// Recursion inside an interrupt handler's call graph is rejected (the frame
 /// save/restore stack is not reentrant under preemption).
 #[test]

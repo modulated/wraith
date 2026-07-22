@@ -227,24 +227,6 @@ pub(super) fn generate_variable(
 ) -> Result<(), CodegenError> {
     use crate::sema::table::SymbolKind;
 
-    // Check if this is a cached string parameter
-    // Only parameters are cached (locals are not cached due to initialization order)
-    if matches!(
-        emitter.current_function(),
-        Some(func_name) if info.function_metadata.get(func_name).is_some_and(|m| m.string_cache.contains_key(name))
-    ) && matches!(
-        info.resolved_symbols.get(&span).map(|s| &s.ty),
-        Some(Type::String)
-    ) {
-        // Use cached string pointer from zero page
-        let func_name = emitter.current_function().unwrap();
-        let cache_addr = info.function_metadata[func_name].string_cache[name];
-        emitter.emit_comment(&format!("Cached string '{}' at ${:02X}", name, cache_addr));
-        emitter.emit_inst("LDA", &format!("${:02X}", cache_addr));
-        emitter.emit_inst("LDX", &format!("${:02X}", cache_addr + 1));
-        return Ok(());
-    }
-
     if let Some(sym) = info.resolved_symbols.get(&span) {
         // Check if this is a u16/i16/b16 variable that needs both bytes loaded
         let is_u16 = matches!(

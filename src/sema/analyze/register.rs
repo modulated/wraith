@@ -3,7 +3,7 @@
 //! First pass of semantic analysis that registers all global items
 //! (functions, statics, structs, enums, imports) before analyzing bodies.
 
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashSet as HashSet;
 use std::path::PathBuf;
 
 use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Spanned};
@@ -129,16 +129,6 @@ impl SemanticAnalyzer {
         // enforced by finalize_frames (SemaError::FrameRegionOverflow), so the old
         // per-function $80-$BF parameter-space warning no longer applies.
 
-        // Track string parameter names for cache eligibility
-        let mut param_names: HashSet<String> = HashSet::default();
-        for param in &func.params {
-            if let Ok(ty) = self.resolve_type(&param.ty.node) {
-                if matches!(ty, Type::String) {
-                    param_names.insert(param.name.node.clone());
-                }
-            }
-        }
-
         let is_interrupt_handler = func.attributes.iter().any(|attr| {
             matches!(
                 attr,
@@ -160,9 +150,6 @@ impl SemanticAnalyzer {
                 inline_param_symbols: None, // Will be populated in second pass
                 has_tail_recursion: false,  // Will be populated by tail call analysis
                 param_bytes_used,
-                struct_param_locals: HashMap::default(), // Will be populated during second pass
-                string_cache: HashMap::default(), // Will be populated after function analysis
-                param_names,
             },
         );
 

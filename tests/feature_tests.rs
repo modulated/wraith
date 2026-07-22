@@ -646,11 +646,12 @@ fn test_string_len_property() {
 }
 
 #[test]
-fn test_string_caching_hot_strings() {
+fn test_string_param_repeated_access() {
+    // String parameters are read directly from their zero-page frame slot; the
+    // old dedicated pointer cache was removed as redundant under frame allocation.
     let asm = compile_success(
         r#"
         fn process_string(s: str) -> u16 {
-            // Access the string 4 times to trigger caching (3+ accesses)
             let len1: u16 = s.len;
             let len2: u16 = s.len;
             let len3: u16 = s.len;
@@ -660,10 +661,9 @@ fn test_string_caching_hot_strings() {
         fn main() {}
         "#,
     );
-    // Should initialize string pointer cache
-    assert_asm_contains(&asm, "Initialize string pointer cache");
-    // Should use cached string
-    assert_asm_contains(&asm, "Cached string");
+    // No separate pointer-cache prologue is emitted anymore.
+    assert_asm_not_contains(&asm, "Initialize string pointer cache");
+    assert_asm_not_contains(&asm, "Cached string");
 }
 
 #[test]

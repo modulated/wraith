@@ -366,15 +366,9 @@ pub(super) fn generate_field_access(
             let is_parameter = sym_is_param;
 
             if is_parameter {
-                // Check if this struct param has a local pointer copy
-                // (prevents clobbering on nested calls)
-                let local_ptr_addr = emitter
-                    .current_function()
-                    .and_then(|fn_name| info.function_metadata.get(fn_name))
-                    .and_then(|meta| meta.struct_param_locals.get(var_name))
-                    .copied();
-
-                let ptr_addr = local_ptr_addr.unwrap_or(base_addr as u8);
+                // The struct pointer lives directly in this parameter's frame slot;
+                // frame coloring guarantees nested calls cannot clobber it.
+                let ptr_addr = base_addr as u8;
 
                 // Use indirect indexed addressing: LDA ($ptr),Y
                 let offset = field_info.offset;

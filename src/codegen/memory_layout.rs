@@ -33,47 +33,24 @@ pub const FRAME_REGION_END: u8 = 0xCF;
 /// adjacent to the $D0-$D8 math working storage.
 pub const MATH_PARAM_BASE: u8 = 0xD9;
 
-/// Memory layout configuration for 6502 code generation
+/// Memory layout configuration for 6502 code generation.
+///
+/// Variable/parameter placement is handled by frame allocation (see
+/// `sema::analyze::frames` and the `FRAME_REGION_*` constants above); this struct
+/// now only describes the fixed codegen scratch regions.
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
-    /// System reserved zero page (usually $00-$1F)
-    pub system_reserved_start: u8,
-    pub system_reserved_end: u8,
-
     /// Temporary storage for codegen operations (default $20-$2F)
     pub temp_storage_start: u8,
-    pub temp_storage_end: u8,
-
     /// Pointer operations scratch space (default $30-$3F)
     pub pointer_ops_start: u8,
-    pub pointer_ops_end: u8,
-
-    /// Variable allocation start (default $40)
-    pub variable_alloc_start: u8,
-
-    /// Variable allocation end (default $7F) - gives 64 bytes for variables
-    pub variable_alloc_end: u8,
-
-    /// Function parameter passing region (default $80)
-    pub param_base: u8,
-
-    /// Parameter region end (default $BF) - gives 64 bytes for parameters
-    pub param_end: u8,
 }
 
 impl Default for MemoryLayout {
     fn default() -> Self {
         Self {
-            system_reserved_start: 0x00,
-            system_reserved_end: 0x1F,
             temp_storage_start: 0x20,
-            temp_storage_end: 0x2F,
             pointer_ops_start: 0x30,
-            pointer_ops_end: 0x3F,
-            variable_alloc_start: 0x40,
-            variable_alloc_end: 0x7F,
-            param_base: 0x80,
-            param_end: 0xBF,
         }
     }
 }
@@ -89,11 +66,6 @@ impl MemoryLayout {
         self.temp_storage_start
     }
 
-    /// Get the loop counter address
-    pub fn loop_counter(&self) -> u8 {
-        self.temp_storage_start + 0x10
-    }
-
     /// Get the loop end temp address
     /// Note: temp_reg uses 2 bytes for u16 operations, so loop_end_temp must be at +2 or higher
     pub fn loop_end_temp(&self) -> u8 {
@@ -104,26 +76,6 @@ impl MemoryLayout {
     /// Used by match statement jump table dispatch
     pub fn jump_ptr(&self) -> u8 {
         self.pointer_ops_start // $30 by default
-    }
-
-    /// Get reserved regions for zero page allocator
-    pub fn get_reserved_regions(&self) -> Vec<(u8, u8)> {
-        vec![
-            (self.system_reserved_start, self.system_reserved_end),
-            (self.temp_storage_start, self.temp_storage_end),
-            (self.pointer_ops_start, self.pointer_ops_end),
-            (self.param_base, self.param_end),
-        ]
-    }
-
-    /// Get the total variable space available (in bytes)
-    pub fn variable_space(&self) -> u8 {
-        self.variable_alloc_end - self.variable_alloc_start + 1
-    }
-
-    /// Get the total parameter space available (in bytes)
-    pub fn param_space(&self) -> u8 {
-        self.param_end - self.param_base + 1
     }
 }
 

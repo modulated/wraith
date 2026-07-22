@@ -227,24 +227,15 @@ impl SemanticAnalyzer {
             }
         }
 
-        // Function metadata: inline param symbols, struct-param local copies,
-        // and string cache slots all hold frame offsets that must be rebased.
-        for (fname, meta) in self.function_metadata.iter_mut() {
+        // Function metadata: inline param symbols hold frame offsets that must be
+        // rebased for cross-module inline expansion.
+        for meta in self.function_metadata.values_mut() {
             if let Some(syms) = meta.inline_param_symbols.as_mut() {
                 for info in syms.values_mut() {
                     if let SymbolLocation::FrameOffset(off) = info.location {
                         let base = frame_base(frames, info.containing_function.as_deref())?;
                         info.location = SymbolLocation::ZeroPage(base + off);
                     }
-                }
-            }
-
-            if let Some(frame) = frames.get(fname) {
-                for off in meta.struct_param_locals.values_mut() {
-                    *off += frame.base;
-                }
-                for off in meta.string_cache.values_mut() {
-                    *off += frame.base;
                 }
             }
         }
