@@ -309,23 +309,17 @@ for (i, c) in message {
 
 **Performance Note:** String iteration is optimized to use the X register as a counter, providing efficient 8-bit indexing on the 6502.
 
-### String Pointer Caching
+### String Parameter Access
 
-Frequently accessed strings are automatically cached in zero page for faster access:
+A `str` parameter is a 2-byte pointer that, like every other parameter, is passed directly in its own zero-page frame slot (see [Zero Page Allocation](../specification.md#zero-page-allocation) in the main specification). Because it's already in zero page, every access reads it in place - there is no separate pointer-caching layer to set up:
 
 ```
 fn process_string(s: str) {
-    // Accessing the same string 3+ times triggers caching
     let len1 = s.len;
-    let len2 = s.len;  // Uses cached pointer
-    let len3 = s.len;  // Uses cached pointer
+    let len2 = s.len;  // Reads the same zero-page slot again
+    let len3 = s.len;
 }
 ```
-
-**Benefits:**
-- ~60% faster access after initial setup
-- Cache initialized once at function entry
-- No manual intervention required
 
 ### Cross-Module String Pooling
 
