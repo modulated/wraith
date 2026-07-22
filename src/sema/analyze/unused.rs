@@ -86,20 +86,20 @@ impl SemanticAnalyzer {
         let mut tokens = code.split_whitespace();
         while let Some(tok) = tokens.next() {
             let mnemonic = tok.to_ascii_uppercase();
-            if mnemonic == "JSR" || mnemonic == "JMP" {
-                if let Some(operand) = tokens.next() {
-                    // Strip label punctuation / substitution braces / addressing syntax.
-                    let target = operand.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                    if !target.is_empty() && self.function_metadata.contains_key(target) {
-                        // A function invoked from assembly is genuinely used.
-                        self.called_functions.insert(target.to_string());
-                        self.all_used_symbols.insert(target.to_string());
-                        if target != caller {
-                            self.call_edges
-                                .entry(caller.clone())
-                                .or_default()
-                                .insert(target.to_string());
-                        }
+            if (mnemonic == "JSR" || mnemonic == "JMP")
+                && let Some(operand) = tokens.next()
+            {
+                // Strip label punctuation / substitution braces / addressing syntax.
+                let target = operand.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !target.is_empty() && self.function_metadata.contains_key(target) {
+                    // A function invoked from assembly is genuinely used.
+                    self.called_functions.insert(target.to_string());
+                    self.all_used_symbols.insert(target.to_string());
+                    if target != caller {
+                        self.call_edges
+                            .entry(caller.clone())
+                            .or_default()
+                            .insert(target.to_string());
                     }
                 }
             }

@@ -88,12 +88,10 @@ pub(super) fn generate_index(
                 .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
             match sym.location {
-                crate::sema::table::SymbolLocation::FrameOffset(_) => {
-                    return Err(CodegenError::Internal(
-                        "unresolved FrameOffset reached codegen (frame finalization skipped)"
-                            .to_string(),
-                    ));
-                }
+                crate::sema::table::SymbolLocation::FrameOffset(_) => Err(CodegenError::Internal(
+                    "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                        .to_string(),
+                )),
                 crate::sema::table::SymbolLocation::Absolute(addr) => {
                     // Array variables store a pointer to the array data
                     // Need to use indirect indexed addressing: LDA (ptr),Y

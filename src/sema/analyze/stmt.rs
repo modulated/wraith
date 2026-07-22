@@ -609,7 +609,7 @@ impl SemanticAnalyzer {
             }
             Pattern::Variable(name) => {
                 // Bind the entire matched value
-                let bind_size = self.type_size(&match_ty) as u8;
+                let bind_size = self.type_size(match_ty) as u8;
                 let off = self.frame_alloc(bind_size.max(1));
                 let info = SymbolInfo {
                     name: name.clone(),

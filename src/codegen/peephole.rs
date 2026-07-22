@@ -533,80 +533,80 @@ fn eliminate_redundant_ldy_zero(lines: &[Line]) -> Vec<Line> {
     result
 }
 
-/// Invert a branch condition
-///
-/// Returns the inverted branch mnemonic, or None if not a conditional branch.
-fn invert_branch(mnemonic: &str) -> Option<&'static str> {
-    match mnemonic {
-        "BEQ" => Some("BNE"),
-        "BNE" => Some("BEQ"),
-        "BCS" => Some("BCC"),
-        "BCC" => Some("BCS"),
-        "BMI" => Some("BPL"),
-        "BPL" => Some("BMI"),
-        "BVS" => Some("BVC"),
-        "BVC" => Some("BVS"),
-        _ => None,
-    }
-}
+// Invert a branch condition
+//
+// Returns the inverted branch mnemonic, or None if not a conditional branch.
+// fn invert_branch(mnemonic: &str) -> Option<&'static str> {
+//     match mnemonic {
+//         "BEQ" => Some("BNE"),
+//         "BNE" => Some("BEQ"),
+//         "BCS" => Some("BCC"),
+//         "BCC" => Some("BCS"),
+//         "BMI" => Some("BPL"),
+//         "BPL" => Some("BMI"),
+//         "BVS" => Some("BVC"),
+//         "BVC" => Some("BVS"),
+//         _ => None,
+//     }
+// }
 
-/// Eliminate branch over jump by inverting the branch condition
-///
-/// Pattern:
-///     BEQ skip_label
-///     JMP target_label
-/// skip_label:
-///
-/// Becomes:
-///     BNE target_label
-/// skip_label:
-///
-/// Saves 3 bytes (the JMP instruction).
-fn eliminate_branch_over_jump(lines: &[Line]) -> Vec<Line> {
-    let mut result = Vec::new();
-    let mut i = 0;
+// Eliminate branch over jump by inverting the branch condition
+//
+// Pattern:
+//     BEQ skip_label
+//     JMP target_label
+// skip_label:
+//
+// Becomes:
+//     BNE target_label
+// skip_label:
+//
+// Saves 3 bytes (the JMP instruction).
+// fn eliminate_branch_over_jump(lines: &[Line]) -> Vec<Line> {
+//     let mut result = Vec::new();
+//     let mut i = 0;
 
-    while i < lines.len() {
-        // Check for pattern: Bxx skip; JMP target; skip:
-        if i + 2 < lines.len()
-            && let (
-                Line::Instruction {
-                    mnemonic: branch_m,
-                    operand: Some(skip_label),
-                    comment: branch_comment,
-                },
-                Line::Instruction {
-                    mnemonic: jmp_m,
-                    operand: Some(target_label),
-                    ..
-                },
-                Line::Label(label),
-            ) = (&lines[i], &lines[i + 1], &lines[i + 2])
-        {
-            // Check if this is a conditional branch followed by JMP, and the label matches
-            if let Some(inverted) = invert_branch(branch_m)
-                && jmp_m == "JMP"
-                && skip_label == label
-            {
-                // Replace with inverted branch to target
-                result.push(Line::Instruction {
-                    mnemonic: inverted.to_string(),
-                    operand: Some(target_label.clone()),
-                    comment: branch_comment.clone(),
-                });
-                // Keep the label (might be used elsewhere)
-                result.push(lines[i + 2].clone());
-                i += 3;
-                continue;
-            }
-        }
+//     while i < lines.len() {
+//         // Check for pattern: Bxx skip; JMP target; skip:
+//         if i + 2 < lines.len()
+//             && let (
+//                 Line::Instruction {
+//                     mnemonic: branch_m,
+//                     operand: Some(skip_label),
+//                     comment: branch_comment,
+//                 },
+//                 Line::Instruction {
+//                     mnemonic: jmp_m,
+//                     operand: Some(target_label),
+//                     ..
+//                 },
+//                 Line::Label(label),
+//             ) = (&lines[i], &lines[i + 1], &lines[i + 2])
+//         {
+//             // Check if this is a conditional branch followed by JMP, and the label matches
+//             if let Some(inverted) = invert_branch(branch_m)
+//                 && jmp_m == "JMP"
+//                 && skip_label == label
+//             {
+//                 // Replace with inverted branch to target
+//                 result.push(Line::Instruction {
+//                     mnemonic: inverted.to_string(),
+//                     operand: Some(target_label.clone()),
+//                     comment: branch_comment.clone(),
+//                 });
+//                 // Keep the label (might be used elsewhere)
+//                 result.push(lines[i + 2].clone());
+//                 i += 3;
+//                 continue;
+//             }
+//         }
 
-        result.push(lines[i].clone());
-        i += 1;
-    }
+//         result.push(lines[i].clone());
+//         i += 1;
+//     }
 
-    result
-}
+//     result
+// }
 
 /// Eliminate redundant LDX #$00 when X is already known to be 0
 ///
@@ -1200,51 +1200,51 @@ mod tests {
         assert_eq!(optimized.len(), 3);
     }
 
-    // Branch inversion tests
+    // // Branch inversion tests
 
-    #[test]
-    fn test_branch_inversion_beq_jmp() {
-        let asm = "    BEQ skip\n    JMP target\nskip:\n    LDA #$00\n";
-        let lines = parse_assembly(asm);
-        let optimized = eliminate_branch_over_jump(&lines);
-        // BEQ skip; JMP target; skip: → BNE target; skip:
-        assert_eq!(optimized.len(), 3);
-        assert!(
-            matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
-            if mnemonic == "BNE" && operand.as_deref() == Some("target"))
-        );
-        assert!(matches!(&optimized[1], Line::Label(l) if l == "skip"));
-    }
+    // #[test]
+    // fn test_branch_inversion_beq_jmp() {
+    //     let asm = "    BEQ skip\n    JMP target\nskip:\n    LDA #$00\n";
+    //     let lines = parse_assembly(asm);
+    //     let optimized = eliminate_branch_over_jump(&lines);
+    //     // BEQ skip; JMP target; skip: → BNE target; skip:
+    //     assert_eq!(optimized.len(), 3);
+    //     assert!(
+    //         matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
+    //         if mnemonic == "BNE" && operand.as_deref() == Some("target"))
+    //     );
+    //     assert!(matches!(&optimized[1], Line::Label(l) if l == "skip"));
+    // }
 
-    #[test]
-    fn test_branch_inversion_bne_jmp() {
-        let asm = "    BNE skip\n    JMP target\nskip:\n";
-        let lines = parse_assembly(asm);
-        let optimized = eliminate_branch_over_jump(&lines);
-        // BNE skip; JMP target; skip: → BEQ target; skip:
-        assert_eq!(optimized.len(), 2);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "BEQ"));
-    }
+    // #[test]
+    // fn test_branch_inversion_bne_jmp() {
+    //     let asm = "    BNE skip\n    JMP target\nskip:\n";
+    //     let lines = parse_assembly(asm);
+    //     let optimized = eliminate_branch_over_jump(&lines);
+    //     // BNE skip; JMP target; skip: → BEQ target; skip:
+    //     assert_eq!(optimized.len(), 2);
+    //     assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "BEQ"));
+    // }
 
-    #[test]
-    fn test_branch_inversion_bcs_jmp() {
-        let asm = "    BCS skip\n    JMP target\nskip:\n";
-        let lines = parse_assembly(asm);
-        let optimized = eliminate_branch_over_jump(&lines);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "BCC"));
-    }
+    // #[test]
+    // fn test_branch_inversion_bcs_jmp() {
+    //     let asm = "    BCS skip\n    JMP target\nskip:\n";
+    //     let lines = parse_assembly(asm);
+    //     let optimized = eliminate_branch_over_jump(&lines);
+    //     assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "BCC"));
+    // }
 
-    #[test]
-    fn test_branch_inversion_preserves_nonmatching() {
-        // Label doesn't match branch target - should not optimize
-        let asm = "    BEQ other\n    JMP target\nskip:\n";
-        let lines = parse_assembly(asm);
-        let optimized = eliminate_branch_over_jump(&lines);
-        // Should keep all 3 lines unchanged
-        assert_eq!(optimized.len(), 3);
-        assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "BEQ"));
-        assert!(matches!(&optimized[1], Line::Instruction { mnemonic, .. } if mnemonic == "JMP"));
-    }
+    // #[test]
+    // fn test_branch_inversion_preserves_nonmatching() {
+    //     // Label doesn't match branch target - should not optimize
+    //     let asm = "    BEQ other\n    JMP target\nskip:\n";
+    //     let lines = parse_assembly(asm);
+    //     let optimized = eliminate_branch_over_jump(&lines);
+    //     // Should keep all 3 lines unchanged
+    //     assert_eq!(optimized.len(), 3);
+    //     assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "BEQ"));
+    //     assert!(matches!(&optimized[1], Line::Instruction { mnemonic, .. } if mnemonic == "JMP"));
+    // }
 
     // LDX #$00 tracking tests
 
