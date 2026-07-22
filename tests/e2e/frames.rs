@@ -80,7 +80,7 @@ fn mul16_uses_relocated_params() {
     assert_asm_contains(&asm, "$DC");
 }
 
-/// A frame larger than the 144-byte frame region is a clear compile error.
+/// A single frame larger than the 144-byte frame region is a clear compile error.
 #[test]
 fn oversized_frame_reports_overflow() {
     assert_error_contains(
@@ -92,6 +92,57 @@ fn oversized_frame_reports_overflow() {
         }
         "#,
         "frame region overflow",
+    );
+}
+
+/// Overflow is a property of the whole call chain, not just one function: many
+/// modestly-sized functions whose frames must all be live at once (a deep call
+/// chain) collectively exceed the 144-byte frame region and are rejected at
+/// compile time, rather than silently overwriting each other's zero page. The
+/// diagnostic names the function whose frame ran off the end of the region.
+#[test]
+fn deep_call_chain_overflows_frame_region() {
+    // 12 functions, each with 16 bytes of locals (8 x u16), chained f0 -> f1 ->
+    // ... -> f11. 12 * 16 = 192 bytes > 144, and because each callee's frame is
+    // colored above its caller's, all 12 frames are simultaneously live.
+    let mut src = String::new();
+    for i in 0..12 {
+        let decls = (0..8)
+            .map(|j| format!("let v{j}: u16 = {j} as u16;"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Keep every local used, and call the next function in the chain.
+        let uses = (0..8)
+            .map(|j| format!("v{j} = v{j} + (1 as u16);"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let call = if i < 11 {
+            format!("f{}();", i + 1)
+        } else {
+            String::new()
+        };
+        src.push_str(&format!("fn f{i}() {{ {decls} {call} {uses} }}\n"));
+    }
+    src.push_str("#[reset]\nfn main() { f0(); loop {} }\n");
+
+    assert_error_contains(&src, "frame region overflow");
+}
+
+/// The overflow diagnostic reports the offending call chain / function, so the
+/// programmer can see where the budget was blown rather than just that it was.
+#[test]
+fn frame_overflow_diagnostic_names_offender() {
+    assert_error_contains(
+        r#"
+        struct Huge { data: [u8; 250] }
+        fn hog() {
+            let h: Huge = { data: [0; 250] };
+            h.data[0] = 1;
+        }
+        #[reset]
+        fn main() { hog(); loop {} }
+        "#,
+        "hog",
     );
 }
 
