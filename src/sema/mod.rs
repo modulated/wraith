@@ -598,6 +598,16 @@ pub enum Warning {
         section_end: u16,
         span: Span,
     },
+
+    /// A recursive function has a large frame, so each recursive call consumes a
+    /// large slice of the fixed 256-byte software stack used to save/restore
+    /// frames across recursion. Deep recursion will silently overflow it.
+    DeepRecursionRisk {
+        function: String,
+        frame_bytes: u8,
+        safe_depth: usize,
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -652,6 +662,21 @@ impl Warning {
                 format!(
                     "address declaration `{}` at ${:04X} overlaps with {} section (${:04X}-${:04X})",
                     name, address, section_name, section_start, section_end
+                ),
+                span,
+            ),
+            Warning::DeepRecursionRisk {
+                function,
+                frame_bytes,
+                safe_depth,
+                span,
+            } => (
+                format!(
+                    "recursive function `{}` has a {}-byte frame; each recursive call saves it \
+                     to the 256-byte software stack, so recursion deeper than ~{} levels will \
+                     silently overflow it and corrupt data. Use tail recursion (which compiles \
+                     to a loop) or an explicit loop for deep recursion.",
+                    function, frame_bytes, safe_depth
                 ),
                 span,
             ),

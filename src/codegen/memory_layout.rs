@@ -40,6 +40,12 @@ pub const FRAME_REGION_END: u8 = 0xCF;
 /// adjacent to the $D0-$D8 math working storage.
 pub const MATH_PARAM_BASE: u8 = 0xD9;
 
+/// Size in bytes of the software stack ($0200-$02FF, pointer in zero-page $FF)
+/// that Wraith uses to save/restore a callee's frame across a recursive call.
+/// A recursive function pushes its whole frame here on each call, so the safe
+/// recursion depth is bounded by this divided by the frame size.
+pub const SOFTWARE_STACK_BYTES: usize = 256;
+
 /// Memory layout configuration for 6502 code generation.
 ///
 /// Variable/parameter placement is handled by frame allocation (see

@@ -23,6 +23,7 @@ use crate::sema::types::Type;
 /// - Arrays: Emit data inline and load address into A+X
 pub(super) fn generate_literal(
     lit: &crate::ast::Literal,
+    elem_size: usize,
     emitter: &mut Emitter,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
@@ -87,33 +88,23 @@ pub(super) fn generate_literal(
             // Emit array data with label
             emitter.emit_label(&arr_label);
 
-            // Emit each element
-            // Try to evaluate each element as a constant expression
+            // Emit each element as `elem_size` little-endian bytes so u16/i16/b16
+            // arrays keep their high byte (a single byte would truncate them).
+            // Try to evaluate each element as a constant expression.
             for elem in elements {
-                match &elem.node {
+                let value = match &elem.node {
                     // Fast path for simple literals
-                    Expr::Literal(crate::ast::Literal::Integer(val)) => {
-                        emitter.emit_byte(*val as u8);
-                    }
-                    Expr::Literal(crate::ast::Literal::Bool(b)) => {
-                        emitter.emit_byte(if *b { 1 } else { 0 });
-                    }
+                    Expr::Literal(crate::ast::Literal::Integer(val)) => *val,
+                    Expr::Literal(crate::ast::Literal::Bool(b)) => i64::from(*b),
                     // For complex expressions, try to evaluate as constant
                     _ => {
-                        // Try to evaluate as constant expression
                         use crate::sema::const_eval::eval_const_expr;
                         match eval_const_expr(elem) {
-                            Ok(const_val) => {
-                                // Successfully evaluated as constant
-                                if let Some(int_val) = const_val.as_integer() {
-                                    emitter.emit_byte(int_val as u8);
-                                } else {
-                                    return Err(CodegenError::UnsupportedOperation(
-                                        "Array elements must evaluate to integer constants"
-                                            .to_string(),
-                                    ));
-                                }
-                            }
+                            Ok(const_val) => const_val.as_integer().ok_or_else(|| {
+                                CodegenError::UnsupportedOperation(
+                                    "Array elements must evaluate to integer constants".to_string(),
+                                )
+                            })?,
                             Err(_) => {
                                 // Not a constant expression - runtime array construction not supported in literals
                                 return Err(CodegenError::UnsupportedOperation(
@@ -123,7 +114,8 @@ pub(super) fn generate_literal(
                             }
                         }
                     }
-                }
+                };
+                emit_le_bytes(emitter, value, elem_size);
             }
 
             // Skip label
@@ -151,29 +143,18 @@ pub(super) fn generate_literal(
             emitter.emit_label(&arr_label);
 
             // Get the fill value (must be a constant expression)
-            let byte_val = match &value.node {
-                Expr::Literal(crate::ast::Literal::Integer(val)) => *val as u8,
-                Expr::Literal(crate::ast::Literal::Bool(b)) => {
-                    if *b {
-                        1
-                    } else {
-                        0
-                    }
-                }
+            let fill_val = match &value.node {
+                Expr::Literal(crate::ast::Literal::Integer(val)) => *val,
+                Expr::Literal(crate::ast::Literal::Bool(b)) => i64::from(*b),
                 _ => {
                     // Try to evaluate as constant expression
                     use crate::sema::const_eval::eval_const_expr;
                     match eval_const_expr(value) {
-                        Ok(const_val) => {
-                            if let Some(int_val) = const_val.as_integer() {
-                                int_val as u8
-                            } else {
-                                return Err(CodegenError::UnsupportedOperation(
-                                    "Array fill value must evaluate to an integer constant"
-                                        .to_string(),
-                                ));
-                            }
-                        }
+                        Ok(const_val) => const_val.as_integer().ok_or_else(|| {
+                            CodegenError::UnsupportedOperation(
+                                "Array fill value must evaluate to an integer constant".to_string(),
+                            )
+                        })?,
                         Err(_) => {
                             return Err(CodegenError::UnsupportedOperation(
                                 "Array fill value must be a constant expression".to_string(),
@@ -183,15 +164,20 @@ pub(super) fn generate_literal(
                 }
             };
 
+            let total_bytes = *count * elem_size;
+
             // Zero-fill optimization: use .RES directive for zero arrays >= 16 bytes
-            if byte_val == 0 && *count >= 16 {
-                emitter.emit_comment(&format!("Zero-filled array optimized: {} bytes", count));
-                emitter.emit_data_directive(&format!(".RES {}", count));
+            if fill_val == 0 && total_bytes >= 16 {
+                emitter.emit_comment(&format!(
+                    "Zero-filled array optimized: {} bytes",
+                    total_bytes
+                ));
+                emitter.emit_data_directive(&format!(".RES {}", total_bytes));
             } else {
-                // Emit the value 'count' times using .BYTE for portability
-                emitter.emit_comment(&format!("Array data: {} bytes", count));
+                // Emit the value 'count' times (elem_size little-endian bytes each).
+                emitter.emit_comment(&format!("Array data: {} bytes", total_bytes));
                 for _ in 0..*count {
-                    emitter.emit_byte(byte_val);
+                    emit_le_bytes(emitter, fill_val, elem_size);
                 }
             }
 
@@ -208,6 +194,15 @@ pub(super) fn generate_literal(
 
             Ok(())
         }
+    }
+}
+
+/// Emit `size` little-endian bytes of `value` as inline array data.
+/// `size` is 1 for u8/bool elements and 2 for u16/i16/b16 elements.
+fn emit_le_bytes(emitter: &mut Emitter, value: i64, size: usize) {
+    let bits = value as u64;
+    for i in 0..size.max(1) {
+        emitter.emit_byte(((bits >> (i * 8)) & 0xFF) as u8);
     }
 }
 

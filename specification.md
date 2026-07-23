@@ -11,6 +11,7 @@ A systems programming language designed specifically for the 6502 processor, tak
 - [Structs](#structs)
 - [Enums](#enums)
 - [Arrays and Slices](#arrays-and-slices)
+- [Strings](#strings)
 - [Control Flow](#control-flow)
 - [Type Casting](#type-casting)
 - [Inline Assembly](#inline-assembly)
@@ -318,6 +319,8 @@ Each function gets a **frame**: a contiguous block of zero page holding its para
 - This coloring is computed once at compile time; there is no runtime allocation or garbage collection involved, and non-recursive calls have zero overhead beyond the normal argument copy and `JSR`.
 
 **Recursion:** a function that calls itself (directly or through a cycle of mutually recursive functions) is a special case - its own frame would otherwise be overwritten by the nested call before the outer call finishes using it. For these calls only, the compiler automatically saves the callee's frame to a small software stack before the call and restores it afterward. This is fully automatic and invisible to the programmer; see [Tail Call Optimization](#tail-call-optimization) for the (zero-overhead) tail-recursive case, which does not need this save/restore at all.
+
+That software stack is a fixed 256-byte region, so a recursive function with a large frame can only nest a shallow number of times (roughly `256 / frame_size`) before it overflows and silently corrupts data - the 6502 has no stack-limit detection, so this is not caught at runtime. To help catch this early, the compiler emits a **compile-time warning** when a non-tail recursive function's frame is large enough that the safe depth is shallow, suggesting tail recursion or an explicit loop instead. (Tail-recursive functions are exempt: they become loops and never grow the stack.) Note the 6502 hardware stack independently caps *any* non-tail recursion at roughly 128 nested calls regardless of frame size.
 
 **Interrupt handlers** (`#[irq]`/`#[nmi]`) can preempt main-line code at any point, including mid-expression. The compiler tracks which zero-page scratch and frames a handler's call graph can touch and automatically saves/restores that state in the handler's prologue/epilogue, so an interrupt firing during an in-progress calculation cannot corrupt it. See [Appendix C: Calling Convention](#appendix-c-calling-convention).
 
@@ -1111,6 +1114,152 @@ let source: [u8; 100] = [...];
 let dest: [u8; 100];
 memcpy(&dest as u16, &source as u16, 100);
 ```
+
+### Completion Status
+
+All items completed.
+
+---
+
+## Strings
+
+### String Type
+
+Strings in Wraith are length-prefixed byte sequences optimized for the 6502. The string type is declared as `str`.
+
+```rust
+let message: str = "Hello, World!";
+let empty: str = "";
+```
+
+**Storage Format:**
+- `[u8 length][byte data...]` - single byte length prefix followed by character data
+- Maximum length: 255 bytes (enforced at compile time)
+- A `str` value is a 2-byte pointer to this length-prefixed data
+
+### String Literals
+
+String literals support escape sequences:
+
+```rust
+let msg1: str = "Hello\n";          // Newline
+let msg2: str = "Tab\there";        // Tab
+let msg3: str = "Quote: \"Hi\"";    // Escaped quotes
+let msg4: str = "Backslash: \\";    // Backslash
+```
+
+### String Properties
+
+Access string metadata:
+
+```rust
+let msg: str = "Hello";
+let len: u16 = msg.len;      // Get length (5)
+```
+
+### String Indexing
+
+Access individual characters by index:
+
+```rust
+let msg: str = "ABC";
+let first: u8 = msg[0];    // 'A' (0x41)
+let second: u8 = msg[1];   // 'B' (0x42)
+```
+
+**Bounds checking** follows the same rules as [array indexing](#array-bounds-checking): a constant index out of range is a compile-time error, while a variable index is **not** bounds-checked at runtime (reading past the end yields undefined data). It is the programmer's responsibility to keep variable indices within `msg.len`.
+
+### String Concatenation
+
+Concatenate strings at compile time using the `+` operator:
+
+```rust
+const GREETING: str = "Hello, " + "World!";
+const PATH: str = "data/" + "level" + ".txt";
+```
+
+**Requirements:**
+- Both operands must be compile-time constant strings
+- Result must not exceed 255 bytes
+- Evaluated entirely at compile time (zero runtime cost)
+
+### String Slicing
+
+Extract substrings at compile time:
+
+```rust
+const FULL: str = "Hello, World!";
+const GREETING: str = FULL[0..5];     // "Hello"
+const NAME: str = FULL[7..12];        // "World"
+const COMMA: str = FULL[5..7];        // ", "
+```
+
+**Slice Syntax:**
+- `start..end` - Exclusive end (standard)
+- `start..=end` - Inclusive end
+- Bounds must be constant expressions
+- Empty slices are not allowed (compile error)
+- Result is validated to fit within 255 bytes
+
+### String Iteration
+
+Iterate over characters in a string:
+
+```rust
+// Simple iteration
+for c in message {
+    // c is u8 (each character)
+    process_char(c);
+}
+
+// With index
+for (i, c) in message {
+    // i is u8 (index), c is u8 (character)
+    buffer[i] = c;
+}
+```
+
+**Performance Note:** String iteration is optimized to use the X register as a counter, providing efficient 8-bit indexing on the 6502.
+
+### String Parameter Access
+
+A `str` parameter is a 2-byte pointer that, like every other parameter, is passed directly in its own zero-page frame slot (see [Zero Page Allocation](#zero-page-allocation)). Because it's already in zero page, every access reads it in place - there is no separate pointer-caching layer:
+
+```rust
+fn process_string(s: str) {
+    let len1: u16 = s.len;
+    let len2: u16 = s.len;  // Reads the same zero-page slot again
+    let len3: u16 = s.len;
+}
+```
+
+### Cross-Module String Pooling
+
+Identical strings across different modules are automatically deduplicated using content-based hashing:
+
+```rust
+// file1.wr
+pub const MSG: str = "Error";
+
+// file2.wr
+import { MSG } from "file1.wr";
+const LOCAL: str = "Error";  // Shares storage with MSG
+```
+
+**Benefits:**
+- Saves memory when multiple modules use the same strings
+- Strings are identified by hash of content
+- Automatic and transparent to the programmer
+
+### Limitations
+
+- Maximum string length: 255 bytes
+- No runtime string mutation
+- No runtime string concatenation (concatenation is compile-time only)
+- String comparisons must be done manually (element by element)
+- No built-in string search/replace operations
+
+These limitations are intentional for the 6502 platform - strings are designed for static data like messages, labels, and constants rather than dynamic text processing.
 
 ### Completion Status
 

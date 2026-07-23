@@ -147,7 +147,7 @@ impl SemanticAnalyzer {
                     self.table.enter_scope();
 
                     // Add pattern bindings to scope
-                    self.add_pattern_bindings(&arm.pattern.node, &match_ty)?;
+                    self.add_pattern_bindings(&arm.pattern.node, arm.pattern.span, &match_ty)?;
 
                     // Analyze arm body
                     self.analyze_stmt(&arm.body)?;
@@ -564,6 +564,7 @@ impl SemanticAnalyzer {
     pub(super) fn add_pattern_bindings(
         &mut self,
         pattern: &Pattern,
+        pattern_span: crate::Span,
         match_ty: &Type,
     ) -> Result<(), SemaError> {
         match pattern {
@@ -623,9 +624,12 @@ impl SemanticAnalyzer {
                     is_param: false,
                 };
                 self.table.insert(name.clone(), info.clone());
-                // Also add to resolved_symbols so codegen can find it
-                // Note: Pattern::Variable doesn't have a span, so we can't add to resolved_symbols here
-                // This is a limitation of the current AST structure
+                // Pattern::Variable carries no span of its own, but the arm's
+                // pattern span is unique per arm, so key the binding on it. This
+                // lets match codegen find the binding's storage to copy the
+                // scrutinee into (the arm-body scope is popped after analysis,
+                // so a name lookup would fail at codegen time).
+                self.resolved_symbols.insert(pattern_span, info);
             }
             Pattern::Wildcard => {
                 // No bindings for wildcard

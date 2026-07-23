@@ -1,0 +1,80 @@
+// ============================================================================
+// Deep recursion and stack overflow on the 6502
+// ============================================================================
+//
+// This example demonstrates what happens when a NON-tail-recursive function
+// recurses too deeply. It COMPILES CLEANLY - stack overflow is a RUNTIME
+// condition on the 6502, and the hardware has no stack-limit detection, so
+// there is no compile-time error and no runtime trap. It just silently
+// corrupts memory. This file exists to document that limitation and the way
+// to avoid it (tail recursion / iteration).
+//
+// Two stacks grow with each non-tail recursive call:
+//
+//   1. Hardware stack ($0100-$01FF, 256 bytes) - the 6502's own stack. Each
+//      JSR pushes a 2-byte return address. It overflows after ~128 nested
+//      calls, at which point the stack pointer wraps and RTS starts returning
+//      to GARBAGE addresses => runaway execution / crash.
+//
+//   2. Software stack ($0200-$02FF, 256 bytes, pointer in zero page $FF) - a
+//      compiler-managed stack Wraith uses ONLY for recursion. Before a
+//      recursive call it saves the callee's zero-page frame (and any binary-op
+//      operand that must survive the call); it restores them afterward. It
+//      overflows when the cumulative saved bytes exceed 256, at which point $FF
+//      wraps and the newest saves overwrite the OLDEST ones => wrong results on
+//      unwind. There is no bounds check.
+//
+// For `deep_sum` below, each level saves ~3 bytes to the software stack
+// (1 byte of frame + a 2-byte u16 operand spill for the `n + ...`), so the
+// software stack overflows first, at roughly level ~85; the hardware stack
+// follows at ~128. deep_sum(200) blows through both.
+//
+// Note: the compiler emits a compile-time WARNING when a non-tail recursive
+// function has a *large* frame (so `256 / frame_size` is a shallow depth).
+// deep_sum's frame is tiny (1 byte), so it is NOT warned about here - its
+// overflow comes from the hardware stack and operand spills, not frame size.
+// A recursive function with big local arrays/structs would be flagged.
+
+const OUT_LO: addr = 0x0400;
+const OUT_HI: addr = 0x0401;
+
+// NON-tail recursive: `n + deep_sum(...)` still needs `n` after the call
+// returns, so this cannot be optimized to a loop - every level occupies stack.
+fn deep_sum(n: u8) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    return (n as u16) + deep_sum(n - 1);
+}
+
+#[reset]
+fn main() {
+    // 200 levels deep - overflows BOTH stacks. On real hardware/an emulator the
+    // result is wrong and/or execution crashes; there is no error reported.
+    let total: u16 = deep_sum(200);
+    OUT_LO = total.low;
+    OUT_HI = total.high;
+
+    loop {}
+}
+
+// ----------------------------------------------------------------------------
+// THE FIX: tail recursion (accumulator pattern)
+// ----------------------------------------------------------------------------
+//
+// `sum_tail` computes the same result but the recursive call is the ENTIRE
+// return value, so Wraith's tail-call optimization rewrites it into a loop
+// (`JMP <function>_loop_start` instead of `JSR`). It performs ZERO frame saves
+// and ZERO stack growth - `sum_tail(200, 0)` and `sum_tail(60000, 0)` both run
+// in constant space and never overflow.
+//
+//   fn sum_tail(n: u8, acc: u16) -> u16 {
+//       if n == 0 {
+//           return acc;
+//       }
+//       return sum_tail(n - 1, acc + (n as u16));
+//   }
+//
+// Rule of thumb on the 6502: keep non-tail recursion shallow (well under ~100
+// levels, fewer if frames are large), and use tail recursion or an explicit
+// loop for anything that can go deep.
