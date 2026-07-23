@@ -415,32 +415,58 @@ pub(super) fn generate_binary(
 // Shift helper functions
 // A contains value to shift, emitter.memory_layout.temp_reg() contains shift amount
 
-fn generate_shift_left(emitter: &mut Emitter, _is_u16: bool) -> Result<(), CodegenError> {
-    // Shift A left by emitter.memory_layout.temp_reg() bits
-    // Use X register as loop counter
+fn generate_shift_left(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+    // Shift the left operand left by emitter.memory_layout.temp_reg() bits.
+    // u8:  value in A.
+    // u16: low byte in A, high byte in Y.
+    // Uses X as the loop counter.
 
     if !emitter.is_minimal() {
         emitter.emit_comment("Shift left (multiply by power of 2)");
     }
 
+    let temp_reg = emitter.memory_layout.temp_reg();
     let loop_label = emitter.next_label("sl");
     let end_label = emitter.next_label("sx");
 
-    // Load shift count into X
-    emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+    if is_u16 {
+        // Park the high byte in scratch so ASL A / ROL <scratch> shift all 16 bits.
+        let high_tmp = emitter.memory_layout.loop_end_temp(); // $22 by default
+        emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
 
-    // Check if count is zero
-    emitter.emit_inst("CPX", "#$00");
-    emitter.emit_inst("BEQ", &end_label);
+        // Load shift count into X
+        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+        emitter.emit_inst("CPX", "#$00");
+        emitter.emit_inst("BEQ", &end_label);
 
-    // Loop: shift left once per iteration
-    emitter.emit_label(&loop_label);
-    emitter.emit_inst("ASL", "A"); // Arithmetic shift left
-    emitter.emit_inst("DEX", "");
-    emitter.emit_inst("BNE", &loop_label);
+        // Loop: low byte shifts bit 7 into carry, high byte rotates it in.
+        emitter.emit_label(&loop_label);
+        emitter.emit_inst("ASL", "A");
+        emitter.emit_inst("ROL", &format!("${:02X}", high_tmp));
+        emitter.emit_inst("DEX", "");
+        emitter.emit_inst("BNE", &loop_label);
 
-    emitter.emit_label(&end_label);
-    // Comparison modifies A register - invalidate tracking
+        emitter.emit_label(&end_label);
+        // Restore the shifted high byte to Y.
+        emitter.emit_inst("LDY", &format!("${:02X}", high_tmp));
+    } else {
+        // Load shift count into X
+        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+
+        // Check if count is zero
+        emitter.emit_inst("CPX", "#$00");
+        emitter.emit_inst("BEQ", &end_label);
+
+        // Loop: shift left once per iteration
+        emitter.emit_label(&loop_label);
+        emitter.emit_inst("ASL", "A"); // Arithmetic shift left
+        emitter.emit_inst("DEX", "");
+        emitter.emit_inst("BNE", &loop_label);
+
+        emitter.emit_label(&end_label);
+    }
+
+    // Shift modifies A (and Y for u16) - invalidate tracking
     emitter.mark_a_unknown();
     Ok(())
 }
@@ -457,32 +483,27 @@ fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), Codeg
     let temp_reg = emitter.memory_layout.temp_reg();
 
     if is_u16 {
-        // For u16, optimize common case of >> 8 (just take high byte)
-        // Check if shift count == 8
-        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
-        emitter.emit_inst("CPX", "#$08");
-        let not_eight_label = emitter.next_label("sn");
+        // u16: low byte in A, high byte in Y. Park the high byte in scratch so
+        // LSR <scratch> / ROR A shift all 16 bits, count in X.
+        let high_tmp = emitter.memory_layout.loop_end_temp(); // $22 by default
+        let loop_label = emitter.next_label("sr");
         let end_label = emitter.next_label("sx");
-        emitter.emit_inst("BNE", &not_eight_label);
 
-        // Shift by exactly 8: move high byte to low byte
-        emitter.emit_inst("TYA", ""); // A = high byte
-        emitter.emit_inst("LDY", "#$00"); // Y = 0
-        emitter.emit_inst("JMP", &end_label);
-
-        emitter.emit_label(&not_eight_label);
-        // For other shift counts, need multi-byte shift (not yet implemented)
-        // For now, just do single-byte shift as before
+        emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
+        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
         emitter.emit_inst("CPX", "#$00");
         emitter.emit_inst("BEQ", &end_label);
 
-        let loop_label = emitter.next_label("sr");
+        // Loop: high byte shifts bit 0 into carry, low byte rotates it in.
         emitter.emit_label(&loop_label);
-        emitter.emit_inst("LSR", "A");
+        emitter.emit_inst("LSR", &format!("${:02X}", high_tmp));
+        emitter.emit_inst("ROR", "A");
         emitter.emit_inst("DEX", "");
         emitter.emit_inst("BNE", &loop_label);
 
         emitter.emit_label(&end_label);
+        // Restore the shifted high byte to Y.
+        emitter.emit_inst("LDY", &format!("${:02X}", high_tmp));
     } else {
         // u8 shift
         let loop_label = emitter.next_label("sr");

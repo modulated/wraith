@@ -172,3 +172,79 @@ fn u16_le_equal_and_low_byte() {
     assert_eq!(u16_le(0x0300, 0x0301), 1, "768 <= 769 should be true");
     assert_eq!(u16_le(0x0301, 0x0300), 0, "769 <= 768 should be false");
 }
+
+// ---------------------------------------------------------------------------
+// Shift width correctness (`<<` and `>>` on u16 must move all 16 bits)
+// ---------------------------------------------------------------------------
+
+/// Compute `(a << n)` as u16 and return the full 16-bit result.
+fn u16_shl(a: u16, n: u8) -> u16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let x: u16 = {a};
+            let s: u8 = {n};
+            let r: u16 = x << s;
+            LO = r.low;
+            HI = r.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400)
+}
+
+/// Compute `(a >> n)` as u16 and return the full 16-bit result.
+fn u16_shr(a: u16, n: u8) -> u16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let x: u16 = {a};
+            let s: u8 = {n};
+            let r: u16 = x >> s;
+            LO = r.low;
+            HI = r.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400)
+}
+
+#[test]
+fn u16_shl_crosses_byte_boundary() {
+    // 1 << 8 = 256: the set bit must move from the low byte into the high byte.
+    assert_eq!(u16_shl(1, 8), 256, "1 << 8 should be 256");
+    // 3 << 7 = 384 = 0x0180: bits straddle the byte boundary.
+    assert_eq!(u16_shl(3, 7), 384, "3 << 7 should be 384");
+    // 0x00FF << 1 = 0x01FE: carry out of the low byte into the high byte.
+    assert_eq!(u16_shl(0x00FF, 1), 0x01FE, "255 << 1 should be 510");
+}
+
+#[test]
+fn u16_shl_small_counts() {
+    assert_eq!(u16_shl(0x0102, 1), 0x0204, "shift keeps high byte");
+    assert_eq!(u16_shl(5, 2), 20, "5 << 2 should be 20");
+}
+
+#[test]
+fn u16_shr_crosses_byte_boundary() {
+    // 0x0180 >> 7 = 3: bits must come down from the high byte.
+    assert_eq!(u16_shr(0x0180, 7), 3, "384 >> 7 should be 3");
+    // 0x0100 >> 1 = 0x0080: carry out of the high byte into the low byte.
+    assert_eq!(u16_shr(0x0100, 1), 0x0080, "256 >> 1 should be 128");
+    // 0xFF00 >> 8 = 0x00FF (existing special case).
+    assert_eq!(u16_shr(0xFF00, 8), 0x00FF, "0xFF00 >> 8 should be 0x00FF");
+}
+
+#[test]
+fn u16_shr_preserves_high_byte() {
+    // 0x0402 >> 1 = 0x0201: the high byte must shift, not be dropped.
+    assert_eq!(u16_shr(0x0402, 1), 0x0201, "0x0402 >> 1 should be 0x0201");
+}
