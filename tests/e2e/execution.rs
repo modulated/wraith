@@ -1154,5 +1154,64 @@ fn array_of_struct_u16_field() {
         }
     "#);
     assert_eq!(e.mem(0x0400), 20, "cells[1].tag");
-    assert_eq!(e.mem16(0x0401), 0xBEEF, "cells[1].val (u16 field, both bytes)");
+    assert_eq!(
+        e.mem16(0x0401),
+        0xBEEF,
+        "cells[1].val (u16 field, both bytes)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Nested and array-of-struct field ASSIGNMENT (write counterpart).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_struct_field_write() {
+    let mut e = run(r#"
+        struct Inner { x: u8, y: u16 }
+        struct Outer { a: u8, inner: Inner }
+        const XOUT: addr = 0x0400;
+        const YLO: addr = 0x0401;
+        const YHI: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let o: Outer = Outer { a: 1, inner: Inner { x: 0, y: 0 } };
+            o.inner.x = 77;
+            o.inner.y = 0xABCD;
+            XOUT = o.inner.x;
+            YLO = o.inner.y.low;
+            YHI = o.inner.y.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 77, "wrote o.inner.x");
+    assert_eq!(e.mem16(0x0401), 0xABCD, "wrote o.inner.y (u16)");
+}
+
+#[test]
+fn array_of_struct_field_write() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const X1: addr = 0x0400;
+        const Y1: addr = 0x0401;
+        const X0: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let pts: [Point; 3] = [
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+            ];
+            pts[1].x = 5;
+            pts[1].y = 9;
+            pts[0].x = 3;
+            X1 = pts[1].x;
+            Y1 = pts[1].y;
+            X0 = pts[0].x;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 5, "pts[1].x written");
+    assert_eq!(e.mem(0x0401), 9, "pts[1].y written");
+    assert_eq!(e.mem(0x0402), 3, "pts[0].x written (distinct element)");
 }

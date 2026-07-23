@@ -1320,6 +1320,43 @@ fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
+    // Nested (a.b.c = x) or array-of-struct (arr[const].f = x) target: resolve a
+    // static address for the local struct chain, then store the value there.
+    if !matches!(&object.node, Expr::Variable(_))
+        && let Some((base, struct_name)) =
+            crate::codegen::expr::resolve_static_struct_lvalue(object, info)
+    {
+        let field_info = info
+            .type_registry
+            .get_struct(&struct_name)
+            .and_then(|s| s.get_field(&field.node).cloned())
+            .ok_or_else(|| {
+                CodegenError::UnsupportedOperation(format!(
+                    "field '{}' not found in struct '{}'",
+                    field.node, struct_name
+                ))
+            })?;
+        let is_multibyte = matches!(
+            &field_info.ty,
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+        );
+        emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
+        generate_expr(value, emitter, info, string_collector)?;
+        let field_addr = base + field_info.offset as u16;
+        if field_addr < 0x100 {
+            emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+            if is_multibyte {
+                emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+            }
+        } else {
+            emitter.emit_inst("STA", &format!("${:04X}", field_addr));
+            if is_multibyte {
+                emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
+            }
+        }
+        return Ok(());
+    }
+
     // Get the base object (must be a variable for now)
     if let Expr::Variable(var_name) = &object.node {
         // Look up the variable

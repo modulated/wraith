@@ -33,6 +33,7 @@ use unary::generate_unary;
 
 // Re-export for use in other codegen modules
 pub use aggregate::generate_struct_init_runtime;
+pub(crate) use aggregate::resolve_static_struct_lvalue;
 pub use call::generate_tail_recursive_update;
 
 pub fn generate_expr(

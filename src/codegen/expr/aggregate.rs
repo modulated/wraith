@@ -386,7 +386,7 @@ pub fn generate_struct_init_runtime(
 /// objects (and constant array indices). Returns `None` when any link is not
 /// statically addressable — a by-reference struct parameter, a runtime array
 /// index, or a non-struct — so callers can fall back to another path.
-fn resolve_static_struct_lvalue(
+pub(crate) fn resolve_static_struct_lvalue(
     expr: &Spanned<crate::ast::Expr>,
     info: &ProgramInfo,
 ) -> Option<(u16, String)> {
