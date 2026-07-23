@@ -1041,9 +1041,6 @@ fn nested_struct_field_read() {
 }
 
 #[test]
-#[ignore] // Read path (arr[i].field) is implemented; blocked on array-of-struct
-// *construction* — array literals of struct literals aren't supported
-// yet (arrays store a ROM data pointer, not inline runtime-initialized RAM).
 fn array_of_struct_const_index_field() {
     let mut e = run(r#"
         struct Point { x: u8, y: u8 }
@@ -1132,4 +1129,30 @@ fn function_pointer_reassign_dispatch() {
         }
     "#);
     assert_eq!(e.mem(0x0400), 33, "11 + 22 via reassigned function pointer");
+}
+
+#[test]
+fn array_of_struct_u16_field() {
+    // Element struct has a u16 field; indexed access must scale by the full
+    // element size and load both bytes.
+    let mut e = run(r#"
+        struct Cell { tag: u8, val: u16 }
+        const T1: addr = 0x0400;
+        const V1LO: addr = 0x0401;
+        const V1HI: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let cells: [Cell; 3] = [
+                Cell { tag: 10, val: 0x1111 },
+                Cell { tag: 20, val: 0xBEEF },
+                Cell { tag: 30, val: 0x3333 },
+            ];
+            T1 = cells[1].tag;
+            V1LO = cells[1].val.low;
+            V1HI = cells[1].val.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 20, "cells[1].tag");
+    assert_eq!(e.mem16(0x0401), 0xBEEF, "cells[1].val (u16 field, both bytes)");
 }

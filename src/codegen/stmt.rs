@@ -156,6 +156,46 @@ pub fn generate_stmt(
                     }
                 }
 
+                // Array of structs: stored inline. Runtime-initialize each element
+                // struct literal directly at addr + i*element_size.
+                if let Type::Array(elem, _n) = &sym.ty
+                    && let Type::Named(elem_struct) = &**elem
+                    && let Some(sdef) = info.type_registry.get_struct(elem_struct)
+                    && let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) =
+                        &init.node
+                    && let crate::sema::table::SymbolLocation::ZeroPage(base) = sym.location
+                {
+                    let elem_size = sdef.total_size as u8;
+                    emitter.emit_comment(&format!(
+                        "Array of {} {}: {} elements inline at ${:02X}",
+                        elem_struct,
+                        "structs",
+                        elements.len(),
+                        base
+                    ));
+                    for (i, elem_expr) in elements.iter().enumerate() {
+                        let elem_addr = base + (i as u8) * elem_size;
+                        let fields = match &elem_expr.node {
+                            crate::ast::Expr::StructInit { fields, .. }
+                            | crate::ast::Expr::AnonStructInit { fields } => fields,
+                            _ => {
+                                return Err(CodegenError::UnsupportedOperation(
+                                    "array-of-struct elements must be struct literals".to_string(),
+                                ));
+                            }
+                        };
+                        crate::codegen::expr::generate_struct_init_runtime(
+                            elem_struct,
+                            fields,
+                            elem_addr,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?;
+                    }
+                    return Ok(());
+                }
+
                 // Check for shorthand array syntax: [value] expanding to [value, value, ...]
                 // If init is a single-element array and target is a larger array, synthesize an ArrayFill
                 let modified_init;
