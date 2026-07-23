@@ -84,6 +84,10 @@ pub(super) fn generate_binary(
         )
     });
 
+    // Whether the operands are signed (i8/i16). Comparisons, `>>`, and division
+    // need signed-specific sequences; other ops are bit-identical either way.
+    let is_signed = left_type.is_some_and(|ty| ty.is_signed());
+
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
 
@@ -353,20 +357,20 @@ pub(super) fn generate_binary(
             generate_compare_ne(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Lt => {
-            generate_compare_lt(emitter, is_u16)?;
+            generate_compare_lt(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Ge => {
-            generate_compare_ge(emitter, is_u16)?;
+            generate_compare_ge(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Gt => {
             // A > B is same as B < A, so swap and use Lt
             // We already have A in accumulator and B in TEMP
             // Just swap them conceptually
-            generate_compare_gt(emitter, is_u16)?;
+            generate_compare_gt(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Le => {
             // A <= B is same as B >= A
-            generate_compare_le(emitter, is_u16)?;
+            generate_compare_le(emitter, is_u16, is_signed)?;
         }
         // And/Or are handled earlier with short-circuit evaluation
         crate::ast::BinaryOp::And | crate::ast::BinaryOp::Or => {

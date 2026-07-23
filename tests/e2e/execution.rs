@@ -506,3 +506,85 @@ fn i16_negative_literal_is_twos_complement() {
     "#);
     assert_eq!(e.mem16(0x0400), 0xFC18, "-1000 as i16 should be 0xFC18");
 }
+
+// ---------------------------------------------------------------------------
+// Signed comparisons (i8 / i16): unsigned branches give wrong results when the
+// sign bit differs (e.g. -1 < 1 is true, but 0xFF > 0x01 unsigned).
+// ---------------------------------------------------------------------------
+
+/// Store `(a OP b) as u8` for two i8 values, where OP is a comparison operator.
+fn i8_cmp(a: i32, b: i32, op: &str) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i8 = {a};
+            let y: i8 = {b};
+            let r: bool = x {op} y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+/// Store `(a OP b) as u8` for two i16 values.
+fn i16_cmp(a: i32, b: i32, op: &str) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i16 = {a};
+            let y: i16 = {b};
+            let r: bool = x {op} y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+#[test]
+fn i8_less_than_signed() {
+    assert_eq!(i8_cmp(-1, 1, "<"), 1, "-1 < 1 should be true");
+    assert_eq!(i8_cmp(1, -1, "<"), 0, "1 < -1 should be false");
+    assert_eq!(i8_cmp(-100, -50, "<"), 1, "-100 < -50 should be true");
+    assert_eq!(i8_cmp(-50, -100, "<"), 0, "-50 < -100 should be false");
+    assert_eq!(i8_cmp(5, 5, "<"), 0, "5 < 5 should be false");
+}
+
+#[test]
+fn i8_ge_gt_le_signed() {
+    assert_eq!(i8_cmp(-1, 1, ">="), 0, "-1 >= 1 false");
+    assert_eq!(i8_cmp(1, -1, ">="), 1, "1 >= -1 true");
+    assert_eq!(i8_cmp(-5, -5, ">="), 1, "-5 >= -5 true");
+    assert_eq!(i8_cmp(-1, 1, ">"), 0, "-1 > 1 false");
+    assert_eq!(i8_cmp(1, -1, ">"), 1, "1 > -1 true");
+    assert_eq!(i8_cmp(-5, -5, ">"), 0, "-5 > -5 false");
+    assert_eq!(i8_cmp(-1, 1, "<="), 1, "-1 <= 1 true");
+    assert_eq!(i8_cmp(-5, -5, "<="), 1, "-5 <= -5 true");
+    assert_eq!(i8_cmp(1, -1, "<="), 0, "1 <= -1 false");
+}
+
+#[test]
+fn i8_extreme_values_signed() {
+    // -128 is the most negative; 127 the most positive.
+    assert_eq!(i8_cmp(-128, 127, "<"), 1, "-128 < 127 true");
+    assert_eq!(i8_cmp(127, -128, ">"), 1, "127 > -128 true");
+    assert_eq!(i8_cmp(-128, -128, "<="), 1, "-128 <= -128 true");
+}
+
+#[test]
+fn i16_comparisons_signed() {
+    assert_eq!(i16_cmp(-1, 1, "<"), 1, "-1 < 1 true (i16)");
+    assert_eq!(i16_cmp(-1000, 1000, "<"), 1, "-1000 < 1000 true");
+    assert_eq!(i16_cmp(1000, -1000, "<"), 0, "1000 < -1000 false");
+    assert_eq!(i16_cmp(-1000, -2000, ">"), 1, "-1000 > -2000 true");
+    assert_eq!(i16_cmp(-32768, 32767, "<"), 1, "min < max true");
+    assert_eq!(i16_cmp(32767, -32768, ">="), 1, "max >= min true");
+    assert_eq!(i16_cmp(-500, -500, "<="), 1, "-500 <= -500 true");
+}
