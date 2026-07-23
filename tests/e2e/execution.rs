@@ -901,3 +901,49 @@ fn u16_struct_field_read() {
         "w.c should read as full u16 0xBEEF"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ForEach `continue` must advance the index. Previously continue jumped to the
+// loop head before the INX, spinning forever on the same element.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foreach_continue_advances() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let data: [u8; 5] = [1, 2, 3, 4, 5];
+            let sum: u8 = 0;
+            for x in data {
+                if x == 3 {
+                    continue;
+                }
+                sum = sum + x;
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    // 1 + 2 + 4 + 5 = 12 (element 3 skipped, loop still terminates).
+    assert_eq!(e.mem(0x0400), 12, "continue should skip 3 and finish");
+}
+
+#[test]
+fn foreach_sum_no_continue() {
+    // Baseline: a plain ForEach sum terminates and is correct.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let data: [u8; 4] = [10, 20, 30, 40];
+            let sum: u8 = 0;
+            for x in data {
+                sum = sum + x;
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 100, "10+20+30+40 = 100");
+}

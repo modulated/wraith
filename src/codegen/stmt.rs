@@ -795,6 +795,7 @@ pub fn generate_stmt(
             let (iterable_base, iterable_ty) = iterable_info;
 
             let loop_label = emitter.next_label("fe");
+            let continue_label = emitter.next_label("fc");
             let end_label = emitter.next_label("fz");
 
             // Initialize counter to 0 in X register
@@ -844,8 +845,10 @@ pub fn generate_stmt(
             }
             emitter.emit_inst("BCS", &end_label); // Branch if X >= size
 
-            // Push loop context for break/continue
-            emitter.push_loop(loop_label.clone(), end_label.clone());
+            // Push loop context for break/continue. `continue` must land on the
+            // increment (continue_label), NOT the loop head — otherwise the index
+            // in X is never advanced and the loop spins forever.
+            emitter.push_loop(continue_label.clone(), end_label.clone());
 
             // Store index in index variable if present
             if let Some(idx_var) = index_var
@@ -906,7 +909,8 @@ pub fn generate_stmt(
             // Pop loop context
             emitter.pop_loop();
 
-            // Increment counter
+            // Continue target: advance the index, then re-test at the loop head.
+            emitter.emit_label(&continue_label);
             emitter.emit_inst("INX", "");
             emitter.reg_state.modify_x();
 
