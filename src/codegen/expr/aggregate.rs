@@ -399,6 +399,18 @@ pub(super) fn generate_field_access(
             // Check if this is a parameter (pass-by-reference)
             let is_parameter = sym_is_param;
 
+            // Multi-byte fields (u16/i16/b16) must load both bytes, ending with
+            // the low byte in A and the high byte in Y (the u16 register
+            // convention). A single LDA would truncate to the low byte.
+            let is_multibyte = matches!(
+                &field_info.ty,
+                crate::sema::types::Type::Primitive(
+                    crate::ast::PrimitiveType::U16
+                        | crate::ast::PrimitiveType::I16
+                        | crate::ast::PrimitiveType::B16
+                )
+            );
+
             if is_parameter {
                 // The struct pointer lives directly in this parameter's frame slot;
                 // frame coloring guarantees nested calls cannot clobber it.
@@ -408,15 +420,29 @@ pub(super) fn generate_field_access(
                 let offset = field_info.offset;
                 emitter.emit_inst("LDY", &format!("#${:02X}", offset));
                 emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
+                if is_multibyte {
+                    emitter.emit_inst("PHA", ""); // stash low byte
+                    emitter.emit_inst("INY", ""); // next field byte
+                    emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
+                    emitter.emit_inst("TAY", ""); // Y = high byte
+                    emitter.emit_inst("PLA", ""); // A = low byte
+                }
             } else {
                 // Local struct - direct access
                 let field_addr = base_addr + field_info.offset as u16;
                 if field_addr < 0x100 {
                     emitter.emit_inst("LDA", &format!("${:02X}", field_addr));
+                    if is_multibyte {
+                        emitter.emit_inst("LDY", &format!("${:02X}", field_addr + 1));
+                    }
                 } else {
                     emitter.emit_inst("LDA", &format!("${:04X}", field_addr));
+                    if is_multibyte {
+                        emitter.emit_inst("LDY", &format!("${:04X}", field_addr + 1));
+                    }
                 }
             }
+            emitter.mark_a_unknown();
 
             Ok(())
         } else {

@@ -265,7 +265,13 @@ impl SemanticAnalyzer {
         self.checking_assignment_target = true;
         let target_ty = self.check_expr(target)?;
         self.checking_assignment_target = false;
+        // Give the value the target type as its expected type so a literal (or
+        // negative literal) infers against the destination, e.g. `RESULT = -10`
+        // storing 246 into a u8, or `x = 127` into an i8.
+        let saved_expected = self.expected_type.take();
+        self.expected_type = Some(target_ty.clone());
         let value_ty = self.check_expr(value)?;
+        self.expected_type = saved_expected;
 
         // Special handling for slice assignment: arr[start..end] = [values]
         if let Expr::Slice {

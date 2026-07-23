@@ -12,6 +12,75 @@ use crate::sema::ProgramInfo;
 // Import generate_expr from parent module for recursive calls
 use super::generate_expr;
 
+/// Emit a *signed* ordering comparison, leaving a 0/1 boolean in A.
+///
+/// Left is in A (low) / Y (high for u16); right is at TEMP (/ TEMP+1). After a
+/// signed subtraction `left - right`, the mathematical "less than" condition is
+/// `N ⊕ V`; flipping bit 7 on overflow (`EOR #$80`) folds that into N alone so a
+/// single `BMI`/`BPL` decides the result. `>` and `<=` reuse the same core by
+/// swapping the operands first (`a > b` ⟺ `b < a`).
+///
+/// - `swap`     : exchange left/right before subtracting (for GT/LE).
+/// - `true_on_neg`: branch to "true" on `BMI` (N set) when true, else `BPL`.
+fn emit_signed_compare(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    temp: u8,
+    swap: bool,
+    true_on_neg: bool,
+) -> Result<(), CodegenError> {
+    let true_label = emitter.next_label("st");
+    let end_label = emitter.next_label("sx");
+    let nov_label = emitter.next_label("sv");
+
+    if swap {
+        if is_u16 {
+            // Exchange the 16-bit operands via two scratch bytes ($22/$23 by
+            // default) so `left - right` below actually computes `right - left`.
+            let s = temp + 2;
+            emitter.emit_inst("STA", &format!("${:02X}", s)); // save left low
+            emitter.emit_inst("STY", &format!("${:02X}", s + 1)); // save left high
+            emitter.emit_inst("LDA", &format!("${:02X}", temp)); // A = right low
+            emitter.emit_inst("LDY", &format!("${:02X}", temp + 1)); // Y = right high
+            emitter.emit_inst("LDX", &format!("${:02X}", s));
+            emitter.emit_inst("STX", &format!("${:02X}", temp)); // TEMP = left low
+            emitter.emit_inst("LDX", &format!("${:02X}", s + 1));
+            emitter.emit_inst("STX", &format!("${:02X}", temp + 1)); // TEMP+1 = left high
+        } else {
+            emitter.emit_inst("LDX", &format!("${:02X}", temp)); // X = right
+            emitter.emit_inst("STA", &format!("${:02X}", temp)); // TEMP = left
+            emitter.emit_inst("TXA", ""); // A = right
+        }
+    }
+
+    // Signed subtraction (8- or 16-bit).
+    emitter.emit_inst("SEC", "");
+    emitter.emit_inst("SBC", &format!("${:02X}", temp));
+    if is_u16 {
+        emitter.emit_inst("TYA", "");
+        emitter.emit_inst("SBC", &format!("${:02X}", temp + 1));
+    }
+
+    // Fold (N ⊕ V) into N: on signed overflow the sign bit is inverted.
+    emitter.emit_inst("BVC", &nov_label);
+    emitter.emit_inst("EOR", "#$80");
+    emitter.emit_label(&nov_label);
+
+    if true_on_neg {
+        emitter.emit_inst("BMI", &true_label);
+    } else {
+        emitter.emit_inst("BPL", &true_label);
+    }
+
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("JMP", &end_label);
+    emitter.emit_label(&true_label);
+    emitter.emit_inst("LDA", "#$01");
+    emitter.emit_label(&end_label);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
 /// Generate equality comparison (==)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if equal, 0 otherwise
@@ -107,11 +176,18 @@ pub(super) fn generate_compare_ne(emitter: &mut Emitter, is_u16: bool) -> Result
 /// Generate less-than comparison (<)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if less than, 0 otherwise
-pub(super) fn generate_compare_lt(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_lt(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
     // A < TEMP
+    let temp = emitter.memory_layout.temp_reg();
+    if is_signed {
+        return emit_signed_compare(emitter, is_u16, temp, false, true);
+    }
     let true_label = emitter.next_label("lt");
     let end_label = emitter.next_label("lx");
-    let temp = emitter.memory_layout.temp_reg();
 
     if is_u16 {
         // 16-bit comparison (Unsigned)
@@ -157,12 +233,19 @@ pub(super) fn generate_compare_lt(emitter: &mut Emitter, is_u16: bool) -> Result
 /// Generate greater-than-or-equal comparison (>=)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if greater than or equal, 0 otherwise
-pub(super) fn generate_compare_ge(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_ge(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
     // A >= TEMP: Opposite of <
     // Optimized: Invert logic of LT
+    let temp = emitter.memory_layout.temp_reg();
+    if is_signed {
+        return emit_signed_compare(emitter, is_u16, temp, false, false);
+    }
     let true_label = emitter.next_label("gt");
     let end_label = emitter.next_label("gx");
-    let temp = emitter.memory_layout.temp_reg();
 
     if is_u16 {
         // 16-bit (Unsigned)
@@ -208,11 +291,19 @@ pub(super) fn generate_compare_ge(emitter: &mut Emitter, is_u16: bool) -> Result
 /// Generate greater-than comparison (>)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if greater than, 0 otherwise
-pub(super) fn generate_compare_gt(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_gt(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
     // A > TEMP
+    let temp = emitter.memory_layout.temp_reg();
+    if is_signed {
+        // a > b  ⟺  b < a: swap operands and use the less-than core.
+        return emit_signed_compare(emitter, is_u16, temp, true, true);
+    }
     let true_label = emitter.next_label("gt");
     let end_label = emitter.next_label("gx");
-    let temp = emitter.memory_layout.temp_reg();
 
     if is_u16 {
         // 16-bit (Unsigned)
@@ -262,10 +353,18 @@ pub(super) fn generate_compare_gt(emitter: &mut Emitter, is_u16: bool) -> Result
 /// Generate less-than-or-equal comparison (<=)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if less than or equal, 0 otherwise
-pub(super) fn generate_compare_le(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+pub(super) fn generate_compare_le(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
     // A <= TEMP
-    let end_label = emitter.next_label("lx");
     let temp = emitter.memory_layout.temp_reg();
+    if is_signed {
+        // a <= b  ⟺  b >= a: swap operands and use the >= core.
+        return emit_signed_compare(emitter, is_u16, temp, true, false);
+    }
+    let end_label = emitter.next_label("lx");
 
     if is_u16 {
         // 16-bit unsigned: left (A=low, Y=high) <= right (TEMP=low, TEMP+1=high)
