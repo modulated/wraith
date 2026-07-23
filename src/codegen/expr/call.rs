@@ -507,6 +507,7 @@ fn generate_inline_call(
             resolved_symbols: merged_resolved,
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
+            loop_bound_slots: info.loop_bound_slots.clone(),
             type_registry: info.type_registry.clone(),
             resolved_types: info.resolved_types.clone(),
             imported_items: info.imported_items.clone(),

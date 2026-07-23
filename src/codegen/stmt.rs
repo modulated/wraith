@@ -2004,7 +2004,6 @@ fn generate_normal_loop(
     // For-loops use X register for the counter (fast increment with INX)
     // u16 arithmetic uses Y register for high bytes to avoid conflicts
 
-    let loop_end_temp = emitter.memory_layout.loop_end_temp();
     let loop_label = emitter.next_label("fl");
     let end_label = emitter.next_label("fx");
 
@@ -2012,32 +2011,46 @@ fn generate_normal_loop(
     generate_expr(&range.start, emitter, info, string_collector)?;
     emitter.emit_inst("TAX", ""); // Counter in X register
 
-    // Generate end value and store in temp location
-    generate_expr(&range.end, emitter, info, string_collector)?;
-    emitter.emit_inst("STA", &format!("${:02X}", loop_end_temp));
+    // Range end operand: constant ends compare as an immediate; non-constant
+    // ends are evaluated once into the loop's hidden frame slot, which nested
+    // loops, scratch-clobbering expressions, and calls in the body cannot
+    // touch (unlike the old shared zero-page scratch byte).
+    let end_operand = match info.folded_constants.get(&range.end.span) {
+        Some(crate::sema::const_eval::ConstValue::Integer(n)) => {
+            format!("#${:02X}", *n as u8)
+        }
+        _ => {
+            let slot_addr = loop_bound_slot(var_name, range, info)?;
+            generate_expr(&range.end, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", &format!("${:02X}", slot_addr));
+            format!("${:02X}", slot_addr)
+        }
+    };
+
+    // Resolve the loop variable's storage once. The counter is memory-backed
+    // across the body: body code (nested loops, shifts, calls) may clobber X,
+    // so X is reloaded from here before each increment.
+    let var_operand = info
+        .resolved_symbols
+        .get(&var_name.span)
+        .or_else(|| info.resolved_symbols.get(&body.span))
+        .or_else(|| info.table.lookup(&var_name.node))
+        .and_then(|sym| match sym.location {
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => Some(format!("${:02X}", addr)),
+            crate::sema::table::SymbolLocation::Absolute(addr) => Some(format!("${:04X}", addr)),
+            _ => None,
+        });
 
     // Store X (loop counter) to the loop variable location
-    if let Some(sym) = info
-        .resolved_symbols
-        .get(&body.span)
-        .or_else(|| info.table.lookup(&var_name.node))
-    {
-        match sym.location {
-            crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                emitter.emit_inst("STX", &format!("${:02X}", addr));
-            }
-            crate::sema::table::SymbolLocation::Absolute(addr) => {
-                emitter.emit_inst("STX", &format!("${:04X}", addr));
-            }
-            _ => {}
-        }
+    if let Some(var) = &var_operand {
+        emitter.emit_inst("STX", var);
     }
 
     // Loop start
     emitter.emit_label(&loop_label);
 
     // Check condition: compare counter with end value
-    emitter.emit_inst("CPX", &format!("${:02X}", loop_end_temp));
+    emitter.emit_inst("CPX", &end_operand);
 
     if range.inclusive {
         // If counter > end, exit
@@ -2050,8 +2063,10 @@ fn generate_normal_loop(
         emitter.emit_inst("BCS", &end_label);
     }
 
-    // Push loop context for break/continue
-    emitter.push_loop(loop_label.clone(), end_label.clone());
+    // `continue` jumps to the increment (not the head), so it cannot skip the
+    // increment or run the comparison against a clobbered X.
+    let incr_label = emitter.next_label("fi");
+    emitter.push_loop(incr_label.clone(), end_label.clone());
 
     // Execute body
     emitter.reg_state.invalidate_all(); // Body might use registers
@@ -2060,24 +2075,28 @@ fn generate_normal_loop(
     // Pop loop context
     emitter.pop_loop();
 
+    emitter.emit_label(&incr_label);
+
+    // Reload the counter: the body may have clobbered X (nested loops, shift
+    // helpers, and calls all use it).
+    if let Some(var) = &var_operand {
+        emitter.emit_inst("LDX", var);
+    }
+
+    if range.inclusive {
+        // The endpoint was just processed; incrementing past it would wrap the
+        // counter at the type boundary (e.g. `..=0xFF`) back onto a value that
+        // passes the head comparison, looping forever. Exit before wrapping.
+        emitter.emit_inst("CPX", &end_operand);
+        emitter.emit_inst("BEQ", &end_label);
+    }
+
     // Increment counter
     emitter.emit_inst("INX", "");
 
     // Update loop variable with new counter value
-    if let Some(sym) = info
-        .resolved_symbols
-        .get(&body.span)
-        .or_else(|| info.table.lookup(&var_name.node))
-    {
-        match sym.location {
-            crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                emitter.emit_inst("STX", &format!("${:02X}", addr));
-            }
-            crate::sema::table::SymbolLocation::Absolute(addr) => {
-                emitter.emit_inst("STX", &format!("${:04X}", addr));
-            }
-            _ => {}
-        }
+    if let Some(var) = &var_operand {
+        emitter.emit_inst("STX", var);
     }
 
     emitter.emit_inst("JMP", &loop_label);
@@ -2112,9 +2131,14 @@ fn generate_normal_loop(
 /// ```
 ///
 /// Constant range ends are compared as immediates so there is nothing in
-/// scratch memory for the body to clobber; non-constant ends are evaluated
-/// once into the loop-end temp pair (`$22/$23`), matching the 8-bit path's
-/// use of the same scratch.
+/// memory for the body to clobber; non-constant ends are evaluated once into
+/// the loop's hidden frame slot pair (allocated by sema and colored with the
+/// call graph), so nested loops, scratch-clobbering expressions, and calls in
+/// the body cannot corrupt a live bound.
+///
+/// Inclusive ranges additionally exit right after processing the endpoint
+/// (before the increment), so `..=0xFFFF` cannot wrap the counter to zero and
+/// loop forever.
 fn generate_normal_loop_u16(
     var_name: &Spanned<String>,
     range: &crate::ast::Range,
@@ -2175,14 +2199,17 @@ fn generate_normal_loop_u16(
     let (end_lo, end_hi) = if let Some(v) = folded_end {
         (format!("#${:02X}", v & 0xFF), format!("#${:02X}", v >> 8))
     } else {
-        let temp = emitter.memory_layout.loop_end_temp();
+        let slot_addr = loop_bound_slot(var_name, range, info)?;
         generate_expr(&range.end, emitter, info, string_collector)?;
         if !expr_is_16bit(range.end.span) {
             emitter.emit_inst("LDY", "#$00"); // zero-extend 8-bit end
         }
-        emitter.emit_inst("STA", &format!("${:02X}", temp));
-        emitter.emit_inst("STY", &format!("${:02X}", temp + 1));
-        (format!("${:02X}", temp), format!("${:02X}", temp + 1))
+        emitter.emit_inst("STA", &format!("${:02X}", slot_addr));
+        emitter.emit_inst("STY", &format!("${:02X}", slot_addr.wrapping_add(1)));
+        (
+            format!("${:02X}", slot_addr),
+            format!("${:02X}", slot_addr.wrapping_add(1)),
+        )
     };
 
     let loop_label = emitter.next_label("fl");
@@ -2223,6 +2250,19 @@ fn generate_normal_loop_u16(
 
     // 16-bit increment of the counter in memory.
     emitter.emit_label(&incr_label);
+    if range.inclusive {
+        // The endpoint was just processed; incrementing past it would wrap the
+        // counter at 0xFFFF back to zero, which passes the head comparison and
+        // loops forever (e.g. `..=0xFFFF`). Exit before wrapping.
+        let go_label = emitter.next_label("fg");
+        emitter.emit_inst("LDA", &var_lo);
+        emitter.emit_inst("CMP", &end_lo);
+        emitter.emit_inst("BNE", &go_label);
+        emitter.emit_inst("LDA", &var_hi);
+        emitter.emit_inst("CMP", &end_hi);
+        emitter.emit_inst("BEQ", &end_label);
+        emitter.emit_label(&go_label);
+    }
     let skip_label = emitter.next_label("fs");
     emitter.emit_inst("INC", &var_lo);
     emitter.emit_inst("BNE", &skip_label);
@@ -2234,4 +2274,25 @@ fn generate_normal_loop_u16(
     emitter.reg_state.invalidate_all();
 
     Ok(())
+}
+
+/// Resolve the hidden frame slot sema allocated for a for-loop's non-constant
+/// range end (low byte at the returned address, high byte - for 16-bit
+/// counters - at the next one).
+fn loop_bound_slot(
+    var_name: &Spanned<String>,
+    range: &crate::ast::Range,
+    info: &ProgramInfo,
+) -> Result<u8, CodegenError> {
+    match info
+        .loop_bound_slots
+        .get(&range.end.span)
+        .map(|s| &s.location)
+    {
+        Some(crate::sema::table::SymbolLocation::ZeroPage(addr)) => Ok(*addr),
+        _ => Err(CodegenError::Internal(format!(
+            "for loop over '{}' has a non-constant range end but no bound slot was allocated",
+            var_name.node
+        ))),
+    }
 }

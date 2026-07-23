@@ -289,6 +289,14 @@ impl SemanticAnalyzer {
             }
         }
 
+        // Hidden loop-bound slots: same rebasing as ordinary symbols.
+        for info in self.loop_bound_slots.values_mut() {
+            if let SymbolLocation::FrameOffset(off) = info.location {
+                let base = frame_base(frames, info.containing_function.as_deref())?;
+                info.location = SymbolLocation::ZeroPage(base + off);
+            }
+        }
+
         // Function metadata: inline param symbols hold frame offsets that must be
         // rebased for cross-module inline expansion.
         for meta in self.function_metadata.values_mut() {
