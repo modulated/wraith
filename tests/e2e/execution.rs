@@ -947,3 +947,26 @@ fn foreach_sum_no_continue() {
     "#);
     assert_eq!(e.mem(0x0400), 100, "10+20+30+40 = 100");
 }
+
+#[test]
+fn foreach_u16_array_elements() {
+    // Iterating a u16 array must scale the index and load both bytes of each
+    // element, not just the low byte.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let data: [u16; 4] = [0x1000, 0x2000, 0x3000, 0x4000];
+            let sum: u16 = 0;
+            for x in data {
+                sum = sum + x;
+            }
+            LO = sum.low;
+            HI = sum.high;
+            loop {}
+        }
+    "#);
+    // 0x1000 + 0x2000 + 0x3000 + 0x4000 = 0xA000.
+    assert_eq!(e.mem16(0x0400), 0xA000, "sum of u16 elements should be 0xA000");
+}

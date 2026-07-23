@@ -867,28 +867,70 @@ pub fn generate_stmt(
                 }
             }
 
-            // Load iterable[X] into A using indirect indexed: LDA (ptr),Y
-            // Transfer X to Y for indexing
+            // Whether the array element type is 16-bit (u16/i16/b16). Strings
+            // always iterate u8 characters.
+            let elem_multibyte = matches!(
+                &iterable_ty,
+                crate::sema::types::Type::Array(elem, _) if matches!(
+                    &**elem,
+                    crate::sema::types::Type::Primitive(
+                        crate::ast::PrimitiveType::U16
+                            | crate::ast::PrimitiveType::I16
+                            | crate::ast::PrimitiveType::B16
+                    )
+                )
+            );
+
+            // Resolve the loop variable's storage up front.
+            let loopvar_loc = info
+                .resolved_symbols
+                .get(&var_name.span)
+                .map(|s| s.location.clone())
+                .ok_or_else(|| CodegenError::SymbolNotFound(var_name.node.clone()))?;
+
+            // Index into the iterable: Y = X, scaled ×2 for u16 elements.
             emitter.emit_inst("TXA", "");
+            if elem_multibyte {
+                emitter.emit_inst("ASL", "A");
+            }
             emitter.emit_inst("TAY", "");
 
+            // Emit "load byte at (base),Y then store to <dest>" for the low byte,
+            // and (for u16 elements) INY + load/store the high byte.
+            let store_lo = |emitter: &mut Emitter, load: &dyn Fn(&mut Emitter)| match loopvar_loc {
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                    load(emitter);
+                    emitter.emit_inst("STA", &format!("${:02X}", addr));
+                    if elem_multibyte {
+                        emitter.emit_inst("INY", "");
+                        load(emitter);
+                        emitter.emit_inst("STA", &format!("${:02X}", addr + 1));
+                    }
+                    Ok(())
+                }
+                crate::sema::table::SymbolLocation::Absolute(addr) => {
+                    load(emitter);
+                    emitter.emit_sta_abs(addr);
+                    if elem_multibyte {
+                        emitter.emit_inst("INY", "");
+                        load(emitter);
+                        emitter.emit_sta_abs(addr + 1);
+                    }
+                    Ok(())
+                }
+                _ => Err(CodegenError::UnsupportedOperation(
+                    "ForEach loop variable must have concrete location".to_string(),
+                )),
+            };
+
             if is_string {
-                // For strings, add 1 to skip length byte
+                // Strings: skip the length byte, u8 elements only.
                 emitter.emit_inst("INY", "");
                 emitter.emit_inst("LDA", "($F0),Y");
-            } else {
-                // For arrays, direct indexed access
-                emitter.emit_inst("LDA", &format!("(${:02X}),Y", iterable_base));
-            }
-
-            // Store the element in the loop variable
-            if let Some(loop_var) = info.resolved_symbols.get(&var_name.span) {
-                match loop_var.location {
-                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                        emitter.emit_sta_zp(addr);
-                    }
+                match loopvar_loc {
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => emitter.emit_sta_zp(addr),
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
-                        emitter.emit_sta_abs(addr);
+                        emitter.emit_sta_abs(addr)
                     }
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(
@@ -897,7 +939,10 @@ pub fn generate_stmt(
                     }
                 }
             } else {
-                return Err(CodegenError::SymbolNotFound(var_name.node.clone()));
+                let base = iterable_base;
+                store_lo(emitter, &move |e: &mut Emitter| {
+                    e.emit_inst("LDA", &format!("(${:02X}),Y", base));
+                })?;
             }
 
             // Restore counter from stack (it's still in X, so no need)
