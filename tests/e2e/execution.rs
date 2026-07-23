@@ -968,5 +968,43 @@ fn foreach_u16_array_elements() {
         }
     "#);
     // 0x1000 + 0x2000 + 0x3000 + 0x4000 = 0xA000.
-    assert_eq!(e.mem16(0x0400), 0xA000, "sum of u16 elements should be 0xA000");
+    assert_eq!(
+        e.mem16(0x0400),
+        0xA000,
+        "sum of u16 elements should be 0xA000"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Signed match range patterns: unsigned CMP/BCC misclassify negative values.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i8_match_range_signed() {
+    // Classify x into: -128..=-1 => 1, 0..=9 => 2, 10..=127 => 3.
+    let classify = |x: i32| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: i8 = {x};
+                match x {{
+                    -128..=-1 => {{ OUT = 1; }}
+                    0..=9 => {{ OUT = 2; }}
+                    n => {{ OUT = 3; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(classify(-100), 1, "-100 is negative");
+    assert_eq!(classify(-1), 1, "-1 is negative");
+    assert_eq!(classify(0), 2, "0 is in 0..=9");
+    assert_eq!(classify(5), 2, "5 is in 0..=9");
+    assert_eq!(classify(9), 2, "9 is in 0..=9");
+    assert_eq!(classify(10), 3, "10 is in the tail");
+    assert_eq!(classify(100), 3, "100 is in the tail");
 }

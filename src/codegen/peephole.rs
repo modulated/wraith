@@ -139,8 +139,15 @@ pub fn optimize(lines: &[Line]) -> Vec<Line> {
         // by inverting branches that exceed the 127-byte limit
         // result = eliminate_branch_over_jump(&result);
         result = eliminate_redundant_ldx_zero(&result);
-        result = eliminate_clc_adc_zero(&result);
-        result = eliminate_sec_sbc_zero(&result);
+        // DISABLED: eliminate_clc_adc_zero / eliminate_sec_sbc_zero remove
+        // `CLC; ADC #$00` / `SEC; SBC #$00`, which preserve A but DO change the
+        // N/Z/C/V flags. Codegen uses `SEC; SBC #imm` (incl. #$00) for signed
+        // comparisons where those flags are consumed by a following branch, so
+        // eliminating the pair silently miscompiles. The compiler never emits
+        // these pairs as genuine value no-ops, so dropping the passes loses
+        // nothing. (Their unit tests still exercise the functions directly.)
+        // result = eliminate_clc_adc_zero(&result);
+        // result = eliminate_sec_sbc_zero(&result);
         result = eliminate_redundant_flag_ops(&result);
         result = eliminate_redundant_address_loads(&result);
         result = apply_strength_reduction(&result);
@@ -668,6 +675,8 @@ fn eliminate_redundant_ldx_zero(lines: &[Line]) -> Vec<Line> {
 /// Eliminate CLC; ADC #$00 pair (no-op addition)
 ///
 /// When carry is cleared and we add 0, the result is unchanged.
+// Disabled in the optimize() pipeline (flag-unsafe); retained for its unit tests.
+#[allow(dead_code)]
 fn eliminate_clc_adc_zero(lines: &[Line]) -> Vec<Line> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -704,6 +713,8 @@ fn eliminate_clc_adc_zero(lines: &[Line]) -> Vec<Line> {
 /// Eliminate SEC; SBC #$00 pair (no-op subtraction)
 ///
 /// When carry is set and we subtract 0, the result is unchanged.
+// Disabled in the optimize() pipeline (flag-unsafe); retained for its unit tests.
+#[allow(dead_code)]
 fn eliminate_sec_sbc_zero(lines: &[Line]) -> Vec<Line> {
     let mut result = Vec::new();
     let mut i = 0;

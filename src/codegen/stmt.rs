@@ -1458,6 +1458,13 @@ fn generate_match_sequential(
         )
     );
 
+    // Whether the matched value is signed (i8/i16) — range patterns must then
+    // use signed comparisons instead of unsigned BCC/BCS.
+    let scrutinee_is_signed = info
+        .resolved_types
+        .get(&expr.span)
+        .is_some_and(|t| t.is_signed());
+
     // Use pointer ops area for indirect addressing to avoid conflict with temp storage
     let ptr_base = emitter.memory_layout.pointer_ops_start; // $30 by default
 
@@ -1518,18 +1525,45 @@ fn generate_match_sequential(
                     crate::ast::Expr::Literal(crate::ast::Literal::Integer(end_val)),
                 ) = (&start.node, &end.node)
                 {
-                    emitter.emit_inst("LDA", "$20");
-
-                    // Check if value < start, skip this arm
-                    emitter.emit_inst("CMP", &format!("#${:02X}", start_val));
-                    emitter.emit_inst("BCC", &format!("match_{}_arm_{}_end", match_id, i));
-
-                    // Check if value <= end (or < end+1)
+                    let arm_label = format!("match_{}_arm_{}", match_id, i);
+                    let skip_label = format!("match_{}_arm_{}_end", match_id, i);
                     let upper_bound = if *inclusive { end_val + 1 } else { *end_val };
-                    emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
-                    emitter.emit_inst("BCC", &format!("match_{}_arm_{}", match_id, i));
 
-                    emitter.emit_label(&format!("match_{}_arm_{}_end", match_id, i));
+                    if scrutinee_is_signed {
+                        // Signed range: (value < start) skips; (value < end+1)
+                        // matches. Signed "less than" is (N eor V) after a
+                        // subtraction, folded into N via EOR #$80 on overflow.
+                        // Comparing against 0 is just a sign-bit test (BMI) — and
+                        // it avoids emitting `SEC; SBC #$00`, which the peephole
+                        // eliminates as a value no-op even though its flags matter.
+                        let mut emit_signed_lt =
+                            |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
+                                emitter.emit_inst("LDA", "$20");
+                                if bound == 0 {
+                                    emitter.emit_inst("BMI", target); // value < 0 == sign set
+                                } else {
+                                    let nov = format!("match_{}_arm_{}_{}", match_id, i, tag);
+                                    emitter.emit_inst("SEC", "");
+                                    emitter.emit_inst("SBC", &format!("#${:02X}", bound as u8));
+                                    emitter.emit_inst("BVC", &nov);
+                                    emitter.emit_inst("EOR", "#$80");
+                                    emitter.emit_label(&nov);
+                                    emitter.emit_inst("BMI", target);
+                                }
+                            };
+                        emit_signed_lt(emitter, *start_val, &skip_label, "v1"); // < start -> skip
+                        emit_signed_lt(emitter, upper_bound, &arm_label, "v2"); // <= end -> match
+                    } else {
+                        emitter.emit_inst("LDA", "$20");
+                        // Check if value < start, skip this arm
+                        emitter.emit_inst("CMP", &format!("#${:02X}", start_val));
+                        emitter.emit_inst("BCC", &skip_label);
+                        // Check if value <= end (or < end+1)
+                        emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
+                        emitter.emit_inst("BCC", &arm_label);
+                    }
+
+                    emitter.emit_label(&skip_label);
                 }
             }
             Pattern::Wildcard => {
