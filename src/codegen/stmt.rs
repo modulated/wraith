@@ -1320,6 +1320,25 @@ fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
+    // arr[i].field = x with a runtime index: absolute,Y indexed store.
+    if let Expr::Index {
+        object: array,
+        index,
+    } = &object.node
+        && crate::codegen::expr::resolve_static_struct_lvalue(object, info).is_none()
+        && crate::codegen::expr::emit_array_struct_field_indexed(
+            array,
+            index,
+            field,
+            Some(value),
+            emitter,
+            info,
+            string_collector,
+        )?
+    {
+        return Ok(());
+    }
+
     // Nested (a.b.c = x) or array-of-struct (arr[const].f = x) target: resolve a
     // static address for the local struct chain, then store the value there.
     if !matches!(&object.node, Expr::Variable(_))

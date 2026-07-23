@@ -1215,3 +1215,89 @@ fn array_of_struct_field_write() {
     assert_eq!(e.mem(0x0401), 9, "pts[1].y written");
     assert_eq!(e.mem(0x0402), 3, "pts[0].x written (distinct element)");
 }
+
+// ---------------------------------------------------------------------------
+// Array-of-struct field access with a RUNTIME index (arr[i].field).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn array_of_struct_runtime_index_read() {
+    let read = |i: u8| {
+        let src = format!(
+            r#"
+            struct Point {{ x: u8, y: u8 }}
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let pts: [Point; 4] = [
+                    Point {{ x: 10, y: 1 }},
+                    Point {{ x: 20, y: 2 }},
+                    Point {{ x: 30, y: 3 }},
+                    Point {{ x: 40, y: 4 }},
+                ];
+                let idx: u8 = {i};
+                OUT = pts[idx].x;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(read(0), 10, "pts[0].x");
+    assert_eq!(read(1), 20, "pts[1].x");
+    assert_eq!(read(3), 40, "pts[3].x");
+}
+
+#[test]
+fn array_of_struct_runtime_index_u16_field() {
+    // Element size is 3 (u8 + u16): exercises non-power-of-2 index scaling.
+    let mut e = run(r#"
+        struct Cell { tag: u8, val: u16 }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let cells: [Cell; 3] = [
+                Cell { tag: 1, val: 0x1111 },
+                Cell { tag: 2, val: 0x2222 },
+                Cell { tag: 3, val: 0xCAFE },
+            ];
+            let i: u8 = 2;
+            let v: u16 = cells[i].val;
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0xCAFE,
+        "cells[2].val via runtime index (size-3 elements)"
+    );
+}
+
+#[test]
+fn array_of_struct_runtime_index_write() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const X: addr = 0x0400;
+        const Y: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let pts: [Point; 4] = [
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+            ];
+            let i: u8 = 2;
+            pts[i].x = 99;
+            pts[i].y = 88;
+            X = pts[2].x;
+            Y = pts[2].y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 99, "pts[i].x written via runtime index");
+    assert_eq!(e.mem(0x0401), 88, "pts[i].y written via runtime index");
+}

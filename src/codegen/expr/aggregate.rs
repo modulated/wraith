@@ -434,6 +434,108 @@ pub(crate) fn resolve_static_struct_lvalue(
     }
 }
 
+/// Scale A (a runtime array index) by a constant element size, leaving the byte
+/// offset in A. Uses shifts for power-of-two sizes and unrolled adds otherwise.
+fn emit_scale_index(emitter: &mut Emitter, size: usize) {
+    if size <= 1 {
+        return;
+    }
+    if size.is_power_of_two() {
+        for _ in 0..size.trailing_zeros() {
+            emitter.emit_inst("ASL", "A");
+        }
+    } else {
+        // acc = index * size via repeated addition of the saved index.
+        let tmp = emitter.memory_layout.loop_end_temp(); // $22
+        emitter.emit_inst("STA", &format!("${:02X}", tmp));
+        for _ in 1..size {
+            emitter.emit_inst("CLC", "");
+            emitter.emit_inst("ADC", &format!("${:02X}", tmp));
+        }
+    }
+}
+
+/// Read or write `array[index].field` for a local array-of-struct with a
+/// *runtime* index, using absolute,Y indexing (element offset = index × size).
+/// `value` = None reads the field into A (low)/Y (high for u16); `Some(v)`
+/// evaluates and stores it.
+pub(crate) fn emit_array_struct_field_indexed(
+    array: &Spanned<Expr>,
+    index: &Spanned<Expr>,
+    field: &Spanned<String>,
+    value: Option<&Spanned<Expr>>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<bool, CodegenError> {
+    use crate::sema::types::Type;
+
+    let Some((base, elem_struct)) = array_of_struct_base(array, info) else {
+        return Ok(false); // not a local array-of-struct; caller falls back
+    };
+    let sdef = info.type_registry.get_struct(&elem_struct).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!("struct '{elem_struct}' not found"))
+    })?;
+    let elem_size = sdef.total_size;
+    let finfo = sdef.get_field(&field.node).cloned().ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "field '{}' not found in struct '{}'",
+            field.node, elem_struct
+        ))
+    })?;
+    let field_addr = base + finfo.offset as u16;
+    let is_multibyte = matches!(
+        &finfo.ty,
+        Type::Primitive(
+            crate::ast::PrimitiveType::U16
+                | crate::ast::PrimitiveType::I16
+                | crate::ast::PrimitiveType::B16
+        )
+    );
+
+    match value {
+        None => {
+            emitter.emit_comment("Array-of-struct indexed field read");
+            generate_expr(index, emitter, info, string_collector)?;
+            emit_scale_index(emitter, elem_size);
+            emitter.emit_inst("TAY", "");
+            emitter.emit_inst("LDA", &format!("${:04X},Y", field_addr));
+            if is_multibyte {
+                emitter.emit_inst("PHA", "");
+                emitter.emit_inst("LDA", &format!("${:04X},Y", field_addr + 1));
+                emitter.emit_inst("TAY", ""); // Y = high byte
+                emitter.emit_inst("PLA", ""); // A = low byte
+            }
+            emitter.mark_a_unknown();
+        }
+        Some(val) => {
+            emitter.emit_comment("Array-of-struct indexed field write");
+            // Evaluate the value and park it in the arg pool ($F4/$F5), which the
+            // index expression below does not touch, then compute the element
+            // offset into Y and store.
+            generate_expr(val, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", "$F4");
+            if is_multibyte {
+                emitter.emit_inst("STY", "$F5");
+            }
+            // The value now sits in A but was just stashed; drop register
+            // tracking so the index load below isn't wrongly elided.
+            emitter.mark_a_unknown();
+            generate_expr(index, emitter, info, string_collector)?;
+            emit_scale_index(emitter, elem_size);
+            emitter.emit_inst("TAY", "");
+            emitter.emit_inst("LDA", "$F4");
+            emitter.emit_inst("STA", &format!("${:04X},Y", field_addr));
+            if is_multibyte {
+                emitter.emit_inst("LDA", "$F5");
+                emitter.emit_inst("STA", &format!("${:04X},Y", field_addr + 1));
+            }
+            emitter.mark_a_unknown();
+        }
+    }
+    Ok(true)
+}
+
 /// If `expr` is a local array-of-struct variable, return its base address and
 /// the element struct's type name.
 fn array_of_struct_base(
@@ -529,6 +631,7 @@ pub(super) fn generate_field_access(
     field: &Spanned<String>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
 
@@ -538,6 +641,23 @@ pub(super) fn generate_field_access(
         if let Some((base, struct_name)) = resolve_static_struct_lvalue(object, info) {
             emitter.emit_comment(&format!("Nested field access: .{}", field.node));
             return emit_static_field_load(base, &struct_name, field, emitter, info);
+        }
+        // arr[i].field with a runtime index: absolute,Y indexed access.
+        if let Expr::Index {
+            object: array,
+            index,
+        } = &object.node
+            && emit_array_struct_field_indexed(
+                array,
+                index,
+                field,
+                None,
+                emitter,
+                info,
+                string_collector,
+            )?
+        {
+            return Ok(());
         }
         return Err(CodegenError::UnsupportedOperation(
             "Field access only supported on variables and local struct/array chains".to_string(),

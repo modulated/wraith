@@ -33,7 +33,7 @@ use unary::generate_unary;
 
 // Re-export for use in other codegen modules
 pub use aggregate::generate_struct_init_runtime;
-pub(crate) use aggregate::resolve_static_struct_lvalue;
+pub(crate) use aggregate::{emit_array_struct_field_indexed, resolve_static_struct_lvalue};
 pub use call::generate_tail_recursive_update;
 
 pub fn generate_expr(
@@ -146,7 +146,9 @@ pub fn generate_expr(
             let name = crate::ast::Spanned::new(struct_name.clone(), expr.span);
             generate_struct_init(&name, fields, emitter, info)
         }
-        Expr::Field { object, field } => generate_field_access(object, field, emitter, info),
+        Expr::Field { object, field } => {
+            generate_field_access(object, field, emitter, info, string_collector)
+        }
         Expr::EnumVariant {
             enum_name,
             variant,
