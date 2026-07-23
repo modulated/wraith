@@ -699,6 +699,20 @@ pub fn generate_stmt(
                         }
                     };
 
+                    // A 16-bit loop variable needs its high byte written too,
+                    // or body reads of the counter see a garbage high byte.
+                    let loop_var_is_16bit =
+                        info.resolved_symbols.get(&var_name.span).is_some_and(|s| {
+                            matches!(
+                                s.ty,
+                                crate::sema::types::Type::Primitive(
+                                    crate::ast::PrimitiveType::U16
+                                        | crate::ast::PrimitiveType::I16
+                                        | crate::ast::PrimitiveType::B16
+                                )
+                            )
+                        });
+
                     // Create end label for break statements
                     let end_label = emitter.next_label("ux");
 
@@ -710,6 +724,13 @@ pub fn generate_stmt(
                         emitter.emit_comment(&format!("{} = {}", var_name.node, iter_val));
                         emitter.emit_inst("LDA", &format!("#${:02X}", iter_val as u8));
                         emitter.emit_inst("STA", &format!("${:02X}", loop_var_addr));
+                        if loop_var_is_16bit {
+                            emitter.emit_inst("LDA", &format!("#${:02X}", (iter_val >> 8) as u8));
+                            emitter.emit_inst(
+                                "STA",
+                                &format!("${:02X}", loop_var_addr.wrapping_add(1)),
+                            );
+                        }
 
                         // Create iteration label for continue statements
                         let iter_label = emitter.next_label("ui");
@@ -1944,6 +1965,42 @@ fn generate_normal_loop(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::types::Type;
+
+    // The X-register machinery below is 8-bit: the counter lives in X and only
+    // one byte of the range end is ever compared. A 16-bit counter must take
+    // the memory-pair path instead, or `for i: u16 in 0..30000` silently runs
+    // 0x30 = 48 iterations.
+    let counter_ty = info
+        .resolved_symbols
+        .get(&var_name.span)
+        .or_else(|| info.resolved_symbols.get(&body.span))
+        .or_else(|| info.table.lookup(&var_name.node))
+        .map(|s| &s.ty);
+
+    match counter_ty {
+        Some(Type::Primitive(PrimitiveType::U16 | PrimitiveType::B16)) => {
+            return generate_normal_loop_u16(
+                var_name,
+                range,
+                body,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        Some(Type::Primitive(PrimitiveType::I16)) => {
+            // The 16-bit comparison below is unsigned; erroring beats silently
+            // miscompiling a signed counter.
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "for loop counter '{}' has type i16; 16-bit loop counters are currently unsigned-only (use u16)",
+                var_name.node
+            )));
+        }
+        _ => {}
+    }
+
     // For-loops use X register for the counter (fast increment with INX)
     // u16 arithmetic uses Y register for high bytes to avoid conflicts
 
@@ -2025,6 +2082,156 @@ fn generate_normal_loop(
 
     emitter.emit_inst("JMP", &loop_label);
     emitter.emit_label(&end_label);
+
+    Ok(())
+}
+
+/// Generate a normal (non-unrolled) for loop with a 16-bit counter.
+///
+/// Unlike the 8-bit path, the counter cannot live in X; it lives in the loop
+/// variable's own memory pair (low at `addr`, high at `addr + 1`) and both
+/// bytes participate in the comparison and increment:
+///
+/// ```text
+/// fl:                  ; head (back-edge target)
+///     LDA var_lo       ; exclusive: continue while var < end
+///     CMP end_lo       ;   (var - end borrows => C clear)
+///     LDA var_hi
+///     SBC end_hi
+///     BCC fb           ; short forward hop, in range for any body size
+///     JMP fx
+/// fb:
+///     ...body...
+/// fi:                  ; continue target (never skips the increment)
+///     INC var_lo
+///     BNE fs
+///     INC var_hi
+/// fs:
+///     JMP fl
+/// fx:
+/// ```
+///
+/// Constant range ends are compared as immediates so there is nothing in
+/// scratch memory for the body to clobber; non-constant ends are evaluated
+/// once into the loop-end temp pair (`$22/$23`), matching the 8-bit path's
+/// use of the same scratch.
+fn generate_normal_loop_u16(
+    var_name: &Spanned<String>,
+    range: &crate::ast::Range,
+    body: &Spanned<Stmt>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let sym = info
+        .resolved_symbols
+        .get(&var_name.span)
+        .or_else(|| info.resolved_symbols.get(&body.span))
+        .or_else(|| info.table.lookup(&var_name.node))
+        .ok_or_else(|| CodegenError::SymbolNotFound(var_name.node.clone()))?;
+
+    let (var_lo, var_hi) = match sym.location {
+        SymbolLocation::ZeroPage(addr) => (
+            format!("${:02X}", addr),
+            format!("${:02X}", addr.wrapping_add(1)),
+        ),
+        SymbolLocation::Absolute(addr) => (format!("${:04X}", addr), format!("${:04X}", addr + 1)),
+        _ => {
+            return Err(CodegenError::Internal(format!(
+                "16-bit loop variable '{}' has no direct memory location",
+                var_name.node
+            )));
+        }
+    };
+
+    // True when the expression at `span` already produces a 16-bit value
+    // (low in A, high in Y); an 8-bit bound needs Y zero-extended by hand.
+    let expr_is_16bit = |span| {
+        info.resolved_types.get(&span).is_some_and(|ty| {
+            matches!(
+                ty,
+                Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+            )
+        })
+    };
+
+    // Initialize the counter from the range start.
+    generate_expr(&range.start, emitter, info, string_collector)?;
+    if !expr_is_16bit(range.start.span) {
+        emitter.emit_inst("LDY", "#$00"); // zero-extend 8-bit start
+    }
+    emitter.emit_inst("STA", &var_lo);
+    emitter.emit_inst("STY", &var_hi);
+
+    // Range end operands for the per-iteration comparison.
+    let folded_end = match info.folded_constants.get(&range.end.span) {
+        Some(crate::sema::const_eval::ConstValue::Integer(n)) => Some(*n as u16),
+        _ => None,
+    };
+    let (end_lo, end_hi) = if let Some(v) = folded_end {
+        (format!("#${:02X}", v & 0xFF), format!("#${:02X}", v >> 8))
+    } else {
+        let temp = emitter.memory_layout.loop_end_temp();
+        generate_expr(&range.end, emitter, info, string_collector)?;
+        if !expr_is_16bit(range.end.span) {
+            emitter.emit_inst("LDY", "#$00"); // zero-extend 8-bit end
+        }
+        emitter.emit_inst("STA", &format!("${:02X}", temp));
+        emitter.emit_inst("STY", &format!("${:02X}", temp + 1));
+        (format!("${:02X}", temp), format!("${:02X}", temp + 1))
+    };
+
+    let loop_label = emitter.next_label("fl");
+    let body_label = emitter.next_label("fb");
+    let incr_label = emitter.next_label("fi");
+    let end_label = emitter.next_label("fx");
+
+    emitter.emit_label(&loop_label);
+    // Back-edge target: register contents cached before the loop or left by
+    // the previous iteration are stale here.
+    emitter.reg_state.invalidate_all();
+
+    if range.inclusive {
+        // Continue while var <= end  <=>  end - var does not borrow (C set).
+        emitter.emit_inst("LDA", &end_lo);
+        emitter.emit_inst("CMP", &var_lo);
+        emitter.emit_inst("LDA", &end_hi);
+        emitter.emit_inst("SBC", &var_hi);
+        emitter.emit_inst("BCS", &body_label);
+    } else {
+        // Continue while var < end  <=>  var - end borrows (C clear).
+        emitter.emit_inst("LDA", &var_lo);
+        emitter.emit_inst("CMP", &end_lo);
+        emitter.emit_inst("LDA", &var_hi);
+        emitter.emit_inst("SBC", &end_hi);
+        emitter.emit_inst("BCC", &body_label);
+    }
+    // Exit through a JMP so the conditional branch above stays within the
+    // 127-byte limit regardless of body size (same shaping as While).
+    emitter.emit_inst("JMP", &end_label);
+    emitter.emit_label(&body_label);
+
+    // `continue` jumps to the increment, `break` to the end label.
+    emitter.push_loop(incr_label.clone(), end_label.clone());
+    emitter.reg_state.invalidate_all(); // Body might use registers
+    generate_stmt(body, emitter, info, string_collector)?;
+    emitter.pop_loop();
+
+    // 16-bit increment of the counter in memory.
+    emitter.emit_label(&incr_label);
+    let skip_label = emitter.next_label("fs");
+    emitter.emit_inst("INC", &var_lo);
+    emitter.emit_inst("BNE", &skip_label);
+    emitter.emit_inst("INC", &var_hi);
+    emitter.emit_label(&skip_label);
+    emitter.emit_inst("JMP", &loop_label);
+
+    emitter.emit_label(&end_label);
+    emitter.reg_state.invalidate_all();
 
     Ok(())
 }

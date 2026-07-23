@@ -378,7 +378,9 @@ impl SemanticAnalyzer {
             });
         }
 
-        let offset = self.frame_alloc(1);
+        // Allocate frame space matching the counter's size: a 16-bit loop
+        // variable needs a zero-page pair (low/high), not a single byte.
+        let offset = self.frame_alloc(var_ty.size().max(1) as u8);
         let info = SymbolInfo {
             name: var_name.node.clone(),
             kind: SymbolKind::Variable,

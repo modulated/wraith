@@ -449,3 +449,166 @@ fn mul_pow2_evaluates_left_once() {
     );
     assert_eq!(e.mem(0x0401), 6, "3 * 2 should be 6");
 }
+
+// ---------------------------------------------------------------------------
+// u16 for-loop counters (16-bit compare + increment)
+// ---------------------------------------------------------------------------
+
+/// Count iterations of `for i: u16 in start..end` (or `..=`) into a u16.
+fn u16_for_iterations(start: u16, end: u16, inclusive: bool) -> u16 {
+    let op = if inclusive { "..=" } else { ".." };
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in {start}{op}{end} {{
+                n = n + one;
+            }}
+            LO = n.low;
+            HI = n.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400)
+}
+
+#[test]
+fn u16_for_loop_delay_range() {
+    // The historical bug: `for i: u16 in 0..30000` compiled to 8-bit loop
+    // machinery that compared only the low byte of the end ($7530 -> $30),
+    // running 48 iterations instead of 30000.
+    assert_eq!(u16_for_iterations(0, 30000, false), 30000);
+}
+
+#[test]
+fn u16_for_loop_end_low_byte_small() {
+    // End 0x0130: low byte 0x30 = 48 < 304, the truncated compare exited early.
+    assert_eq!(u16_for_iterations(0, 0x0130, false), 304);
+}
+
+#[test]
+fn u16_for_loop_end_low_byte_zero() {
+    // End 0x0100: low byte 0 made the old code run 0 iterations.
+    assert_eq!(u16_for_iterations(0, 0x0100, false), 256);
+}
+
+#[test]
+fn u16_for_loop_inclusive_range() {
+    assert_eq!(u16_for_iterations(0, 0x0100, true), 257);
+}
+
+#[test]
+fn u16_for_loop_nonzero_start() {
+    assert_eq!(u16_for_iterations(0x00F0, 0x0110, false), 32);
+}
+
+#[test]
+fn u16_for_loop_var_carries_into_high_byte() {
+    // The counter itself must propagate its carry: record the last value of i.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let last: u16 = 0;
+            for i: u16 in 0..0x0110 {
+                last = i;
+            }
+            LO = last.low;
+            HI = last.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0x010F, "last i should be end - 1");
+}
+
+#[test]
+fn u16_for_loop_runtime_end() {
+    // A non-constant range end takes the temp-pair path instead of immediates.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn limit() -> u16 {
+            return 0x0120;
+        }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0..limit() {
+                n = n + one;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x0120,
+        "runtime end must compare both bytes"
+    );
+}
+
+#[test]
+fn u16_for_loop_break_and_continue() {
+    // `continue` must jump to the increment (not the head) and `break` must
+    // exit; both must work above 255.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0..0x0200 {
+                if i == 0x0105 {
+                    break;
+                }
+                if i < 0x0100 {
+                    continue;
+                }
+                n = n + one;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    // Only i in 0x0100..0x0105 increments n.
+    assert_eq!(
+        e.mem16(0x0400),
+        5,
+        "break/continue must respect 16-bit counter"
+    );
+}
+
+#[test]
+fn u16_for_loop_unrolled_sets_high_byte() {
+    // Small constant ranges unroll; a 16-bit counter above 255 must have its
+    // high byte written each iteration (it was left uninitialized before).
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let last: u16 = 0;
+            for i: u16 in 0x0205..0x0208 {
+                last = i;
+            }
+            LO = last.low;
+            HI = last.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x0207,
+        "unrolled u16 loop must set high byte"
+    );
+}
