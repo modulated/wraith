@@ -419,3 +419,33 @@ fn match_tuple_variant_u16_field_not_truncated() {
         "u16 tuple field should extract as 1000"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Strength reduction must not double-evaluate the left operand
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mul_pow2_evaluates_left_once() {
+    // `tick() * 2` is strength-reduced to a shift. The left operand has a side
+    // effect (increments CTR), so it must run exactly once.
+    let mut e = run(r#"
+        const CTR: addr = 0x0400;
+        const OUT: addr = 0x0401;
+        fn tick() -> u8 {
+            CTR = CTR + 1;
+            return 3;
+        }
+        #[reset]
+        fn main() {
+            CTR = 0;
+            OUT = tick() * 2;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        1,
+        "left operand must be evaluated exactly once"
+    );
+    assert_eq!(e.mem(0x0401), 6, "3 * 2 should be 6");
+}

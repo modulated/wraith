@@ -102,16 +102,16 @@ pub(super) fn generate_binary(
                         ));
                     }
 
-                    // Generate left operand
+                    // Generate left operand (result in A, and Y if u16).
                     generate_expr(left, emitter, info, string_collector)?;
 
-                    // Store shift amount in temp
+                    // Store the shift amount in temp via X so the left operand in
+                    // A/Y is preserved — reloading it with a second generate_expr
+                    // would double-evaluate a side-effecting left (e.g. a call).
                     let temp_reg = emitter.memory_layout.temp_reg();
-                    emitter.emit_inst("LDA", &format!("#${:02X}", shift_amount));
-                    emitter.emit_sta_zp(temp_reg);
-
-                    // Reload left operand
-                    generate_expr(left, emitter, info, string_collector)?;
+                    emitter.emit_inst("LDX", &format!("#${:02X}", shift_amount));
+                    emitter.emit_inst("STX", &format!("${:02X}", temp_reg));
+                    emitter.mark_x_unknown();
 
                     // Perform shift
                     generate_shift_left(emitter, is_u16)?;
