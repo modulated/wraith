@@ -826,3 +826,57 @@ fn u8_for_loop_continue_reaches_increment() {
     "#);
     assert_eq!(e.mem(0x0400), 5, "continue must not skip the increment");
 }
+
+// ---------------------------------------------------------------------------
+// Register state must be invalidated at loop back-edge targets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn loop_carried_var_reloaded_at_head() {
+    // The head of a `loop` is a back-edge target: register contents cached
+    // before the loop are stale on iteration 2+. Reading a loop-carried
+    // variable at the loop head must reload it from memory rather than reuse
+    // whatever the previous iteration's body left in A. Here `OUT = x` is the
+    // first body statement, and the trailing `if x == N` comparison clobbers A
+    // before jumping back, so without a reload the store writes garbage.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 1;
+            loop {
+                OUT = x;
+                x = x + 1;
+                if x == 5 {
+                    break;
+                }
+            }
+            loop {}
+        }
+    "#);
+    // Iterations write x = 1, 2, 3, 4 to OUT; the last committed value is 4.
+    assert_eq!(e.mem(0x0400), 4, "loop head must reload x each iteration");
+}
+
+#[test]
+fn while_carried_var_survives_iterations() {
+    // The `while` condition check is the sibling back-edge target of the `loop`
+    // head and gets the same invalidation. Current codegen already reloads the
+    // condition's operands from memory, so this exercises correctness rather
+    // than reproducing the bare-STA bug directly; it guards the while path
+    // against future register-state regressions.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 1;
+            while x < 5 {
+                OUT = x;
+                x = x + 1;
+            }
+            loop {}
+        }
+    "#);
+    // Iterations write x = 1, 2, 3, 4 to OUT; the last committed value is 4.
+    assert_eq!(e.mem(0x0400), 4, "while head must reload x each iteration");
+}
