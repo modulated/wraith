@@ -4,6 +4,7 @@
 //! used across the test suite.
 
 pub mod assertions;
+pub mod exec;
 pub mod fixtures;
 pub mod harness;
 

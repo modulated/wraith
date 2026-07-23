@@ -7,6 +7,7 @@ mod bcd_validation;
 mod control_flow;
 mod cpu_flags;
 mod enums;
+mod execution;
 mod frames;
 mod functions;
 mod interrupts;
