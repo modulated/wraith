@@ -15,6 +15,23 @@ use crate::sema::ProgramInfo;
 // Import generate_expr from parent module for recursive calls
 use super::generate_expr;
 
+/// Byte size of a type, resolving `Named` struct/enum types via the registry
+/// (unlike `Type::size()`, which returns 0 for `Named`).
+pub(super) fn type_byte_size(ty: &crate::sema::types::Type, info: &ProgramInfo) -> usize {
+    use crate::sema::types::Type;
+    match ty {
+        Type::Primitive(p) => p.size_bytes(),
+        Type::Array(el, n) => type_byte_size(el, info) * n,
+        Type::Named(name) => info
+            .type_registry
+            .get_struct(name)
+            .map(|s| s.total_size)
+            .or_else(|| info.type_registry.get_enum(name).map(|e| e.total_size))
+            .unwrap_or(0),
+        other => other.size(),
+    }
+}
+
 /// Emit an indirect-indexed array element load through a zero-page pointer at
 /// `ptr`. For u8 elements this is `LDA (ptr),Y`; for u16 elements the index is
 /// scaled ×2 and both bytes are loaded, ending with the low byte in A and the
@@ -297,32 +314,62 @@ pub fn generate_struct_init_runtime(
         .map(|f| (f.name.node.clone(), &f.value))
         .collect();
 
+    // Clone the field layout so the type_registry borrow is released before the
+    // recursive calls below (which also borrow `info`).
+    let field_layout: Vec<crate::sema::type_defs::FieldInfo> = struct_def.fields.clone();
+
     // Initialize each field in order (respecting struct layout)
-    for field_info in &struct_def.fields {
+    for field_info in &field_layout {
         let field_addr = dest_addr + field_info.offset as u8;
+        let field_size = type_byte_size(&field_info.ty, info);
 
         if let Some(value_expr) = field_values.get(&field_info.name) {
-            // Generate the field value expression
+            // A struct-typed field holds an inline nested struct: recurse into
+            // its literal, writing directly at this field's address.
+            if let crate::sema::types::Type::Named(inner) = &field_info.ty
+                && info.type_registry.get_struct(inner).is_some()
+            {
+                let inner_fields = match &value_expr.node {
+                    crate::ast::Expr::StructInit { fields, .. }
+                    | crate::ast::Expr::AnonStructInit { fields } => fields,
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(format!(
+                            "nested struct field '{}' must be initialized with a struct literal",
+                            field_info.name
+                        )));
+                    }
+                };
+                generate_struct_init_runtime(
+                    inner,
+                    inner_fields,
+                    field_addr,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                continue;
+            }
+
+            // Generate the scalar field value expression.
             generate_expr(value_expr, emitter, info, string_collector)?;
 
             // Store to field address
-            let size = field_info.ty.size();
-            if size == 1 {
+            if field_size == 1 {
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-            } else if size == 2 {
+            } else if field_size == 2 {
                 // For u16: A has low byte, Y has high byte
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
                 emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
             } else {
                 return Err(CodegenError::UnsupportedOperation(format!(
                     "struct field type with size {} not yet supported",
-                    size
+                    field_size
                 )));
             }
         } else {
             // Field not provided - initialize to zero
             emitter.emit_inst("LDA", "#$00");
-            for i in 0..field_info.ty.size() {
+            for i in 0..field_size {
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr + i as u8));
             }
         }
@@ -334,6 +381,149 @@ pub fn generate_struct_init_runtime(
     Ok(())
 }
 
+/// Resolve a chain of *local* (inline, non-pointer) struct accesses to a static
+/// `(base_address, struct_type_name)`. Handles `Variable` and nested `Field`
+/// objects (and constant array indices). Returns `None` when any link is not
+/// statically addressable — a by-reference struct parameter, a runtime array
+/// index, or a non-struct — so callers can fall back to another path.
+fn resolve_static_struct_lvalue(
+    expr: &Spanned<crate::ast::Expr>,
+    info: &ProgramInfo,
+) -> Option<(u16, String)> {
+    use crate::ast::Expr;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    match &expr.node {
+        Expr::Variable(name) => {
+            let sym = info
+                .resolved_symbols
+                .get(&expr.span)
+                .or_else(|| info.table.lookup(name))?;
+            if sym.is_param {
+                return None; // parameter slot holds a pointer, not the struct
+            }
+            let addr = match sym.location {
+                SymbolLocation::ZeroPage(a) => a as u16,
+                SymbolLocation::Absolute(a) => a,
+                _ => return None,
+            };
+            match &sym.ty {
+                Type::Named(n) => Some((addr, n.clone())),
+                _ => None,
+            }
+        }
+        Expr::Field { object, field } => {
+            let (base, struct_name) = resolve_static_struct_lvalue(object, info)?;
+            let sdef = info.type_registry.get_struct(&struct_name)?;
+            let finfo = sdef.get_field(&field.node)?;
+            match &finfo.ty {
+                Type::Named(inner) => Some((base + finfo.offset as u16, inner.clone())),
+                _ => None, // scalar field: not a further struct
+            }
+        }
+        Expr::Index { object, index } => {
+            // Array element as struct: only a constant index is statically
+            // addressable here (runtime indices need pointer arithmetic).
+            let (base, elem_struct) = array_of_struct_base(object, info)?;
+            let idx = const_index(index, info)?;
+            let sdef = info.type_registry.get_struct(&elem_struct)?;
+            Some((base + (idx * sdef.total_size) as u16, elem_struct))
+        }
+        _ => None,
+    }
+}
+
+/// If `expr` is a local array-of-struct variable, return its base address and
+/// the element struct's type name.
+fn array_of_struct_base(
+    expr: &Spanned<crate::ast::Expr>,
+    info: &ProgramInfo,
+) -> Option<(u16, String)> {
+    use crate::ast::Expr;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let Expr::Variable(name) = &expr.node else {
+        return None;
+    };
+    let sym = info
+        .resolved_symbols
+        .get(&expr.span)
+        .or_else(|| info.table.lookup(name))?;
+    let addr = match sym.location {
+        SymbolLocation::ZeroPage(a) => a as u16,
+        SymbolLocation::Absolute(a) => a,
+        _ => return None,
+    };
+    match &sym.ty {
+        Type::Array(elem, _) => match &**elem {
+            Type::Named(n) => Some((addr, n.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Evaluate an index expression as a compile-time constant, if possible.
+fn const_index(expr: &Spanned<crate::ast::Expr>, info: &ProgramInfo) -> Option<usize> {
+    use crate::ast::{Expr, Literal};
+    if let Expr::Literal(Literal::Integer(n)) = &expr.node {
+        return usize::try_from(*n).ok();
+    }
+    if let Some(crate::sema::const_eval::ConstValue::Integer(n)) =
+        info.folded_constants.get(&expr.span)
+    {
+        return usize::try_from(*n).ok();
+    }
+    None
+}
+
+/// Emit a load of `base.field` (a scalar struct field at a static address) into
+/// A (low) / Y (high for u16). Shared by the local single-level and nested paths.
+fn emit_static_field_load(
+    base_addr: u16,
+    struct_name: &str,
+    field: &Spanned<String>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    let sdef = info.type_registry.get_struct(struct_name).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "struct '{}' not found in type registry",
+            struct_name
+        ))
+    })?;
+    let finfo = sdef.get_field(&field.node).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "field '{}' not found in struct '{}'",
+            field.node, struct_name
+        ))
+    })?;
+    let is_multibyte = matches!(
+        &finfo.ty,
+        crate::sema::types::Type::Primitive(
+            crate::ast::PrimitiveType::U16
+                | crate::ast::PrimitiveType::I16
+                | crate::ast::PrimitiveType::B16
+        )
+    );
+    let field_addr = base_addr + finfo.offset as u16;
+    if field_addr < 0x100 {
+        emitter.emit_inst("LDA", &format!("${:02X}", field_addr));
+        if is_multibyte {
+            emitter.emit_inst("LDY", &format!("${:02X}", field_addr + 1));
+        }
+    } else {
+        emitter.emit_inst("LDA", &format!("${:04X}", field_addr));
+        if is_multibyte {
+            emitter.emit_inst("LDY", &format!("${:04X}", field_addr + 1));
+        }
+    }
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
 pub(super) fn generate_field_access(
     object: &Spanned<crate::ast::Expr>,
     field: &Spanned<String>,
@@ -341,6 +531,18 @@ pub(super) fn generate_field_access(
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
+
+    // Nested field access (a.b.c) or array-of-struct element (arr[i].f): the
+    // object is not a plain variable. Resolve a static address for local chains.
+    if !matches!(&object.node, Expr::Variable(_)) {
+        if let Some((base, struct_name)) = resolve_static_struct_lvalue(object, info) {
+            emitter.emit_comment(&format!("Nested field access: .{}", field.node));
+            return emit_static_field_load(base, &struct_name, field, emitter, info);
+        }
+        return Err(CodegenError::UnsupportedOperation(
+            "Field access only supported on variables and local struct/array chains".to_string(),
+        ));
+    }
 
     // Get the base object (must be a variable for now)
     if let Expr::Variable(var_name) = &object.node {

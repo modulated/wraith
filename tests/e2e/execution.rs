@@ -1008,3 +1008,65 @@ fn i8_match_range_signed() {
     assert_eq!(classify(10), 3, "10 is in the tail");
     assert_eq!(classify(100), 3, "100 is in the tail");
 }
+
+// ---------------------------------------------------------------------------
+// Nested field access (a.b.c) and array-of-struct element fields (arr[i].f).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_struct_field_read() {
+    let mut e = run(r#"
+        struct Inner { x: u8, y: u16 }
+        struct Outer { a: u8, inner: Inner, b: u8 }
+        const OA: addr = 0x0400;
+        const OX: addr = 0x0401;
+        const YLO: addr = 0x0402;
+        const YHI: addr = 0x0403;
+        const OB: addr = 0x0404;
+        #[reset]
+        fn main() {
+            let o: Outer = Outer { a: 5, inner: Inner { x: 42, y: 0x1234 }, b: 9 };
+            OA = o.a;
+            OX = o.inner.x;
+            YLO = o.inner.y.low;
+            YHI = o.inner.y.high;
+            OB = o.b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 5, "o.a");
+    assert_eq!(e.mem(0x0401), 42, "o.inner.x");
+    assert_eq!(e.mem16(0x0402), 0x1234, "o.inner.y (u16, both bytes)");
+    assert_eq!(e.mem(0x0404), 9, "o.b (offset past the nested struct)");
+}
+
+#[test]
+#[ignore] // Read path (arr[i].field) is implemented; blocked on array-of-struct
+// *construction* — array literals of struct literals aren't supported
+// yet (arrays store a ROM data pointer, not inline runtime-initialized RAM).
+fn array_of_struct_const_index_field() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const X0: addr = 0x0400;
+        const Y0: addr = 0x0401;
+        const X2: addr = 0x0402;
+        const Y2: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let pts: [Point; 3] = [
+                Point { x: 1, y: 2 },
+                Point { x: 3, y: 4 },
+                Point { x: 5, y: 6 },
+            ];
+            X0 = pts[0].x;
+            Y0 = pts[0].y;
+            X2 = pts[2].x;
+            Y2 = pts[2].y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 1, "pts[0].x");
+    assert_eq!(e.mem(0x0401), 2, "pts[0].y");
+    assert_eq!(e.mem(0x0402), 5, "pts[2].x");
+    assert_eq!(e.mem(0x0403), 6, "pts[2].y");
+}
