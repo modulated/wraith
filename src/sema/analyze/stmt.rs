@@ -369,6 +369,23 @@ impl SemanticAnalyzer {
             }
         };
 
+        // 16-bit counters are u16-only for now: the loop machinery's compare
+        // is unsigned (wrong for i16) and its increment is binary (wrong for
+        // BCD b16). Fail loudly rather than miscompile.
+        if matches!(
+            var_ty,
+            Type::Primitive(PrimitiveType::I16) | Type::Primitive(PrimitiveType::B16)
+        ) {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "for loop counter '{}' has type {}; 16-bit loop counters are currently u16-only",
+                    var_name.node,
+                    var_ty.display_name()
+                ),
+                span: var_name.span,
+            });
+        }
+
         // Check for duplicate loop variable (shouldn't happen in new scope, but check anyway)
         if self.table.defined_in_current_scope(&var_name.node) {
             return Err(SemaError::DuplicateSymbol {

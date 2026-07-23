@@ -1980,7 +1980,7 @@ fn generate_normal_loop(
         .map(|s| &s.ty);
 
     match counter_ty {
-        Some(Type::Primitive(PrimitiveType::U16 | PrimitiveType::B16)) => {
+        Some(Type::Primitive(PrimitiveType::U16)) => {
             return generate_normal_loop_u16(
                 var_name,
                 range,
@@ -1990,11 +1990,11 @@ fn generate_normal_loop(
                 string_collector,
             );
         }
-        Some(Type::Primitive(PrimitiveType::I16)) => {
-            // The 16-bit comparison below is unsigned; erroring beats silently
-            // miscompiling a signed counter.
+        Some(Type::Primitive(PrimitiveType::I16 | PrimitiveType::B16)) => {
+            // Backstop for sema's rejection: the 16-bit comparison is unsigned
+            // (wrong for i16) and the increment is binary (wrong for BCD b16).
             return Err(CodegenError::UnsupportedOperation(format!(
-                "for loop counter '{}' has type i16; 16-bit loop counters are currently unsigned-only (use u16)",
+                "for loop counter '{}' is not u16; 16-bit loop counters are currently u16-only",
                 var_name.node
             )));
         }
