@@ -449,3 +449,562 @@ fn mul_pow2_evaluates_left_once() {
     );
     assert_eq!(e.mem(0x0401), 6, "3 * 2 should be 6");
 }
+
+// ---------------------------------------------------------------------------
+// Signed integers: negative literals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i8_negative_literal_is_twos_complement() {
+    // -5 as i8 is 0xFB. A prior double-negation bug folded it back to +5.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: i8 = -5;
+            OUT = x as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0xFB, "-5 as i8 should be 0xFB (251)");
+}
+
+#[test]
+fn i8_negative_literal_boundaries() {
+    let val = |lit: i32| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: i8 = {lit};
+                OUT = x as u8;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(val(-1), 0xFF, "-1 as i8");
+    assert_eq!(val(-128), 0x80, "-128 as i8 (min)");
+    assert_eq!(val(127), 0x7F, "127 as i8 (max)");
+}
+
+#[test]
+fn i16_negative_literal_is_twos_complement() {
+    // -1000 as i16 = 0xFC18.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let x: i16 = -1000;
+            LO = x.low;
+            HI = x.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0xFC18, "-1000 as i16 should be 0xFC18");
+}
+
+// ---------------------------------------------------------------------------
+// Signed comparisons (i8 / i16): unsigned branches give wrong results when the
+// sign bit differs (e.g. -1 < 1 is true, but 0xFF > 0x01 unsigned).
+// ---------------------------------------------------------------------------
+
+/// Store `(a OP b) as u8` for two i8 values, where OP is a comparison operator.
+fn i8_cmp(a: i32, b: i32, op: &str) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i8 = {a};
+            let y: i8 = {b};
+            let r: bool = x {op} y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+/// Store `(a OP b) as u8` for two i16 values.
+fn i16_cmp(a: i32, b: i32, op: &str) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i16 = {a};
+            let y: i16 = {b};
+            let r: bool = x {op} y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+#[test]
+fn i8_less_than_signed() {
+    assert_eq!(i8_cmp(-1, 1, "<"), 1, "-1 < 1 should be true");
+    assert_eq!(i8_cmp(1, -1, "<"), 0, "1 < -1 should be false");
+    assert_eq!(i8_cmp(-100, -50, "<"), 1, "-100 < -50 should be true");
+    assert_eq!(i8_cmp(-50, -100, "<"), 0, "-50 < -100 should be false");
+    assert_eq!(i8_cmp(5, 5, "<"), 0, "5 < 5 should be false");
+}
+
+#[test]
+fn i8_ge_gt_le_signed() {
+    assert_eq!(i8_cmp(-1, 1, ">="), 0, "-1 >= 1 false");
+    assert_eq!(i8_cmp(1, -1, ">="), 1, "1 >= -1 true");
+    assert_eq!(i8_cmp(-5, -5, ">="), 1, "-5 >= -5 true");
+    assert_eq!(i8_cmp(-1, 1, ">"), 0, "-1 > 1 false");
+    assert_eq!(i8_cmp(1, -1, ">"), 1, "1 > -1 true");
+    assert_eq!(i8_cmp(-5, -5, ">"), 0, "-5 > -5 false");
+    assert_eq!(i8_cmp(-1, 1, "<="), 1, "-1 <= 1 true");
+    assert_eq!(i8_cmp(-5, -5, "<="), 1, "-5 <= -5 true");
+    assert_eq!(i8_cmp(1, -1, "<="), 0, "1 <= -1 false");
+}
+
+#[test]
+fn i8_extreme_values_signed() {
+    // -128 is the most negative; 127 the most positive.
+    assert_eq!(i8_cmp(-128, 127, "<"), 1, "-128 < 127 true");
+    assert_eq!(i8_cmp(127, -128, ">"), 1, "127 > -128 true");
+    assert_eq!(i8_cmp(-128, -128, "<="), 1, "-128 <= -128 true");
+}
+
+#[test]
+fn i16_comparisons_signed() {
+    assert_eq!(i16_cmp(-1, 1, "<"), 1, "-1 < 1 true (i16)");
+    assert_eq!(i16_cmp(-1000, 1000, "<"), 1, "-1000 < 1000 true");
+    assert_eq!(i16_cmp(1000, -1000, "<"), 0, "1000 < -1000 false");
+    assert_eq!(i16_cmp(-1000, -2000, ">"), 1, "-1000 > -2000 true");
+    assert_eq!(i16_cmp(-32768, 32767, "<"), 1, "min < max true");
+    assert_eq!(i16_cmp(32767, -32768, ">="), 1, "max >= min true");
+    assert_eq!(i16_cmp(-500, -500, "<="), 1, "-500 <= -500 true");
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic shift right (signed) and 16-bit negation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i8_arithmetic_shift_right() {
+    // -8 >> 1 = -4 (arithmetic: sign replicated). Logical LSR would give 124.
+    let shr = |a: i32, n: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: i8 = {a};
+                let s: u8 = {n};
+                let r: i8 = x >> s;
+                OUT = r as u8;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(shr(-8, 1), 0xFC, "-8 >> 1 should be -4 (0xFC)");
+    assert_eq!(shr(-1, 1), 0xFF, "-1 >> 1 should stay -1");
+    assert_eq!(shr(-64, 2), 0xF0, "-64 >> 2 should be -16 (0xF0)");
+    assert_eq!(shr(32, 2), 8, "positive 32 >> 2 should be 8");
+}
+
+#[test]
+fn i16_arithmetic_shift_right() {
+    let shr = |a: i32, n: u8| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: i16 = {a};
+                let s: u8 = {n};
+                let r: i16 = x >> s;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400) as i16
+    };
+    assert_eq!(shr(-8, 1), -4, "-8 >> 1 = -4 (i16)");
+    assert_eq!(shr(-1000, 2), -250, "-1000 >> 2 = -250");
+    assert_eq!(shr(-32768, 4), -2048, "min >> 4");
+    assert_eq!(shr(1000, 2), 250, "positive 1000 >> 2 = 250");
+}
+
+#[test]
+fn i16_negation() {
+    let neg = |a: i32| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: i16 = {a};
+                let r: i16 = -x;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400) as i16
+    };
+    assert_eq!(neg(5), -5, "-(5) = -5 across both bytes");
+    assert_eq!(neg(256), -256, "-(256) = -256 (0xFF00)");
+    assert_eq!(neg(-1000), 1000, "-(-1000) = 1000");
+    assert_eq!(neg(1000), -1000, "-(1000) = -1000");
+}
+
+// ---------------------------------------------------------------------------
+// Signed division and modulo (truncated toward zero; remainder sign = dividend)
+// ---------------------------------------------------------------------------
+
+fn i8_div(a: i32, b: i32) -> i8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i8 = {a};
+            let y: i8 = {b};
+            let r: i8 = x / y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400) as i8
+}
+
+fn i8_mod(a: i32, b: i32) -> i8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i8 = {a};
+            let y: i8 = {b};
+            let r: i8 = x % y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400) as i8
+}
+
+#[test]
+fn i8_signed_division() {
+    assert_eq!(i8_div(-20, 4), -5, "-20 / 4 = -5");
+    assert_eq!(i8_div(20, -4), -5, "20 / -4 = -5");
+    assert_eq!(i8_div(-20, -4), 5, "-20 / -4 = 5");
+    assert_eq!(i8_div(20, 4), 5, "20 / 4 = 5");
+    assert_eq!(i8_div(-7, 2), -3, "-7 / 2 = -3 (truncated toward zero)");
+    assert_eq!(i8_div(7, -2), -3, "7 / -2 = -3");
+}
+
+#[test]
+fn i8_signed_modulo() {
+    // Remainder takes the sign of the dividend (Rust/C truncated semantics).
+    assert_eq!(i8_mod(-7, 3), -1, "-7 % 3 = -1");
+    assert_eq!(i8_mod(7, -3), 1, "7 % -3 = 1");
+    assert_eq!(i8_mod(-7, -3), -1, "-7 % -3 = -1");
+    assert_eq!(i8_mod(7, 3), 1, "7 % 3 = 1");
+}
+
+fn i16_div(a: i32, b: i32) -> i16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let x: i16 = {a};
+            let y: i16 = {b};
+            let r: i16 = x / y;
+            LO = r.low;
+            HI = r.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400) as i16
+}
+
+fn i16_mod(a: i32, b: i32) -> i16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let x: i16 = {a};
+            let y: i16 = {b};
+            let r: i16 = x % y;
+            LO = r.low;
+            HI = r.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400) as i16
+}
+
+#[test]
+fn i16_signed_division() {
+    assert_eq!(i16_div(-1000, 8), -125, "-1000 / 8 = -125");
+    assert_eq!(i16_div(1000, -8), -125, "1000 / -8 = -125");
+    assert_eq!(i16_div(-1000, -8), 125, "-1000 / -8 = 125");
+    assert_eq!(i16_div(-30000, 100), -300, "-30000 / 100 = -300");
+}
+
+#[test]
+fn i16_signed_modulo() {
+    assert_eq!(i16_mod(-1000, 7), -6, "-1000 % 7 = -6");
+    assert_eq!(i16_mod(1000, -7), 6, "1000 % -7 = 6");
+    assert_eq!(i16_mod(-1003, 100), -3, "-1003 % 100 = -3");
+}
+
+// ---------------------------------------------------------------------------
+// Unsigned u16 division/modulo end to end. These exercise the stdlib div16 /
+// mod16 routines, whose bodies were previously deleted by the peephole pass
+// (indented stdlib labels were misparsed, so the dead-code pass ate the block
+// after the divide-by-zero guard's JMP).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_division_stdlib() {
+    let div = |a: u16, b: u16| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {a};
+                let y: u16 = {b};
+                let r: u16 = x / y;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(div(1000, 8), 125, "1000 / 8 = 125");
+    assert_eq!(div(60000, 3), 20000, "60000 / 3 = 20000");
+    assert_eq!(div(65535, 256), 255, "65535 / 256 = 255");
+    assert_eq!(div(7, 10), 0, "7 / 10 = 0");
+}
+
+#[test]
+fn u16_modulo_stdlib() {
+    let m = |a: u16, b: u16| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {a};
+                let y: u16 = {b};
+                let r: u16 = x % y;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(m(1000, 7), 6, "1000 % 7 = 6");
+    assert_eq!(m(60000, 7), 3, "60000 % 7 = 3");
+    assert_eq!(m(100, 100), 0, "100 % 100 = 0");
+}
+
+#[test]
+fn u16_multiply_stdlib() {
+    let mul = |a: u16, b: u16| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {a};
+                let y: u16 = {b};
+                let r: u16 = x * y;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(mul(300, 5), 1500, "300 * 5 = 1500");
+    assert_eq!(mul(1000, 60), 60000, "1000 * 60 = 60000");
+}
+
+// ---------------------------------------------------------------------------
+// Struct field reads must not truncate multi-byte (u16/i16) fields. The write
+// path handled the high byte; the read path emitted a single LDA.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_struct_field_read() {
+    let mut e = run(r#"
+        struct Wide {
+            a: u16,
+            b: u8,
+            c: u16,
+        }
+        const A_LO: addr = 0x0400;
+        const A_HI: addr = 0x0401;
+        const C_LO: addr = 0x0402;
+        const C_HI: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let w: Wide = Wide { a: 0x1234, b: 7, c: 0xBEEF };
+            let ra: u16 = w.a;
+            let rc: u16 = w.c;
+            A_LO = ra.low;
+            A_HI = ra.high;
+            C_LO = rc.low;
+            C_HI = rc.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x1234,
+        "w.a should read as full u16 0x1234"
+    );
+    assert_eq!(
+        e.mem16(0x0402),
+        0xBEEF,
+        "w.c should read as full u16 0xBEEF"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ForEach `continue` must advance the index. Previously continue jumped to the
+// loop head before the INX, spinning forever on the same element.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foreach_continue_advances() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let data: [u8; 5] = [1, 2, 3, 4, 5];
+            let sum: u8 = 0;
+            for x in data {
+                if x == 3 {
+                    continue;
+                }
+                sum = sum + x;
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    // 1 + 2 + 4 + 5 = 12 (element 3 skipped, loop still terminates).
+    assert_eq!(e.mem(0x0400), 12, "continue should skip 3 and finish");
+}
+
+#[test]
+fn foreach_sum_no_continue() {
+    // Baseline: a plain ForEach sum terminates and is correct.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let data: [u8; 4] = [10, 20, 30, 40];
+            let sum: u8 = 0;
+            for x in data {
+                sum = sum + x;
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 100, "10+20+30+40 = 100");
+}
+
+#[test]
+fn foreach_u16_array_elements() {
+    // Iterating a u16 array must scale the index and load both bytes of each
+    // element, not just the low byte.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let data: [u16; 4] = [0x1000, 0x2000, 0x3000, 0x4000];
+            let sum: u16 = 0;
+            for x in data {
+                sum = sum + x;
+            }
+            LO = sum.low;
+            HI = sum.high;
+            loop {}
+        }
+    "#);
+    // 0x1000 + 0x2000 + 0x3000 + 0x4000 = 0xA000.
+    assert_eq!(
+        e.mem16(0x0400),
+        0xA000,
+        "sum of u16 elements should be 0xA000"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Signed match range patterns: unsigned CMP/BCC misclassify negative values.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i8_match_range_signed() {
+    // Classify x into: -128..=-1 => 1, 0..=9 => 2, 10..=127 => 3.
+    let classify = |x: i32| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: i8 = {x};
+                match x {{
+                    -128..=-1 => {{ OUT = 1; }}
+                    0..=9 => {{ OUT = 2; }}
+                    n => {{ OUT = 3; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(classify(-100), 1, "-100 is negative");
+    assert_eq!(classify(-1), 1, "-1 is negative");
+    assert_eq!(classify(0), 2, "0 is in 0..=9");
+    assert_eq!(classify(5), 2, "5 is in 0..=9");
+    assert_eq!(classify(9), 2, "9 is in 0..=9");
+    assert_eq!(classify(10), 3, "10 is in the tail");
+    assert_eq!(classify(100), 3, "100 is in the tail");
+}

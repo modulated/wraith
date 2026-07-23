@@ -28,17 +28,53 @@ pub(super) fn generate_unary(
     // Evaluate operand first
     generate_expr(operand, emitter, info, string_collector)?;
 
-    // Apply unary operation to A
+    // Determine operand width so 16-bit values negate/complement both bytes.
+    let is_u16 = matches!(
+        info.resolved_types.get(&operand.span),
+        Some(crate::sema::types::Type::Primitive(
+            crate::ast::PrimitiveType::U16
+                | crate::ast::PrimitiveType::I16
+                | crate::ast::PrimitiveType::B16
+        ))
+    );
+
+    // Apply unary operation to A (low) / Y (high for u16)
     match op {
         UnaryOp::Neg => {
-            // Two's complement: ~A + 1
-            emitter.emit_inst("EOR", "#$FF"); // Bitwise NOT
-            emitter.emit_inst("CLC", "");
-            emitter.emit_inst("ADC", "#$01"); // Add 1
+            if is_u16 {
+                // 16-bit two's complement: ~value + 1 across both bytes, carrying
+                // from low into high. Low in A, high in Y; $22 holds the low result.
+                let tmp = emitter.memory_layout.loop_end_temp(); // $22
+                emitter.emit_inst("EOR", "#$FF"); // ~low
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("ADC", "#$01"); // ~low + 1 (carry out)
+                emitter.emit_inst("STA", &format!("${:02X}", tmp));
+                emitter.emit_inst("TYA", ""); // high
+                emitter.emit_inst("EOR", "#$FF"); // ~high
+                emitter.emit_inst("ADC", "#$00"); // + carry from low
+                emitter.emit_inst("TAY", ""); // Y = high result
+                emitter.emit_inst("LDA", &format!("${:02X}", tmp)); // A = low result
+            } else {
+                // 8-bit two's complement: ~A + 1
+                emitter.emit_inst("EOR", "#$FF"); // Bitwise NOT
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("ADC", "#$01"); // Add 1
+            }
         }
         UnaryOp::BitNot => {
-            // Bitwise NOT
-            emitter.emit_inst("EOR", "#$FF");
+            if is_u16 {
+                // Complement both bytes; stash the low result while doing the high.
+                let tmp = emitter.memory_layout.loop_end_temp(); // $22
+                emitter.emit_inst("EOR", "#$FF"); // ~low
+                emitter.emit_inst("STA", &format!("${:02X}", tmp));
+                emitter.emit_inst("TYA", ""); // high
+                emitter.emit_inst("EOR", "#$FF"); // ~high
+                emitter.emit_inst("TAY", ""); // Y = ~high
+                emitter.emit_inst("LDA", &format!("${:02X}", tmp)); // A = ~low
+            } else {
+                // Bitwise NOT
+                emitter.emit_inst("EOR", "#$FF");
+            }
         }
         UnaryOp::Not => {
             // Logical NOT: convert to boolean (0 or 1) and invert
@@ -60,5 +96,8 @@ pub(super) fn generate_unary(
         }
     }
 
+    // Unary ops rewrite A (and Y for u16) via raw instructions the tracker does
+    // not follow; drop cached register beliefs.
+    emitter.mark_a_unknown();
     Ok(())
 }

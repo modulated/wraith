@@ -795,6 +795,7 @@ pub fn generate_stmt(
             let (iterable_base, iterable_ty) = iterable_info;
 
             let loop_label = emitter.next_label("fe");
+            let continue_label = emitter.next_label("fc");
             let end_label = emitter.next_label("fz");
 
             // Initialize counter to 0 in X register
@@ -844,8 +845,10 @@ pub fn generate_stmt(
             }
             emitter.emit_inst("BCS", &end_label); // Branch if X >= size
 
-            // Push loop context for break/continue
-            emitter.push_loop(loop_label.clone(), end_label.clone());
+            // Push loop context for break/continue. `continue` must land on the
+            // increment (continue_label), NOT the loop head — otherwise the index
+            // in X is never advanced and the loop spins forever.
+            emitter.push_loop(continue_label.clone(), end_label.clone());
 
             // Store index in index variable if present
             if let Some(idx_var) = index_var
@@ -864,28 +867,70 @@ pub fn generate_stmt(
                 }
             }
 
-            // Load iterable[X] into A using indirect indexed: LDA (ptr),Y
-            // Transfer X to Y for indexing
+            // Whether the array element type is 16-bit (u16/i16/b16). Strings
+            // always iterate u8 characters.
+            let elem_multibyte = matches!(
+                &iterable_ty,
+                crate::sema::types::Type::Array(elem, _) if matches!(
+                    &**elem,
+                    crate::sema::types::Type::Primitive(
+                        crate::ast::PrimitiveType::U16
+                            | crate::ast::PrimitiveType::I16
+                            | crate::ast::PrimitiveType::B16
+                    )
+                )
+            );
+
+            // Resolve the loop variable's storage up front.
+            let loopvar_loc = info
+                .resolved_symbols
+                .get(&var_name.span)
+                .map(|s| s.location.clone())
+                .ok_or_else(|| CodegenError::SymbolNotFound(var_name.node.clone()))?;
+
+            // Index into the iterable: Y = X, scaled ×2 for u16 elements.
             emitter.emit_inst("TXA", "");
+            if elem_multibyte {
+                emitter.emit_inst("ASL", "A");
+            }
             emitter.emit_inst("TAY", "");
 
+            // Emit "load byte at (base),Y then store to <dest>" for the low byte,
+            // and (for u16 elements) INY + load/store the high byte.
+            let store_lo = |emitter: &mut Emitter, load: &dyn Fn(&mut Emitter)| match loopvar_loc {
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                    load(emitter);
+                    emitter.emit_inst("STA", &format!("${:02X}", addr));
+                    if elem_multibyte {
+                        emitter.emit_inst("INY", "");
+                        load(emitter);
+                        emitter.emit_inst("STA", &format!("${:02X}", addr + 1));
+                    }
+                    Ok(())
+                }
+                crate::sema::table::SymbolLocation::Absolute(addr) => {
+                    load(emitter);
+                    emitter.emit_sta_abs(addr);
+                    if elem_multibyte {
+                        emitter.emit_inst("INY", "");
+                        load(emitter);
+                        emitter.emit_sta_abs(addr + 1);
+                    }
+                    Ok(())
+                }
+                _ => Err(CodegenError::UnsupportedOperation(
+                    "ForEach loop variable must have concrete location".to_string(),
+                )),
+            };
+
             if is_string {
-                // For strings, add 1 to skip length byte
+                // Strings: skip the length byte, u8 elements only.
                 emitter.emit_inst("INY", "");
                 emitter.emit_inst("LDA", "($F0),Y");
-            } else {
-                // For arrays, direct indexed access
-                emitter.emit_inst("LDA", &format!("(${:02X}),Y", iterable_base));
-            }
-
-            // Store the element in the loop variable
-            if let Some(loop_var) = info.resolved_symbols.get(&var_name.span) {
-                match loop_var.location {
-                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                        emitter.emit_sta_zp(addr);
-                    }
+                match loopvar_loc {
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => emitter.emit_sta_zp(addr),
                     crate::sema::table::SymbolLocation::Absolute(addr) => {
-                        emitter.emit_sta_abs(addr);
+                        emitter.emit_sta_abs(addr)
                     }
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(
@@ -894,7 +939,10 @@ pub fn generate_stmt(
                     }
                 }
             } else {
-                return Err(CodegenError::SymbolNotFound(var_name.node.clone()));
+                let base = iterable_base;
+                store_lo(emitter, &move |e: &mut Emitter| {
+                    e.emit_inst("LDA", &format!("(${:02X}),Y", base));
+                })?;
             }
 
             // Restore counter from stack (it's still in X, so no need)
@@ -906,7 +954,8 @@ pub fn generate_stmt(
             // Pop loop context
             emitter.pop_loop();
 
-            // Increment counter
+            // Continue target: advance the index, then re-test at the loop head.
+            emitter.emit_label(&continue_label);
             emitter.emit_inst("INX", "");
             emitter.reg_state.modify_x();
 
@@ -1409,6 +1458,13 @@ fn generate_match_sequential(
         )
     );
 
+    // Whether the matched value is signed (i8/i16) — range patterns must then
+    // use signed comparisons instead of unsigned BCC/BCS.
+    let scrutinee_is_signed = info
+        .resolved_types
+        .get(&expr.span)
+        .is_some_and(|t| t.is_signed());
+
     // Use pointer ops area for indirect addressing to avoid conflict with temp storage
     let ptr_base = emitter.memory_layout.pointer_ops_start; // $30 by default
 
@@ -1469,18 +1525,45 @@ fn generate_match_sequential(
                     crate::ast::Expr::Literal(crate::ast::Literal::Integer(end_val)),
                 ) = (&start.node, &end.node)
                 {
-                    emitter.emit_inst("LDA", "$20");
-
-                    // Check if value < start, skip this arm
-                    emitter.emit_inst("CMP", &format!("#${:02X}", start_val));
-                    emitter.emit_inst("BCC", &format!("match_{}_arm_{}_end", match_id, i));
-
-                    // Check if value <= end (or < end+1)
+                    let arm_label = format!("match_{}_arm_{}", match_id, i);
+                    let skip_label = format!("match_{}_arm_{}_end", match_id, i);
                     let upper_bound = if *inclusive { end_val + 1 } else { *end_val };
-                    emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
-                    emitter.emit_inst("BCC", &format!("match_{}_arm_{}", match_id, i));
 
-                    emitter.emit_label(&format!("match_{}_arm_{}_end", match_id, i));
+                    if scrutinee_is_signed {
+                        // Signed range: (value < start) skips; (value < end+1)
+                        // matches. Signed "less than" is (N eor V) after a
+                        // subtraction, folded into N via EOR #$80 on overflow.
+                        // Comparing against 0 is just a sign-bit test (BMI) — and
+                        // it avoids emitting `SEC; SBC #$00`, which the peephole
+                        // eliminates as a value no-op even though its flags matter.
+                        let mut emit_signed_lt =
+                            |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
+                                emitter.emit_inst("LDA", "$20");
+                                if bound == 0 {
+                                    emitter.emit_inst("BMI", target); // value < 0 == sign set
+                                } else {
+                                    let nov = format!("match_{}_arm_{}_{}", match_id, i, tag);
+                                    emitter.emit_inst("SEC", "");
+                                    emitter.emit_inst("SBC", &format!("#${:02X}", bound as u8));
+                                    emitter.emit_inst("BVC", &nov);
+                                    emitter.emit_inst("EOR", "#$80");
+                                    emitter.emit_label(&nov);
+                                    emitter.emit_inst("BMI", target);
+                                }
+                            };
+                        emit_signed_lt(emitter, *start_val, &skip_label, "v1"); // < start -> skip
+                        emit_signed_lt(emitter, upper_bound, &arm_label, "v2"); // <= end -> match
+                    } else {
+                        emitter.emit_inst("LDA", "$20");
+                        // Check if value < start, skip this arm
+                        emitter.emit_inst("CMP", &format!("#${:02X}", start_val));
+                        emitter.emit_inst("BCC", &skip_label);
+                        // Check if value <= end (or < end+1)
+                        emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
+                        emitter.emit_inst("BCC", &arm_label);
+                    }
+
+                    emitter.emit_label(&skip_label);
                 }
             }
             Pattern::Wildcard => {

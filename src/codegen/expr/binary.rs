@@ -84,6 +84,10 @@ pub(super) fn generate_binary(
         )
     });
 
+    // Whether the operands are signed (i8/i16). Comparisons, `>>`, and division
+    // need signed-specific sequences; other ops are bit-identical either way.
+    let is_signed = left_type.is_some_and(|ty| ty.is_signed());
+
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
 
@@ -119,9 +123,10 @@ pub(super) fn generate_binary(
                 }
             }
 
-            // Optimization: x / 256 → x.high (for u16 only)
+            // Optimization: x / 256 → x.high (unsigned u16 only; for signed the
+            // high byte is not the truncated quotient).
             crate::ast::BinaryOp::Div => {
-                if is_u16 && val_u64 == 256 {
+                if is_u16 && !is_signed && val_u64 == 256 {
                     if emitter.is_verbose() {
                         emitter.emit_comment("Strength reduction: x / 256 → x.high");
                     }
@@ -138,9 +143,10 @@ pub(super) fn generate_binary(
                 }
             }
 
-            // Optimization: x % 256 → x.low (for u16 only)
+            // Optimization: x % 256 → x.low (unsigned u16 only; a signed
+            // remainder takes the dividend's sign).
             crate::ast::BinaryOp::Mod => {
-                if is_u16 && val_u64 == 256 {
+                if is_u16 && !is_signed && val_u64 == 256 {
                     if emitter.is_verbose() {
                         emitter.emit_comment("Strength reduction: x % 256 → x.low");
                     }
@@ -334,16 +340,16 @@ pub(super) fn generate_binary(
             generate_shift_left(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Shr => {
-            generate_shift_right(emitter, is_u16)?;
+            generate_shift_right(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Mul => {
             generate_multiply(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Div => {
-            generate_divide(emitter, is_u16)?;
+            generate_divide(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Mod => {
-            generate_modulo(emitter, is_u16)?;
+            generate_modulo(emitter, is_u16, is_signed)?;
         }
         // Comparison operations - result is boolean (0 or 1)
         crate::ast::BinaryOp::Eq => {
@@ -353,20 +359,20 @@ pub(super) fn generate_binary(
             generate_compare_ne(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Lt => {
-            generate_compare_lt(emitter, is_u16)?;
+            generate_compare_lt(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Ge => {
-            generate_compare_ge(emitter, is_u16)?;
+            generate_compare_ge(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Gt => {
             // A > B is same as B < A, so swap and use Lt
             // We already have A in accumulator and B in TEMP
             // Just swap them conceptually
-            generate_compare_gt(emitter, is_u16)?;
+            generate_compare_gt(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Le => {
             // A <= B is same as B >= A
-            generate_compare_le(emitter, is_u16)?;
+            generate_compare_le(emitter, is_u16, is_signed)?;
         }
         // And/Or are handled earlier with short-circuit evaluation
         crate::ast::BinaryOp::And | crate::ast::BinaryOp::Or => {
@@ -471,39 +477,73 @@ fn generate_shift_left(emitter: &mut Emitter, is_u16: bool) -> Result<(), Codege
     Ok(())
 }
 
-fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
-    // Shift value right by emitter.memory_layout.temp_reg() bits
-    // For u8: Shift A right
-    // For u16: Shift A (low) and Y (high) right together
+fn generate_shift_right(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
+    // Shift value right by emitter.memory_layout.temp_reg() bits.
+    // For u8:  shift A right. For u16: shift A (low) and Y (high) together.
+    // Signed operands use an arithmetic shift (sign bit replicated); unsigned
+    // use a logical shift (zero filled).
 
     if !emitter.is_minimal() {
-        emitter.emit_comment("Shift right (divide by power of 2)");
+        emitter.emit_comment(if is_signed {
+            "Arithmetic shift right (signed divide by power of 2)"
+        } else {
+            "Shift right (divide by power of 2)"
+        });
     }
 
     let temp_reg = emitter.memory_layout.temp_reg();
 
     if is_u16 {
-        // u16: low byte in A, high byte in Y. Park the high byte in scratch so
-        // LSR <scratch> / ROR A shift all 16 bits, count in X.
-        let high_tmp = emitter.memory_layout.loop_end_temp(); // $22 by default
         let loop_label = emitter.next_label("sr");
         let end_label = emitter.next_label("sx");
 
-        emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
-        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
-        emitter.emit_inst("CPX", "#$00");
-        emitter.emit_inst("BEQ", &end_label);
+        if is_signed {
+            // Arithmetic: park both bytes in scratch. Each iteration seeds the
+            // carry with the high byte's sign bit (ASL of a copy), then rotates
+            // it back in so the sign is replicated.
+            let low_tmp = emitter.memory_layout.loop_end_temp(); // $22
+            let high_tmp = low_tmp + 1; // $23
+            emitter.emit_inst("STA", &format!("${:02X}", low_tmp));
+            emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+            emitter.emit_inst("CPX", "#$00");
+            emitter.emit_inst("BEQ", &end_label);
 
-        // Loop: high byte shifts bit 0 into carry, low byte rotates it in.
-        emitter.emit_label(&loop_label);
-        emitter.emit_inst("LSR", &format!("${:02X}", high_tmp));
-        emitter.emit_inst("ROR", "A");
-        emitter.emit_inst("DEX", "");
-        emitter.emit_inst("BNE", &loop_label);
+            emitter.emit_label(&loop_label);
+            emitter.emit_inst("LDA", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("ASL", "A"); // carry = sign bit of high
+            emitter.emit_inst("ROR", &format!("${:02X}", high_tmp)); // sign back into bit 7
+            emitter.emit_inst("ROR", &format!("${:02X}", low_tmp));
+            emitter.emit_inst("DEX", "");
+            emitter.emit_inst("BNE", &loop_label);
 
-        emitter.emit_label(&end_label);
-        // Restore the shifted high byte to Y.
-        emitter.emit_inst("LDY", &format!("${:02X}", high_tmp));
+            emitter.emit_label(&end_label);
+            emitter.emit_inst("LDA", &format!("${:02X}", low_tmp)); // A = low
+            emitter.emit_inst("LDY", &format!("${:02X}", high_tmp)); // Y = high
+        } else {
+            // Logical: park the high byte in scratch so LSR <hi> / ROR A shift
+            // all 16 bits, count in X.
+            let high_tmp = emitter.memory_layout.loop_end_temp(); // $22 by default
+            emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+            emitter.emit_inst("CPX", "#$00");
+            emitter.emit_inst("BEQ", &end_label);
+
+            // Loop: high byte shifts bit 0 into carry, low byte rotates it in.
+            emitter.emit_label(&loop_label);
+            emitter.emit_inst("LSR", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("ROR", "A");
+            emitter.emit_inst("DEX", "");
+            emitter.emit_inst("BNE", &loop_label);
+
+            emitter.emit_label(&end_label);
+            // Restore the shifted high byte to Y.
+            emitter.emit_inst("LDY", &format!("${:02X}", high_tmp));
+        }
     } else {
         // u8 shift
         let loop_label = emitter.next_label("sr");
@@ -516,16 +556,22 @@ fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), Codeg
         emitter.emit_inst("CPX", "#$00");
         emitter.emit_inst("BEQ", &end_label);
 
-        // Loop: shift right once per iteration
+        // Loop: shift right once per iteration.
         emitter.emit_label(&loop_label);
-        emitter.emit_inst("LSR", "A"); // Logical shift right
+        if is_signed {
+            // Arithmetic: seed carry with the sign bit (A >= $80) then rotate in.
+            emitter.emit_inst("CMP", "#$80");
+            emitter.emit_inst("ROR", "A");
+        } else {
+            emitter.emit_inst("LSR", "A"); // Logical shift right
+        }
         emitter.emit_inst("DEX", "");
         emitter.emit_inst("BNE", &loop_label);
 
         emitter.emit_label(&end_label);
     }
 
-    // Comparison modifies A register - invalidate tracking
+    // Shift modifies A (and Y for u16) - invalidate tracking
     emitter.mark_a_unknown();
     Ok(())
 }
@@ -641,9 +687,62 @@ fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     Ok(())
 }
 
-fn generate_divide(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+/// Negate the 16-bit value at zero-page `[lo, lo+1]` in place (0 - value).
+fn emit_negate16_zp(emitter: &mut Emitter, lo: u8) {
+    emitter.emit_inst("SEC", "");
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("SBC", &format!("${:02X}", lo));
+    emitter.emit_inst("STA", &format!("${:02X}", lo));
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("SBC", &format!("${:02X}", lo + 1));
+    emitter.emit_inst("STA", &format!("${:02X}", lo + 1));
+}
+
+/// Replace the 16-bit value at `[lo, lo+1]` with its absolute value.
+fn emit_abs16_zp(emitter: &mut Emitter, lo: u8) {
+    let done = emitter.next_label("ab");
+    emitter.emit_inst("LDA", &format!("${:02X}", lo + 1)); // high byte
+    emitter.emit_inst("BPL", &done); // sign clear -> already non-negative
+    emit_negate16_zp(emitter, lo);
+    emitter.emit_label(&done);
+}
+
+/// Conditionally two's-complement negate A (8-bit) when N of a prior `BIT` on
+/// the sign byte is set. `sign` holds the result sign in bit 7.
+fn emit_negate8_if_sign(emitter: &mut Emitter, sign: u8) {
+    let done = emitter.next_label("ng");
+    emitter.emit_inst("BIT", &format!("${:02X}", sign)); // N = sign bit 7 (leaves A intact)
+    emitter.emit_inst("BPL", &done);
+    emitter.emit_inst("EOR", "#$FF");
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "#$01");
+    emitter.emit_label(&done);
+}
+
+/// Two's-complement negate A (8-bit) when it is negative. Assumes N already
+/// reflects A's sign (i.e. A was just loaded via LDA), leaving abs(A) in A.
+fn emit_abs8_a(emitter: &mut Emitter) {
+    let done = emitter.next_label("ab");
+    emitter.emit_inst("BPL", &done); // N clear (from the preceding LDA) -> non-negative
+    emitter.emit_inst("EOR", "#$FF");
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "#$01");
+    emitter.emit_label(&done);
+}
+
+fn generate_divide(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
     if is_u16 {
+        if is_signed {
+            return generate_divide_i16(emitter);
+        }
         return generate_divide_u16(emitter);
+    }
+    if is_signed {
+        return generate_divide_i8(emitter);
     }
 
     // Divide u8 A / TEMP using repeated subtraction
@@ -726,9 +825,19 @@ fn generate_divide_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     Ok(())
 }
 
-fn generate_modulo(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
+fn generate_modulo(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
     if is_u16 {
+        if is_signed {
+            return generate_modulo_i16(emitter);
+        }
         return generate_modulo_u16(emitter);
+    }
+    if is_signed {
+        return generate_modulo_i8(emitter);
     }
 
     // Modulo A % TEMP using repeated subtraction
@@ -800,5 +909,136 @@ fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
         emitter.emit_comment("Returns: A=remainder_low, Y=remainder_high (u16)");
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Signed division and modulo (sign-magnitude wrappers around the unsigned
+// routines). Truncated (round-toward-zero) semantics: the quotient's sign is
+// sign(a) ⊕ sign(b), and the remainder takes the sign of the dividend `a`.
+// ---------------------------------------------------------------------------
+
+fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    let temp = emitter.memory_layout.temp_reg(); // divisor
+    let divd = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x26);
+    let sign = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x27);
+
+    // Save dividend, then compute result sign = dividend ⊕ divisor (bit 7).
+    emitter.emit_inst("STA", &format!("${:02X}", divd));
+    emitter.emit_inst("EOR", &format!("${:02X}", temp));
+    emitter.emit_inst("STA", &format!("${:02X}", sign));
+
+    // abs(divisor) in place.
+    let vpos = emitter.next_label("dv");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp));
+    emitter.emit_inst("BPL", &vpos);
+    emitter.emit_inst("EOR", "#$FF");
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "#$01");
+    emitter.emit_inst("STA", &format!("${:02X}", temp));
+    emitter.emit_label(&vpos);
+
+    // abs(dividend) into A (LDA sets N to the dividend's sign for emit_abs8_a).
+    emitter.emit_inst("LDA", &format!("${:02X}", divd));
+    emit_abs8_a(emitter);
+
+    // Unsigned quotient in A, then apply the result sign.
+    generate_divide(emitter, false, false)?;
+    emit_negate8_if_sign(emitter, sign);
+
+    emitter.temp_alloc.free_primary(divd, 1);
+    emitter.temp_alloc.free_primary(sign, 1);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
+fn generate_modulo_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    let temp = emitter.memory_layout.temp_reg(); // divisor
+    let divd = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x26);
+
+    // Save the dividend; its sign becomes the remainder's sign.
+    emitter.emit_inst("STA", &format!("${:02X}", divd));
+
+    // abs(divisor) in place.
+    let vpos = emitter.next_label("mv");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp));
+    emitter.emit_inst("BPL", &vpos);
+    emitter.emit_inst("EOR", "#$FF");
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "#$01");
+    emitter.emit_inst("STA", &format!("${:02X}", temp));
+    emitter.emit_label(&vpos);
+
+    // abs(dividend) into A.
+    emitter.emit_inst("LDA", &format!("${:02X}", divd));
+    emit_abs8_a(emitter);
+
+    // Unsigned remainder in A, then apply the dividend's sign.
+    generate_modulo(emitter, false, false)?;
+    emit_negate8_if_sign(emitter, divd);
+
+    emitter.temp_alloc.free_primary(divd, 1);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
+fn generate_divide_i16(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Dividend in A/Y, divisor at TEMP/TEMP+1. div16 clobbers $20-$27, so the
+    // result sign is parked at $28 to survive the call; $22/$23 hold the
+    // dividend only before the call.
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("STA", "$22");
+    emitter.emit_inst("STY", "$23");
+    // Result sign = dividend.high ⊕ divisor.high (bit 7).
+    emitter.emit_inst("LDA", "$23");
+    emitter.emit_inst("EOR", &format!("${:02X}", temp + 1));
+    emitter.emit_inst("STA", "$28");
+
+    emit_abs16_zp(emitter, temp); // abs divisor
+    emit_abs16_zp(emitter, 0x22); // abs dividend
+
+    emitter.emit_inst("LDA", "$22");
+    emitter.emit_inst("LDY", "$23");
+    generate_divide_u16(emitter)?; // quotient in A/Y
+
+    // Negate quotient if the result should be negative.
+    let done = emitter.next_label("dn");
+    emitter.emit_inst("BIT", "$28");
+    emitter.emit_inst("BPL", &done);
+    emitter.emit_inst("STA", "$22");
+    emitter.emit_inst("STY", "$23");
+    emit_negate16_zp(emitter, 0x22);
+    emitter.emit_inst("LDA", "$22");
+    emitter.emit_inst("LDY", "$23");
+    emitter.emit_label(&done);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
+fn generate_modulo_i16(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Remainder takes the dividend's sign. Park it at $28 to survive mod16.
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("STA", "$22");
+    emitter.emit_inst("STY", "$23");
+    emitter.emit_inst("LDA", "$23"); // dividend high
+    emitter.emit_inst("STA", "$28"); // sign source (bit 7)
+
+    emit_abs16_zp(emitter, temp); // abs divisor
+    emit_abs16_zp(emitter, 0x22); // abs dividend
+
+    emitter.emit_inst("LDA", "$22");
+    emitter.emit_inst("LDY", "$23");
+    generate_modulo_u16(emitter)?; // remainder in A/Y
+
+    let done = emitter.next_label("mn");
+    emitter.emit_inst("BIT", "$28");
+    emitter.emit_inst("BPL", &done);
+    emitter.emit_inst("STA", "$22");
+    emitter.emit_inst("STY", "$23");
+    emit_negate16_zp(emitter, 0x22);
+    emitter.emit_inst("LDA", "$22");
+    emitter.emit_inst("LDY", "$23");
+    emitter.emit_label(&done);
+    emitter.mark_a_unknown();
     Ok(())
 }

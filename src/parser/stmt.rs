@@ -326,14 +326,14 @@ impl Parser<'_> {
                 }
             }
 
-            // Integer literal pattern
-            Some(Token::Integer(_)) => {
-                let expr = self.parse_expr()?;
+            // Integer literal pattern, possibly negative (e.g. `-128..=-1`).
+            Some(Token::Integer(_)) | Some(Token::Minus) => {
+                let expr = self.parse_pattern_bound()?;
 
                 // Check for range pattern
                 if self.check(&Token::DotDotEq) {
                     self.advance();
-                    let end = self.parse_expr()?;
+                    let end = self.parse_pattern_bound()?;
                     let span = start.merge(end.span);
                     Ok(Spanned::new(
                         Pattern::Range {
@@ -350,6 +350,36 @@ impl Parser<'_> {
 
             Some(tok) => Err(ParseError::unexpected_token(start, "pattern", Some(tok))),
             None => Err(ParseError::unexpected_eof(start, "pattern")),
+        }
+    }
+
+    /// Parse a numeric bound of a literal/range pattern, folding an optional
+    /// leading `-` into a negative integer literal. Downstream match codegen
+    /// pattern-matches on `Expr::Literal(Integer(_))`, so a negative bound must
+    /// arrive already folded rather than as `Unary(Neg, ..)`.
+    fn parse_pattern_bound(&mut self) -> ParseResult<Spanned<crate::ast::Expr>> {
+        let start = self.current_span();
+        let negative = if self.check(&Token::Minus) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        match self.peek().cloned() {
+            Some(Token::Integer(n)) => {
+                self.advance();
+                let val = if negative { -n } else { n };
+                let span = start.merge(self.previous_span());
+                Ok(Spanned::new(
+                    crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)),
+                    span,
+                ))
+            }
+            other => Err(ParseError::unexpected_token(
+                start,
+                "integer in pattern",
+                other,
+            )),
         }
     }
 
