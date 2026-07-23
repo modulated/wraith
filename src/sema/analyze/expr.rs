@@ -427,11 +427,20 @@ impl SemanticAnalyzer {
         // Special handling for shift operations: allow u16 to be shifted by u8
         // (shift amounts realistically never exceed 255)
         let types_compatible = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
-            // Allow same-type shifts (u8 >> u8, u16 >> u16, etc.)
-            // Or allow larger type to be shifted by u8 (u16 >> u8)
+            // Allow same-type shifts (u8 >> u8, u16 >> u16, etc.), or any
+            // integer (incl. signed i8/i16) shifted by a u8 count — shift
+            // amounts realistically never exceed 255.
             left_ty == right_ty
-                || (matches!(left_ty, Type::Primitive(PrimitiveType::U16))
-                    && matches!(right_ty, Type::Primitive(PrimitiveType::U8)))
+                || (matches!(right_ty, Type::Primitive(PrimitiveType::U8))
+                    && matches!(
+                        left_ty,
+                        Type::Primitive(
+                            PrimitiveType::U8
+                                | PrimitiveType::I8
+                                | PrimitiveType::U16
+                                | PrimitiveType::I16
+                        )
+                    ))
         } else {
             // For all other operations, types must match
             left_ty == right_ty

@@ -338,7 +338,7 @@ pub(super) fn generate_binary(
             generate_shift_left(emitter, is_u16)?;
         }
         crate::ast::BinaryOp::Shr => {
-            generate_shift_right(emitter, is_u16)?;
+            generate_shift_right(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Mul => {
             generate_multiply(emitter, is_u16)?;
@@ -475,39 +475,73 @@ fn generate_shift_left(emitter: &mut Emitter, is_u16: bool) -> Result<(), Codege
     Ok(())
 }
 
-fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), CodegenError> {
-    // Shift value right by emitter.memory_layout.temp_reg() bits
-    // For u8: Shift A right
-    // For u16: Shift A (low) and Y (high) right together
+fn generate_shift_right(
+    emitter: &mut Emitter,
+    is_u16: bool,
+    is_signed: bool,
+) -> Result<(), CodegenError> {
+    // Shift value right by emitter.memory_layout.temp_reg() bits.
+    // For u8:  shift A right. For u16: shift A (low) and Y (high) together.
+    // Signed operands use an arithmetic shift (sign bit replicated); unsigned
+    // use a logical shift (zero filled).
 
     if !emitter.is_minimal() {
-        emitter.emit_comment("Shift right (divide by power of 2)");
+        emitter.emit_comment(if is_signed {
+            "Arithmetic shift right (signed divide by power of 2)"
+        } else {
+            "Shift right (divide by power of 2)"
+        });
     }
 
     let temp_reg = emitter.memory_layout.temp_reg();
 
     if is_u16 {
-        // u16: low byte in A, high byte in Y. Park the high byte in scratch so
-        // LSR <scratch> / ROR A shift all 16 bits, count in X.
-        let high_tmp = emitter.memory_layout.loop_end_temp(); // $22 by default
         let loop_label = emitter.next_label("sr");
         let end_label = emitter.next_label("sx");
 
-        emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
-        emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
-        emitter.emit_inst("CPX", "#$00");
-        emitter.emit_inst("BEQ", &end_label);
+        if is_signed {
+            // Arithmetic: park both bytes in scratch. Each iteration seeds the
+            // carry with the high byte's sign bit (ASL of a copy), then rotates
+            // it back in so the sign is replicated.
+            let low_tmp = emitter.memory_layout.loop_end_temp(); // $22
+            let high_tmp = low_tmp + 1; // $23
+            emitter.emit_inst("STA", &format!("${:02X}", low_tmp));
+            emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+            emitter.emit_inst("CPX", "#$00");
+            emitter.emit_inst("BEQ", &end_label);
 
-        // Loop: high byte shifts bit 0 into carry, low byte rotates it in.
-        emitter.emit_label(&loop_label);
-        emitter.emit_inst("LSR", &format!("${:02X}", high_tmp));
-        emitter.emit_inst("ROR", "A");
-        emitter.emit_inst("DEX", "");
-        emitter.emit_inst("BNE", &loop_label);
+            emitter.emit_label(&loop_label);
+            emitter.emit_inst("LDA", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("ASL", "A"); // carry = sign bit of high
+            emitter.emit_inst("ROR", &format!("${:02X}", high_tmp)); // sign back into bit 7
+            emitter.emit_inst("ROR", &format!("${:02X}", low_tmp));
+            emitter.emit_inst("DEX", "");
+            emitter.emit_inst("BNE", &loop_label);
 
-        emitter.emit_label(&end_label);
-        // Restore the shifted high byte to Y.
-        emitter.emit_inst("LDY", &format!("${:02X}", high_tmp));
+            emitter.emit_label(&end_label);
+            emitter.emit_inst("LDA", &format!("${:02X}", low_tmp)); // A = low
+            emitter.emit_inst("LDY", &format!("${:02X}", high_tmp)); // Y = high
+        } else {
+            // Logical: park the high byte in scratch so LSR <hi> / ROR A shift
+            // all 16 bits, count in X.
+            let high_tmp = emitter.memory_layout.loop_end_temp(); // $22 by default
+            emitter.emit_inst("STY", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("LDX", &format!("${:02X}", temp_reg));
+            emitter.emit_inst("CPX", "#$00");
+            emitter.emit_inst("BEQ", &end_label);
+
+            // Loop: high byte shifts bit 0 into carry, low byte rotates it in.
+            emitter.emit_label(&loop_label);
+            emitter.emit_inst("LSR", &format!("${:02X}", high_tmp));
+            emitter.emit_inst("ROR", "A");
+            emitter.emit_inst("DEX", "");
+            emitter.emit_inst("BNE", &loop_label);
+
+            emitter.emit_label(&end_label);
+            // Restore the shifted high byte to Y.
+            emitter.emit_inst("LDY", &format!("${:02X}", high_tmp));
+        }
     } else {
         // u8 shift
         let loop_label = emitter.next_label("sr");
@@ -520,16 +554,22 @@ fn generate_shift_right(emitter: &mut Emitter, is_u16: bool) -> Result<(), Codeg
         emitter.emit_inst("CPX", "#$00");
         emitter.emit_inst("BEQ", &end_label);
 
-        // Loop: shift right once per iteration
+        // Loop: shift right once per iteration.
         emitter.emit_label(&loop_label);
-        emitter.emit_inst("LSR", "A"); // Logical shift right
+        if is_signed {
+            // Arithmetic: seed carry with the sign bit (A >= $80) then rotate in.
+            emitter.emit_inst("CMP", "#$80");
+            emitter.emit_inst("ROR", "A");
+        } else {
+            emitter.emit_inst("LSR", "A"); // Logical shift right
+        }
         emitter.emit_inst("DEX", "");
         emitter.emit_inst("BNE", &loop_label);
 
         emitter.emit_label(&end_label);
     }
 
-    // Comparison modifies A register - invalidate tracking
+    // Shift modifies A (and Y for u16) - invalidate tracking
     emitter.mark_a_unknown();
     Ok(())
 }

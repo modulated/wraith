@@ -588,3 +588,83 @@ fn i16_comparisons_signed() {
     assert_eq!(i16_cmp(32767, -32768, ">="), 1, "max >= min true");
     assert_eq!(i16_cmp(-500, -500, "<="), 1, "-500 <= -500 true");
 }
+
+// ---------------------------------------------------------------------------
+// Arithmetic shift right (signed) and 16-bit negation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i8_arithmetic_shift_right() {
+    // -8 >> 1 = -4 (arithmetic: sign replicated). Logical LSR would give 124.
+    let shr = |a: i32, n: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: i8 = {a};
+                let s: u8 = {n};
+                let r: i8 = x >> s;
+                OUT = r as u8;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(shr(-8, 1), 0xFC, "-8 >> 1 should be -4 (0xFC)");
+    assert_eq!(shr(-1, 1), 0xFF, "-1 >> 1 should stay -1");
+    assert_eq!(shr(-64, 2), 0xF0, "-64 >> 2 should be -16 (0xF0)");
+    assert_eq!(shr(32, 2), 8, "positive 32 >> 2 should be 8");
+}
+
+#[test]
+fn i16_arithmetic_shift_right() {
+    let shr = |a: i32, n: u8| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: i16 = {a};
+                let s: u8 = {n};
+                let r: i16 = x >> s;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400) as i16
+    };
+    assert_eq!(shr(-8, 1), -4, "-8 >> 1 = -4 (i16)");
+    assert_eq!(shr(-1000, 2), -250, "-1000 >> 2 = -250");
+    assert_eq!(shr(-32768, 4), -2048, "min >> 4");
+    assert_eq!(shr(1000, 2), 250, "positive 1000 >> 2 = 250");
+}
+
+#[test]
+fn i16_negation() {
+    let neg = |a: i32| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: i16 = {a};
+                let r: i16 = -x;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400) as i16
+    };
+    assert_eq!(neg(5), -5, "-(5) = -5 across both bytes");
+    assert_eq!(neg(256), -256, "-(256) = -256 (0xFF00)");
+    assert_eq!(neg(-1000), 1000, "-(-1000) = 1000");
+    assert_eq!(neg(1000), -1000, "-(1000) = -1000");
+}
