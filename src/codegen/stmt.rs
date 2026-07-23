@@ -601,6 +601,9 @@ pub fn generate_stmt(
 
             // Condition check
             emitter.emit_label(&check_label);
+            // check_label is a back-edge target: register state from before
+            // the loop (or from the previous iteration) is stale here.
+            emitter.reg_state.invalidate_all();
             generate_expr(condition, emitter, info, string_collector)?;
 
             if !emitter.is_minimal() {
@@ -636,6 +639,9 @@ pub fn generate_stmt(
             let end_label = emitter.next_label("lx");
 
             emitter.emit_label(&loop_label);
+            // loop_label is a back-edge target: register state from before
+            // the loop (or from the previous iteration) is stale here.
+            emitter.reg_state.invalidate_all();
 
             // Push loop context for break/continue
             emitter.push_loop(loop_label.clone(), end_label.clone());
