@@ -6,6 +6,10 @@
 //! self-contained: a small flat assembler for the compiler's exact output
 //! dialect (`.ORG`/`.BYTE`/`.WORD`/`.RES`, standard addressing modes) plus the
 //! `mos6502` emulator crate - no external assembler/linker required.
+//!
+//! Shared test infrastructure: this module is compiled into several test
+//! binaries but only exercised by some, so unused-item warnings are expected.
+#![allow(dead_code)]
 
 use mos6502::cpu::CPU;
 use mos6502::instruction::Nmos6502;
@@ -434,7 +438,7 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
 
     let mut mem = [0u8; 65536];
     let mut addr: u16 = 0;
-    let mut emit = |mem: &mut [u8; 65536], a: &mut u16, byte: u8| {
+    let emit = |mem: &mut [u8; 65536], a: &mut u16, byte: u8| {
         mem[*a as usize] = byte;
         *a = a.wrapping_add(1);
     };

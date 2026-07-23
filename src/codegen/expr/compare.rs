@@ -268,20 +268,22 @@ pub(super) fn generate_compare_le(emitter: &mut Emitter, is_u16: bool) -> Result
     let temp = emitter.memory_layout.temp_reg();
 
     if is_u16 {
-        // 16-bit (Unsigned)
+        // 16-bit unsigned: left (A=low, Y=high) <= right (TEMP=low, TEMP+1=high)
         let true_label = emitter.next_label("lt");
+        let false_label = emitter.next_label("lf");
 
-        // Compare High Bytes
+        // Compare high bytes first
         emitter.emit_inst("CPY", &format!("${:02X}", temp + 1));
-        emitter.emit_inst("BCC", &true_label); // Y < High -> True
-        emitter.emit_inst("BNE", &end_label); // Y > High -> False (LDA 0 below)
+        emitter.emit_inst("BCC", &true_label); // left.high < right.high -> true
+        emitter.emit_inst("BNE", &false_label); // left.high > right.high -> false
 
-        // High equal, check Low
+        // High bytes equal: compare low bytes
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
-        emitter.emit_inst("BEQ", &true_label); // Equal -> True
-        emitter.emit_inst("BCC", &true_label); // A < Low -> True
+        emitter.emit_inst("BEQ", &true_label); // equal -> true
+        emitter.emit_inst("BCC", &true_label); // left.low < right.low -> true
 
-        // False (Default fallthrough state needs to be loaded with 0? No wait)
+        // Fall through: left.low > right.low -> false
+        emitter.emit_label(&false_label);
         emitter.emit_inst("LDA", "#$00");
         emitter.emit_inst("JMP", &end_label);
 
@@ -289,37 +291,13 @@ pub(super) fn generate_compare_le(emitter: &mut Emitter, is_u16: bool) -> Result
         emitter.emit_label(&true_label);
         emitter.emit_inst("LDA", "#$01");
     } else {
-        // 8-bit comparison
-        emitter.emit_inst("CMP", &format!("${:02X}", temp));
-        emitter.emit_inst("BEQ", &end_label); // If equal, keep A as is (wait, A is matched val, non-zero? No A==TEMP. BEQ taken means A==TEMP.)
-        // Bug in original: "If equal, keep A as is, set to 1 after".
-        // If A=5, TEMP=5. CMP -> Z=1. BEQ end_label.
-        // At end_label, A is still 5!
-        // But we want boolean logic 0/1.
-        // If A=0, TEMP=0. A=0.
-        // Incorrect logic in original?
-        // Let's fix 8-bit too.
-
-        // Original logic:
-        // BEQ end_label
-        // BCS false_label
-        // LDA 1
-        // JMP end
-        // false: LDA 0
-        // end:
-
-        // If EQ: Jumps to END with A unchanged.
-        // If A was 5. A is 5 (True in C bool, but we want 1).
-        // If A was 0. A is 0 (False).
-        // So `0 <= 0` returns 0 (False)? Wrong.
-
-        // Fix 8-bit logic:
-        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        // 8-bit unsigned: A <= TEMP
         let true_label = emitter.next_label("lt");
-        emitter.emit_inst("BEQ", &true_label);
-        emitter.emit_inst("BCC", &true_label);
+        emitter.emit_inst("CMP", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &true_label); // equal -> true
+        emitter.emit_inst("BCC", &true_label); // A < TEMP -> true
 
-        // False
+        // False (A > TEMP)
         emitter.emit_inst("LDA", "#$00");
         emitter.emit_inst("JMP", &end_label);
 

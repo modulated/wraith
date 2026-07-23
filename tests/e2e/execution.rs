@@ -103,3 +103,72 @@ fn smoke_u16_addition_carry() {
     "#);
     assert_eq!(e.mem16(0x0400), 307, "300 + 7 should be 307");
 }
+
+// ---------------------------------------------------------------------------
+// `<=` comparison correctness (u8 and u16)
+// ---------------------------------------------------------------------------
+
+/// Store `(a <= b) as u8` at OUT for two u8 values.
+fn u8_le(a: u8, b: u8) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: u8 = {a};
+            let y: u8 = {b};
+            let r: bool = x <= y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+/// Store `(a <= b) as u8` at OUT for two u16 values.
+fn u16_le(a: u16, b: u16) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: u16 = {a};
+            let y: u16 = {b};
+            let r: bool = x <= y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+#[test]
+fn u8_le_equal_is_true() {
+    assert_eq!(u8_le(0, 0), 1, "0 <= 0 should be true");
+    assert_eq!(u8_le(3, 3), 1, "3 <= 3 should be true");
+    assert_eq!(u8_le(200, 200), 1, "200 <= 200 should be true");
+}
+
+#[test]
+fn u8_le_ordering() {
+    assert_eq!(u8_le(2, 5), 1, "2 <= 5 should be true");
+    assert_eq!(u8_le(5, 2), 0, "5 <= 2 should be false");
+    assert_eq!(u8_le(0, 1), 1, "0 <= 1 should be true");
+    assert_eq!(u8_le(1, 0), 0, "1 <= 0 should be false");
+}
+
+#[test]
+fn u16_le_high_byte_ordering() {
+    // left.high > right.high must be false (the historical bug returned garbage).
+    assert_eq!(u16_le(0x0305, 0x0102), 0, "773 <= 258 should be false");
+    assert_eq!(u16_le(0x0102, 0x0305), 1, "258 <= 773 should be true");
+}
+
+#[test]
+fn u16_le_equal_and_low_byte() {
+    assert_eq!(u16_le(0x0300, 0x0300), 1, "768 <= 768 should be true");
+    assert_eq!(u16_le(0x0300, 0x0301), 1, "768 <= 769 should be true");
+    assert_eq!(u16_le(0x0301, 0x0300), 0, "769 <= 768 should be false");
+}
