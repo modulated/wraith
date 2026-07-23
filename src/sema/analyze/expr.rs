@@ -483,9 +483,20 @@ impl SemanticAnalyzer {
         // Track function call for unused function detection
         self.called_functions.insert(function.node.clone());
 
-        // Record a call-graph edge (caller -> callee) for frame coloring and
-        // recursion detection. Covers direct and inline calls alike.
-        if let Some(caller) = &self.current_function {
+        // Is the callee a function-pointer *variable* (indirect call) rather
+        // than a named function? Record its symbol under the call's span so
+        // codegen can find its storage (the local scope is popped by then).
+        let is_fnptr_var = self
+            .table
+            .lookup(&function.node)
+            .is_some_and(|s| s.kind == SymbolKind::Variable && matches!(s.ty, Type::Function(..)));
+        if is_fnptr_var {
+            if let Some(s) = self.table.lookup(&function.node) {
+                self.resolved_symbols.insert(function.span, s.clone());
+            }
+        } else if let Some(caller) = &self.current_function {
+            // Record a call-graph edge (caller -> callee) for frame coloring and
+            // recursion detection. Only for real named functions.
             self.call_edges
                 .entry(caller.clone())
                 .or_default()

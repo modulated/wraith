@@ -1070,3 +1070,66 @@ fn array_of_struct_const_index_field() {
     assert_eq!(e.mem(0x0402), 5, "pts[2].x");
     assert_eq!(e.mem(0x0403), 6, "pts[2].y");
 }
+
+// ---------------------------------------------------------------------------
+// Function pointers (zero-argument): store a function's address in a variable
+// and call through it (indirect JSR via the trampoline).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn function_pointer_basic_call() {
+    let mut e = run(r#"
+        fn answer() -> u8 { return 42; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let h: fn() -> u8 = answer;
+            let r: u8 = h();
+            OUT = r;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "indirect call should return 42");
+}
+
+#[test]
+fn function_pointer_u16_return() {
+    let mut e = run(r#"
+        fn big() -> u16 { return 0x1234; }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let h: fn() -> u16 = big;
+            let r: u16 = h();
+            LO = r.low;
+            HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x1234,
+        "indirect u16 return keeps both bytes"
+    );
+}
+
+#[test]
+fn function_pointer_reassign_dispatch() {
+    // A jump-table-style pattern: the pointer selects which handler runs.
+    let mut e = run(r#"
+        fn one() -> u8 { return 11; }
+        fn two() -> u8 { return 22; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let h: fn() -> u8 = one;
+            let a: u8 = h();
+            h = two;
+            let b: u8 = h();
+            OUT = a + b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 33, "11 + 22 via reassigned function pointer");
+}

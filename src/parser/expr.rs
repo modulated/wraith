@@ -542,6 +542,29 @@ impl Parser<'_> {
                 Ok(Spanned::new(TypeExpr::array(element, size), span))
             }
 
+            // Function pointer type: fn(T1, T2, ...) -> R  (the "-> R" is optional)
+            Some(Token::Fn) => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let mut params = Vec::new();
+                while !self.check(&Token::RParen) {
+                    params.push(self.parse_type()?);
+                    if !self.check(&Token::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RParen)?;
+                let ret = if self.check(&Token::Arrow) {
+                    self.advance();
+                    Some(Box::new(self.parse_type()?))
+                } else {
+                    None
+                };
+                let span = start.merge(self.previous_span());
+                Ok(Spanned::new(TypeExpr::Function { params, ret }, span))
+            }
+
             // Primitive types
             Some(Token::U8) => {
                 self.advance();

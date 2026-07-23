@@ -32,6 +32,17 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
             }
         }
         TypeExpr::Named(name) => name.clone(),
+        TypeExpr::Function { params, ret } => {
+            let params = params
+                .iter()
+                .map(format_type)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match ret {
+                Some(r) => format!("fn({}) -> {}", params, format_type(r)),
+                None => format!("fn({})", params),
+            }
+        }
     }
 }
 

@@ -224,6 +224,7 @@ pub fn generate_stmt(
                     sym.ty,
                     Type::Array(_, _)
                         | Type::String
+                        | Type::Function(_, _)
                         | Type::Primitive(crate::ast::PrimitiveType::U16)
                         | Type::Primitive(crate::ast::PrimitiveType::I16)
                         | Type::Primitive(crate::ast::PrimitiveType::B16)
@@ -431,10 +432,12 @@ pub fn generate_stmt(
                             false
                         };
 
-                        // Check if this is a multi-byte type (u16/i16/b16, arrays, enums)
+                        // Check if this is a multi-byte type (u16/i16/b16, arrays,
+                        // enums, function pointers)
                         let is_multibyte = matches!(
                             sym.ty,
                             Type::Array(_, _)
+                                | Type::Function(_, _)
                                 | Type::Primitive(crate::ast::PrimitiveType::U16)
                                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                                 | Type::Primitive(crate::ast::PrimitiveType::B16)
@@ -1536,7 +1539,7 @@ fn generate_match_sequential(
                         // Comparing against 0 is just a sign-bit test (BMI) — and
                         // it avoids emitting `SEC; SBC #$00`, which the peephole
                         // eliminates as a value no-op even though its flags matter.
-                        let mut emit_signed_lt =
+                        let emit_signed_lt =
                             |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
                                 emitter.emit_inst("LDA", "$20");
                                 if bound == 0 {
