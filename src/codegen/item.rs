@@ -535,13 +535,22 @@ fn emit_const_array(
     // Emit data label
     emitter.emit_data_label(name);
 
+    // Element width so u16/i16/b16 arrays emit two little-endian bytes each.
+    let elem_size = match &stat.ty.node {
+        crate::ast::TypeExpr::Array { element, .. } => match &element.node {
+            crate::ast::TypeExpr::Primitive(p) => p.size_bytes(),
+            _ => 1,
+        },
+        _ => 1,
+    };
+
     // Emit array data based on initialization expression
     match &stat.init.node {
         crate::ast::Expr::Literal(crate::ast::Literal::ArrayFill { value, count }) => {
-            emit_array_fill_data(value, *count, emitter, info)?;
+            emit_array_fill_data(value, *count, elem_size, emitter, info)?;
         }
         crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) => {
-            emit_array_literal_data(elements, emitter, info)?;
+            emit_array_literal_data(elements, elem_size, emitter, info)?;
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(
@@ -557,6 +566,7 @@ fn emit_const_array(
 fn emit_array_fill_data(
     value: &Spanned<crate::ast::Expr>,
     count: usize,
+    elem_size: usize,
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
@@ -577,13 +587,22 @@ fn emit_array_fill_data(
         ));
     };
 
+    let total_bytes = count * elem_size.max(1);
+
     // Zero-fill optimization: use .RES directive for zeros
-    if val == 0 && count >= 16 {
-        emitter.emit_comment(&format!("Zero-filled array optimized: {} bytes", count));
-        emitter.emit_data_directive(&format!(".RES {}", count));
+    if val == 0 && total_bytes >= 16 {
+        emitter.emit_comment(&format!(
+            "Zero-filled array optimized: {} bytes",
+            total_bytes
+        ));
+        emitter.emit_data_directive(&format!(".RES {}", total_bytes));
     } else {
-        // Emit repeated bytes (using .BYTE for portability)
-        emit_repeated_bytes(val as u8, count, emitter);
+        // Emit each element as `elem_size` little-endian bytes, `count` times.
+        let mut bytes = Vec::with_capacity(total_bytes);
+        for _ in 0..count {
+            push_le_bytes(&mut bytes, val, elem_size);
+        }
+        emit_byte_directives(&bytes, emitter);
     }
 
     Ok(())
@@ -592,12 +611,14 @@ fn emit_array_fill_data(
 /// Emit data for an array literal ([1, 2, 3, ...])
 fn emit_array_literal_data(
     elements: &[Spanned<crate::ast::Expr>],
+    elem_size: usize,
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     let mut bytes = Vec::new();
 
-    // Collect all bytes
+    // Collect each element as `elem_size` little-endian bytes so u16/i16/b16
+    // arrays keep their high byte instead of being truncated.
     for elem in elements {
         let val = if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &elem.node {
             *n
@@ -614,7 +635,7 @@ fn emit_array_literal_data(
                 "Array elements must be constants".to_string(),
             ));
         };
-        bytes.push(val as u8);
+        push_le_bytes(&mut bytes, val, elem_size);
     }
 
     // Emit as .BYTE directives (max 16 per line for readability)
@@ -630,10 +651,16 @@ fn emit_array_literal_data(
     Ok(())
 }
 
-/// Emit repeated bytes for array fill with non-zero value
-fn emit_repeated_bytes(val: u8, count: usize, emitter: &mut Emitter) {
-    // Emit as .BYTE directives (max 16 per line)
-    let bytes = vec![val; count];
+/// Append `size` little-endian bytes of `value` (1 for u8/bool, 2 for u16).
+fn push_le_bytes(bytes: &mut Vec<u8>, value: i64, size: usize) {
+    let bits = value as u64;
+    for i in 0..size.max(1) {
+        bytes.push(((bits >> (i * 8)) & 0xFF) as u8);
+    }
+}
+
+/// Emit a byte slice as `.BYTE` directives, max 16 per line for readability.
+fn emit_byte_directives(bytes: &[u8], emitter: &mut Emitter) {
     for chunk in bytes.chunks(16) {
         let byte_str = chunk
             .iter()

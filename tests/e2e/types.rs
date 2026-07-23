@@ -534,7 +534,6 @@ fn shorthand_array_expression_value() {
 }
 
 #[test]
-#[ignore] // TODO: ArrayFill doesn't handle multi-byte elements (u16, i16) yet
 fn shorthand_array_u16_elements() {
     let asm = compile_success(
         r#"
@@ -548,6 +547,23 @@ fn shorthand_array_u16_elements() {
     // Each u16 is stored little-endian: low byte, high byte
     assert_asm_contains(&asm, ".BYTE $34"); // Low byte
     assert_asm_contains(&asm, ".BYTE $12"); // High byte
+}
+
+#[test]
+fn global_u16_array_data_is_little_endian() {
+    // Const/static u16 arrays must emit two little-endian bytes per element,
+    // not a single truncated byte.
+    let asm = compile_success(
+        r#"
+        const TABLE: [u16; 3] = [0x1111, 0x2222, 0x3333];
+        const FILL: [u16; 3] = [0x00AB; 3];
+        fn main() {}
+    "#,
+    );
+    // Full 6 bytes for the literal array (low, high per element).
+    assert_asm_contains(&asm, ".BYTE $11, $11, $22, $22, $33, $33");
+    // Fill emits low/high per element too.
+    assert_asm_contains(&asm, ".BYTE $AB, $00, $AB, $00, $AB, $00");
 }
 
 #[test]
