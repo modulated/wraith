@@ -457,9 +457,19 @@ fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
                 },
             ) = (&lines[i], &lines[i + 1])
         {
+            // Unlike LDA/AND/ORA/EOR, CMP #$00 also sets the carry (A >= 0
+            // always holds), so it is only removable when the following
+            // instruction reads just the Z flag. A multi-byte compare like
+            // `LDA lo; CMP #$00; LDA hi; SBC hi2` needs that carry as the
+            // borrow seed - eliminating the CMP there miscompiles it.
+            let next_reads_only_z = matches!(
+                lines.get(i + 2),
+                Some(Line::Instruction { mnemonic, .. }) if mnemonic == "BEQ" || mnemonic == "BNE"
+            );
+
             // LDA followed by CMP #$00 - the CMP is redundant
             // LDA already sets Z flag if value is 0
-            if m1 == "LDA" && m2 == "CMP" && op2.as_deref() == Some("#$00") {
+            if m1 == "LDA" && m2 == "CMP" && op2.as_deref() == Some("#$00") && next_reads_only_z {
                 result.push(lines[i].clone());
                 i += 2; // Skip the CMP
                 continue;
@@ -468,6 +478,7 @@ fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
             if (m1 == "AND" || m1 == "ORA" || m1 == "EOR")
                 && m2 == "CMP"
                 && op2.as_deref() == Some("#$00")
+                && next_reads_only_z
             {
                 result.push(lines[i].clone());
                 i += 2;

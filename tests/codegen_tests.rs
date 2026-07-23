@@ -483,7 +483,11 @@ fn test_codegen_for_loop() {
     assert!(asm.contains("TAX"), "Should transfer counter to X");
     assert!(asm.contains("fl_"), "Should have loop label");
     assert!(asm.contains("fx_"), "Should have end label");
-    assert!(asm.contains("CPX $22"), "Should compare X with end value");
+    // Constant range ends compare as an immediate (no scratch byte to clobber)
+    assert!(
+        asm.contains("CPX #$0A"),
+        "Should compare X with the constant end value"
+    );
     assert!(asm.contains("BCS fx_"), "Should exit if counter >= end");
     assert!(asm.contains("INX"), "Should increment X register");
     assert!(asm.contains("JMP fl_"), "Should jump back to start");
@@ -492,10 +496,6 @@ fn test_codegen_for_loop() {
     assert!(
         appears_before(&asm, "TAX", "fl_"),
         "Transfer to X before loop"
-    );
-    assert!(
-        appears_before(&asm, "STA $22", "fl_"),
-        "Store end before loop"
     );
     assert!(
         appears_before(&asm, "fl_", "CPX"),

@@ -28,6 +28,11 @@ pub struct SemanticAnalyzer {
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
     pub(super) function_metadata: HashMap<String, FunctionMetadata>,
     pub(super) folded_constants: HashMap<Span, crate::sema::const_eval::ConstValue>,
+    /// Hidden per-loop frame slots holding non-constant for-loop range ends,
+    /// keyed by the range end expression's span. Frame-allocated so nested
+    /// loops, scratch-using expressions, and calls in the body cannot clobber
+    /// a live bound.
+    pub(super) loop_bound_slots: HashMap<Span, SymbolInfo>,
     pub(super) resolved_types: HashMap<Span, Type>,
     pub(super) type_registry: TypeRegistry,
     pub(super) imported_items: Vec<Spanned<Item>>,
@@ -89,6 +94,7 @@ impl SemanticAnalyzer {
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
             folded_constants: HashMap::default(),
+            loop_bound_slots: HashMap::default(),
             resolved_types: HashMap::default(),
             type_registry: TypeRegistry::new(),
             imported_items: Vec::with_capacity(8),
@@ -124,6 +130,7 @@ impl SemanticAnalyzer {
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
             folded_constants: HashMap::default(),
+            loop_bound_slots: HashMap::default(),
             resolved_types: HashMap::default(),
             type_registry: TypeRegistry::new(),
             imported_items: Vec::with_capacity(8),
@@ -233,6 +240,7 @@ impl SemanticAnalyzer {
             resolved_symbols: self.resolved_symbols.clone(),
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
+            loop_bound_slots: self.loop_bound_slots.clone(),
             type_registry: self.type_registry.clone(),
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),
