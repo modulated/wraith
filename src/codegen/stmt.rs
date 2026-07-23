@@ -1384,6 +1384,8 @@ fn generate_match_sequential(
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
 
     let match_id = emitter.next_match_id();
 
@@ -1396,6 +1398,16 @@ fn generate_match_sequential(
 
     // Evaluate the matched expression into accumulator
     generate_expr(expr, emitter, info, string_collector)?;
+
+    // Whether the matched value is 16-bit (low in A/$20, high in Y/$21).
+    let scrutinee_is_u16 = matches!(
+        info.resolved_types.get(&expr.span),
+        Some(
+            Type::Primitive(crate::ast::PrimitiveType::U16)
+                | Type::Primitive(crate::ast::PrimitiveType::I16)
+                | Type::Primitive(crate::ast::PrimitiveType::B16)
+        )
+    );
 
     // Use pointer ops area for indirect addressing to avoid conflict with temp storage
     let ptr_base = emitter.memory_layout.pointer_ops_start; // $30 by default
@@ -1411,8 +1423,13 @@ fn generate_match_sequential(
         emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
         emitter.emit_inst("STA", &format!("${:02X}", ptr_base + 2)); // Store tag
     } else {
-        // For simple value matching, store value at $20
+        // For simple value matching, store the low byte at $20 (and, for u16,
+        // the high byte at $21 so literal patterns and variable bindings see
+        // the full value rather than a truncated low byte).
         emitter.emit_inst("STA", "$20");
+        if scrutinee_is_u16 {
+            emitter.emit_inst("STY", "$21");
+        }
     }
 
     // Generate code for each arm
@@ -1423,11 +1440,22 @@ fn generate_match_sequential(
                 // Compare with literal value
                 if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) = &lit_expr.node
                 {
-                    // For enum matching, we already have the tag in $22, but this is for literal patterns
-                    // which shouldn't mix with enum patterns in the same match
-                    emitter.emit_inst("LDA", "$20");
-                    emitter.emit_inst("CMP", &format!("#${:02X}", val));
-                    emitter.emit_inst("BEQ", &format!("match_{}_arm_{}", match_id, i));
+                    let arm_label = format!("match_{}_arm_{}", match_id, i);
+                    if scrutinee_is_u16 {
+                        // Compare both bytes; only branch to the arm if both match.
+                        let skip = format!("match_{}_arm_{}_skip", match_id, i);
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", (*val as u16) & 0xFF));
+                        emitter.emit_inst("BNE", &skip);
+                        emitter.emit_inst("LDA", "$21");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", ((*val as u16) >> 8) & 0xFF));
+                        emitter.emit_inst("BEQ", &arm_label);
+                        emitter.emit_label(&skip);
+                    } else {
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", (*val as u16) & 0xFF));
+                        emitter.emit_inst("BEQ", &arm_label);
+                    }
                 }
             }
             Pattern::Range {
@@ -1460,9 +1488,42 @@ fn generate_match_sequential(
                 has_wildcard = true;
                 emitter.emit_inst("JMP", &format!("match_{}_arm_{}", match_id, i));
             }
-            Pattern::Variable(_) => {
-                // Variable pattern binds the value - like wildcard but with binding
-                // TODO: Store value in the variable
+            Pattern::Variable(name) => {
+                // Variable pattern binds the whole matched value - a catch-all
+                // like wildcard, but the scrutinee must be copied into the
+                // binding's storage so the arm body can read it.
+                has_wildcard = true;
+                // Sema records the binding under the arm's pattern span (the
+                // arm-body scope is gone by codegen, so a name lookup fails).
+                let loc = info
+                    .resolved_symbols
+                    .get(&arm.pattern.span)
+                    .map(|sym| sym.location.clone())
+                    .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
+                match loc {
+                    SymbolLocation::ZeroPage(addr) => {
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("STA", &format!("${:02X}", addr));
+                        if scrutinee_is_u16 {
+                            emitter.emit_inst("LDA", "$21");
+                            emitter.emit_inst("STA", &format!("${:02X}", addr + 1));
+                        }
+                    }
+                    SymbolLocation::Absolute(addr) => {
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("STA", &format!("${:04X}", addr));
+                        if scrutinee_is_u16 {
+                            emitter.emit_inst("LDA", "$21");
+                            emitter.emit_inst("STA", &format!("${:04X}", addr + 1));
+                        }
+                    }
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(format!(
+                            "match binding '{}' has unsupported storage location",
+                            name
+                        )));
+                    }
+                }
                 emitter.emit_inst("JMP", &format!("match_{}_arm_{}", match_id, i));
             }
             Pattern::EnumVariant {
@@ -1685,21 +1746,30 @@ fn generate_match_arm_bodies(
                         )));
                     }
 
-                    let mut offset = 1; // Start after the tag byte
+                    let mut offset = 1u8; // Start after the tag byte
                     for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
-                        // Load field value using indirect indexed addressing
-                        emitter.emit_inst("LDY", &format!("#${:02X}", offset));
-                        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+                        let field_size = field_type.size().max(1) as u8;
 
-                        // Store in the binding variable
-                        // Look up the binding variable in resolved_symbols
-                        if let Some(var_sym) = info.resolved_symbols.get(&binding.name.span) {
-                            match var_sym.location {
+                        // Resolve the binding's storage location once.
+                        let loc = info
+                            .resolved_symbols
+                            .get(&binding.name.span)
+                            .map(|sym| sym.location.clone())
+                            .ok_or_else(|| {
+                                CodegenError::SymbolNotFound(binding.name.node.clone())
+                            })?;
+
+                        // Copy every byte of the field so multi-byte (u16/i16/b16)
+                        // fields keep their high byte instead of being truncated.
+                        for byte in 0..field_size {
+                            emitter.emit_inst("LDY", &format!("#${:02X}", offset + byte));
+                            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+                            match loc {
                                 crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                                    emitter.emit_sta_zp(addr);
+                                    emitter.emit_sta_zp(addr + byte);
                                 }
                                 crate::sema::table::SymbolLocation::Absolute(addr) => {
-                                    emitter.emit_sta_abs(addr);
+                                    emitter.emit_sta_abs(addr + byte as u16);
                                 }
                                 _ => {
                                     return Err(CodegenError::UnsupportedOperation(format!(
@@ -1708,12 +1778,10 @@ fn generate_match_arm_bodies(
                                     )));
                                 }
                             }
-                        } else {
-                            return Err(CodegenError::SymbolNotFound(binding.name.node.clone()));
                         }
 
-                        // Move to next field (assuming u8 fields for now)
-                        offset += field_type.size() as u8;
+                        // Move to the next field.
+                        offset += field_size;
                     }
                 }
                 crate::sema::type_defs::VariantData::Struct(_) => {

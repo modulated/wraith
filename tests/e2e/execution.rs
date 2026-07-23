@@ -307,3 +307,115 @@ fn u16_array_roundtrip() {
         "written u16 should read back intact"
     );
 }
+
+// ---------------------------------------------------------------------------
+// match / pattern binding correctness
+// ---------------------------------------------------------------------------
+
+/// `match x { 5 => 50, n => n }` for a u8 scrutinee.
+fn u8_match_var_binding(x: u8) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: u8 = {x};
+            match x {{
+                5 => {{ OUT = 50; }}
+                n => {{ OUT = n; }}
+            }}
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400)
+}
+
+#[test]
+fn match_variable_pattern_binds_scrutinee() {
+    // The variable arm must observe the actual matched value, not garbage.
+    assert_eq!(u8_match_var_binding(7), 7, "n should bind to 7");
+    assert_eq!(u8_match_var_binding(200), 200, "n should bind to 200");
+    // The literal arm still wins when it matches.
+    assert_eq!(u8_match_var_binding(5), 50, "5 => 50");
+}
+
+#[test]
+fn match_u16_literal_compares_full_value() {
+    // 256 and 0 share a low byte; an 8-bit-only compare would confuse them.
+    let src = |v: u16| {
+        format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: u16 = {v};
+                match x {{
+                    256 => {{ OUT = 1; }}
+                    n => {{ OUT = 2; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        )
+    };
+    assert_eq!(
+        run(&src(256)).mem(0x0400),
+        1,
+        "256 should match the 256 arm"
+    );
+    assert_eq!(
+        run(&src(0)).mem(0x0400),
+        2,
+        "0 must NOT match the 256 arm (differs in high byte)"
+    );
+}
+
+#[test]
+fn match_u16_variable_binding_keeps_high_byte() {
+    let src = r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let x: u16 = 0x0305;
+            match x {
+                256 => { LO = 0; HI = 0; }
+                n => { LO = n.low; HI = n.high; }
+            }
+            loop {}
+        }
+    "#;
+    assert_eq!(
+        run(src).mem16(0x0400),
+        0x0305,
+        "u16 binding must keep both bytes"
+    );
+}
+
+#[test]
+fn match_tuple_variant_u16_field_not_truncated() {
+    // Extracting a u16 tuple field must copy both bytes, not just the low byte.
+    let mut e = run(r#"
+        enum Result {
+            Ok(u16),
+            Err(u8),
+        }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let res: Result = Result::Ok(1000);
+            match res {
+                Result::Ok(value) => { LO = value.low; HI = value.high; }
+                Result::Err(code) => { LO = code; HI = 0; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        1000,
+        "u16 tuple field should extract as 1000"
+    );
+}
