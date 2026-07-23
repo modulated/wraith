@@ -65,8 +65,13 @@ pub fn parse_assembly(asm: &str) -> Vec<Line> {
                 return Line::Comment(line.to_string());
             }
 
-            // Label (ends with colon, no leading whitespace in original)
-            if !line.starts_with(' ') && trimmed.ends_with(':') {
+            // Label (a single token ending with a colon). Leading whitespace is
+            // allowed: some raw-emitted stdlib labels are indented, and parsing
+            // them as instructions let eliminate_unreachable_after_terminator
+            // delete the whole block following an unconditional JMP (e.g. the
+            // div16/mul16/mod16 bodies after their divide-by-zero guard).
+            if trimmed.ends_with(':') && !trimmed[..trimmed.len() - 1].contains(char::is_whitespace)
+            {
                 return Line::Label(trimmed.trim_end_matches(':').to_string());
             }
 

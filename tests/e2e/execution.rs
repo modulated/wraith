@@ -668,3 +668,195 @@ fn i16_negation() {
     assert_eq!(neg(-1000), 1000, "-(-1000) = 1000");
     assert_eq!(neg(1000), -1000, "-(1000) = -1000");
 }
+
+// ---------------------------------------------------------------------------
+// Signed division and modulo (truncated toward zero; remainder sign = dividend)
+// ---------------------------------------------------------------------------
+
+fn i8_div(a: i32, b: i32) -> i8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i8 = {a};
+            let y: i8 = {b};
+            let r: i8 = x / y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400) as i8
+}
+
+fn i8_mod(a: i32, b: i32) -> i8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let x: i8 = {a};
+            let y: i8 = {b};
+            let r: i8 = x % y;
+            OUT = r as u8;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0400) as i8
+}
+
+#[test]
+fn i8_signed_division() {
+    assert_eq!(i8_div(-20, 4), -5, "-20 / 4 = -5");
+    assert_eq!(i8_div(20, -4), -5, "20 / -4 = -5");
+    assert_eq!(i8_div(-20, -4), 5, "-20 / -4 = 5");
+    assert_eq!(i8_div(20, 4), 5, "20 / 4 = 5");
+    assert_eq!(i8_div(-7, 2), -3, "-7 / 2 = -3 (truncated toward zero)");
+    assert_eq!(i8_div(7, -2), -3, "7 / -2 = -3");
+}
+
+#[test]
+fn i8_signed_modulo() {
+    // Remainder takes the sign of the dividend (Rust/C truncated semantics).
+    assert_eq!(i8_mod(-7, 3), -1, "-7 % 3 = -1");
+    assert_eq!(i8_mod(7, -3), 1, "7 % -3 = 1");
+    assert_eq!(i8_mod(-7, -3), -1, "-7 % -3 = -1");
+    assert_eq!(i8_mod(7, 3), 1, "7 % 3 = 1");
+}
+
+fn i16_div(a: i32, b: i32) -> i16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let x: i16 = {a};
+            let y: i16 = {b};
+            let r: i16 = x / y;
+            LO = r.low;
+            HI = r.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400) as i16
+}
+
+fn i16_mod(a: i32, b: i32) -> i16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let x: i16 = {a};
+            let y: i16 = {b};
+            let r: i16 = x % y;
+            LO = r.low;
+            HI = r.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400) as i16
+}
+
+#[test]
+fn i16_signed_division() {
+    assert_eq!(i16_div(-1000, 8), -125, "-1000 / 8 = -125");
+    assert_eq!(i16_div(1000, -8), -125, "1000 / -8 = -125");
+    assert_eq!(i16_div(-1000, -8), 125, "-1000 / -8 = 125");
+    assert_eq!(i16_div(-30000, 100), -300, "-30000 / 100 = -300");
+}
+
+#[test]
+fn i16_signed_modulo() {
+    assert_eq!(i16_mod(-1000, 7), -6, "-1000 % 7 = -6");
+    assert_eq!(i16_mod(1000, -7), 6, "1000 % -7 = 6");
+    assert_eq!(i16_mod(-1003, 100), -3, "-1003 % 100 = -3");
+}
+
+// ---------------------------------------------------------------------------
+// Unsigned u16 division/modulo end to end. These exercise the stdlib div16 /
+// mod16 routines, whose bodies were previously deleted by the peephole pass
+// (indented stdlib labels were misparsed, so the dead-code pass ate the block
+// after the divide-by-zero guard's JMP).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_division_stdlib() {
+    let div = |a: u16, b: u16| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {a};
+                let y: u16 = {b};
+                let r: u16 = x / y;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(div(1000, 8), 125, "1000 / 8 = 125");
+    assert_eq!(div(60000, 3), 20000, "60000 / 3 = 20000");
+    assert_eq!(div(65535, 256), 255, "65535 / 256 = 255");
+    assert_eq!(div(7, 10), 0, "7 / 10 = 0");
+}
+
+#[test]
+fn u16_modulo_stdlib() {
+    let m = |a: u16, b: u16| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {a};
+                let y: u16 = {b};
+                let r: u16 = x % y;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(m(1000, 7), 6, "1000 % 7 = 6");
+    assert_eq!(m(60000, 7), 3, "60000 % 7 = 3");
+    assert_eq!(m(100, 100), 0, "100 % 100 = 0");
+}
+
+#[test]
+fn u16_multiply_stdlib() {
+    let mul = |a: u16, b: u16| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {a};
+                let y: u16 = {b};
+                let r: u16 = x * y;
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(mul(300, 5), 1500, "300 * 5 = 1500");
+    assert_eq!(mul(1000, 60), 60000, "1000 * 60 = 60000");
+}
