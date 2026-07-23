@@ -51,18 +51,19 @@ fn invalid_bcd_b16_out_of_range() {
 }
 
 #[test]
-fn bcd_negative_value_compiles_but_wraps() {
-    // BCD doesn't support negative numbers, but -1 as a unary expression
-    // cannot be fully evaluated at compile time in all cases
-    // This is a known limitation - the value will wrap at runtime
-    let _asm = compile_success(
+fn bcd_negative_value_is_rejected() {
+    // BCD has no representation for negative numbers. `-1` now folds to a real
+    // -1 (a prior double-negation bug in const-eval turned it into +1, which
+    // silently slipped through the BCD range check), so casting it to b8 is
+    // correctly rejected at compile time.
+    assert_error_contains(
         r#"
         fn main() {
-            let a: b8 = -1 as b8;  // Will wrap to 255 at runtime
+            let a: b8 = -1 as b8;
         }
     "#,
+        "out of range",
     );
-    // TODO: Consider adding a warning for this case
 }
 
 // ============================================================

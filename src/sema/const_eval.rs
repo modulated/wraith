@@ -319,7 +319,9 @@ fn eval_unary_with_env(
     match op {
         UnaryOp::Neg => {
             if let Some(n) = val.as_integer() {
-                Ok(ConstValue::Integer(-n.checked_neg().ok_or_else(|| {
+                // `n.checked_neg()` already yields -n; a leading `-` here would
+                // double-negate and fold `-5` back to `5`.
+                Ok(ConstValue::Integer(n.checked_neg().ok_or_else(|| {
                     SemaError::Custom {
                         message: "negation overflow in constant expression".to_string(),
                         span,

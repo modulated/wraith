@@ -221,6 +221,22 @@ impl SemanticAnalyzer {
     ) -> Result<Type, SemaError> {
         match lit {
             crate::ast::Literal::Integer(val) => {
+                // If there is an expected integer type from context (e.g. a
+                // `let x: i8 = 127;` annotation) and the value fits its range,
+                // adopt it. Without this a positive literal always infers as
+                // u8/u16 and cannot be assigned to a signed target.
+                if let Some(Type::Primitive(expected)) = &self.expected_type {
+                    let fits = match expected {
+                        PrimitiveType::U8 => (0..=255).contains(val),
+                        PrimitiveType::I8 => (-128..=127).contains(val),
+                        PrimitiveType::U16 | PrimitiveType::Addr => (0..=65535).contains(val),
+                        PrimitiveType::I16 => (-32768..=32767).contains(val),
+                        _ => false,
+                    };
+                    if fits {
+                        return Ok(Type::Primitive(*expected));
+                    }
+                }
                 // Infer type based on value range
                 if *val < 0 {
                     // Negative values
@@ -492,10 +508,16 @@ impl SemanticAnalyzer {
                 span,
             });
         }
+        // Each argument is checked against its parameter type, not the ambient
+        // expected type (e.g. the `let x: u16 = f(4)` target). Save/restore the
+        // outer context so a literal argument infers against the parameter.
+        let saved_expected = self.expected_type.take();
         for (arg, param_ty) in args.iter().zip(param_types.iter()) {
+            self.expected_type = Some(param_ty.clone());
             let arg_ty = self.check_expr(arg)?;
             // Check if argument type can be implicitly converted to parameter type
             if !arg_ty.is_implicitly_convertible_to(param_ty) {
+                self.expected_type = saved_expected;
                 return Err(SemaError::TypeMismatch {
                     expected: param_ty.display_name(),
                     found: arg_ty.display_name(),
@@ -503,6 +525,7 @@ impl SemanticAnalyzer {
                 });
             }
         }
+        self.expected_type = saved_expected;
         Ok(*ret_type)
     }
 
@@ -517,15 +540,54 @@ impl SemanticAnalyzer {
         // Check type compatibility with the operator
         match op {
             crate::ast::UnaryOp::Neg => {
-                // Negation works on numeric types
-                if operand_ty.is_primitive() {
-                    Ok(operand_ty)
-                } else {
-                    Err(SemaError::InvalidUnaryOp {
+                // Negation works on numeric types and always yields a signed
+                // result: `-5` is i8, not u8. `5` on its own infers as u8, so
+                // without this the operand type would leak through and code like
+                // `let x: i8 = -5;` would fail to type-check.
+                if !operand_ty.is_primitive() {
+                    return Err(SemaError::InvalidUnaryOp {
                         op: "-".to_string(),
                         operand_ty: operand_ty.display_name(),
                         span,
-                    })
+                    });
+                }
+                // For a literal operand, choose the signed width from the
+                // negated magnitude so `-5` is i8 and `-200` widens to i16.
+                // For any other operand keep the operand's own type: negating an
+                // unsigned value is a two's-complement wrap that stays the same
+                // width/signedness (so `-X` on a u8 addr remains u8-assignable).
+                if let Expr::Literal(crate::ast::Literal::Integer(v)) = &operand.node {
+                    let neg = -(*v);
+                    // Honor an explicit integer target: `-10` stored into a u8
+                    // becomes u8 (two's-complement wrap to 246), `-5` into an i8
+                    // stays i8. BCD is excluded so its cast range-checks the value.
+                    if let Some(Type::Primitive(exp)) = &self.expected_type
+                        && !exp.is_bcd()
+                        && matches!(
+                            exp,
+                            PrimitiveType::U8
+                                | PrimitiveType::I8
+                                | PrimitiveType::U16
+                                | PrimitiveType::I16
+                                | PrimitiveType::Addr
+                        )
+                    {
+                        let fits = match exp.size_bytes() {
+                            1 => (-128..=255).contains(&neg),
+                            _ => (-32768..=65535).contains(&neg),
+                        };
+                        if fits {
+                            return Ok(Type::Primitive(*exp));
+                        }
+                    }
+                    // No usable context: pick the signed width from the magnitude.
+                    if (-128..=127).contains(&neg) {
+                        Ok(Type::Primitive(PrimitiveType::I8))
+                    } else {
+                        Ok(Type::Primitive(PrimitiveType::I16))
+                    }
+                } else {
+                    Ok(operand_ty)
                 }
             }
             crate::ast::UnaryOp::BitNot => {

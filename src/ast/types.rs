@@ -40,6 +40,15 @@ impl PrimitiveType {
     pub fn is_bcd(&self) -> bool {
         matches!(self, PrimitiveType::B8 | PrimitiveType::B16)
     }
+
+    /// Returns true if this is a signed integer type (i8 or i16).
+    ///
+    /// Only i8/i16 are signed; u8/u16/bool/BCD/addr are all unsigned. This is
+    /// the primitive codegen consults to choose signed vs unsigned comparison,
+    /// shift, and division sequences.
+    pub fn is_signed(&self) -> bool {
+        matches!(self, PrimitiveType::I8 | PrimitiveType::I16)
+    }
 }
 
 /// A type expression in the language

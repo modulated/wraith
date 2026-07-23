@@ -307,7 +307,6 @@ fn i8_basic_operations() {
 }
 
 #[test]
-#[ignore] // TODO: Negative literals not yet supported
 fn i8_negative_values() {
     let asm = compile_success(
         r#"
@@ -325,7 +324,6 @@ fn i8_negative_values() {
 }
 
 #[test]
-#[ignore] // TODO: i16 operations need more work
 fn i16_basic_operations() {
     let asm = compile_success(
         r#"
@@ -343,7 +341,6 @@ fn i16_basic_operations() {
 }
 
 #[test]
-#[ignore] // TODO: Negative literals and sign extension not yet supported
 fn i8_to_i16_cast() {
     let asm = compile_success(
         r#"

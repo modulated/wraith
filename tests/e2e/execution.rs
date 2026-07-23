@@ -449,3 +449,60 @@ fn mul_pow2_evaluates_left_once() {
     );
     assert_eq!(e.mem(0x0401), 6, "3 * 2 should be 6");
 }
+
+// ---------------------------------------------------------------------------
+// Signed integers: negative literals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i8_negative_literal_is_twos_complement() {
+    // -5 as i8 is 0xFB. A prior double-negation bug folded it back to +5.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: i8 = -5;
+            OUT = x as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0xFB, "-5 as i8 should be 0xFB (251)");
+}
+
+#[test]
+fn i8_negative_literal_boundaries() {
+    let val = |lit: i32| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let x: i8 = {lit};
+                OUT = x as u8;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(val(-1), 0xFF, "-1 as i8");
+    assert_eq!(val(-128), 0x80, "-128 as i8 (min)");
+    assert_eq!(val(127), 0x7F, "127 as i8 (max)");
+}
+
+#[test]
+fn i16_negative_literal_is_twos_complement() {
+    // -1000 as i16 = 0xFC18.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let x: i16 = -1000;
+            LO = x.low;
+            HI = x.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0xFC18, "-1000 as i16 should be 0xFC18");
+}

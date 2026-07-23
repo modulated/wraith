@@ -31,6 +31,11 @@ impl Type {
         matches!(self, Type::Primitive(_))
     }
 
+    /// Returns true if this is a signed integer type (i8 or i16).
+    pub fn is_signed(&self) -> bool {
+        matches!(self, Type::Primitive(p) if p.is_signed())
+    }
+
     pub fn size(&self) -> usize {
         match self {
             Type::Primitive(prim) => prim.size_bytes(),
