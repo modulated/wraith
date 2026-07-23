@@ -860,3 +860,44 @@ fn u16_multiply_stdlib() {
     assert_eq!(mul(300, 5), 1500, "300 * 5 = 1500");
     assert_eq!(mul(1000, 60), 60000, "1000 * 60 = 60000");
 }
+
+// ---------------------------------------------------------------------------
+// Struct field reads must not truncate multi-byte (u16/i16) fields. The write
+// path handled the high byte; the read path emitted a single LDA.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_struct_field_read() {
+    let mut e = run(r#"
+        struct Wide {
+            a: u16,
+            b: u8,
+            c: u16,
+        }
+        const A_LO: addr = 0x0400;
+        const A_HI: addr = 0x0401;
+        const C_LO: addr = 0x0402;
+        const C_HI: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let w: Wide = Wide { a: 0x1234, b: 7, c: 0xBEEF };
+            let ra: u16 = w.a;
+            let rc: u16 = w.c;
+            A_LO = ra.low;
+            A_HI = ra.high;
+            C_LO = rc.low;
+            C_HI = rc.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x1234,
+        "w.a should read as full u16 0x1234"
+    );
+    assert_eq!(
+        e.mem16(0x0402),
+        0xBEEF,
+        "w.c should read as full u16 0xBEEF"
+    );
+}
