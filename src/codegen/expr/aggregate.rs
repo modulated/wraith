@@ -15,6 +15,54 @@ use crate::sema::ProgramInfo;
 // Import generate_expr from parent module for recursive calls
 use super::generate_expr;
 
+/// Emit an indirect-indexed array element load through a zero-page pointer at
+/// `ptr`. For u8 elements this is `LDA (ptr),Y`; for u16 elements the index is
+/// scaled ×2 and both bytes are loaded, ending with the low byte in A and the
+/// high byte in Y (the compiler's u16 register convention). Mirrors the store
+/// path in `stmt::generate_index_assignment`.
+fn emit_indexed_load(
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    object: &Spanned<Expr>,
+    index: &Spanned<Expr>,
+    ptr: u8,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::types::Type;
+
+    // Determine whether the element type occupies two bytes.
+    let is_multibyte = matches!(
+        info.resolved_types.get(&object.span),
+        Some(Type::Array(elem, _)) if matches!(
+            &**elem,
+            Type::Primitive(PrimitiveType::U16)
+                | Type::Primitive(PrimitiveType::I16)
+                | Type::Primitive(PrimitiveType::B16)
+        )
+    );
+
+    // Index expression -> A.
+    generate_expr(index, emitter, info, string_collector)?;
+
+    if is_multibyte {
+        emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+        emitter.emit_inst("ASL", "A"); // index * 2
+        emitter.emit_inst("TAY", "");
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr)); // low byte
+        emitter.emit_inst("PHA", ""); // stash low byte
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr)); // high byte
+        emitter.emit_inst("TAY", ""); // Y = high byte
+        emitter.emit_inst("PLA", ""); // A = low byte
+    } else {
+        emitter.emit_inst("TAY", "");
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
+    }
+    emitter.reg_state.modify_a();
+    Ok(())
+}
+
 pub(super) fn generate_index(
     object: &Spanned<Expr>,
     index: &Spanned<Expr>,
@@ -111,23 +159,11 @@ pub(super) fn generate_index(
                         emitter.emit_comment("Use indirect indexed addressing: (ptr),Y");
                     }
 
-                    // Generate index expression -> A, then transfer to Y
-                    generate_expr(index, emitter, info, string_collector)?;
-                    emitter.emit_inst("TAY", "");
-
-                    // Use indirect indexed addressing: LDA (ptr),Y
-                    // The array variable holds a 2-byte pointer in zero page
-                    emitter.emit_inst("LDA", &format!("(${:02X}),Y", addr));
-                    emitter.reg_state.modify_a();
-                    Ok(())
+                    emit_indexed_load(emitter, info, object, index, addr as u8, string_collector)
                 }
                 crate::sema::table::SymbolLocation::ZeroPage(addr) => {
                     // Array in zero page - use indirect indexed addressing
-                    generate_expr(index, emitter, info, string_collector)?;
-                    emitter.emit_inst("TAY", "");
-                    emitter.emit_inst("LDA", &format!("(${:02X}),Y", addr));
-                    emitter.reg_state.modify_a();
-                    Ok(())
+                    emit_indexed_load(emitter, info, object, index, addr, string_collector)
                 }
                 crate::sema::table::SymbolLocation::None => {
                     // Compile-time constants don't have runtime storage

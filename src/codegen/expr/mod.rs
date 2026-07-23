@@ -100,7 +100,15 @@ pub fn generate_expr(
     }
 
     match &expr.node {
-        Expr::Literal(lit) => generate_literal(lit, emitter, string_collector),
+        Expr::Literal(lit) => {
+            // Array literals need the element width so u16/i16/b16 elements emit
+            // two little-endian bytes rather than a single truncated byte.
+            let elem_size = match info.resolved_types.get(&expr.span) {
+                Some(crate::sema::types::Type::Array(elem, _)) => elem.size(),
+                _ => 1,
+            };
+            generate_literal(lit, elem_size, emitter, string_collector)
+        }
         Expr::Variable(name) => generate_variable(name, expr.span, emitter, info),
         Expr::Binary { left, op, right } => {
             generate_binary(left, *op, right, emitter, info, string_collector)

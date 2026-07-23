@@ -1103,6 +1103,11 @@ fn generate_index_assignment(
         ));
     }
 
+    // This path mutates A/X/Y through raw instructions the register tracker does
+    // not follow, so drop all cached register beliefs. Otherwise a following read
+    // of a variable the tracker thinks is still in A would be wrongly elided.
+    emitter.invalidate_registers();
+
     Ok(())
 }
 

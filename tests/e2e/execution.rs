@@ -248,3 +248,62 @@ fn u16_shr_preserves_high_byte() {
     // 0x0402 >> 1 = 0x0201: the high byte must shift, not be dropped.
     assert_eq!(u16_shr(0x0402, 1), 0x0201, "0x0402 >> 1 should be 0x0201");
 }
+
+// ---------------------------------------------------------------------------
+// u16 array element reads (index must scale ×2 and load both bytes)
+// ---------------------------------------------------------------------------
+
+/// Read `data[i]` from a u16 array with a runtime index and return the full u16.
+fn u16_array_read(index: u8) -> u16 {
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let data: [u16; 4] = [0x1122, 0x3344, 0x5566, 0x7788];
+            let i: u8 = {index};
+            let v: u16 = data[i];
+            LO = v.low;
+            HI = v.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400)
+}
+
+#[test]
+fn u16_array_read_scales_index() {
+    // Element 0 is the only one a low-byte-only read could get right.
+    assert_eq!(u16_array_read(0), 0x1122, "data[0] should be 0x1122");
+    // These require scaling the index and loading the high byte.
+    assert_eq!(u16_array_read(1), 0x3344, "data[1] should be 0x3344");
+    assert_eq!(u16_array_read(2), 0x5566, "data[2] should be 0x5566");
+    assert_eq!(u16_array_read(3), 0x7788, "data[3] should be 0x7788");
+}
+
+#[test]
+fn u16_array_roundtrip() {
+    // Write through the (already-correct) store path, then read back.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let data: [u16; 3] = [0x1000, 0x2000, 0x3000];
+            let i: u8 = 1;
+            let w: u16 = 0xBEEF;
+            data[i] = w;
+            let v: u16 = data[i];
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0xBEEF,
+        "written u16 should read back intact"
+    );
+}
