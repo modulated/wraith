@@ -71,6 +71,13 @@ pub enum TypeExpr {
         element: Box<Spanned<TypeExpr>>,
         mutable: bool,
     },
+
+    /// Function pointer type: fn(params) -> ret (ret omitted = void).
+    /// Stored as a 16-bit code address.
+    Function {
+        params: Vec<Spanned<TypeExpr>>,
+        ret: Option<Box<Spanned<TypeExpr>>>,
+    },
 }
 
 impl TypeExpr {

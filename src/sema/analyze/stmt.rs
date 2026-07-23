@@ -216,7 +216,14 @@ impl SemanticAnalyzer {
         // Arrays (pointers) and u16/i16/b16 types need 2 bytes
         // Named types: structs need their full size, enums need 2 bytes (pointer)
         let alloc_size = match &declared_ty {
-            Type::Array(_, _) => 2, // Array pointer
+            // Arrays of structs are stored inline (element data lives directly at
+            // the variable's address so arr[i].field addresses statically); other
+            // arrays are a 2-byte pointer to (ROM) element data.
+            Type::Array(elem, n) if matches!(&**elem, Type::Named(t) if self.type_registry.get_struct(t).is_some()) => {
+                (self.type_size(elem) * n).min(255)
+            }
+            Type::Array(_, _) => 2,    // Array pointer
+            Type::Function(_, _) => 2, // Function pointer (16-bit code address)
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
             | Type::Primitive(PrimitiveType::B16) => 2,

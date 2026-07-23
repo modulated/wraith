@@ -722,6 +722,18 @@ pub fn generate(
     // Emit stdlib math functions if needed
     emit_stdlib_math_functions(&mut emitter, &mut section_alloc)?;
 
+    // Emit the indirect-call trampoline if any function pointer is called.
+    if emitter.needs_indirect_call {
+        let org_addr = section_alloc
+            .allocate("CODE", 3)
+            .map_err(CodegenError::SectionError)?;
+        emitter.emit_org(org_addr);
+        emitter.emit_comment("Indirect-call trampoline: JSR here after loading the");
+        emitter.emit_comment("target address into the indirect vector at $EE/$EF.");
+        emitter.emit_raw("__indirect_call:");
+        emitter.emit_raw("    JMP ($EE)");
+    }
+
     // Generate interrupt vector table
     generate_interrupt_vectors(ast, &mut emitter)?;
 

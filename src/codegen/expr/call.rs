@@ -40,6 +40,15 @@ pub(super) fn generate_call(
         return generate_inline_call(function, args, emitter, info, metadata, string_collector);
     }
 
+    // Indirect call through a function-pointer variable: sema recorded the
+    // variable's symbol under the call span. Its location holds a 2-byte code
+    // address we call through the trampoline.
+    if let Some(sym) = info.resolved_symbols.get(&function.span)
+        && matches!(sym.ty, Type::Function(..))
+    {
+        return generate_indirect_call(sym.location.clone(), args, emitter);
+    }
+
     // 6502 calling convention: arguments are passed in the callee's zero-page
     // frame (its parameter block sits at the frame base). This avoids the small,
     // slow hardware stack and, because frames are colored by the call graph, a
@@ -396,6 +405,59 @@ pub(super) fn generate_call(
         }
     }
 
+    Ok(())
+}
+
+/// Generate an indirect call through a function-pointer variable.
+///
+/// Loads the variable's 2-byte address into the indirect vector at $EE/$EF and
+/// JSRs the shared trampoline (`JMP ($EE)`); the callee's RTS returns here. The
+/// return value arrives in A (u8) / A:Y (u16) per the normal convention.
+///
+/// Only zero-argument function pointers are supported: the static frame model
+/// assigns each function its own colored parameter block, so an unknown indirect
+/// callee has no known place to receive arguments.
+fn generate_indirect_call(
+    location: crate::sema::table::SymbolLocation,
+    args: &[Spanned<Expr>],
+    emitter: &mut Emitter,
+) -> Result<(), CodegenError> {
+    use crate::sema::table::SymbolLocation;
+
+    if !args.is_empty() {
+        return Err(CodegenError::UnsupportedOperation(
+            "indirect calls through a function pointer with arguments are not yet supported \
+             (only zero-argument function pointers)"
+                .to_string(),
+        ));
+    }
+
+    let addr = match location {
+        SymbolLocation::ZeroPage(a) => a as u16,
+        SymbolLocation::Absolute(a) => a,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "function-pointer variable has no concrete storage location".to_string(),
+            ));
+        }
+    };
+
+    emitter.emit_comment("Indirect call through function pointer");
+    // Copy the pointer into the indirect vector $EE/$EF.
+    if addr < 0x100 {
+        emitter.emit_inst("LDA", &format!("${:02X}", addr));
+        emitter.emit_inst("STA", "$EE");
+        emitter.emit_inst("LDA", &format!("${:02X}", addr + 1));
+        emitter.emit_inst("STA", "$EF");
+    } else {
+        emitter.emit_inst("LDA", &format!("${:04X}", addr));
+        emitter.emit_inst("STA", "$EE");
+        emitter.emit_inst("LDA", &format!("${:04X}", addr + 1));
+        emitter.emit_inst("STA", "$EF");
+    }
+    emitter.needs_indirect_call = true;
+    emitter.emit_inst("JSR", "__indirect_call");
+    emitter.invalidate_registers();
     Ok(())
 }
 

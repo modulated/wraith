@@ -222,6 +222,20 @@ pub(super) fn generate_variable(
 ) -> Result<(), CodegenError> {
     use crate::sema::table::SymbolKind;
 
+    // A bare function name evaluates to its 2-byte code address (a function
+    // pointer): low byte in A, high byte in Y (the u16 register convention).
+    if let Some(sym) = info
+        .resolved_symbols
+        .get(&span)
+        .or_else(|| info.table.lookup(name))
+        && (sym.kind == SymbolKind::Function || matches!(sym.ty, Type::Function(..)))
+    {
+        emitter.emit_inst("LDA", &format!("#<{}", name));
+        emitter.emit_inst("LDY", &format!("#>{}", name));
+        emitter.mark_a_unknown();
+        return Ok(());
+    }
+
     if let Some(sym) = info.resolved_symbols.get(&span) {
         // Check if this is a u16/i16/b16 variable that needs both bytes loaded
         let is_u16 = matches!(

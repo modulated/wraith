@@ -1008,3 +1008,296 @@ fn i8_match_range_signed() {
     assert_eq!(classify(10), 3, "10 is in the tail");
     assert_eq!(classify(100), 3, "100 is in the tail");
 }
+
+// ---------------------------------------------------------------------------
+// Nested field access (a.b.c) and array-of-struct element fields (arr[i].f).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_struct_field_read() {
+    let mut e = run(r#"
+        struct Inner { x: u8, y: u16 }
+        struct Outer { a: u8, inner: Inner, b: u8 }
+        const OA: addr = 0x0400;
+        const OX: addr = 0x0401;
+        const YLO: addr = 0x0402;
+        const YHI: addr = 0x0403;
+        const OB: addr = 0x0404;
+        #[reset]
+        fn main() {
+            let o: Outer = Outer { a: 5, inner: Inner { x: 42, y: 0x1234 }, b: 9 };
+            OA = o.a;
+            OX = o.inner.x;
+            YLO = o.inner.y.low;
+            YHI = o.inner.y.high;
+            OB = o.b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 5, "o.a");
+    assert_eq!(e.mem(0x0401), 42, "o.inner.x");
+    assert_eq!(e.mem16(0x0402), 0x1234, "o.inner.y (u16, both bytes)");
+    assert_eq!(e.mem(0x0404), 9, "o.b (offset past the nested struct)");
+}
+
+#[test]
+fn array_of_struct_const_index_field() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const X0: addr = 0x0400;
+        const Y0: addr = 0x0401;
+        const X2: addr = 0x0402;
+        const Y2: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let pts: [Point; 3] = [
+                Point { x: 1, y: 2 },
+                Point { x: 3, y: 4 },
+                Point { x: 5, y: 6 },
+            ];
+            X0 = pts[0].x;
+            Y0 = pts[0].y;
+            X2 = pts[2].x;
+            Y2 = pts[2].y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 1, "pts[0].x");
+    assert_eq!(e.mem(0x0401), 2, "pts[0].y");
+    assert_eq!(e.mem(0x0402), 5, "pts[2].x");
+    assert_eq!(e.mem(0x0403), 6, "pts[2].y");
+}
+
+// ---------------------------------------------------------------------------
+// Function pointers (zero-argument): store a function's address in a variable
+// and call through it (indirect JSR via the trampoline).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn function_pointer_basic_call() {
+    let mut e = run(r#"
+        fn answer() -> u8 { return 42; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let h: fn() -> u8 = answer;
+            let r: u8 = h();
+            OUT = r;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "indirect call should return 42");
+}
+
+#[test]
+fn function_pointer_u16_return() {
+    let mut e = run(r#"
+        fn big() -> u16 { return 0x1234; }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let h: fn() -> u16 = big;
+            let r: u16 = h();
+            LO = r.low;
+            HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x1234,
+        "indirect u16 return keeps both bytes"
+    );
+}
+
+#[test]
+fn function_pointer_reassign_dispatch() {
+    // A jump-table-style pattern: the pointer selects which handler runs.
+    let mut e = run(r#"
+        fn one() -> u8 { return 11; }
+        fn two() -> u8 { return 22; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let h: fn() -> u8 = one;
+            let a: u8 = h();
+            h = two;
+            let b: u8 = h();
+            OUT = a + b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 33, "11 + 22 via reassigned function pointer");
+}
+
+#[test]
+fn array_of_struct_u16_field() {
+    // Element struct has a u16 field; indexed access must scale by the full
+    // element size and load both bytes.
+    let mut e = run(r#"
+        struct Cell { tag: u8, val: u16 }
+        const T1: addr = 0x0400;
+        const V1LO: addr = 0x0401;
+        const V1HI: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let cells: [Cell; 3] = [
+                Cell { tag: 10, val: 0x1111 },
+                Cell { tag: 20, val: 0xBEEF },
+                Cell { tag: 30, val: 0x3333 },
+            ];
+            T1 = cells[1].tag;
+            V1LO = cells[1].val.low;
+            V1HI = cells[1].val.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 20, "cells[1].tag");
+    assert_eq!(
+        e.mem16(0x0401),
+        0xBEEF,
+        "cells[1].val (u16 field, both bytes)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Nested and array-of-struct field ASSIGNMENT (write counterpart).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_struct_field_write() {
+    let mut e = run(r#"
+        struct Inner { x: u8, y: u16 }
+        struct Outer { a: u8, inner: Inner }
+        const XOUT: addr = 0x0400;
+        const YLO: addr = 0x0401;
+        const YHI: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let o: Outer = Outer { a: 1, inner: Inner { x: 0, y: 0 } };
+            o.inner.x = 77;
+            o.inner.y = 0xABCD;
+            XOUT = o.inner.x;
+            YLO = o.inner.y.low;
+            YHI = o.inner.y.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 77, "wrote o.inner.x");
+    assert_eq!(e.mem16(0x0401), 0xABCD, "wrote o.inner.y (u16)");
+}
+
+#[test]
+fn array_of_struct_field_write() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const X1: addr = 0x0400;
+        const Y1: addr = 0x0401;
+        const X0: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let pts: [Point; 3] = [
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+            ];
+            pts[1].x = 5;
+            pts[1].y = 9;
+            pts[0].x = 3;
+            X1 = pts[1].x;
+            Y1 = pts[1].y;
+            X0 = pts[0].x;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 5, "pts[1].x written");
+    assert_eq!(e.mem(0x0401), 9, "pts[1].y written");
+    assert_eq!(e.mem(0x0402), 3, "pts[0].x written (distinct element)");
+}
+
+// ---------------------------------------------------------------------------
+// Array-of-struct field access with a RUNTIME index (arr[i].field).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn array_of_struct_runtime_index_read() {
+    let read = |i: u8| {
+        let src = format!(
+            r#"
+            struct Point {{ x: u8, y: u8 }}
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let pts: [Point; 4] = [
+                    Point {{ x: 10, y: 1 }},
+                    Point {{ x: 20, y: 2 }},
+                    Point {{ x: 30, y: 3 }},
+                    Point {{ x: 40, y: 4 }},
+                ];
+                let idx: u8 = {i};
+                OUT = pts[idx].x;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(read(0), 10, "pts[0].x");
+    assert_eq!(read(1), 20, "pts[1].x");
+    assert_eq!(read(3), 40, "pts[3].x");
+}
+
+#[test]
+fn array_of_struct_runtime_index_u16_field() {
+    // Element size is 3 (u8 + u16): exercises non-power-of-2 index scaling.
+    let mut e = run(r#"
+        struct Cell { tag: u8, val: u16 }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let cells: [Cell; 3] = [
+                Cell { tag: 1, val: 0x1111 },
+                Cell { tag: 2, val: 0x2222 },
+                Cell { tag: 3, val: 0xCAFE },
+            ];
+            let i: u8 = 2;
+            let v: u16 = cells[i].val;
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0xCAFE,
+        "cells[2].val via runtime index (size-3 elements)"
+    );
+}
+
+#[test]
+fn array_of_struct_runtime_index_write() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const X: addr = 0x0400;
+        const Y: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let pts: [Point; 4] = [
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 },
+            ];
+            let i: u8 = 2;
+            pts[i].x = 99;
+            pts[i].y = 88;
+            X = pts[2].x;
+            Y = pts[2].y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 99, "pts[i].x written via runtime index");
+    assert_eq!(e.mem(0x0401), 88, "pts[i].y written via runtime index");
+}
