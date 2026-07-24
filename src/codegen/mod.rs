@@ -737,10 +737,33 @@ pub fn generate(
     // Generate interrupt vector table
     generate_interrupt_vectors(ast, &mut emitter)?;
 
+    // Collect memory-mapped I/O symbols so the peephole optimizer never folds
+    // their accesses. Reads and writes are tracked by declared access mode
+    // (R / W / RW) so the guard matches which direction carries side effects.
+    let mut volatile = peephole::VolatileSymbols::default();
+    for symbol in program.resolved_symbols.values() {
+        if symbol.kind == SymbolKind::Address {
+            match symbol.access_mode {
+                Some(crate::ast::AccessMode::Read) => {
+                    volatile.reads.insert(symbol.name.clone());
+                }
+                Some(crate::ast::AccessMode::Write) => {
+                    volatile.writes.insert(symbol.name.clone());
+                }
+                // ReadWrite (or unspecified, which defaults to read-write) is
+                // volatile in both directions.
+                _ => {
+                    volatile.reads.insert(symbol.name.clone());
+                    volatile.writes.insert(symbol.name.clone());
+                }
+            }
+        }
+    }
+
     // Apply peephole optimizations
     let asm = emitter.finish();
     let lines = peephole::parse_assembly(&asm);
-    let optimized = peephole::optimize(&lines);
+    let optimized = peephole::optimize(&lines, &volatile);
     let final_asm = peephole::lines_to_string(&optimized);
 
     Ok((final_asm, section_alloc))
