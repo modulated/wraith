@@ -152,6 +152,39 @@ pub(super) fn generate_index(
                 .or_else(|| info.table.lookup(name))
                 .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
+            // A global const array lives inline at its data label (e.g. a lookup
+            // table). Index it with absolute-indexed addressing through the
+            // label, not the pointer-indirect path used for local ZP arrays.
+            if sym.kind == crate::sema::table::SymbolKind::Constant
+                && matches!(sym.ty, crate::sema::types::Type::Array(..))
+            {
+                let is_multibyte = matches!(
+                    &sym.ty,
+                    crate::sema::types::Type::Array(elem, _) if matches!(
+                        &**elem,
+                        crate::sema::types::Type::Primitive(
+                            crate::ast::PrimitiveType::U16
+                                | crate::ast::PrimitiveType::I16
+                                | crate::ast::PrimitiveType::B16
+                        )
+                    )
+                );
+                generate_expr(index, emitter, info, string_collector)?;
+                if is_multibyte {
+                    emitter.emit_inst("ASL", "A"); // scale index x2 for u16 elements
+                }
+                emitter.emit_inst("TAY", "");
+                emitter.emit_inst("LDA", &format!("{},Y", name));
+                if is_multibyte {
+                    emitter.emit_inst("PHA", "");
+                    emitter.emit_inst("LDA", &format!("{}+1,Y", name));
+                    emitter.emit_inst("TAY", ""); // Y = high byte
+                    emitter.emit_inst("PLA", ""); // A = low byte
+                }
+                emitter.reg_state.modify_a();
+                return Ok(());
+            }
+
             match sym.location {
                 crate::sema::table::SymbolLocation::FrameOffset(_) => Err(CodegenError::Internal(
                     "unresolved FrameOffset reached codegen (frame finalization skipped)"

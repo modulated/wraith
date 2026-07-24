@@ -4,6 +4,7 @@
 
 mod bcd;
 mod bcd_validation;
+mod complex_features;
 mod control_flow;
 mod cpu_flags;
 mod enums;
