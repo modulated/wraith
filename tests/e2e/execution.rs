@@ -1981,3 +1981,59 @@ fn direct_call_to_address_taken_function() {
     "#);
     assert_eq!(e.mem(0x0400), 61, "sq(5)=25 + sq(6)=36 = 61");
 }
+
+// ---------------------------------------------------------------------------
+// examples/factorial_tail.wr — tail-recursive factorial with a u16 accumulator.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn factorial_tail_recursion() {
+    // Verbatim from examples/factorial_tail.wr (inline-asm halt ending and all).
+    // Exercises tail-call optimization plus u16 multiply (via the mul16 stdlib);
+    // the results were wrong until the mul16/div16/mod16 stdlib bodies stopped
+    // being deleted by the peephole (see the peephole label-parsing fix).
+    let mut e = run(r#"
+        const RESULT_0_LO: addr = 0x6000;
+        const RESULT_0_HI: addr = 0x6001;
+        const RESULT_1_LO: addr = 0x6002;
+        const RESULT_1_HI: addr = 0x6003;
+        const RESULT_5_LO: addr = 0x6004;
+        const RESULT_5_HI: addr = 0x6005;
+        const RESULT_7_LO: addr = 0x6006;
+        const RESULT_7_HI: addr = 0x6007;
+
+        #[reset]
+        fn main() {
+            let result: u16 = factorial(0, 1);
+            RESULT_0_LO = result.low;
+            RESULT_0_HI = result.high;
+
+            result = factorial(1, 1);
+            RESULT_1_LO = result.low;
+            RESULT_1_HI = result.high;
+
+            result = factorial(5, 1);
+            RESULT_5_LO = result.low;
+            RESULT_5_HI = result.high;
+
+            result = factorial(7, 1);
+            RESULT_7_LO = result.low;
+            RESULT_7_HI = result.high;
+
+            asm {
+                "halt: JMP halt"
+            }
+        }
+
+        fn factorial(n: u8, acc: u16) -> u16 {
+            if n == 0 {
+                return acc;
+            }
+            return factorial(n - 1, acc * (n as u16));
+        }
+    "#);
+    assert_eq!(e.mem16(0x6000), 1, "factorial(0,1) = 1");
+    assert_eq!(e.mem16(0x6002), 1, "factorial(1,1) = 1");
+    assert_eq!(e.mem16(0x6004), 120, "factorial(5,1) = 120");
+    assert_eq!(e.mem16(0x6006), 5040, "factorial(7,1) = 5040");
+}

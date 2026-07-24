@@ -377,6 +377,24 @@ fn clean_line(line: &str) -> &str {
     no_comment.trim()
 }
 
+/// Split an optional leading `label:` off an instruction line, returning the
+/// label (if any) and the remaining instruction text. Handles both a bare
+/// `foo:` label and an inline-asm `foo: JMP foo` (label and instruction on one
+/// line, as emitted from `asm { }` blocks). A `NAME = VALUE` symbol definition
+/// has no colon and is left untouched.
+fn split_leading_label(line: &str) -> (Option<&str>, &str) {
+    if !line.contains('=')
+        && let Some(idx) = line.find(':')
+    {
+        let label = line[..idx].trim();
+        let rest = line[idx + 1..].trim();
+        if !label.is_empty() && !label.contains(char::is_whitespace) {
+            return (Some(label), rest);
+        }
+    }
+    (None, line)
+}
+
 /// Assemble the compiler's asm text into a flat 64 KB image.
 pub fn assemble(asm: &str) -> [u8; 65536] {
     // ---- Pass 1: collect label addresses ----
@@ -393,8 +411,13 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
             labels.insert(name.trim().to_string(), value);
             continue;
         }
-        if let Some(label) = line.strip_suffix(':') {
-            labels.insert(label.trim().to_string(), addr);
+        // A leading `label:` (possibly followed by an instruction on the same
+        // line, as inline asm emits) records the label at the current address.
+        let (label, line) = split_leading_label(line);
+        if let Some(l) = label {
+            labels.insert(l.to_string(), addr);
+        }
+        if line.is_empty() {
             continue;
         }
         let mut parts = line.splitn(2, char::is_whitespace);
@@ -456,8 +479,14 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
 
     for raw in asm.lines() {
         let line = clean_line(raw);
-        if line.is_empty() || line.ends_with(':') || line.contains('=') {
-            // blank, label definition, or `NAME = VALUE` (recorded in pass 1)
+        if line.is_empty() || line.contains('=') {
+            // blank or `NAME = VALUE` (recorded in pass 1)
+            continue;
+        }
+        // Drop any leading `label:` (recorded in pass 1); emit the instruction
+        // that may follow it on the same line.
+        let (_label, line) = split_leading_label(line);
+        if line.is_empty() {
             continue;
         }
         let mut parts = line.splitn(2, char::is_whitespace);
