@@ -504,6 +504,10 @@ pub fn generate_stmt(
                                     if is_multibyte {
                                         let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
                                         emitter.emit_inst(hi_inst, &format!("${:04X}", addr + 1));
+                                        // Raw STX/STY overwrites the high byte without
+                                        // updating tracking; forget any register cached
+                                        // to it so a later load isn't wrongly elided.
+                                        emitter.invalidate_abs(addr + 1);
                                     }
                                 }
                             }
@@ -513,6 +517,10 @@ pub fn generate_stmt(
                                 if is_multibyte {
                                     let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
                                     emitter.emit_inst(hi_inst, &format!("${:02X}", addr + 1));
+                                    // Raw STX/STY overwrites the high byte without
+                                    // updating tracking; forget any register cached
+                                    // to it so a later load isn't wrongly elided.
+                                    emitter.invalidate_zp(addr + 1);
                                 }
                             }
                             crate::sema::table::SymbolLocation::None => {
@@ -1509,6 +1517,12 @@ fn generate_field_assignment(
                 }
             }
         }
+
+        // Both paths above rewrite A/Y through raw instructions (temp saves in the
+        // parameter path, plain stores in the local path) that don't feed register
+        // tracking, so drop all cached beliefs — a following load could otherwise be
+        // wrongly elided. Mirrors generate_index_assignment.
+        emitter.invalidate_registers();
 
         Ok(())
     } else {

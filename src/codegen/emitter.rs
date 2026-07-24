@@ -322,6 +322,17 @@ impl Emitter {
         self.reg_state.invalidate_all();
     }
 
+    /// Drop any cached belief that a register mirrors this zero-page location.
+    /// Use after a raw store (STX/STY) whose destination the emitter can't see.
+    pub fn invalidate_zp(&mut self, addr: u8) {
+        self.reg_state.invalidate_zero_page(addr);
+    }
+
+    /// Drop any cached belief that a register mirrors this absolute location.
+    pub fn invalidate_abs(&mut self, addr: u16) {
+        self.reg_state.invalidate_memory(addr);
+    }
+
     /// Mark that A register contains an unknown value (after arithmetic, etc.)
     pub fn mark_a_unknown(&mut self) {
         self.reg_state.modify_a();

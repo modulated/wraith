@@ -440,6 +440,12 @@ pub fn generate_struct_init_runtime(
         }
     }
 
+    // The field initializers above write memory through raw STA/STY that bypass
+    // register tracking, so drop all cached beliefs before returning — otherwise a
+    // later load of one of these fields (or of A) could be wrongly elided. The
+    // final LDA is raw and leaves A untracked, which is correct.
+    emitter.invalidate_registers();
+
     // Return base address in A (for use in expressions)
     emitter.emit_inst("LDA", &format!("#${:02X}", dest_addr));
 

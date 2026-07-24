@@ -2037,3 +2037,47 @@ fn factorial_tail_recursion() {
     assert_eq!(e.mem16(0x6004), 120, "factorial(5,1) = 120");
     assert_eq!(e.mem16(0x6006), 5040, "factorial(7,1) = 5040");
 }
+
+// ---------------------------------------------------------------------------
+// Register-tracking must be invalidated after raw A/Y mutations, or a following
+// load gets wrongly elided (reads a stale value).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bool_cast_does_not_stale_register() {
+    // After `x as bool`, A holds 0/1 but the tracker still believes A mirrors x.
+    // Reloading x with nothing in between must not elide the load.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 42;
+            let b: bool = x as bool;
+            OUT = x;          // must reload 42, not the bool result in A
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "x must still read as 42 (not the bool 1)");
+}
+
+#[test]
+fn field_assignment_does_not_stale_register() {
+    // Assigning a u16 field of a by-reference struct param ends with A holding the
+    // high byte, while the tracker still believes A holds the assigned immediate.
+    let mut e = run(r#"
+        struct P { a: u16, b: u8 }
+        const OUT: addr = 0x0400;
+        fn setit(p: P) {
+            p.a = 0x1234;      // raw indirect stores; A ends = 0x12
+            let q: u8 = 0x34;  // must load 0x34, not the stale high byte
+            OUT = q;
+        }
+        #[reset]
+        fn main() {
+            let p: P = P { a: 0, b: 0 };
+            setit(p);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x34, "q must read 0x34 after the u16 field store");
+}
