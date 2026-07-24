@@ -1732,3 +1732,56 @@ fn array_of_struct_runtime_index_write() {
     assert_eq!(e.mem(0x0400), 99, "pts[i].x written via runtime index");
     assert_eq!(e.mem(0x0401), 88, "pts[i].y written via runtime index");
 }
+
+// ---------------------------------------------------------------------------
+// Struct-variant enum pattern bindings (Shape::Rect { w, h }).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_struct_variant_bindings() {
+    let mut e = run(r#"
+        enum Shape {
+            Circle { r: u8 },
+            Rect { w: u8, h: u16 },
+        }
+        const W: addr = 0x0400;
+        const HLO: addr = 0x0401;
+        const HHI: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let s: Shape = Shape::Rect { w: 7, h: 0x1234 };
+            match s {
+                Shape::Circle { r } => { W = r; HLO = 0; HHI = 0; }
+                Shape::Rect { w, h } => {
+                    W = w;
+                    HLO = h.low;
+                    HHI = h.high;
+                }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "Rect.w extracted");
+    assert_eq!(e.mem16(0x0401), 0x1234, "Rect.h extracted as full u16");
+}
+
+#[test]
+fn match_struct_variant_selects_circle() {
+    let mut e = run(r#"
+        enum Shape {
+            Circle { r: u8 },
+            Rect { w: u8, h: u16 },
+        }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let s: Shape = Shape::Circle { r: 42 };
+            match s {
+                Shape::Circle { r } => { OUT = r; }
+                Shape::Rect { w, h } => { OUT = w; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "Circle.r extracted and correct arm chosen");
+}

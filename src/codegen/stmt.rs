@@ -1993,12 +1993,50 @@ fn generate_match_arm_bodies(
                         offset += field_size;
                     }
                 }
-                crate::sema::type_defs::VariantData::Struct(_) => {
-                    // Struct variant: bindings should match field names
-                    // For now, not implemented
-                    return Err(CodegenError::UnsupportedOperation(
-                        "Pattern bindings for struct variants not yet implemented".to_string(),
-                    ));
+                crate::sema::type_defs::VariantData::Struct(struct_fields) => {
+                    // Struct variant: each binding name selects a field. Field
+                    // offsets are relative to the variant data, which starts one
+                    // byte after the tag.
+                    for binding in bindings.iter() {
+                        let field = struct_fields
+                            .iter()
+                            .find(|f| f.name == binding.name.node)
+                            .ok_or_else(|| {
+                                CodegenError::UnsupportedOperation(format!(
+                                    "field '{}' not found in struct variant",
+                                    binding.name.node
+                                ))
+                            })?;
+                        let field_size = field.ty.size().max(1) as u8;
+                        let base_offset = 1 + field.offset as u8; // skip tag
+                        let loc = info
+                            .resolved_symbols
+                            .get(&binding.name.span)
+                            .map(|sym| sym.location.clone())
+                            .ok_or_else(|| {
+                                CodegenError::SymbolNotFound(binding.name.node.clone())
+                            })?;
+
+                        // Copy every byte so multi-byte fields keep their high byte.
+                        for byte in 0..field_size {
+                            emitter.emit_inst("LDY", &format!("#${:02X}", base_offset + byte));
+                            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+                            match loc {
+                                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                                    emitter.emit_sta_zp(addr + byte);
+                                }
+                                crate::sema::table::SymbolLocation::Absolute(addr) => {
+                                    emitter.emit_sta_abs(addr + byte as u16);
+                                }
+                                _ => {
+                                    return Err(CodegenError::UnsupportedOperation(format!(
+                                        "Binding '{}' has unsupported location",
+                                        binding.name.node
+                                    )));
+                                }
+                            }
+                        }
+                    }
                 }
                 crate::sema::type_defs::VariantData::Unit => {
                     // Unit variant shouldn't have bindings

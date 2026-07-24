@@ -628,38 +628,52 @@ impl SemanticAnalyzer {
                 variant,
                 bindings,
             } => {
-                // Get enum definition to find variant field types. Clone the tuple
-                // field types out first so the type_registry borrow is released
+                // Resolve each binding's type. Tuple variants bind positionally;
+                // struct variants bind by matching the binding name to a field.
+                // Clone the data out first so the type_registry borrow is released
                 // before allocating frame slots (which needs &mut self).
-                let tuple_field_types: Option<Vec<Type>> = self
+                let variant_data = self
                     .type_registry
                     .get_enum(&enum_name.node)
                     .and_then(|enum_def| enum_def.variants.iter().find(|v| v.name == variant.node))
-                    .and_then(|variant_def| match &variant_def.data {
-                        VariantData::Tuple(field_types) => Some(field_types.clone()),
-                        _ => None,
-                    });
+                    .map(|variant_def| variant_def.data.clone());
 
-                if let Some(field_types) = tuple_field_types {
-                    for (i, binding) in bindings.iter().enumerate() {
-                        if let Some(field_ty) = field_types.get(i) {
-                            let field_size = self.type_size(field_ty) as u8;
-                            let off = self.frame_alloc(field_size.max(1));
-                            let info = SymbolInfo {
-                                name: binding.name.node.clone(),
-                                kind: SymbolKind::Variable,
-                                ty: field_ty.clone(),
-                                location: SymbolLocation::FrameOffset(off),
-                                mutable: false,
-                                access_mode: None,
-                                is_pub: false, // Pattern bindings are never public
-                                containing_function: self.current_function.clone(),
-                                is_param: false,
-                            };
-                            self.table.insert(binding.name.node.clone(), info.clone());
-                            // Also add to resolved_symbols so codegen can find it
-                            self.resolved_symbols.insert(binding.name.span, info);
-                        }
+                let binding_types: Vec<Option<Type>> = match &variant_data {
+                    Some(VariantData::Tuple(field_types)) => bindings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| field_types.get(i).cloned())
+                        .collect(),
+                    Some(VariantData::Struct(fields)) => bindings
+                        .iter()
+                        .map(|b| {
+                            fields
+                                .iter()
+                                .find(|f| f.name == b.name.node)
+                                .map(|f| f.ty.clone())
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+
+                for (binding, field_ty) in bindings.iter().zip(binding_types.iter()) {
+                    if let Some(field_ty) = field_ty {
+                        let field_size = self.type_size(field_ty) as u8;
+                        let off = self.frame_alloc(field_size.max(1));
+                        let info = SymbolInfo {
+                            name: binding.name.node.clone(),
+                            kind: SymbolKind::Variable,
+                            ty: field_ty.clone(),
+                            location: SymbolLocation::FrameOffset(off),
+                            mutable: false,
+                            access_mode: None,
+                            is_pub: false, // Pattern bindings are never public
+                            containing_function: self.current_function.clone(),
+                            is_param: false,
+                        };
+                        self.table.insert(binding.name.node.clone(), info.clone());
+                        // Also add to resolved_symbols so codegen can find it
+                        self.resolved_symbols.insert(binding.name.span, info);
                     }
                 }
             }
