@@ -252,12 +252,19 @@ fn is_branch(mnem: &str) -> bool {
 /// Parse a mnemonic's operand string into an addressing mode + value.
 fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
     let po = |mode, value| ParsedOperand { mode, value };
+    // A bare shift/rotate (no operand) is accumulator mode in 6502 assembly
+    // (ca65 accepts `LSR` as `LSR A`); everything else with no operand is implied.
+    let bare_mode = if matches!(mnem, "ASL" | "LSR" | "ROL" | "ROR") {
+        Mode::Acc
+    } else {
+        Mode::Imp
+    };
     let Some(op) = operand else {
-        return po(Mode::Imp, ValueExpr::None);
+        return po(bare_mode, ValueExpr::None);
     };
     let op = op.trim();
     if op.is_empty() {
-        return po(Mode::Imp, ValueExpr::None);
+        return po(bare_mode, ValueExpr::None);
     }
     if op == "A" {
         return po(Mode::Acc, ValueExpr::None);

@@ -790,6 +790,10 @@ pub struct ProgramInfo {
     pub recursive_call_edges: HashSet<(String, String)>,
     /// Per-interrupt-handler zero-page save requirements.
     pub interrupt_save_info: HashMap<String, InterruptSaveInfo>,
+    /// Functions whose address is taken (used as function pointers). They pass
+    /// arguments through the fixed indirect-arg staging block and copy them into
+    /// their frame in a prologue, so indirect callers can pass args.
+    pub address_taken_functions: HashSet<String>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

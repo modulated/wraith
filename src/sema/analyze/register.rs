@@ -498,6 +498,8 @@ impl SemanticAnalyzer {
                 .or_default()
                 .extend(callees.iter().cloned());
         }
+        self.address_taken_functions
+            .extend(imported_analyzer.address_taken_functions.iter().cloned());
 
         // Merge the imported files set
         self.imported_files.extend(imported_analyzer.imported_files);

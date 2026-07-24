@@ -356,6 +356,12 @@ impl SemanticAnalyzer {
 
         self.resolved_symbols.insert(expr.span, info.clone());
 
+        // Using a function's bare name as a value takes its address: record it so
+        // codegen routes its arguments through the fixed indirect-arg staging block.
+        if info.kind == SymbolKind::Function {
+            self.address_taken_functions.insert(name.to_string());
+        }
+
         // Mark variable as used (for unused variable/parameter warnings)
         self.used_variables.insert(name.to_string());
         // Also track in all_used_symbols (for unused import warnings)

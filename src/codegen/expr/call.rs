@@ -44,23 +44,34 @@ pub(super) fn generate_call(
     // variable's symbol under the call span. Its location holds a 2-byte code
     // address we call through the trampoline.
     if let Some(sym) = info.resolved_symbols.get(&function.span)
-        && matches!(sym.ty, Type::Function(..))
+        && let Type::Function(param_types, _) = &sym.ty
     {
-        return generate_indirect_call(sym.location.clone(), args, emitter);
+        let loc = sym.location.clone();
+        let ptypes = param_types.clone();
+        return generate_indirect_call(loc, &ptypes, args, emitter, info, string_collector);
     }
 
     // 6502 calling convention: arguments are passed in the callee's zero-page
     // frame (its parameter block sits at the frame base). This avoids the small,
     // slow hardware stack and, because frames are colored by the call graph, a
     // callee's parameter writes never touch the caller's live frame.
+    //
+    // Exception: an address-taken function (its pointer is used indirectly) takes
+    // its arguments in the fixed indirect-arg staging block instead, and copies
+    // them into its frame in a prologue — so direct and indirect callers agree.
     let callee_frame = info.function_frames.get(&function.node).copied();
-    let param_base = match callee_frame {
-        Some(f) => f.base,
-        None => {
-            return Err(CodegenError::Internal(format!(
-                "no frame assigned for called function '{}'",
-                function.node
-            )));
+    let is_address_taken = info.address_taken_functions.contains(&function.node);
+    let param_base = if is_address_taken {
+        crate::codegen::memory_layout::INDIRECT_ARG_BASE
+    } else {
+        match callee_frame {
+            Some(f) => f.base,
+            None => {
+                return Err(CodegenError::Internal(format!(
+                    "no frame assigned for called function '{}'",
+                    function.node
+                )));
+            }
         }
     };
 
@@ -410,26 +421,92 @@ pub(super) fn generate_call(
 
 /// Generate an indirect call through a function-pointer variable.
 ///
-/// Loads the variable's 2-byte address into the indirect vector at $EE/$EF and
-/// JSRs the shared trampoline (`JMP ($EE)`); the callee's RTS returns here. The
-/// return value arrives in A (u8) / A:Y (u16) per the normal convention.
-///
-/// Only zero-argument function pointers are supported: the static frame model
-/// assigns each function its own colored parameter block, so an unknown indirect
-/// callee has no known place to receive arguments.
+/// Scalar arguments are written to the fixed indirect-arg staging block (the
+/// address-taken callee's prologue copies them into its frame). The pointer is
+/// loaded into the indirect vector at $EE/$EF and the shared trampoline
+/// (`JMP ($EE)`) is JSR'd; the callee's RTS returns here. The return value
+/// arrives in A (u8) / A:Y (u16) per the normal convention.
 fn generate_indirect_call(
     location: crate::sema::table::SymbolLocation,
+    param_types: &[Type],
     args: &[Spanned<Expr>],
     emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    use crate::codegen::memory_layout::{INDIRECT_ARG_BASE, INDIRECT_ARG_MAX};
     use crate::sema::table::SymbolLocation;
 
+    let is_16 = |ty: Option<&Type>| {
+        matches!(
+            ty,
+            Some(Type::Primitive(
+                crate::ast::PrimitiveType::U16
+                    | crate::ast::PrimitiveType::I16
+                    | crate::ast::PrimitiveType::B16
+            ))
+        )
+    };
+
+    emitter.emit_comment("Indirect call through function pointer");
+
     if !args.is_empty() {
-        return Err(CodegenError::UnsupportedOperation(
-            "indirect calls through a function pointer with arguments are not yet supported \
-             (only zero-argument function pointers)"
-                .to_string(),
-        ));
+        // Only scalar (1- or 2-byte) parameters are supported indirectly.
+        for pty in param_types {
+            if !matches!(pty, Type::Primitive(_)) {
+                return Err(CodegenError::UnsupportedOperation(
+                    "indirect calls only support scalar (u8/i8/u16/i16/bool) arguments".to_string(),
+                ));
+            }
+        }
+        let total: u8 = param_types
+            .iter()
+            .map(|p| if is_16(Some(p)) { 2 } else { 1 })
+            .sum();
+        if total > INDIRECT_ARG_MAX {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "indirect call arguments exceed the {}-byte staging block",
+                INDIRECT_ARG_MAX
+            )));
+        }
+
+        // STEP 1: evaluate args into the arg pool (so a later arg containing a
+        // call can't clobber an earlier one, and nothing touches the staging
+        // block until every arg is ready).
+        let temp_base = emitter.temp_alloc.alloc_arg(total).ok_or_else(|| {
+            CodegenError::Internal("argument-evaluation pool exhausted (indirect call)".to_string())
+        })?;
+        let mut off = 0u8;
+        let mut placed = Vec::new();
+        for (arg, pty) in args.iter().zip(param_types.iter()) {
+            let p16 = is_16(Some(pty));
+            let arg16 = is_16(info.resolved_types.get(&arg.span));
+            generate_expr(arg, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
+            if p16 {
+                if !arg16 {
+                    emitter.emit_inst("LDY", "#$00"); // zero-extend u8 arg -> u16 param
+                }
+                emitter.emit_inst("STY", &format!("${:02X}", temp_base + off + 1));
+            }
+            placed.push((temp_base + off, p16));
+            off += if p16 { 2 } else { 1 };
+        }
+
+        // STEP 2: copy the staged args into the fixed staging block.
+        let mut boff = 0u8;
+        for (taddr, p16) in &placed {
+            emitter.emit_inst("LDA", &format!("${:02X}", taddr));
+            emitter.emit_inst("STA", &format!("${:02X}", INDIRECT_ARG_BASE + boff));
+            if *p16 {
+                emitter.emit_inst("LDA", &format!("${:02X}", taddr + 1));
+                emitter.emit_inst("STA", &format!("${:02X}", INDIRECT_ARG_BASE + boff + 1));
+                boff += 2;
+            } else {
+                boff += 1;
+            }
+        }
+        emitter.temp_alloc.free_arg(temp_base, total);
     }
 
     let addr = match location {
@@ -442,7 +519,6 @@ fn generate_indirect_call(
         }
     };
 
-    emitter.emit_comment("Indirect call through function pointer");
     // Copy the pointer into the indirect vector $EE/$EF.
     if addr < 0x100 {
         emitter.emit_inst("LDA", &format!("${:02X}", addr));
@@ -581,6 +657,7 @@ fn generate_inline_call(
             function_frames: info.function_frames.clone(),
             recursive_call_edges: info.recursive_call_edges.clone(),
             interrupt_save_info: info.interrupt_save_info.clone(),
+            address_taken_functions: info.address_taken_functions.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;

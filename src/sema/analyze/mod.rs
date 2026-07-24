@@ -76,6 +76,11 @@ pub struct SemanticAnalyzer {
     /// analysis (direct calls and inline calls) and consumed by `finalize_frames`
     /// to color frames and detect recursion.
     pub(super) call_edges: HashMap<String, HashSet<String>>,
+    /// Functions whose address is taken (used as a value / function pointer).
+    /// These receive arguments through the fixed indirect-arg staging block so
+    /// an indirect caller (which cannot know the callee's colored frame) can
+    /// still pass args; their prologue copies staging -> frame params.
+    pub(super) address_taken_functions: HashSet<String>,
 }
 
 impl Default for SemanticAnalyzer {
@@ -118,6 +123,7 @@ impl SemanticAnalyzer {
             frame_cursor: 0,
             frame_sizes: HashMap::default(),
             call_edges: HashMap::default(),
+            address_taken_functions: HashSet::default(),
         }
     }
 
@@ -154,6 +160,7 @@ impl SemanticAnalyzer {
             frame_cursor: 0,
             frame_sizes: HashMap::default(),
             call_edges: HashMap::default(),
+            address_taken_functions: HashSet::default(),
         }
     }
 
@@ -252,6 +259,7 @@ impl SemanticAnalyzer {
             function_frames,
             recursive_call_edges,
             interrupt_save_info,
+            address_taken_functions: self.address_taken_functions.clone(),
         })
     }
 

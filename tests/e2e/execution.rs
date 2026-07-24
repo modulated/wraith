@@ -1883,3 +1883,101 @@ fn nested_array_of_struct_const_and_write() {
     assert_eq!(e.mem(0x0400), 7, "g.pts[0].x written (const index)");
     assert_eq!(e.mem(0x0401), 8, "g.pts[i].y written (runtime index)");
 }
+
+// ---------------------------------------------------------------------------
+// Function pointers WITH arguments (indirect calls pass args via the staging
+// block; the address-taken callee copies them into its frame in a prologue).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn function_pointer_one_arg() {
+    let mut e = run(r#"
+        fn dbl(n: u8) -> u8 { return n + n; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = dbl;
+            let r: u8 = f(21);
+            OUT = r;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "f(21) via pointer = 42");
+}
+
+#[test]
+fn function_pointer_two_args() {
+    let mut e = run(r#"
+        fn combine(a: u8, b: u8) -> u8 { return a + b; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8, u8) -> u8 = combine;
+            let r: u8 = f(30, 12);
+            OUT = r;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "f(30, 12) = 42");
+}
+
+#[test]
+fn function_pointer_u16_arg() {
+    let mut e = run(r#"
+        fn dbl16(n: u16) -> u16 { return n + n; }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let f: fn(u16) -> u16 = dbl16;
+            let r: u16 = f(400);
+            LO = r.low;
+            HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        800,
+        "f(400) doubled = 800 (u16 arg + return)"
+    );
+}
+
+#[test]
+fn function_pointer_arg_dispatch() {
+    // Reassign the pointer between calls (jump-table dispatch with an argument).
+    let mut e = run(r#"
+        fn plus1(n: u8) -> u8 { return n + 1; }
+        fn minus1(n: u8) -> u8 { return n - 1; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = plus1;
+            let a: u8 = f(10);
+            f = minus1;
+            let b: u8 = f(10);
+            OUT = a + b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 20, "plus1(10)=11 + minus1(10)=9 = 20");
+}
+
+#[test]
+fn direct_call_to_address_taken_function() {
+    // A function that is also used as a pointer can still be called directly;
+    // both paths go through the staging block + prologue.
+    let mut e = run(r#"
+        fn sq(n: u8) -> u8 { return n * n; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = sq;
+            let viaptr: u8 = f(5);
+            let direct: u8 = sq(6);
+            OUT = viaptr + direct;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 61, "sq(5)=25 + sq(6)=36 = 61");
+}
