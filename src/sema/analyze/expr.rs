@@ -182,14 +182,18 @@ impl SemanticAnalyzer {
                 arms,
             } => {
                 // Check the matched expression
-                self.check_expr(match_expr)?;
+                let match_ty = self.check_expr(match_expr)?;
 
-                // Check each arm's body expression and track their types
+                // Check each arm's body expression and track their types. Each
+                // arm gets its own scope with the pattern's bindings in it, so
+                // variable and enum-payload bindings resolve to real storage
+                // (mirrors the match-statement path).
                 let mut arm_types = Vec::new();
                 for arm in arms {
-                    // Check pattern bindings are available in arm body scope
-                    // TODO: proper scoping for pattern bindings
+                    self.table.enter_scope();
+                    self.add_pattern_bindings(&arm.pattern.node, arm.pattern.span, &match_ty)?;
                     let arm_ty = self.check_expr(&arm.body)?;
+                    self.table.exit_scope();
                     arm_types.push(arm_ty);
                 }
 

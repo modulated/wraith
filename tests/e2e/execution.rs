@@ -450,6 +450,88 @@ fn match_tuple_variant_u16_field_not_truncated() {
 }
 
 // ---------------------------------------------------------------------------
+// match EXPRESSION parity (value-producing match)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_expr_u16_literal_and_variable_binding() {
+    // A u16 match expression: literal arms compare both bytes and the variable
+    // arm binds and yields the full 16-bit scrutinee (not a truncated byte).
+    let src = |v: u16| {
+        format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {v};
+                let r: u16 = match x {{
+                    256 => 0x0999,
+                    n => n,
+                }};
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        )
+    };
+    assert_eq!(run(&src(256)).mem16(0x0400), 0x0999, "256 arm selected");
+    // 0x0305 hits the variable arm and must come back whole, high byte intact.
+    assert_eq!(run(&src(0x0305)).mem16(0x0400), 0x0305, "variable arm keeps u16");
+}
+
+#[test]
+fn match_expr_range_arm() {
+    // Inclusive range arm in a match expression.
+    let classify = |v: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let y: u8 = {v};
+                let g: u8 = match y {{
+                    0 => 100,
+                    1..=5 => 50,
+                    _ => 9,
+                }};
+                OUT = g;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(classify(0), 100, "0 arm");
+    assert_eq!(classify(3), 50, "1..=5 range arm");
+    assert_eq!(classify(5), 50, "inclusive upper bound");
+    assert_eq!(classify(7), 9, "wildcard arm");
+}
+
+#[test]
+fn match_expr_enum_payload_binding_u16() {
+    // A match expression binding a u16 enum payload must yield both bytes.
+    let mut e = run(r#"
+        enum Msg { Ping, Val(u16) }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let m: Msg = Msg::Val(0x0ABC);
+            let r: u16 = match m {
+                Msg::Ping => 0,
+                Msg::Val(v) => v,
+            };
+            LO = r.low;
+            HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0x0ABC, "u16 enum payload yielded whole");
+}
+
+// ---------------------------------------------------------------------------
 // Strength reduction must not double-evaluate the left operand
 // ---------------------------------------------------------------------------
 

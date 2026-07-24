@@ -1953,6 +1953,120 @@ fn emit_jump_table(
 /// Generate arm bodies for a match statement
 ///
 /// Shared between sequential and jump table strategies.
+/// Copy an enum variant's payload fields into their pattern bindings' storage.
+///
+/// `ptr_base`/`ptr_base+1` hold the enum pointer (low/high); field data begins
+/// one byte past the tag. Every byte of each field is copied so multi-byte
+/// (u16/i16/b16) payloads keep their high byte. Shared by the match-statement
+/// and match-expression code paths so both extract bindings identically.
+pub(crate) fn extract_enum_bindings(
+    enum_name: &Spanned<String>,
+    variant: &Spanned<String>,
+    bindings: &[crate::ast::PatternBinding],
+    ptr_base: u8,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+
+    // Look up the enum definition to get field information.
+    let enum_def = info
+        .type_registry
+        .get_enum(&enum_name.node)
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(format!(
+                "enum '{}' not found in type registry",
+                enum_name.node
+            ))
+        })?;
+
+    let variant_info = enum_def.get_variant(&variant.node).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "variant '{}' not found in enum '{}'",
+            variant.node, enum_name.node
+        ))
+    })?;
+
+    // Copy `field_size` bytes from enum data at `offset` into the binding's slot.
+    let copy_field = |offset: u8,
+                      field_size: u8,
+                      binding: &crate::ast::PatternBinding,
+                      emitter: &mut Emitter|
+     -> Result<(), CodegenError> {
+        let loc = info
+            .resolved_symbols
+            .get(&binding.name.span)
+            .map(|sym| sym.location.clone())
+            .ok_or_else(|| CodegenError::SymbolNotFound(binding.name.node.clone()))?;
+        for byte in 0..field_size {
+            emitter.emit_inst("LDY", &format!("#${:02X}", offset + byte));
+            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+            match loc {
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                    emitter.emit_sta_zp(addr + byte);
+                }
+                crate::sema::table::SymbolLocation::Absolute(addr) => {
+                    emitter.emit_sta_abs(addr + byte as u16);
+                }
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "Binding '{}' has unsupported location",
+                        binding.name.node
+                    )));
+                }
+            }
+        }
+        Ok(())
+    };
+
+    match &variant_info.data {
+        crate::sema::type_defs::VariantData::Tuple(field_types) => {
+            // Tuple variant: extract each field by position.
+            if bindings.len() != field_types.len() {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "Pattern binding count mismatch: expected {}, got {}",
+                    field_types.len(),
+                    bindings.len()
+                )));
+            }
+            let mut offset = 1u8; // Start after the tag byte
+            for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
+                let field_size = field_type.size().max(1) as u8;
+                copy_field(offset, field_size, binding, emitter)?;
+                offset += field_size;
+            }
+        }
+        crate::sema::type_defs::VariantData::Struct(struct_fields) => {
+            // Struct variant: each binding name selects a field; offsets are
+            // relative to the variant data, one byte past the tag.
+            for binding in bindings.iter() {
+                let field = struct_fields
+                    .iter()
+                    .find(|f| f.name == binding.name.node)
+                    .ok_or_else(|| {
+                        CodegenError::UnsupportedOperation(format!(
+                            "field '{}' not found in struct variant",
+                            binding.name.node
+                        ))
+                    })?;
+                let field_size = field.ty.size().max(1) as u8;
+                let base_offset = 1 + field.offset as u8; // skip tag
+                copy_field(base_offset, field_size, binding, emitter)?;
+            }
+        }
+        crate::sema::type_defs::VariantData::Unit => {
+            // Unit variant shouldn't have bindings.
+            return Err(CodegenError::UnsupportedOperation(
+                "Unit variant should not have bindings".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn generate_match_arm_bodies(
     arms: &[crate::ast::MatchArm],
     emitter: &mut Emitter,
@@ -1971,135 +2085,9 @@ fn generate_match_arm_bodies(
             variant,
             bindings,
         } = &arm.pattern.node
-            && !bindings.is_empty()
         {
-            // Look up the enum definition to get field information
-            let enum_def = info
-                .type_registry
-                .get_enum(&enum_name.node)
-                .ok_or_else(|| {
-                    CodegenError::UnsupportedOperation(format!(
-                        "enum '{}' not found in type registry",
-                        enum_name.node
-                    ))
-                })?;
-
-            let variant_info = enum_def.get_variant(&variant.node).ok_or_else(|| {
-                CodegenError::UnsupportedOperation(format!(
-                    "variant '{}' not found in enum '{}'",
-                    variant.node, enum_name.node
-                ))
-            })?;
-
-            // Extract field values from enum data
-            // Enum layout in memory: [tag: u8][field0][field1]...
-            // The pointer in pointer ops area points to the tag byte
-            // Field data starts at offset 1
             let ptr_base = emitter.memory_layout.pointer_ops_start;
-
-            match &variant_info.data {
-                crate::sema::type_defs::VariantData::Tuple(field_types) => {
-                    // Tuple variant: extract each field by position
-                    if bindings.len() != field_types.len() {
-                        return Err(CodegenError::UnsupportedOperation(format!(
-                            "Pattern binding count mismatch: expected {}, got {}",
-                            field_types.len(),
-                            bindings.len()
-                        )));
-                    }
-
-                    let mut offset = 1u8; // Start after the tag byte
-                    for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
-                        let field_size = field_type.size().max(1) as u8;
-
-                        // Resolve the binding's storage location once.
-                        let loc = info
-                            .resolved_symbols
-                            .get(&binding.name.span)
-                            .map(|sym| sym.location.clone())
-                            .ok_or_else(|| {
-                                CodegenError::SymbolNotFound(binding.name.node.clone())
-                            })?;
-
-                        // Copy every byte of the field so multi-byte (u16/i16/b16)
-                        // fields keep their high byte instead of being truncated.
-                        for byte in 0..field_size {
-                            emitter.emit_inst("LDY", &format!("#${:02X}", offset + byte));
-                            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
-                            match loc {
-                                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                                    emitter.emit_sta_zp(addr + byte);
-                                }
-                                crate::sema::table::SymbolLocation::Absolute(addr) => {
-                                    emitter.emit_sta_abs(addr + byte as u16);
-                                }
-                                _ => {
-                                    return Err(CodegenError::UnsupportedOperation(format!(
-                                        "Binding '{}' has unsupported location",
-                                        binding.name.node
-                                    )));
-                                }
-                            }
-                        }
-
-                        // Move to the next field.
-                        offset += field_size;
-                    }
-                }
-                crate::sema::type_defs::VariantData::Struct(struct_fields) => {
-                    // Struct variant: each binding name selects a field. Field
-                    // offsets are relative to the variant data, which starts one
-                    // byte after the tag.
-                    for binding in bindings.iter() {
-                        let field = struct_fields
-                            .iter()
-                            .find(|f| f.name == binding.name.node)
-                            .ok_or_else(|| {
-                                CodegenError::UnsupportedOperation(format!(
-                                    "field '{}' not found in struct variant",
-                                    binding.name.node
-                                ))
-                            })?;
-                        let field_size = field.ty.size().max(1) as u8;
-                        let base_offset = 1 + field.offset as u8; // skip tag
-                        let loc = info
-                            .resolved_symbols
-                            .get(&binding.name.span)
-                            .map(|sym| sym.location.clone())
-                            .ok_or_else(|| {
-                                CodegenError::SymbolNotFound(binding.name.node.clone())
-                            })?;
-
-                        // Copy every byte so multi-byte fields keep their high byte.
-                        for byte in 0..field_size {
-                            emitter.emit_inst("LDY", &format!("#${:02X}", base_offset + byte));
-                            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
-                            match loc {
-                                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                                    emitter.emit_sta_zp(addr + byte);
-                                }
-                                crate::sema::table::SymbolLocation::Absolute(addr) => {
-                                    emitter.emit_sta_abs(addr + byte as u16);
-                                }
-                                _ => {
-                                    return Err(CodegenError::UnsupportedOperation(format!(
-                                        "Binding '{}' has unsupported location",
-                                        binding.name.node
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                }
-                crate::sema::type_defs::VariantData::Unit => {
-                    // Unit variant shouldn't have bindings
-                    if !bindings.is_empty() {
-                        return Err(CodegenError::UnsupportedOperation(
-                            "Unit variant should not have bindings".to_string(),
-                        ));
-                    }
-                }
-            }
+            extract_enum_bindings(enum_name, variant, bindings, ptr_base, emitter, info)?;
         }
 
         generate_stmt(&arm.body, emitter, info, string_collector)?;
