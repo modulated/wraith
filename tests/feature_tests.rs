@@ -243,7 +243,9 @@ fn test_for_range_loop() {
         }
         "#,
     );
-    assert_asm_contains(&asm, "fl_");
+    // Bottom-tested loop: body label + a backward branch to it.
+    assert_asm_contains(&asm, "fb_");
+    assert_asm_contains(&asm, "BCC fb_");
 }
 
 // ============================================================================

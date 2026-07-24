@@ -2090,11 +2090,35 @@ fn generate_normal_loop(
         _ => {}
     }
 
-    // For-loops use X register for the counter (fast increment with INX)
-    // u16 arithmetic uses Y register for high bytes to avoid conflicts
+    // Resolve the loop variable's storage once; every strategy needs it.
+    let var_operand = info
+        .resolved_symbols
+        .get(&var_name.span)
+        .or_else(|| info.resolved_symbols.get(&body.span))
+        .or_else(|| info.table.lookup(&var_name.node))
+        .and_then(|sym| match sym.location {
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => Some(format!("${:02X}", addr)),
+            crate::sema::table::SymbolLocation::Absolute(addr) => Some(format!("${:04X}", addr)),
+            _ => None,
+        });
 
-    let loop_label = emitter.next_label("fl");
-    let end_label = emitter.next_label("fx");
+    // Strategy 1: count-down. When the body never mentions the counter, only
+    // the iteration count matters, so the loop can decrement its own frame
+    // slot toward zero: DEC var / BNE is 8 cycles of overhead per iteration
+    // versus ~14 for the counting-up shape, immune to X clobbering, and free
+    // of any comparison. Shadowing in the body can only make the reference
+    // walk over-report (skipping the optimization), never under-report.
+    if let Some(var) = &var_operand
+        && !stmt_references_name(&body.node, &var_name.node)
+    {
+        return generate_countdown_loop(var.clone(), range, body, emitter, info, string_collector);
+    }
+
+    // Strategy 2: bottom-test counting loop. The exit test lives at the
+    // bottom, so each iteration runs one compare and one (usually short)
+    // backward branch; a single entry guard handles empty ranges. The counter
+    // is memory-backed: X is reloaded before the increment only when the body
+    // could have disturbed it.
 
     // Initialize loop counter with range start
     generate_expr(&range.start, emitter, info, string_collector)?;
@@ -2116,49 +2140,35 @@ fn generate_normal_loop(
         }
     };
 
-    // Resolve the loop variable's storage once. The counter is memory-backed
-    // across the body: body code (nested loops, shifts, calls) may clobber X,
-    // so X is reloaded from here before each increment.
-    let var_operand = info
-        .resolved_symbols
-        .get(&var_name.span)
-        .or_else(|| info.resolved_symbols.get(&body.span))
-        .or_else(|| info.table.lookup(&var_name.node))
-        .and_then(|sym| match sym.location {
-            crate::sema::table::SymbolLocation::ZeroPage(addr) => Some(format!("${:02X}", addr)),
-            crate::sema::table::SymbolLocation::Absolute(addr) => Some(format!("${:04X}", addr)),
-            _ => None,
-        });
-
     // Store X (loop counter) to the loop variable location
     if let Some(var) = &var_operand {
         emitter.emit_inst("STX", var);
     }
 
-    // Loop start
-    emitter.emit_label(&loop_label);
-
-    // Check condition: compare counter with end value
-    emitter.emit_inst("CPX", &end_operand);
-
-    if range.inclusive {
-        // If counter > end, exit
-        let continue_label = emitter.next_label("fc");
-        emitter.emit_inst("BEQ", &continue_label); // Equal is ok for inclusive
-        emitter.emit_inst("BCS", &end_label); // Counter > end, exit
-        emitter.emit_label(&continue_label);
-    } else {
-        // If counter >= end, exit
-        emitter.emit_inst("BCS", &end_label);
-    }
-
-    // `continue` jumps to the increment (not the head), so it cannot skip the
-    // increment or run the comparison against a clobbered X.
+    let body_label = emitter.next_label("fb");
     let incr_label = emitter.next_label("fi");
+    let end_label = emitter.next_label("fx");
+
+    // Entry guard (once): enter only when the range is non-empty.
+    emitter.emit_inst("CPX", &end_operand);
+    if range.inclusive {
+        emitter.emit_inst("BEQ", &body_label); // start == end: one iteration
+        emitter.emit_inst("BCC", &body_label); // start < end
+    } else {
+        emitter.emit_inst("BCC", &body_label); // start < end
+    }
+    emitter.emit_inst("JMP", &end_label);
+
+    emitter.emit_label(&body_label);
+
+    // `continue` jumps to the increment (not the body start), so it cannot
+    // skip the increment.
     emitter.push_loop(incr_label.clone(), end_label.clone());
 
     // Execute body
-    emitter.reg_state.invalidate_all(); // Body might use registers
+    emitter.reg_state.invalidate_all(); // Back-edge target: registers are stale
+    let body_output_pos = emitter.output_len();
+    let body_bytes_start = emitter.byte_count();
     generate_stmt(body, emitter, info, string_collector)?;
 
     // Pop loop context
@@ -2166,30 +2176,153 @@ fn generate_normal_loop(
 
     emitter.emit_label(&incr_label);
 
-    // Reload the counter: the body may have clobbered X (nested loops, shift
-    // helpers, and calls all use it).
-    if let Some(var) = &var_operand {
+    // Reload the counter only if the body could have clobbered X or written
+    // the loop variable (nested loops, shift helpers, calls, assignments).
+    let need_reload = {
+        let body_asm = emitter.output_since(body_output_pos);
+        if let Some(var) = &var_operand {
+            body_disturbs_counter(body_asm, var)
+        } else {
+            false
+        }
+    };
+    if need_reload && let Some(var) = &var_operand {
         emitter.emit_inst("LDX", var);
     }
 
     if range.inclusive {
         // The endpoint was just processed; incrementing past it would wrap the
         // counter at the type boundary (e.g. `..=0xFF`) back onto a value that
-        // passes the head comparison, looping forever. Exit before wrapping.
+        // passes the entry guard shape, looping forever. Exit before wrapping.
         emitter.emit_inst("CPX", &end_operand);
         emitter.emit_inst("BEQ", &end_label);
+        emitter.emit_inst("INX", "");
+        if let Some(var) = &var_operand {
+            emitter.emit_inst("STX", var);
+        }
+        // Unconditional back edge: Z is clear here (the BEQ above fell
+        // through), so BNE is an always-taken 2-byte branch when in range.
+        if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+            emitter.emit_inst("BNE", &body_label);
+        } else {
+            emitter.emit_inst("JMP", &body_label);
+        }
+    } else {
+        emitter.emit_inst("INX", "");
+        if let Some(var) = &var_operand {
+            emitter.emit_inst("STX", var);
+        }
+        // Bottom test: loop while X < end.
+        emitter.emit_inst("CPX", &end_operand);
+        if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+            emitter.emit_inst("BCC", &body_label);
+        } else {
+            emitter.emit_inst("BCS", &end_label); // short hop over the JMP
+            emitter.emit_inst("JMP", &body_label);
+        }
     }
-
-    // Increment counter
-    emitter.emit_inst("INX", "");
-
-    // Update loop variable with new counter value
-    if let Some(var) = &var_operand {
-        emitter.emit_inst("STX", var);
-    }
-
-    emitter.emit_inst("JMP", &loop_label);
     emitter.emit_label(&end_label);
+    emitter.reg_state.invalidate_all();
+
+    Ok(())
+}
+
+/// Maximum body size (bytes) for which a bottom-test loop uses a direct
+/// backward conditional branch. The 6502 relative branch reaches -128 bytes;
+/// the margin covers the increment/compare sequence between the body and the
+/// branch plus the branch itself.
+const SHORT_BRANCH_LIMIT: u16 = 100;
+
+/// Generate a count-down loop for an 8-bit counter the body never reads.
+///
+/// The loop variable's frame slot is reused as a pure iteration counter:
+///
+/// ```text
+///     LDA #count      ; or runtime: end - start (guarded, see below)
+///     STA var
+/// fb:
+///     ...body...
+/// fi:                 ; continue target
+///     DEC var
+///     BNE fb          ; 8 cycles/iteration total overhead
+/// fx:
+/// ```
+///
+/// A count of 256 (`0..=255`) is encoded as $00: DEC wraps it to $FF first,
+/// so the BNE-loop still runs exactly 256 times. Constant empty ranges emit
+/// no code at all; runtime bounds get an entry guard that skips the loop when
+/// `end <= start` (exclusive) or `end < start` (inclusive).
+fn generate_countdown_loop(
+    var: String,
+    range: &crate::ast::Range,
+    body: &Spanned<Stmt>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    let folded = |span: &crate::ast::Span| match info.folded_constants.get(span) {
+        Some(crate::sema::const_eval::ConstValue::Integer(n)) => Some(*n),
+        _ => None,
+    };
+
+    let body_label = emitter.next_label("fb");
+    let incr_label = emitter.next_label("fi");
+    let end_label = emitter.next_label("fx");
+
+    match (folded(&range.start.span), folded(&range.end.span)) {
+        (Some(s), Some(e)) => {
+            let count = if range.inclusive { e - s + 1 } else { e - s };
+            if count <= 0 {
+                // Statically empty range: the loop vanishes entirely.
+                return Ok(());
+            }
+            emitter.emit_inst("LDA", &format!("#${:02X}", (count as u16 & 0xFF) as u8));
+            emitter.emit_inst("STA", &var);
+        }
+        _ => {
+            // Runtime bounds: count = end - start, entered only when positive
+            // (the subtraction would otherwise wrap into a huge count).
+            generate_expr(&range.start, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", &var);
+            generate_expr(&range.end, emitter, info, string_collector)?;
+            let enter_label = emitter.next_label("fg");
+            emitter.emit_inst("CMP", &var);
+            if range.inclusive {
+                emitter.emit_inst("BCS", &enter_label); // end >= start
+            } else {
+                let skip_label = emitter.next_label("fs");
+                emitter.emit_inst("BEQ", &skip_label); // end == start: empty
+                emitter.emit_inst("BCS", &enter_label); // end > start
+                emitter.emit_label(&skip_label);
+            }
+            emitter.emit_inst("JMP", &end_label);
+            emitter.emit_label(&enter_label);
+            // Carry is set on every path here, so SBC computes end - start.
+            emitter.emit_inst("SBC", &var);
+            emitter.emit_inst("STA", &var);
+            if range.inclusive {
+                emitter.emit_inst("INC", &var); // count + 1; 256 wraps to $00
+            }
+        }
+    }
+
+    emitter.emit_label(&body_label);
+    emitter.push_loop(incr_label.clone(), end_label.clone());
+    emitter.reg_state.invalidate_all(); // Back-edge target: registers are stale
+    let body_bytes_start = emitter.byte_count();
+    generate_stmt(body, emitter, info, string_collector)?;
+    emitter.pop_loop();
+
+    emitter.emit_label(&incr_label);
+    emitter.emit_inst("DEC", &var);
+    if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+        emitter.emit_inst("BNE", &body_label);
+    } else {
+        emitter.emit_inst("BEQ", &end_label); // short hop over the JMP
+        emitter.emit_inst("JMP", &body_label);
+    }
+    emitter.emit_label(&end_label);
+    emitter.reg_state.invalidate_all();
 
     Ok(())
 }
@@ -2198,15 +2331,16 @@ fn generate_normal_loop(
 ///
 /// Unlike the 8-bit path, the counter cannot live in X; it lives in the loop
 /// variable's own memory pair (low at `addr`, high at `addr + 1`) and both
-/// bytes participate in the comparison and increment:
+/// bytes participate in the comparison and increment. The loop is
+/// bottom-tested: one entry guard handles empty ranges, then each iteration
+/// pays a single compare and (usually short) backward branch:
 ///
 /// ```text
-/// fl:                  ; head (back-edge target)
-///     LDA var_lo       ; exclusive: continue while var < end
+///     LDA var_lo       ; entry guard (once): enter while var < end
 ///     CMP end_lo       ;   (var - end borrows => C clear)
 ///     LDA var_hi
 ///     SBC end_hi
-///     BCC fb           ; short forward hop, in range for any body size
+///     BCC fb
 ///     JMP fx
 /// fb:
 ///     ...body...
@@ -2215,7 +2349,11 @@ fn generate_normal_loop(
 ///     BNE fs
 ///     INC var_hi
 /// fs:
-///     JMP fl
+///     LDA var_lo       ; bottom test: loop while var < end
+///     CMP end_lo
+///     LDA var_hi
+///     SBC end_hi
+///     BCC fb           ; direct when the body is small; JMP trampoline else
 /// fx:
 /// ```
 ///
@@ -2225,9 +2363,9 @@ fn generate_normal_loop(
 /// call graph), so nested loops, scratch-clobbering expressions, and calls in
 /// the body cannot corrupt a live bound.
 ///
-/// Inclusive ranges additionally exit right after processing the endpoint
-/// (before the increment), so `..=0xFFFF` cannot wrap the counter to zero and
-/// loop forever.
+/// Inclusive ranges instead test `var == end` before the increment (their
+/// only per-iteration test, with an unconditional back edge), so `..=0xFFFF`
+/// cannot wrap the counter to zero and loop forever.
 fn generate_normal_loop_u16(
     var_name: &Spanned<String>,
     range: &crate::ast::Range,
@@ -2301,48 +2439,45 @@ fn generate_normal_loop_u16(
         )
     };
 
-    let loop_label = emitter.next_label("fl");
     let body_label = emitter.next_label("fb");
     let incr_label = emitter.next_label("fi");
     let end_label = emitter.next_label("fx");
 
-    emitter.emit_label(&loop_label);
-    // Back-edge target: register contents cached before the loop or left by
-    // the previous iteration are stale here.
-    emitter.reg_state.invalidate_all();
-
+    // Entry guard (once): enter only when the range is non-empty. The
+    // per-iteration test lives at the bottom instead, saving the JMP-around
+    // every iteration.
     if range.inclusive {
-        // Continue while var <= end  <=>  end - var does not borrow (C set).
+        // Enter while var <= end  <=>  end - var does not borrow (C set).
         emitter.emit_inst("LDA", &end_lo);
         emitter.emit_inst("CMP", &var_lo);
         emitter.emit_inst("LDA", &end_hi);
         emitter.emit_inst("SBC", &var_hi);
         emitter.emit_inst("BCS", &body_label);
     } else {
-        // Continue while var < end  <=>  var - end borrows (C clear).
+        // Enter while var < end  <=>  var - end borrows (C clear).
         emitter.emit_inst("LDA", &var_lo);
         emitter.emit_inst("CMP", &end_lo);
         emitter.emit_inst("LDA", &var_hi);
         emitter.emit_inst("SBC", &end_hi);
         emitter.emit_inst("BCC", &body_label);
     }
-    // Exit through a JMP so the conditional branch above stays within the
-    // 127-byte limit regardless of body size (same shaping as While).
     emitter.emit_inst("JMP", &end_label);
     emitter.emit_label(&body_label);
 
     // `continue` jumps to the increment, `break` to the end label.
     emitter.push_loop(incr_label.clone(), end_label.clone());
-    emitter.reg_state.invalidate_all(); // Body might use registers
+    emitter.reg_state.invalidate_all(); // Back-edge target: registers are stale
+    let body_bytes_start = emitter.byte_count();
     generate_stmt(body, emitter, info, string_collector)?;
     emitter.pop_loop();
 
-    // 16-bit increment of the counter in memory.
     emitter.emit_label(&incr_label);
     if range.inclusive {
         // The endpoint was just processed; incrementing past it would wrap the
-        // counter at 0xFFFF back to zero, which passes the head comparison and
-        // loops forever (e.g. `..=0xFFFF`). Exit before wrapping.
+        // counter at 0xFFFF back to zero and loop forever (e.g. `..=0xFFFF`).
+        // Exit before wrapping. This is also the loop's only per-iteration
+        // test: whenever it falls through, var < end, so the back edge below
+        // is unconditional.
         let go_label = emitter.next_label("fg");
         emitter.emit_inst("LDA", &var_lo);
         emitter.emit_inst("CMP", &end_lo);
@@ -2351,13 +2486,30 @@ fn generate_normal_loop_u16(
         emitter.emit_inst("CMP", &end_hi);
         emitter.emit_inst("BEQ", &end_label);
         emitter.emit_label(&go_label);
+        let skip_label = emitter.next_label("fs");
+        emitter.emit_inst("INC", &var_lo);
+        emitter.emit_inst("BNE", &skip_label);
+        emitter.emit_inst("INC", &var_hi);
+        emitter.emit_label(&skip_label);
+        emitter.emit_inst("JMP", &body_label);
+    } else {
+        // 16-bit increment, then bottom test: loop while var < end.
+        let skip_label = emitter.next_label("fs");
+        emitter.emit_inst("INC", &var_lo);
+        emitter.emit_inst("BNE", &skip_label);
+        emitter.emit_inst("INC", &var_hi);
+        emitter.emit_label(&skip_label);
+        emitter.emit_inst("LDA", &var_lo);
+        emitter.emit_inst("CMP", &end_lo);
+        emitter.emit_inst("LDA", &var_hi);
+        emitter.emit_inst("SBC", &end_hi);
+        if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+            emitter.emit_inst("BCC", &body_label);
+        } else {
+            emitter.emit_inst("BCS", &end_label); // short hop over the JMP
+            emitter.emit_inst("JMP", &body_label);
+        }
     }
-    let skip_label = emitter.next_label("fs");
-    emitter.emit_inst("INC", &var_lo);
-    emitter.emit_inst("BNE", &skip_label);
-    emitter.emit_inst("INC", &var_hi);
-    emitter.emit_label(&skip_label);
-    emitter.emit_inst("JMP", &loop_label);
 
     emitter.emit_label(&end_label);
     emitter.reg_state.invalidate_all();
@@ -2384,4 +2536,210 @@ fn loop_bound_slot(
             var_name.node
         ))),
     }
+}
+
+/// True when the statement tree references the given variable name.
+///
+/// Used to decide whether a for-loop counter is observable by its body.
+/// Shadowing (a nested binding of the same name) makes this return true even
+/// though the outer variable is not really referenced - over-reporting only
+/// disables an optimization, never miscompiles. Inline assembly is opaque and
+/// counts as a reference.
+fn stmt_references_name(stmt: &Stmt, name: &str) -> bool {
+    use crate::ast::Stmt as S;
+    match stmt {
+        S::VarDecl {
+            name: n,
+            init,
+            ty: _,
+            mutable: _,
+        } => n.node == name || expr_references_name(&init.node, name),
+        S::Assign { target, value } => {
+            expr_references_name(&target.node, name) || expr_references_name(&value.node, name)
+        }
+        S::Expr(e) => expr_references_name(&e.node, name),
+        S::Return(Some(e)) => expr_references_name(&e.node, name),
+        S::Return(None) | S::Break | S::Continue => false,
+        S::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            expr_references_name(&condition.node, name)
+                || stmt_references_name(&then_branch.node, name)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| stmt_references_name(&e.node, name))
+        }
+        S::While { condition, body } => {
+            expr_references_name(&condition.node, name) || stmt_references_name(&body.node, name)
+        }
+        S::Loop { body } => stmt_references_name(&body.node, name),
+        S::For {
+            var_name,
+            range,
+            body,
+            var_type: _,
+        } => {
+            var_name.node == name
+                || expr_references_name(&range.start.node, name)
+                || expr_references_name(&range.end.node, name)
+                || stmt_references_name(&body.node, name)
+        }
+        S::ForEach {
+            var_name,
+            iterable,
+            body,
+            index_var,
+            var_type: _,
+        } => {
+            var_name.node == name
+                || index_var.as_ref().is_some_and(|v| v.node == name)
+                || expr_references_name(&iterable.node, name)
+                || stmt_references_name(&body.node, name)
+        }
+        S::Match { expr, arms } => {
+            expr_references_name(&expr.node, name)
+                || arms
+                    .iter()
+                    .any(|arm| stmt_references_name(&arm.body.node, name))
+        }
+        S::Block(stmts) => stmts.iter().any(|s| stmt_references_name(&s.node, name)),
+        S::Asm { .. } => true, // opaque: may reference anything
+    }
+}
+
+/// Expression half of [`stmt_references_name`].
+fn expr_references_name(expr: &crate::ast::Expr, name: &str) -> bool {
+    use crate::ast::Expr as E;
+    use crate::ast::VariantData;
+    match expr {
+        E::Variable(n) => n == name,
+        E::Literal(_)
+        | E::CpuFlagCarry
+        | E::CpuFlagZero
+        | E::CpuFlagOverflow
+        | E::CpuFlagNegative => false,
+        E::Binary { left, right, .. } => {
+            expr_references_name(&left.node, name) || expr_references_name(&right.node, name)
+        }
+        E::Unary { operand, .. } => expr_references_name(&operand.node, name),
+        E::Cast { expr, .. } => expr_references_name(&expr.node, name),
+        E::Field { object, .. } => expr_references_name(&object.node, name),
+        E::Index { object, index } => {
+            expr_references_name(&object.node, name) || expr_references_name(&index.node, name)
+        }
+        E::Slice {
+            object, start, end, ..
+        } => {
+            expr_references_name(&object.node, name)
+                || expr_references_name(&start.node, name)
+                || expr_references_name(&end.node, name)
+        }
+        E::Call { args, .. } => args.iter().any(|a| expr_references_name(&a.node, name)),
+        E::StructInit { fields, .. } | E::AnonStructInit { fields } => fields
+            .iter()
+            .any(|f| expr_references_name(&f.value.node, name)),
+        E::EnumVariant { data, .. } => match data {
+            VariantData::Unit => false,
+            VariantData::Tuple(exprs) => exprs.iter().any(|e| expr_references_name(&e.node, name)),
+            VariantData::Struct(fields) => fields
+                .iter()
+                .any(|f| expr_references_name(&f.value.node, name)),
+        },
+        E::SliceLen(e) | E::U16Low(e) | E::U16High(e) | E::Paren(e) => {
+            expr_references_name(&e.node, name)
+        }
+        E::Match { expr, arms } => {
+            expr_references_name(&expr.node, name)
+                || arms
+                    .iter()
+                    .any(|arm| expr_references_name(&arm.body.node, name))
+        }
+    }
+}
+
+/// True when the emitted body assembly may change X or write the loop
+/// variable's storage, in which case the counting loop must reload X from
+/// memory before incrementing.
+///
+/// Conservative by construction: only a whitelist of X-preserving mnemonics
+/// passes, any write through a pointer (`(zp),Y` / `(zp,X)` operands) counts
+/// as touching the variable, and anything unrecognized (JSR, RTS, inline
+/// assembly passthrough) counts as a clobber.
+fn body_disturbs_counter(body_asm: &str, var_operand: &str) -> bool {
+    for raw in body_asm.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with(';') || line.ends_with(':') || line.starts_with('.')
+        {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let mnem = parts.next().unwrap_or("");
+        let operand = parts.next().unwrap_or("");
+
+        let x_preserved = matches!(
+            mnem,
+            "LDA"
+                | "STA"
+                | "LDY"
+                | "STY"
+                | "STX"
+                | "CMP"
+                | "CPX"
+                | "CPY"
+                | "ADC"
+                | "SBC"
+                | "AND"
+                | "ORA"
+                | "EOR"
+                | "ASL"
+                | "LSR"
+                | "ROL"
+                | "ROR"
+                | "INC"
+                | "DEC"
+                | "INY"
+                | "DEY"
+                | "TAY"
+                | "TYA"
+                | "TXA"
+                | "TXS"
+                | "CLC"
+                | "SEC"
+                | "CLV"
+                | "CLD"
+                | "SED"
+                | "CLI"
+                | "SEI"
+                | "BIT"
+                | "NOP"
+                | "PHA"
+                | "PLA"
+                | "PHP"
+                | "PLP"
+                | "BCC"
+                | "BCS"
+                | "BEQ"
+                | "BNE"
+                | "BMI"
+                | "BPL"
+                | "BVC"
+                | "BVS"
+                | "JMP"
+        );
+        if !x_preserved {
+            return true;
+        }
+
+        // Writes that could hit the loop variable's storage.
+        let writes_mem = matches!(
+            mnem,
+            "STA" | "STX" | "STY" | "INC" | "DEC" | "ASL" | "LSR" | "ROL" | "ROR"
+        );
+        if writes_mem && (operand.contains(var_operand) || operand.starts_with('(')) {
+            return true;
+        }
+    }
+    false
 }
