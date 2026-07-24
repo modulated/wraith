@@ -202,9 +202,19 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // For now, just return the type of the first arm
-                // TODO: unify types across arms
-                arm_types.into_iter().next().unwrap()
+                // Unify the arm types into a single common type: each arm must be
+                // implicitly convertible to (or accept) the others, e.g. mixing a
+                // u8 and a u16 arm yields u16.
+                let mut unified = arm_types[0].clone();
+                for ty in arm_types.iter().skip(1) {
+                    unified =
+                        Self::unify_types(&unified, ty).ok_or_else(|| SemaError::TypeMismatch {
+                            expected: unified.display_name(),
+                            found: ty.display_name(),
+                            span: expr.span,
+                        })?;
+                }
+                unified
             }
         };
 
@@ -212,6 +222,21 @@ impl SemanticAnalyzer {
         self.resolved_types.insert(expr.span, result_ty.clone());
 
         Ok(result_ty)
+    }
+
+    /// Find a common type for two arm/branch types: identical types unify to
+    /// themselves; otherwise the narrower widens to the other if implicitly
+    /// convertible (e.g. u8 + u16 -> u16). Returns None if incompatible.
+    fn unify_types(a: &Type, b: &Type) -> Option<Type> {
+        if a == b {
+            Some(a.clone())
+        } else if b.is_implicitly_convertible_to(a) {
+            Some(a.clone())
+        } else if a.is_implicitly_convertible_to(b) {
+            Some(b.clone())
+        } else {
+            None
+        }
     }
 
     fn check_literal(

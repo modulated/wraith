@@ -371,7 +371,26 @@ pub fn generate_expr(
         Expr::Match {
             expr: match_expr,
             arms,
-        } => generate_match_expr(match_expr, arms, emitter, info, string_collector),
+        } => {
+            // Whether the unified result type is 16-bit — narrow arm bodies must
+            // then be zero-extended so their high byte in Y is well-defined.
+            let result_is_u16 = matches!(
+                info.resolved_types.get(&expr.span),
+                Some(crate::sema::types::Type::Primitive(
+                    crate::ast::PrimitiveType::U16
+                        | crate::ast::PrimitiveType::I16
+                        | crate::ast::PrimitiveType::B16
+                ))
+            );
+            generate_match_expr(
+                match_expr,
+                arms,
+                result_is_u16,
+                emitter,
+                info,
+                string_collector,
+            )
+        }
     }
 }
 
@@ -380,11 +399,37 @@ pub fn generate_expr(
 fn generate_match_expr(
     match_expr: &Spanned<Expr>,
     arms: &[crate::ast::ExprMatchArm],
+    result_is_u16: bool,
     emitter: &mut Emitter,
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
+
+    // Generate an arm body, then zero-extend its high byte (Y) when the unified
+    // result is 16-bit but this arm produced only an 8-bit value — otherwise Y
+    // would carry a garbage high byte into the u16 result.
+    let gen_body = |body: &Spanned<Expr>,
+                    emitter: &mut Emitter,
+                    info: &ProgramInfo,
+                    sc: &mut StringCollector|
+     -> Result<(), CodegenError> {
+        generate_expr(body, emitter, info, sc)?;
+        if result_is_u16 {
+            let body_is_u16 = matches!(
+                info.resolved_types.get(&body.span),
+                Some(crate::sema::types::Type::Primitive(
+                    crate::ast::PrimitiveType::U16
+                        | crate::ast::PrimitiveType::I16
+                        | crate::ast::PrimitiveType::B16
+                ))
+            );
+            if !body_is_u16 {
+                emitter.emit_inst("LDY", "#$00"); // zero-extend to u16
+            }
+        }
+        Ok(())
+    };
 
     let match_id = emitter.next_match_id();
     let end_label = format!("mx_{}", match_id);
@@ -444,7 +489,7 @@ fn generate_match_expr(
                     }
 
                     // Generate arm body (expression)
-                    generate_expr(&arm.body, emitter, info, string_collector)?;
+                    gen_body(&arm.body, emitter, info, string_collector)?;
                     emitter.emit_inst("JMP", &end_label);
                 }
                 emitter.emit_label(&next_label);
@@ -452,14 +497,14 @@ fn generate_match_expr(
 
             Pattern::Wildcard => {
                 // Wildcard matches everything - just generate the body
-                generate_expr(&arm.body, emitter, info, string_collector)?;
+                gen_body(&arm.body, emitter, info, string_collector)?;
                 emitter.emit_inst("JMP", &end_label);
             }
 
             Pattern::Variable(_name) => {
                 // Variable pattern binds the whole value
                 // Value is already in $20, body can use it
-                generate_expr(&arm.body, emitter, info, string_collector)?;
+                gen_body(&arm.body, emitter, info, string_collector)?;
                 emitter.emit_inst("JMP", &end_label);
             }
 
@@ -469,7 +514,7 @@ fn generate_match_expr(
                     emitter.emit_inst("LDA", "$20");
                     emitter.emit_inst("CMP", &format!("#${:02X}", *n as u8));
                     emitter.emit_inst("BNE", &next_label);
-                    generate_expr(&arm.body, emitter, info, string_collector)?;
+                    gen_body(&arm.body, emitter, info, string_collector)?;
                     emitter.emit_inst("JMP", &end_label);
                 }
                 emitter.emit_label(&next_label);

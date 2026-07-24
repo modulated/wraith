@@ -1783,5 +1783,47 @@ fn match_struct_variant_selects_circle() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 42, "Circle.r extracted and correct arm chosen");
+    assert_eq!(
+        e.mem(0x0400),
+        42,
+        "Circle.r extracted and correct arm chosen"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Match-expression type unification: arms of differing widths unify to the
+// wider type (u8 + u16 -> u16), so the result isn't truncated.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_expr_unifies_arm_widths() {
+    // End-to-end: a mixed-width match feeding a u16 add produces correct 16-bit
+    // results — narrow arms are zero-extended and the add carries into the high
+    // byte. (Incompatible-arm rejection is covered by the sema tests.)
+    let pick = |k: u8| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let k: u8 = {k};
+                let x: u16 = (match k {{
+                    1 => 5,
+                    2 => 300,
+                    _ => 0,
+                }}) + 224;
+                LO = x.low;
+                HI = x.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    // Narrow arm (5) must be zero-extended, else Y carries garbage into the high byte.
+    assert_eq!(pick(1), 229, "5 + 224 (narrow arm zero-extended)");
+    // Low bytes carry (0x2C + 0xE0 = 0x10C), so a u8 add would drop the carry.
+    assert_eq!(pick(2), 524, "300 + 224 (u16 add carries into high byte)");
+    assert_eq!(pick(9), 224, "0 + 224");
 }
