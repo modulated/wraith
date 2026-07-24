@@ -156,6 +156,46 @@ pub fn generate_stmt(
                     }
                 }
 
+                // Array of structs: stored inline. Runtime-initialize each element
+                // struct literal directly at addr + i*element_size.
+                if let Type::Array(elem, _n) = &sym.ty
+                    && let Type::Named(elem_struct) = &**elem
+                    && let Some(sdef) = info.type_registry.get_struct(elem_struct)
+                    && let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) =
+                        &init.node
+                    && let crate::sema::table::SymbolLocation::ZeroPage(base) = sym.location
+                {
+                    let elem_size = sdef.total_size as u8;
+                    emitter.emit_comment(&format!(
+                        "Array of {} {}: {} elements inline at ${:02X}",
+                        elem_struct,
+                        "structs",
+                        elements.len(),
+                        base
+                    ));
+                    for (i, elem_expr) in elements.iter().enumerate() {
+                        let elem_addr = base + (i as u8) * elem_size;
+                        let fields = match &elem_expr.node {
+                            crate::ast::Expr::StructInit { fields, .. }
+                            | crate::ast::Expr::AnonStructInit { fields } => fields,
+                            _ => {
+                                return Err(CodegenError::UnsupportedOperation(
+                                    "array-of-struct elements must be struct literals".to_string(),
+                                ));
+                            }
+                        };
+                        crate::codegen::expr::generate_struct_init_runtime(
+                            elem_struct,
+                            fields,
+                            elem_addr,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?;
+                    }
+                    return Ok(());
+                }
+
                 // Check for shorthand array syntax: [value] expanding to [value, value, ...]
                 // If init is a single-element array and target is a larger array, synthesize an ArrayFill
                 let modified_init;
@@ -224,6 +264,7 @@ pub fn generate_stmt(
                     sym.ty,
                     Type::Array(_, _)
                         | Type::String
+                        | Type::Function(_, _)
                         | Type::Primitive(crate::ast::PrimitiveType::U16)
                         | Type::Primitive(crate::ast::PrimitiveType::I16)
                         | Type::Primitive(crate::ast::PrimitiveType::B16)
@@ -475,10 +516,12 @@ pub fn generate_stmt(
                             false
                         };
 
-                        // Check if this is a multi-byte type (u16/i16/b16, arrays, enums)
+                        // Check if this is a multi-byte type (u16/i16/b16, arrays,
+                        // enums, function pointers)
                         let is_multibyte = matches!(
                             sym.ty,
                             Type::Array(_, _)
+                                | Type::Function(_, _)
                                 | Type::Primitive(crate::ast::PrimitiveType::U16)
                                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                                 | Type::Primitive(crate::ast::PrimitiveType::B16)
@@ -1348,6 +1391,62 @@ fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
+    // arr[i].field = x with a runtime index: absolute,Y indexed store.
+    if let Expr::Index {
+        object: array,
+        index,
+    } = &object.node
+        && crate::codegen::expr::resolve_static_struct_lvalue(object, info).is_none()
+        && crate::codegen::expr::emit_array_struct_field_indexed(
+            array,
+            index,
+            field,
+            Some(value),
+            emitter,
+            info,
+            string_collector,
+        )?
+    {
+        return Ok(());
+    }
+
+    // Nested (a.b.c = x) or array-of-struct (arr[const].f = x) target: resolve a
+    // static address for the local struct chain, then store the value there.
+    if !matches!(&object.node, Expr::Variable(_))
+        && let Some((base, struct_name)) =
+            crate::codegen::expr::resolve_static_struct_lvalue(object, info)
+    {
+        let field_info = info
+            .type_registry
+            .get_struct(&struct_name)
+            .and_then(|s| s.get_field(&field.node).cloned())
+            .ok_or_else(|| {
+                CodegenError::UnsupportedOperation(format!(
+                    "field '{}' not found in struct '{}'",
+                    field.node, struct_name
+                ))
+            })?;
+        let is_multibyte = matches!(
+            &field_info.ty,
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+        );
+        emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
+        generate_expr(value, emitter, info, string_collector)?;
+        let field_addr = base + field_info.offset as u16;
+        if field_addr < 0x100 {
+            emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+            if is_multibyte {
+                emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+            }
+        } else {
+            emitter.emit_inst("STA", &format!("${:04X}", field_addr));
+            if is_multibyte {
+                emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
+            }
+        }
+        return Ok(());
+    }
+
     // Get the base object (must be a variable for now)
     if let Expr::Variable(var_name) = &object.node {
         // Look up the variable
@@ -1607,7 +1706,7 @@ fn generate_match_sequential(
                         // Comparing against 0 is just a sign-bit test (BMI) — and
                         // it avoids emitting `SEC; SBC #$00`, which the peephole
                         // eliminates as a value no-op even though its flags matter.
-                        let mut emit_signed_lt =
+                        let emit_signed_lt =
                             |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
                                 emitter.emit_inst("LDA", "$20");
                                 if bound == 0 {

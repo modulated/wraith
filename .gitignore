@@ -4,3 +4,7 @@
 *.asm
 *.o
 *.bin
+
+# Local agent/editor config
+.claude/
+.opencode/

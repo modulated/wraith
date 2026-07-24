@@ -340,7 +340,11 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
 fn index_operand(base: &str, x: bool) -> ParsedOperand {
     let base = base.trim();
     if let Some(v) = parse_num(base) {
-        let mode = if v <= 0xFF {
+        // A `$XXXX` operand (4+ hex digits) forces absolute indexing even for
+        // low addresses — matching how real assemblers select abs,Y when the
+        // mnemonic has no zp,Y form (e.g. LDA $0040,Y).
+        let force_abs = base.strip_prefix('$').is_some_and(|h| h.len() >= 4);
+        let mode = if v <= 0xFF && !force_abs {
             if x { Mode::ZpX } else { Mode::ZpY }
         } else if x {
             Mode::AbsX

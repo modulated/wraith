@@ -488,6 +488,17 @@ impl SemanticAnalyzer {
                 let element_type = self.resolve_type(&element.node)?;
                 Ok(Type::Slice(Box::new(element_type)))
             }
+            TypeExpr::Function { params, ret } => {
+                let mut param_types = Vec::with_capacity(params.len());
+                for p in params {
+                    param_types.push(self.resolve_type(&p.node)?);
+                }
+                let ret_type = match ret {
+                    Some(r) => self.resolve_type(&r.node)?,
+                    None => Type::Void,
+                };
+                Ok(Type::Function(param_types, Box::new(ret_type)))
+            }
         }
     }
 

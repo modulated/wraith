@@ -46,6 +46,8 @@ pub struct Emitter {
     pub needs_div16: bool,
     /// Track if mod16 stdlib function is needed
     pub needs_mod16: bool,
+    /// Track if the indirect-call trampoline is needed (function pointers)
+    pub needs_indirect_call: bool,
 }
 
 impl Default for Emitter {
@@ -74,6 +76,7 @@ impl Emitter {
             needs_mul16: false,
             needs_div16: false,
             needs_mod16: false,
+            needs_indirect_call: false,
         }
     }
 
