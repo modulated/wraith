@@ -50,7 +50,14 @@ impl SemanticAnalyzer {
             }
             Stmt::Return(expr) => {
                 let expr_ty = if let Some(e) = expr {
-                    self.check_expr(e)?
+                    // Propagate the function's return type as the expected type so
+                    // literals and anonymous struct literals in return position are
+                    // typed by it, exactly as `let x: T = ...` does for its init.
+                    let saved_expected = self.expected_type.take();
+                    self.expected_type = self.current_return_type.clone();
+                    let ty = self.check_expr(e);
+                    self.expected_type = saved_expected;
+                    ty?
                 } else {
                     Type::Void
                 };

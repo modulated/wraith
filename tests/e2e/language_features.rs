@@ -176,6 +176,36 @@ fn nested_function_calls() {
 }
 
 // ---------------------------------------------------------------------------
+// Return position propagates the function's return type as expected type.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn return_anonymous_struct_literal_type_checks() {
+    // An anonymous struct literal in return position can only be typed if the
+    // function's return type is propagated as the expected type (as `let x: T`
+    // does). Before the fix this failed sema with "cannot infer struct type".
+    // (Struct return-by-value codegen is a separate concern; here we assert the
+    // sema propagation lets it compile and lower the field initializers.)
+    let asm = crate::common::harness::compile_success(
+        r#"
+        struct Point { x: u8, y: u8 }
+        fn make() -> Point {
+            return { x: 7, y: 9 };
+        }
+        #[reset]
+        fn main() {
+            let p: Point = make();
+            loop {}
+        }
+    "#,
+    );
+    // The anonymous struct is const-folded into a static; both field bytes
+    // (7 and 9) must appear as its data, proving sema typed and lowered it.
+    assert!(asm.contains(".BYTE $07"), "field x=7 lowered\n{}", asm);
+    assert!(asm.contains(".BYTE $09"), "field y=9 lowered\n{}", asm);
+}
+
+// ---------------------------------------------------------------------------
 // Signed 16-bit comparison with a complex left operand keeps signed semantics.
 // ---------------------------------------------------------------------------
 
