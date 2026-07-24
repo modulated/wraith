@@ -355,3 +355,105 @@ fn u16_return_of_u8_literal_zero_extends() {
         "u16 return of u8 expr must zero-extend"
     );
 }
+
+#[test]
+fn inclusive_loop_body_mutation_past_endpoint_terminates() {
+    // Review regression: with an equality-only bottom test, a body that
+    // assigns the counter above the inclusive endpoint looped forever. The
+    // test must be >=, for both widths.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0..=10 {
+                i = 20;
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        1,
+        "u8 inclusive loop must exit past endpoint"
+    );
+
+    let mut e2 = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i: u16 in 0..=0x0110 {
+                i = 0x0200;
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e2.mem(0x0400),
+        1,
+        "u16 inclusive loop must exit past endpoint"
+    );
+}
+
+#[test]
+fn exclusive_loop_body_mutation_past_endpoint_terminates() {
+    // The exclusive bottom test is a full compare; mutation above the end
+    // must exit there too (guards against future equality-shape regressions).
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0..10 {
+                i = 200;
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        1,
+        "u8 exclusive loop must exit past endpoint"
+    );
+}
+
+#[test]
+fn inline_asm_data_directive_forces_far_branch() {
+    // Review regression: a `.BYTE` directive in the body is under-counted by
+    // the emitter's size estimate, so the short-branch decision must not
+    // trust it. 144 padding NOP bytes via .BYTE would put a direct BNE/BCC
+    // out of range; with the guard, the loop takes the JMP trampoline and
+    // still runs correctly.
+    let byte_line = format!("\"    .BYTE {}\"", vec!["$EA"; 16].join(", "));
+    let asm_block = vec![byte_line; 9].join(",\n");
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {{
+            let n: u8 = 0;
+            for i in 0..12 {{
+                n = n + 1;
+                asm {{
+{asm_block}
+                }}
+            }}
+            OUT = n;
+            loop {{}}
+        }}
+    "#
+    );
+    let mut e = run(&src);
+    assert_eq!(
+        e.mem(0x0400),
+        12,
+        ".BYTE-heavy body must still loop correctly"
+    );
+}

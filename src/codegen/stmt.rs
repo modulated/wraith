@@ -2222,32 +2222,35 @@ fn generate_normal_loop(
 
     // Reload the counter only if the body could have clobbered X or written
     // the loop variable (nested loops, shift helpers, calls, assignments).
-    let need_reload = {
+    // Also decide whether the emitted body's byte count can be trusted for
+    // the short-branch choice (inline data directives are under-counted).
+    let (need_reload, short_ok) = {
         let body_asm = emitter.output_since(body_output_pos);
-        if let Some(var) = &var_operand {
+        let reload = if let Some(var) = &var_operand {
             body_disturbs_counter(body_asm, var)
         } else {
             false
-        }
+        };
+        (reload, !body_defeats_size_estimate(body_asm))
     };
     if need_reload && let Some(var) = &var_operand {
         emitter.emit_inst("LDX", var);
     }
 
     if range.inclusive {
-        // The endpoint was just processed; incrementing past it would wrap the
-        // counter at the type boundary (e.g. `..=0xFF`) back onto a value that
-        // passes the entry guard shape, looping forever. Exit before wrapping.
+        // Exit when the counter is at (or, if the body mutated it, past) the
+        // endpoint. A bare equality test would miss a body assignment above
+        // the endpoint and loop forever; >= also prevents the `..=0xFF` wrap.
         emitter.emit_inst("CPX", &end_operand);
-        emitter.emit_inst("BEQ", &end_label);
+        emitter.emit_inst("BCS", &end_label);
         emitter.emit_inst("INX", "");
         if let Some(var) = &var_operand {
             emitter.emit_inst("STX", var);
         }
-        // Unconditional back edge: Z is clear here (the BEQ above fell
-        // through), so BNE is an always-taken 2-byte branch when in range.
-        if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
-            emitter.emit_inst("BNE", &body_label);
+        // Unconditional back edge: C is clear here (the BCS above fell
+        // through; INX/STX preserve C), so BCC is always taken when in range.
+        if short_ok && emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+            emitter.emit_inst("BCC", &body_label);
         } else {
             emitter.emit_inst("JMP", &body_label);
         }
@@ -2258,7 +2261,7 @@ fn generate_normal_loop(
         }
         // Bottom test: loop while X < end.
         emitter.emit_inst("CPX", &end_operand);
-        if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+        if short_ok && emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
             emitter.emit_inst("BCC", &body_label);
         } else {
             emitter.emit_inst("BCS", &end_label); // short hop over the JMP
@@ -2353,13 +2356,15 @@ fn generate_countdown_loop(
     emitter.emit_label(&body_label);
     emitter.push_loop(incr_label.clone(), end_label.clone());
     emitter.reg_state.invalidate_all(); // Back-edge target: registers are stale
+    let body_output_pos = emitter.output_len();
     let body_bytes_start = emitter.byte_count();
     generate_stmt(body, emitter, info, string_collector)?;
     emitter.pop_loop();
 
     emitter.emit_label(&incr_label);
     emitter.emit_inst("DEC", &var);
-    if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+    let short_ok = !body_defeats_size_estimate(emitter.output_since(body_output_pos));
+    if short_ok && emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
         emitter.emit_inst("BNE", &body_label);
     } else {
         emitter.emit_inst("BEQ", &end_label); // short hop over the JMP
@@ -2511,31 +2516,64 @@ fn generate_normal_loop_u16(
     // `continue` jumps to the increment, `break` to the end label.
     emitter.push_loop(incr_label.clone(), end_label.clone());
     emitter.reg_state.invalidate_all(); // Back-edge target: registers are stale
+    let body_output_pos = emitter.output_len();
     let body_bytes_start = emitter.byte_count();
     generate_stmt(body, emitter, info, string_collector)?;
     emitter.pop_loop();
 
+    let (short_ok, body_writes_counter) = {
+        let body_asm = emitter.output_since(body_output_pos);
+        (
+            !body_defeats_size_estimate(body_asm),
+            body_may_write_addresses(body_asm, &[&var_lo, &var_hi]),
+        )
+    };
+
     emitter.emit_label(&incr_label);
     if range.inclusive {
-        // The endpoint was just processed; incrementing past it would wrap the
-        // counter at 0xFFFF back to zero and loop forever (e.g. `..=0xFFFF`).
-        // Exit before wrapping. This is also the loop's only per-iteration
-        // test: whenever it falls through, var < end, so the back edge below
-        // is unconditional.
-        let go_label = emitter.next_label("fg");
-        emitter.emit_inst("LDA", &var_lo);
-        emitter.emit_inst("CMP", &end_lo);
-        emitter.emit_inst("BNE", &go_label);
-        emitter.emit_inst("LDA", &var_hi);
-        emitter.emit_inst("CMP", &end_hi);
-        emitter.emit_inst("BEQ", &end_label);
-        emitter.emit_label(&go_label);
+        // Exit when the counter reaches the endpoint. When the body can write
+        // the counter, a bare equality test would miss an assignment above
+        // the endpoint and loop forever, so a full >= compare is required;
+        // otherwise the counter is exactly start + iterations (entry-guarded
+        // to var <= end), it hits the endpoint precisely, and the cheaper
+        // equality pair suffices - including at `..=0xFFFF`, which it reaches
+        // before any wrap. This is the loop's only per-iteration test.
+        if body_writes_counter {
+            emitter.emit_inst("LDA", &var_lo);
+            emitter.emit_inst("CMP", &end_lo);
+            emitter.emit_inst("LDA", &var_hi);
+            emitter.emit_inst("SBC", &end_hi);
+            emitter.emit_inst("BCS", &end_label); // var >= end: done
+        } else {
+            let go_label = emitter.next_label("fg");
+            emitter.emit_inst("LDA", &var_lo);
+            emitter.emit_inst("CMP", &end_lo);
+            emitter.emit_inst("BNE", &go_label);
+            emitter.emit_inst("LDA", &var_hi);
+            emitter.emit_inst("CMP", &end_hi);
+            emitter.emit_inst("BEQ", &end_label); // var == end: done
+            emitter.emit_label(&go_label);
+        }
         let skip_label = emitter.next_label("fs");
         emitter.emit_inst("INC", &var_lo);
         emitter.emit_inst("BNE", &skip_label);
         emitter.emit_inst("INC", &var_hi);
         emitter.emit_label(&skip_label);
-        emitter.emit_inst("JMP", &body_label);
+        if short_ok && emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+            // The back edge is unconditional here. In the >=-shape, C is
+            // clear (the BCS fell through and INC preserves C), so BCC is
+            // always taken. In the equality shape, Z reflects the last INC's
+            // result, which is never zero mid-loop (a zero would mean the
+            // counter wrapped past 0xFFFF, impossible before the equality
+            // exit fires), so BNE is always taken.
+            if body_writes_counter {
+                emitter.emit_inst("BCC", &body_label);
+            } else {
+                emitter.emit_inst("BNE", &body_label);
+            }
+        } else {
+            emitter.emit_inst("JMP", &body_label);
+        }
     } else {
         // 16-bit increment, then bottom test: loop while var < end.
         let skip_label = emitter.next_label("fs");
@@ -2547,7 +2585,7 @@ fn generate_normal_loop_u16(
         emitter.emit_inst("CMP", &end_lo);
         emitter.emit_inst("LDA", &var_hi);
         emitter.emit_inst("SBC", &end_hi);
-        if emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
+        if short_ok && emitter.byte_count().wrapping_sub(body_bytes_start) <= SHORT_BRANCH_LIMIT {
             emitter.emit_inst("BCC", &body_label);
         } else {
             emitter.emit_inst("BCS", &end_label); // short hop over the JMP
@@ -2782,6 +2820,95 @@ fn body_disturbs_counter(body_asm: &str, var_operand: &str) -> bool {
             "STA" | "STX" | "STY" | "INC" | "DEC" | "ASL" | "LSR" | "ROL" | "ROR"
         );
         if writes_mem && (operand.contains(var_operand) || operand.starts_with('(')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when the emitted body contains lines whose byte size the emitter's
+/// instruction-size accounting cannot estimate reliably - assembler
+/// directives like `.BYTE`/`.WORD`/`.RES` from inline assembly can span any
+/// number of bytes but are counted as a single instruction. Such bodies must
+/// use the JMP-trampoline back edge instead of a direct relative branch.
+fn body_defeats_size_estimate(body_asm: &str) -> bool {
+    body_asm
+        .lines()
+        .any(|line| line.trim_start().starts_with('.'))
+}
+
+/// True when the emitted body assembly may write any of the given memory
+/// operands. Conservative: pointer-indirect writes, unrecognized mnemonics,
+/// and calls (whose callees could write through pointers) all count as
+/// potential writes.
+fn body_may_write_addresses(body_asm: &str, addrs: &[&str]) -> bool {
+    for raw in body_asm.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with(';') || line.ends_with(':') || line.starts_with('.')
+        {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let mnem = parts.next().unwrap_or("");
+        let operand = parts.next().unwrap_or("");
+
+        let known_non_writing = matches!(
+            mnem,
+            "LDA"
+                | "LDX"
+                | "LDY"
+                | "CMP"
+                | "CPX"
+                | "CPY"
+                | "ADC"
+                | "SBC"
+                | "AND"
+                | "ORA"
+                | "EOR"
+                | "BIT"
+                | "TAX"
+                | "TAY"
+                | "TXA"
+                | "TYA"
+                | "TXS"
+                | "TSX"
+                | "INX"
+                | "INY"
+                | "DEX"
+                | "DEY"
+                | "CLC"
+                | "SEC"
+                | "CLV"
+                | "CLD"
+                | "SED"
+                | "CLI"
+                | "SEI"
+                | "NOP"
+                | "PHA"
+                | "PLA"
+                | "PHP"
+                | "PLP"
+                | "BCC"
+                | "BCS"
+                | "BEQ"
+                | "BNE"
+                | "BMI"
+                | "BPL"
+                | "BVC"
+                | "BVS"
+                | "JMP"
+        );
+        let known_writing = matches!(
+            mnem,
+            "STA" | "STX" | "STY" | "INC" | "DEC" | "ASL" | "LSR" | "ROL" | "ROR"
+        );
+
+        if known_writing {
+            if operand.starts_with('(') || addrs.iter().any(|a| operand.contains(*a)) {
+                return true;
+            }
+        } else if !known_non_writing {
+            // JSR, RTS, inline-asm oddities: assume the worst.
             return true;
         }
     }
