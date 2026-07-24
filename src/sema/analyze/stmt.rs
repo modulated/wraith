@@ -223,6 +223,7 @@ impl SemanticAnalyzer {
                 (self.type_size(elem) * n).min(255)
             }
             Type::Array(_, _) => 2,    // Array pointer
+            Type::String => 2,         // String pointer (16-bit address)
             Type::Function(_, _) => 2, // Function pointer (16-bit code address)
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
