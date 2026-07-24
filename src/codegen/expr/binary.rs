@@ -25,6 +25,22 @@ fn is_simple_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_) | Expr::Variable(_))
 }
 
+/// Does evaluating this expression leave the Y register untouched?
+///
+/// The u8 binary fast path parks the left operand in Y while the right operand
+/// is evaluated, so any right operand that writes Y — array indexing (`arr[i]`
+/// scales the index through Y), casts and byte extraction (`.low`/`.high` load
+/// the u16 source's high byte into Y), nested binary ops (their own u8 save uses
+/// Y), field/pointer derefs, and calls — would silently corrupt it. Only
+/// literals and direct scalar variable reads are guaranteed to touch A alone.
+fn is_y_preserving(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Variable(_) => true,
+        Expr::Paren(inner) => is_y_preserving(&inner.node),
+        _ => false,
+    }
+}
+
 /// Does evaluating this expression involve a function call (direct or nested)?
 /// A call clobbers Y and the $F0 scratch pool, so a live left operand held there
 /// must instead be spilled across the call.
@@ -175,14 +191,21 @@ pub(super) fn generate_binary(
     // correctly (LIFO) with the recursion frame saves in generate_call.
     let right_has_call = contains_call(&right.node);
 
+    // The u8 fast path additionally parks the left operand in Y, which any
+    // Y-writing right operand (even a call-free one, e.g. `arr[i]` or a cast)
+    // destroys. Route those through the same memory spill. The u16 fast path
+    // saves to a temp_alloc slot that nested ops never reuse, so it only needs
+    // the call guard.
+    let needs_spill = right_has_call || (!is_u16 && !is_y_preserving(&right.node));
+
     // Allocate temp storage for the u16 fast-path left-operand save (if needed)
-    let left_save_addr = if use_stack && is_u16 && !right_has_call {
+    let left_save_addr = if use_stack && is_u16 && !needs_spill {
         emitter.temp_alloc.alloc_high(2)
     } else {
         None
     };
 
-    if use_stack && right_has_call {
+    if use_stack && needs_spill {
         // Right operand contains a call: spill the left operand across it.
         let spill_size = if is_u16 { 2 } else { 1 };
 

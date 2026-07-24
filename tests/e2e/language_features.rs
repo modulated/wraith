@@ -176,6 +176,32 @@ fn nested_function_calls() {
 }
 
 // ---------------------------------------------------------------------------
+// u8 binary op whose right operand clobbers Y.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u8_binary_right_operand_clobbers_y() {
+    // The left operand `(a + 1)` is complex, so codegen parks it in Y while it
+    // evaluates the right operand. `arr[i]` scales its index through Y, which
+    // destroyed the parked value before the fix (result came out as the index,
+    // not the sum).
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: u8 = 10;
+            let arr: [u8; 4] = [1, 2, 3, 5];
+            let i: u8 = 3;
+            let r: u8 = (a + 1) + arr[i];
+            OUT = r;
+            loop {}
+        }
+    "#);
+    // (10 + 1) + arr[3](=5) = 16.
+    assert_eq!(e.mem(0x0400), 16, "left operand must survive a Y-clobbering right");
+}
+
+// ---------------------------------------------------------------------------
 // Inclusive for-range.
 // ---------------------------------------------------------------------------
 
