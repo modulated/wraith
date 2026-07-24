@@ -327,6 +327,50 @@ pub fn generate_stmt(
                     // Normal return with value
                     generate_expr(e, emitter, info, string_collector)?;
 
+                    // A 16-bit return convention is A (low) / Y (high). If the
+                    // returned expression is 8-bit (e.g. `return 255;` from a
+                    // `-> u16` function, where the literal fits u8), Y still
+                    // holds junk from earlier code - extend it explicitly.
+                    {
+                        use crate::ast::PrimitiveType;
+                        use crate::sema::types::Type;
+                        let ret_ty = emitter
+                            .current_function()
+                            .and_then(|name| info.table.lookup(name))
+                            .and_then(|sym| match &sym.ty {
+                                Type::Function(_, ret) => Some((**ret).clone()),
+                                _ => None,
+                            });
+                        let expr_is_8bit = info.resolved_types.get(&e.span).is_some_and(|t| {
+                            matches!(
+                                t,
+                                Type::Primitive(
+                                    PrimitiveType::U8
+                                        | PrimitiveType::I8
+                                        | PrimitiveType::B8
+                                        | PrimitiveType::Bool
+                                )
+                            )
+                        });
+                        match ret_ty {
+                            Some(Type::Primitive(PrimitiveType::U16 | PrimitiveType::B16))
+                                if expr_is_8bit =>
+                            {
+                                emitter.emit_inst("LDY", "#$00"); // zero-extend
+                            }
+                            Some(Type::Primitive(PrimitiveType::I16)) if expr_is_8bit => {
+                                // Sign-extend A into Y without destroying A.
+                                let pos_label = emitter.next_label("sx");
+                                emitter.emit_inst("LDY", "#$00");
+                                emitter.emit_inst("CMP", "#$80");
+                                emitter.emit_inst("BCC", &pos_label);
+                                emitter.emit_inst("DEY", ""); // Y = $FF
+                                emitter.emit_label(&pos_label);
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // Only emit RTS if we're not in an inline context
                     if !emitter.is_inlining() {
                         emitter.emit_inst("RTS", "");
