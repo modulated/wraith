@@ -308,6 +308,35 @@ fn u16_array_roundtrip() {
     );
 }
 
+#[test]
+fn u16_slice_assignment_stores_both_bytes() {
+    // Slice-assign two u16 elements, then read them back. Before the fix the
+    // unroll stored only the low byte at the unscaled element index, so both
+    // the high bytes and the second element were corrupted.
+    let mut e = run(r#"
+        const A0: addr = 0x0400;
+        const A1: addr = 0x0401;
+        const B0: addr = 0x0402;
+        const B1: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let data: [u16; 4] = [0x1000, 0x2000, 0x3000, 0x4000];
+            data[1..3] = [0x1234, 0xABCD];
+            let i: u8 = 1;
+            let j: u8 = 2;
+            let x: u16 = data[i];
+            let y: u16 = data[j];
+            A0 = x.low;
+            A1 = x.high;
+            B0 = y.low;
+            B1 = y.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0x1234, "data[1] via slice assign");
+    assert_eq!(e.mem16(0x0402), 0xABCD, "data[2] via slice assign");
+}
+
 // ---------------------------------------------------------------------------
 // match / pattern binding correctness
 // ---------------------------------------------------------------------------

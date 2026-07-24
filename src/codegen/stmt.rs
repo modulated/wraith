@@ -1321,17 +1321,56 @@ fn generate_slice_assignment(
             s, actual_end
         ));
 
+        // Determine element width: u16/i16/b16 arrays store two bytes per
+        // element and index by a byte offset (element index * 2), matching
+        // generate_index_assignment. Truncating to one byte and using the raw
+        // element index (as the original code did) silently corrupts u16 arrays.
+        use crate::ast::PrimitiveType;
+        use crate::sema::types::Type;
+        let element_is_multibyte = matches!(
+            info.resolved_types.get(&object.span),
+            Some(Type::Array(elem, _)) if matches!(
+                &**elem,
+                Type::Primitive(PrimitiveType::U16)
+                    | Type::Primitive(PrimitiveType::I16)
+                    | Type::Primitive(PrimitiveType::B16)
+            )
+        );
+        let elem_size = if element_is_multibyte { 2usize } else { 1usize };
+
         // Unroll: generate individual stores for each element
         for (i, val_expr) in values.iter().enumerate() {
-            let target_index = s + i;
+            let byte_offset = (s + i) * elem_size;
+            if byte_offset + elem_size - 1 > 0xFF {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "slice assignment byte offset {} exceeds zero-page indirect range",
+                    byte_offset
+                )));
+            }
 
-            // Generate the value expression
+            // Generate the value expression (A = low byte, Y = high byte for u16)
             generate_expr(val_expr, emitter, info, string_collector)?;
 
-            // Store to array[target_index] using indirect indexed addressing
-            emitter.emit_inst("LDY", &format!("#${:02X}", target_index));
-            emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+            if element_is_multibyte {
+                // Y holds the high byte but we need Y for the store index, so
+                // stash both bytes first, then store low then high.
+                emitter.emit_inst("STA", "$20");
+                emitter.emit_inst("STY", "$21");
+                emitter.emit_inst("LDY", &format!("#${:02X}", byte_offset));
+                emitter.emit_inst("LDA", "$20");
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+                emitter.emit_inst("INY", "");
+                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+            } else {
+                // Store to array[target_index] using indirect indexed addressing
+                emitter.emit_inst("LDY", &format!("#${:02X}", byte_offset));
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+            }
         }
+
+        // Raw A/Y stores above bypass register tracking; drop cached beliefs.
+        emitter.invalidate_registers();
     } else {
         // Dynamic bounds - not supported yet
         return Err(CodegenError::UnsupportedOperation(
