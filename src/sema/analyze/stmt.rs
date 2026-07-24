@@ -430,9 +430,11 @@ impl SemanticAnalyzer {
         // A non-constant range end must survive the whole loop body, which may
         // itself run nested loops, scratch-clobbering expressions, or calls.
         // Give it a hidden frame slot (colored with the call graph like any
-        // local) rather than a shared zero-page scratch byte.
-        if !self.folded_constants.contains_key(&range.end.span) {
-            let bound_offset = self.frame_alloc(counter_size);
+        // local) rather than a shared zero-page scratch byte. Sibling loops
+        // reuse each other's released slots (their lifetimes never overlap);
+        // a nested loop allocates fresh because the outer slot is still held.
+        let bound_slot = if !self.folded_constants.contains_key(&range.end.span) {
+            let bound_offset = self.loop_bound_alloc(counter_size);
             self.loop_bound_slots.insert(
                 range.end.span,
                 SymbolInfo {
@@ -447,12 +449,20 @@ impl SemanticAnalyzer {
                     is_param: false,
                 },
             );
-        }
+            Some((bound_offset, counter_size))
+        } else {
+            None
+        };
 
         // Analyze body
         self.loop_depth += 1;
         self.analyze_stmt(body)?;
         self.loop_depth -= 1;
+
+        // The bound dies with the loop; let sibling loops reuse its bytes.
+        if let Some((offset, size)) = bound_slot {
+            self.loop_bound_release(offset, size);
+        }
 
         self.table.exit_scope();
 

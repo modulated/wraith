@@ -462,7 +462,11 @@ fn test_codegen_shift_operations() {
 }
 
 #[test]
-fn test_codegen_for_loop() {
+fn test_codegen_for_loop_countdown_when_var_unused() {
+    // The counter is never read, so the loop compiles to the count-down
+    // shape: the frame slot holds the remaining count, DEC/BNE per iteration,
+    // no X machinery and no comparison at all. Count must be > 8 to avoid the
+    // unrolled path.
     let source = r#"
         fn main() {
             for i in 0..10 {
@@ -476,34 +480,56 @@ fn test_codegen_for_loop() {
     let program = analyze(&ast).unwrap();
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
-    // Optimized for loop using X register:
-    // 1. Initialize counter in X register (TAX)
-    // 2. Store end value in temp location
-    // 3. Loop: check condition with CPX, execute body, increment with INX
+    assert!(asm.contains("LDA #$0A"), "Should load the iteration count");
+    assert!(asm.contains("DEC"), "Should decrement the counter slot");
+    assert!(asm.contains("BNE fb_"), "Should loop back while nonzero");
+    assert!(!asm.contains("CPX"), "Count-down loop needs no comparison");
+    assert!(
+        appears_before(&asm, "DEC", "BNE fb_"),
+        "Decrement before back-branch"
+    );
+}
+
+#[test]
+fn test_codegen_for_loop_bottom_test_when_var_used() {
+    // The counter is read in the body, so the loop counts up with the test at
+    // the bottom: one entry guard, then INX / STX / CPX #imm / BCC back per
+    // iteration - no JMP inside the iteration.
+    let source = r#"
+        const OUT: addr = 0x0400;
+        fn main() {
+            for i in 0..10 {
+                OUT = i;
+            }
+        }
+    "#;
+
+    let tokens = lex(source).unwrap();
+    let ast = Parser::parse(&tokens).unwrap();
+    let program = analyze(&ast).unwrap();
+    let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
+
     assert!(asm.contains("TAX"), "Should transfer counter to X");
-    assert!(asm.contains("fl_"), "Should have loop label");
+    assert!(asm.contains("fb_"), "Should have body label");
     assert!(asm.contains("fx_"), "Should have end label");
     // Constant range ends compare as an immediate (no scratch byte to clobber)
     assert!(
         asm.contains("CPX #$0A"),
         "Should compare X with the constant end value"
     );
-    assert!(asm.contains("BCS fx_"), "Should exit if counter >= end");
     assert!(asm.contains("INX"), "Should increment X register");
-    assert!(asm.contains("JMP fl_"), "Should jump back to start");
-
-    // Verify ordering
     assert!(
-        appears_before(&asm, "TAX", "fl_"),
-        "Transfer to X before loop"
+        asm.contains("BCC fb_"),
+        "Bottom test should branch back while X < end"
     );
     assert!(
-        appears_before(&asm, "fl_", "CPX"),
-        "Loop label before check"
+        appears_before(&asm, "TAX", "fb_"),
+        "Counter initialized before the body"
     );
+    // The body's store precedes the increment: the test is at the bottom.
     assert!(
-        appears_before(&asm, "INX", "JMP fl_"),
-        "Increment before jump"
+        appears_before(&asm, "STA OUT", "INX"),
+        "Body before increment (bottom-tested loop)"
     );
 }
 
