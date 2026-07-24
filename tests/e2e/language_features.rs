@@ -176,6 +176,33 @@ fn nested_function_calls() {
 }
 
 // ---------------------------------------------------------------------------
+// Signed 16-bit comparison with a complex left operand keeps signed semantics.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signed_i16_comparison_complex_left() {
+    // (a - b) evaluates to -100 as i16 (0xFF9C). Compared to 5 it must be less
+    // (signed); an unsigned compare would read 0xFF9C as 65436 and get it wrong.
+    // Guards that comparison width/signedness is taken from the operands' type.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: i16 = -100;
+            let b: i16 = 0;
+            let c: i16 = 5;
+            if (a - b) < c {
+                OUT = 1;
+            } else {
+                OUT = 2;
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 1, "-100 < 5 must hold under signed comparison");
+}
+
+// ---------------------------------------------------------------------------
 // u8 binary op whose right operand clobbers Y.
 // ---------------------------------------------------------------------------
 

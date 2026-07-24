@@ -88,10 +88,25 @@ pub(super) fn generate_binary(
         _ => {}
     }
 
-    // Check if we're doing 16-bit arithmetic (check before generating expressions)
+    // Determine operand width/signedness before generating code.
+    //
+    // Arithmetic and comparison operands share a type (Wraith has no implicit
+    // conversions), but a complex operand's span may be absent from
+    // resolved_types; deriving purely from the left then silently defaults to
+    // 8-bit unsigned and miscompiles a wide/signed comparison. So consult the
+    // right operand as a fallback. Shifts are the exception: `u16 >> u8` is
+    // allowed, so the value's width/signedness must come from the left operand
+    // (the value), never the right (a count that may be narrower).
     let left_type = info.resolved_types.get(&left.span);
+    let right_type = info.resolved_types.get(&right.span);
+    let is_shift = matches!(op, crate::ast::BinaryOp::Shl | crate::ast::BinaryOp::Shr);
+    let op_type = if is_shift {
+        left_type
+    } else {
+        left_type.or(right_type)
+    };
 
-    let is_u16 = left_type.is_some_and(|ty| {
+    let is_u16 = op_type.is_some_and(|ty| {
         matches!(
             ty,
             Type::Primitive(crate::ast::PrimitiveType::U16)
@@ -102,7 +117,7 @@ pub(super) fn generate_binary(
 
     // Whether the operands are signed (i8/i16). Comparisons, `>>`, and division
     // need signed-specific sequences; other ops are bit-identical either way.
-    let is_signed = left_type.is_some_and(|ty| ty.is_signed());
+    let is_signed = op_type.is_some_and(|ty| ty.is_signed());
 
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
