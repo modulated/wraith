@@ -225,6 +225,7 @@ impl SemanticAnalyzer {
             Type::Array(_, _) => 2,    // Array pointer
             Type::String => 2,         // String pointer (16-bit address)
             Type::Function(_, _) => 2, // Function pointer (16-bit code address)
+            Type::Slice(_) => 4,       // Fat pointer: 2-byte base + 2-byte length
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
             | Type::Primitive(PrimitiveType::B16) => 2,
@@ -529,10 +530,12 @@ impl SemanticAnalyzer {
         }
 
         // Allocate storage for loop variable
-        // u16/i16 types need 2 bytes
+        // u16/i16/b16 types need 2 bytes
         let elem_size = if matches!(
             var_ty,
-            Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16)
+            Type::Primitive(PrimitiveType::U16)
+                | Type::Primitive(PrimitiveType::I16)
+                | Type::Primitive(PrimitiveType::B16)
         ) {
             2
         } else {

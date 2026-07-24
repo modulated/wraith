@@ -202,6 +202,36 @@ fn u8_binary_right_operand_clobbers_y() {
 }
 
 // ---------------------------------------------------------------------------
+// foreach over a b16 (BCD) array reserves a full 2-byte loop-variable slot.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foreach_b16_loop_var_full_width() {
+    // b16 was omitted from the loop-variable width check, so the loop var got
+    // only 1 byte and the next body-local (`t`) overlapped its high byte. The
+    // cast reads the high byte back, which `t` had clobbered.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let arr: [b16; 2] = [1234 as b16, 5678 as b16];
+            for x in arr {
+                let t: u8 = 0x99;
+                let xu: u16 = x as u16;
+                LO = xu.low;
+                HI = xu.high;
+                LO = t;
+            }
+            loop {}
+        }
+    "#);
+    // Last element 5678 packs to BCD 0x5678; its high byte must be 0x56, not
+    // the 0x99 written into the overlapping slot.
+    assert_eq!(e.mem(0x0401), 0x56, "b16 loop var high byte must survive");
+}
+
+// ---------------------------------------------------------------------------
 // Inclusive for-range.
 // ---------------------------------------------------------------------------
 
