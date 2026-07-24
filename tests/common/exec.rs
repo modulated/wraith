@@ -13,7 +13,7 @@
 
 use mos6502::cpu::CPU;
 use mos6502::instruction::Nmos6502;
-use mos6502::memory::{Bus, Memory};
+use mos6502::memory::Bus;
 use std::collections::HashMap;
 
 use super::compile_success;
@@ -560,9 +560,46 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
 // Execution harness
 // ============================================================================
 
+/// A flat 64 KB RAM bus with software-controllable IRQ/NMI lines. The crate's
+/// default `Memory` bus never asserts an interrupt, so tests that exercise
+/// `#[irq]`/`#[nmi]` handlers use this to pulse the lines under their control.
+pub struct TestBus {
+    ram: Vec<u8>,
+    irq: bool,
+    nmi: bool,
+}
+
+impl TestBus {
+    fn new() -> Self {
+        Self {
+            ram: vec![0u8; 65536],
+            irq: false,
+            nmi: false,
+        }
+    }
+}
+
+impl Bus for TestBus {
+    fn get_byte(&mut self, address: u16) -> u8 {
+        self.ram[address as usize]
+    }
+    fn set_byte(&mut self, address: u16, value: u8) {
+        self.ram[address as usize] = value;
+    }
+    fn irq_pending(&mut self) -> bool {
+        self.irq
+    }
+    fn nmi_pending(&mut self) -> bool {
+        self.nmi
+    }
+}
+
 /// Result of running a compiled Wraith program on the emulator.
 pub struct Exec {
-    cpu: CPU<Memory, Nmos6502>,
+    cpu: CPU<TestBus, Nmos6502>,
+    /// Address of the terminating `loop {}` (JMP-to-self) the program settled
+    /// into. Interrupt pulses run the handler and return control here.
+    idle_pc: u16,
     pub steps: usize,
     pub halted: bool,
 }
@@ -587,6 +624,72 @@ impl Exec {
     pub fn y(&self) -> u8 {
         self.cpu.registers.index_y
     }
+
+    /// Assert the IRQ line for exactly one servicing: with the program paused in
+    /// its idle loop, take the interrupt, run the handler, and resume at idle.
+    /// The program must have enabled IRQs (e.g. `asm { "CLI" }`) for this to fire.
+    pub fn pulse_irq(&mut self) {
+        self.pulse(true);
+    }
+
+    /// Assert the NMI line for one edge-triggered servicing.
+    pub fn pulse_nmi(&mut self) {
+        self.pulse(false);
+    }
+
+    /// Hold the IRQ line asserted for a while and report whether it stayed
+    /// masked (the CPU never left the idle loop). Used to verify the I-flag
+    /// blocks IRQs. Deasserts the line before returning.
+    pub fn irq_stays_masked(&mut self) -> bool {
+        let idle = self.idle_pc;
+        self.cpu.memory.irq = true;
+        let mut masked = true;
+        for _ in 0..2000 {
+            self.cpu.single_step();
+            if self.cpu.registers.program_counter != idle {
+                masked = false;
+                break;
+            }
+        }
+        self.cpu.memory.irq = false;
+        masked
+    }
+
+    fn pulse(&mut self, irq: bool) {
+        let idle = self.idle_pc;
+        let mut budget = 200_000usize;
+
+        // Assert the line and step until the interrupt is taken (PC leaves the
+        // idle loop). NMI is non-maskable; IRQ needs the I-flag clear.
+        if irq {
+            self.cpu.memory.irq = true;
+        } else {
+            self.cpu.memory.nmi = true;
+        }
+        while self.cpu.registers.program_counter == idle && budget > 0 {
+            self.cpu.single_step();
+            budget -= 1;
+        }
+        assert!(
+            self.cpu.registers.program_counter != idle,
+            "interrupt was never serviced (IRQ needs `CLI`, or no handler is installed)"
+        );
+
+        // Deassert so a level-triggered IRQ fires exactly once, and an NMI edge
+        // can re-arm for the next pulse.
+        if irq {
+            self.cpu.memory.irq = false;
+        } else {
+            self.cpu.memory.nmi = false;
+        }
+
+        // Run the handler to completion (RTI returns to the idle loop).
+        while self.cpu.registers.program_counter != idle && budget > 0 {
+            self.cpu.single_step();
+            budget -= 1;
+        }
+        assert!(budget > 0, "interrupt handler did not return to the idle loop");
+    }
 }
 
 /// Compile, assemble, and run a Wraith program to completion.
@@ -599,14 +702,17 @@ pub fn run(source: &str) -> Exec {
     let asm = compile_success(source);
     let image = assemble(&asm);
 
-    let mut memory = Memory::new();
-    memory.set_bytes(0x0000, &image);
-    let mut cpu = CPU::new(memory, Nmos6502);
+    let mut bus = TestBus::new();
+    // Load the full 64 KB image directly: the default Bus::set_bytes truncates
+    // its length to u16 (65536 -> 0), so it would copy nothing.
+    bus.ram.copy_from_slice(&image);
+    let mut cpu = CPU::new(bus, Nmos6502);
     cpu.reset();
 
     const BUDGET: usize = 20_000_000;
     let mut steps = 0usize;
     let mut halted = false;
+    let mut idle_pc = 0u16;
     while steps < BUDGET {
         let pc_before = cpu.registers.program_counter;
         let executed = cpu.single_step();
@@ -614,11 +720,13 @@ pub fn run(source: &str) -> Exec {
         if !executed {
             // Couldn't decode an instruction (bad opcode) or a wait state.
             halted = true;
+            idle_pc = cpu.registers.program_counter;
             break;
         }
         if cpu.registers.program_counter == pc_before {
             // JMP-to-self: the program's terminating `loop {}`.
             halted = true;
+            idle_pc = pc_before;
             break;
         }
     }
@@ -628,5 +736,10 @@ pub fn run(source: &str) -> Exec {
         BUDGET
     );
 
-    Exec { cpu, steps, halted }
+    Exec {
+        cpu,
+        idle_pc,
+        steps,
+        halted,
+    }
 }

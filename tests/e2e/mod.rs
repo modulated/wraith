@@ -12,6 +12,7 @@ mod execution;
 mod frames;
 mod functions;
 mod interrupts;
+mod interrupts_exec;
 mod math16;
 mod memory;
 mod operators;
