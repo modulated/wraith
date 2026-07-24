@@ -451,6 +451,437 @@ fn mul_pow2_evaluates_left_once() {
 }
 
 // ---------------------------------------------------------------------------
+// u16 for-loop counters (16-bit compare + increment)
+// ---------------------------------------------------------------------------
+
+/// Count iterations of `for i: u16 in start..end` (or `..=`) into a u16.
+fn u16_for_iterations(start: u16, end: u16, inclusive: bool) -> u16 {
+    let op = if inclusive { "..=" } else { ".." };
+    let src = format!(
+        r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {{
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in {start}{op}{end} {{
+                n = n + one;
+            }}
+            LO = n.low;
+            HI = n.high;
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem16(0x0400)
+}
+
+#[test]
+fn u16_for_loop_delay_range() {
+    // The historical bug: `for i: u16 in 0..30000` compiled to 8-bit loop
+    // machinery that compared only the low byte of the end ($7530 -> $30),
+    // running 48 iterations instead of 30000.
+    assert_eq!(u16_for_iterations(0, 30000, false), 30000);
+}
+
+#[test]
+fn u16_for_loop_end_low_byte_small() {
+    // End 0x0130: low byte 0x30 = 48 < 304, the truncated compare exited early.
+    assert_eq!(u16_for_iterations(0, 0x0130, false), 304);
+}
+
+#[test]
+fn u16_for_loop_end_low_byte_zero() {
+    // End 0x0100: low byte 0 made the old code run 0 iterations.
+    assert_eq!(u16_for_iterations(0, 0x0100, false), 256);
+}
+
+#[test]
+fn u16_for_loop_inclusive_range() {
+    assert_eq!(u16_for_iterations(0, 0x0100, true), 257);
+}
+
+#[test]
+fn u16_for_loop_nonzero_start() {
+    assert_eq!(u16_for_iterations(0x00F0, 0x0110, false), 32);
+}
+
+#[test]
+fn u16_for_loop_var_carries_into_high_byte() {
+    // The counter itself must propagate its carry: record the last value of i.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let last: u16 = 0;
+            for i: u16 in 0..0x0110 {
+                last = i;
+            }
+            LO = last.low;
+            HI = last.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0x010F, "last i should be end - 1");
+}
+
+#[test]
+fn u16_for_loop_runtime_end() {
+    // A non-constant range end takes the temp-pair path instead of immediates.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn limit() -> u16 {
+            return 0x0120;
+        }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0..limit() {
+                n = n + one;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x0120,
+        "runtime end must compare both bytes"
+    );
+}
+
+#[test]
+fn u16_for_loop_break_and_continue() {
+    // `continue` must jump to the increment (not the head) and `break` must
+    // exit; both must work above 255.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0..0x0200 {
+                if i == 0x0105 {
+                    break;
+                }
+                if i < 0x0100 {
+                    continue;
+                }
+                n = n + one;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    // Only i in 0x0100..0x0105 increments n.
+    assert_eq!(
+        e.mem16(0x0400),
+        5,
+        "break/continue must respect 16-bit counter"
+    );
+}
+
+#[test]
+fn u16_for_loop_unrolled_sets_high_byte() {
+    // Small constant ranges unroll; a 16-bit counter above 255 must have its
+    // high byte written each iteration (it was left uninitialized before).
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let last: u16 = 0;
+            for i: u16 in 0x0205..0x0208 {
+                last = i;
+            }
+            LO = last.low;
+            HI = last.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x0207,
+        "unrolled u16 loop must set high byte"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Loop bounds must survive the loop body (hidden frame slot, not scratch)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_for_loop_nested_runtime_bounds() {
+    // Both loops have non-constant ends; with a shared scratch pair the inner
+    // loop's bound would overwrite the outer loop's live bound.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn outer_lim() -> u16 {
+            return 3;
+        }
+        fn inner_lim() -> u16 {
+            return 0x0102;
+        }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0..outer_lim() {
+                for j: u16 in 0..inner_lim() {
+                    n = n + one;
+                }
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    // 3 * 258 iterations.
+    assert_eq!(
+        e.mem16(0x0400),
+        774,
+        "nested loops must not share bound storage"
+    );
+}
+
+#[test]
+fn u16_for_loop_bound_survives_shift_in_body() {
+    // A u16 shift with a runtime count parks its high byte in the $22 scratch
+    // byte; the loop's bound must live elsewhere.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn lim() -> u16 {
+            return 0x0110;
+        }
+        fn one_bit() -> u8 {
+            return 1;
+        }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0..lim() {
+                let x: u16 = one << one_bit();
+                n = n + x;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    // 272 iterations, each adding 2.
+    assert_eq!(
+        e.mem16(0x0400),
+        544,
+        "u16 shift in body must not corrupt bound"
+    );
+}
+
+#[test]
+fn u16_for_loop_bound_survives_call_with_loop() {
+    // The body calls a function that runs its own runtime-bounded loop. Frame
+    // coloring keeps the callee's bound slot disjoint from the caller's.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn inner_lim() -> u16 {
+            return 0x0101;
+        }
+        fn outer_lim() -> u16 {
+            return 3;
+        }
+        fn count_inner() -> u16 {
+            let m: u16 = 0;
+            let one: u16 = 1;
+            for j: u16 in 0..inner_lim() {
+                m = m + one;
+            }
+            return m;
+        }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            for i: u16 in 0..outer_lim() {
+                n = n + count_inner();
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    // 3 * 257 iterations counted.
+    assert_eq!(
+        e.mem16(0x0400),
+        771,
+        "callee loop must not corrupt caller bound"
+    );
+}
+
+#[test]
+fn u8_for_loop_nested_runtime_bounds() {
+    // The 8-bit path had the same shared-scratch defect.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn outer_lim() -> u8 {
+            return 3;
+        }
+        fn inner_lim() -> u8 {
+            return 7;
+        }
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0..outer_lim() {
+                for j in 0..inner_lim() {
+                    n = n + 1;
+                }
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        21,
+        "nested u8 loops must not share bound storage"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Inclusive loops must not wrap the counter at the type maximum
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_for_loop_inclusive_to_max() {
+    // `..=0xFFFF`: the endpoint passes the head check, and an unconditional
+    // increment would wrap the counter to zero and loop forever. Termination
+    // itself is the regression check (the harness panics on budget exhaustion).
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i: u16 in 0xFFF0..=0xFFFF {
+                n = n + one;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        16,
+        "0xFFF0..=0xFFFF must run exactly 16 times"
+    );
+}
+
+#[test]
+fn u8_for_loop_inclusive_to_max() {
+    // Same wrap hazard for the 8-bit path at `..=0xFF`.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0xF0..=0xFF {
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 16, "0xF0..=0xFF must run exactly 16 times");
+}
+
+#[test]
+fn u8_for_loop_continue_reaches_increment() {
+    // `continue` must jump to the increment, not the head; jumping to the head
+    // both skipped the increment (infinite loop) and compared a clobbered X.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0..10 {
+                if i < 5 {
+                    continue;
+                }
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 5, "continue must not skip the increment");
+}
+
+// ---------------------------------------------------------------------------
+// Register state must be invalidated at loop back-edge targets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn loop_carried_var_reloaded_at_head() {
+    // The head of a `loop` is a back-edge target: register contents cached
+    // before the loop are stale on iteration 2+. Reading a loop-carried
+    // variable at the loop head must reload it from memory rather than reuse
+    // whatever the previous iteration's body left in A. Here `OUT = x` is the
+    // first body statement, and the trailing `if x == N` comparison clobbers A
+    // before jumping back, so without a reload the store writes garbage.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 1;
+            loop {
+                OUT = x;
+                x = x + 1;
+                if x == 5 {
+                    break;
+                }
+            }
+            loop {}
+        }
+    "#);
+    // Iterations write x = 1, 2, 3, 4 to OUT; the last committed value is 4.
+    assert_eq!(e.mem(0x0400), 4, "loop head must reload x each iteration");
+}
+
+#[test]
+fn while_carried_var_survives_iterations() {
+    // The `while` condition check is the sibling back-edge target of the `loop`
+    // head and gets the same invalidation. Current codegen already reloads the
+    // condition's operands from memory, so this exercises correctness rather
+    // than reproducing the bare-STA bug directly; it guards the while path
+    // against future register-state regressions.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 1;
+            while x < 5 {
+                OUT = x;
+                x = x + 1;
+            }
+            loop {}
+        }
+    "#);
+    // Iterations write x = 1, 2, 3, 4 to OUT; the last committed value is 4.
+    assert_eq!(e.mem(0x0400), 4, "while head must reload x each iteration");
+}
+
+// ---------------------------------------------------------------------------
 // Signed integers: negative literals
 // ---------------------------------------------------------------------------
 

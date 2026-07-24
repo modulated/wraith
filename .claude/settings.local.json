@@ -15,7 +15,8 @@
       "Bash(wc:*)",
       "Bash(find:*)",
       "Bash(xxd:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__add_repo"
     ]
   },
   "hooks": {

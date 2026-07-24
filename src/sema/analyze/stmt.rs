@@ -382,6 +382,23 @@ impl SemanticAnalyzer {
             }
         };
 
+        // 16-bit counters are u16-only for now: the loop machinery's compare
+        // is unsigned (wrong for i16) and its increment is binary (wrong for
+        // BCD b16). Fail loudly rather than miscompile.
+        if matches!(
+            var_ty,
+            Type::Primitive(PrimitiveType::I16) | Type::Primitive(PrimitiveType::B16)
+        ) {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "for loop counter '{}' has type {}; 16-bit loop counters are currently u16-only",
+                    var_name.node,
+                    var_ty.display_name()
+                ),
+                span: var_name.span,
+            });
+        }
+
         // Check for duplicate loop variable (shouldn't happen in new scope, but check anyway)
         if self.table.defined_in_current_scope(&var_name.node) {
             return Err(SemaError::DuplicateSymbol {
@@ -391,11 +408,14 @@ impl SemanticAnalyzer {
             });
         }
 
-        let offset = self.frame_alloc(1);
+        // Allocate frame space matching the counter's size: a 16-bit loop
+        // variable needs a zero-page pair (low/high), not a single byte.
+        let counter_size = var_ty.size().max(1) as u8;
+        let offset = self.frame_alloc(counter_size);
         let info = SymbolInfo {
             name: var_name.node.clone(),
             kind: SymbolKind::Variable,
-            ty: var_ty,
+            ty: var_ty.clone(),
             location: SymbolLocation::FrameOffset(offset),
             mutable: true,
             access_mode: None,
@@ -412,6 +432,28 @@ impl SemanticAnalyzer {
         if var_type.is_some() {
             self.check_expr(&range.start)?;
             self.check_expr(&range.end)?;
+        }
+
+        // A non-constant range end must survive the whole loop body, which may
+        // itself run nested loops, scratch-clobbering expressions, or calls.
+        // Give it a hidden frame slot (colored with the call graph like any
+        // local) rather than a shared zero-page scratch byte.
+        if !self.folded_constants.contains_key(&range.end.span) {
+            let bound_offset = self.frame_alloc(counter_size);
+            self.loop_bound_slots.insert(
+                range.end.span,
+                SymbolInfo {
+                    name: format!("<loop bound for {}>", var_name.node),
+                    kind: SymbolKind::Variable,
+                    ty: var_ty,
+                    location: SymbolLocation::FrameOffset(bound_offset),
+                    mutable: true,
+                    access_mode: None,
+                    is_pub: false,
+                    containing_function: self.current_function.clone(),
+                    is_param: false,
+                },
+            );
         }
 
         // Analyze body

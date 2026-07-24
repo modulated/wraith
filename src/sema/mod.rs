@@ -760,6 +760,11 @@ pub struct ProgramInfo {
     pub function_metadata: HashMap<String, FunctionMetadata>,
     /// Map of expression spans to their constant-folded values
     pub folded_constants: HashMap<Span, const_eval::ConstValue>,
+    /// Hidden per-loop frame slots holding non-constant for-loop range ends,
+    /// keyed by the range end expression's span. Frame-allocated (and colored
+    /// with the call graph) so nested loops, scratch-using expressions, and
+    /// calls in the loop body cannot clobber a live bound.
+    pub loop_bound_slots: HashMap<Span, SymbolInfo>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
     /// Map of expression spans to their resolved types

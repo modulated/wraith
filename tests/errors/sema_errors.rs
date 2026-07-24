@@ -564,3 +564,39 @@ fn error_has_source_context() {
         _ => panic!("Expected semantic error"),
     }
 }
+
+// ============================================================================
+// Codegen limitations that must fail loudly (not miscompile)
+// ============================================================================
+
+#[test]
+fn i16_for_loop_counter_rejected() {
+    // The 16-bit for-loop comparison is unsigned-only; a signed counter must
+    // be a compile error rather than a silent miscompile.
+    assert_error_contains(
+        r#"
+        fn main() {
+            for i: i16 in 0..1000 {
+                let x: u8 = 1;
+            }
+        }
+        "#,
+        "i16",
+    );
+}
+
+#[test]
+fn b16_for_loop_counter_rejected() {
+    // BCD counters would need decimal-mode increments; reject rather than
+    // run the binary increment over BCD values.
+    assert_error_contains(
+        r#"
+        fn main() {
+            for i: b16 in 0..1000 {
+                let x: u8 = 1;
+            }
+        }
+        "#,
+        "b16",
+    );
+}
