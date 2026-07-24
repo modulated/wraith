@@ -350,6 +350,38 @@ pub fn generate_struct_init_runtime(
                 continue;
             }
 
+            // An array-of-struct field holds inline elements: initialize each
+            // struct-literal element at field_addr + j*element_size.
+            if let crate::sema::types::Type::Array(elem, _) = &field_info.ty
+                && let crate::sema::types::Type::Named(elem_struct) = &**elem
+                && info.type_registry.get_struct(elem_struct).is_some()
+                && let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) =
+                    &value_expr.node
+            {
+                let esize = type_byte_size(elem, info) as u8;
+                for (j, el) in elements.iter().enumerate() {
+                    let el_fields = match &el.node {
+                        crate::ast::Expr::StructInit { fields, .. }
+                        | crate::ast::Expr::AnonStructInit { fields } => fields,
+                        _ => {
+                            return Err(CodegenError::UnsupportedOperation(
+                                "array-of-struct field elements must be struct literals"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    generate_struct_init_runtime(
+                        elem_struct,
+                        el_fields,
+                        field_addr + (j as u8) * esize,
+                        emitter,
+                        info,
+                        string_collector,
+                    )?;
+                }
+                continue;
+            }
+
             // Generate the scalar field value expression.
             generate_expr(value_expr, emitter, info, string_collector)?;
 
@@ -536,31 +568,67 @@ pub(crate) fn emit_array_struct_field_indexed(
     Ok(true)
 }
 
-/// If `expr` is a local array-of-struct variable, return its base address and
-/// the element struct's type name.
-fn array_of_struct_base(
+/// Resolve any statically-addressable lvalue to its `(address, type)`: a local
+/// (inline, non-pointer) variable, a nested struct field, or a constant array
+/// index. Returns None for by-reference parameters, runtime indices, or
+/// non-static forms. Generalizes resolve_static_struct_lvalue to non-struct
+/// field types (e.g. an array-of-struct field, needed for `a.b[i].c`).
+fn resolve_static_addr(
     expr: &Spanned<crate::ast::Expr>,
     info: &ProgramInfo,
-) -> Option<(u16, String)> {
+) -> Option<(u16, crate::sema::types::Type)> {
     use crate::ast::Expr;
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
-    let Expr::Variable(name) = &expr.node else {
-        return None;
-    };
-    let sym = info
-        .resolved_symbols
-        .get(&expr.span)
-        .or_else(|| info.table.lookup(name))?;
-    let addr = match sym.location {
-        SymbolLocation::ZeroPage(a) => a as u16,
-        SymbolLocation::Absolute(a) => a,
-        _ => return None,
-    };
-    match &sym.ty {
-        Type::Array(elem, _) => match &**elem {
-            Type::Named(n) => Some((addr, n.clone())),
+    match &expr.node {
+        Expr::Variable(name) => {
+            let sym = info
+                .resolved_symbols
+                .get(&expr.span)
+                .or_else(|| info.table.lookup(name))?;
+            if sym.is_param {
+                return None; // pointer, not inline storage
+            }
+            let addr = match sym.location {
+                SymbolLocation::ZeroPage(a) => a as u16,
+                SymbolLocation::Absolute(a) => a,
+                _ => return None,
+            };
+            Some((addr, sym.ty.clone()))
+        }
+        Expr::Field { object, field } => {
+            let (base, ty) = resolve_static_addr(object, info)?;
+            let Type::Named(sname) = ty else { return None };
+            let sdef = info.type_registry.get_struct(&sname)?;
+            let finfo = sdef.get_field(&field.node)?;
+            Some((base + finfo.offset as u16, finfo.ty.clone()))
+        }
+        Expr::Index { object, index } => {
+            let (base, ty) = resolve_static_addr(object, info)?;
+            let Type::Array(elem, _) = ty else {
+                return None;
+            };
+            let idx = const_index(index, info)?;
+            let esize = type_byte_size(&elem, info);
+            Some((base + (idx * esize) as u16, (*elem).clone()))
+        }
+        _ => None,
+    }
+}
+
+/// If `expr` is a statically-addressable array-of-struct lvalue (a variable or
+/// a nested field), return its base address and the element struct's name.
+fn array_of_struct_base(
+    expr: &Spanned<crate::ast::Expr>,
+    info: &ProgramInfo,
+) -> Option<(u16, String)> {
+    use crate::sema::types::Type;
+
+    let (addr, ty) = resolve_static_addr(expr, info)?;
+    match ty {
+        Type::Array(elem, _) => match *elem {
+            Type::Named(n) if info.type_registry.get_struct(&n).is_some() => Some((addr, n)),
             _ => None,
         },
         _ => None,

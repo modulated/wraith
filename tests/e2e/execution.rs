@@ -1827,3 +1827,59 @@ fn match_expr_unifies_arm_widths() {
     assert_eq!(pick(2), 524, "300 + 224 (u16 add carries into high byte)");
     assert_eq!(pick(9), 224, "0 + 224");
 }
+
+// ---------------------------------------------------------------------------
+// Deeper nested chains: an array-of-struct nested inside a struct (a.b[i].c).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_array_of_struct_read() {
+    let read = |i: u8| {
+        let src = format!(
+            r#"
+            struct Point {{ x: u8, y: u8 }}
+            struct Grid {{ count: u8, pts: [Point; 3] }}
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let g: Grid = Grid {{
+                    count: 3,
+                    pts: [ Point {{ x: 10, y: 1 }}, Point {{ x: 20, y: 2 }}, Point {{ x: 30, y: 3 }} ],
+                }};
+                let i: u8 = {i};
+                OUT = g.pts[i].x;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(read(0), 10, "g.pts[0].x");
+    assert_eq!(read(1), 20, "g.pts[1].x (runtime index into nested array)");
+    assert_eq!(read(2), 30, "g.pts[2].x");
+}
+
+#[test]
+fn nested_array_of_struct_const_and_write() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        struct Grid { count: u8, pts: [Point; 3] }
+        const OA: addr = 0x0400;
+        const OB: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let g: Grid = Grid {
+                count: 3,
+                pts: [ Point { x: 0, y: 0 }, Point { x: 0, y: 0 }, Point { x: 0, y: 0 } ],
+            };
+            let i: u8 = 1;
+            g.pts[0].x = 7;
+            g.pts[i].y = 8;
+            OA = g.pts[0].x;
+            OB = g.pts[1].y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "g.pts[0].x written (const index)");
+    assert_eq!(e.mem(0x0401), 8, "g.pts[i].y written (runtime index)");
+}
