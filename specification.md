@@ -1458,6 +1458,36 @@ let addr: u16 = 0x1000;
 **No implicit conversions** - all casts must be explicit.
 **No error checking** - casts that are invalid will overflow/underflow.
 
+### Integer Literals in Binary Operations
+
+A binary operation requires both operands to have the same type; two **variables**
+of different widths (e.g. `u16 + u8`) are a type error and must be reconciled with
+an explicit cast:
+
+```rust
+let a: u16 = 300;
+let b: u8 = 5;
+let c: u16 = a + (b as u16);   // explicit widening required
+```
+
+The single exception is a bare **integer literal** operand: it adopts the other
+operand's integer type when its value fits, in any operand position and for any
+operator (arithmetic *and* comparison). This is a compile-time typing of the
+literal, not a runtime conversion, so the no-implicit-conversion rule is
+preserved. A negated literal (`-5`) counts as a literal.
+
+```rust
+let a: u16 = 300;
+if a < 5 { ... }               // ok: `5` adopts u16
+let d: u16 = 1 + a;            // ok: `1` adopts u16
+
+let s: i16 = -300;
+if s < -5 { ... }              // ok: `-5` adopts i16 (signed compare)
+
+let e: u8 = 5;
+let f: u16 = e + 300;          // error: `e` is u8 and 300 does not fit u8
+```
+
 ### Valid Cast Combinations
 
 **Integer Widening (Safe):**

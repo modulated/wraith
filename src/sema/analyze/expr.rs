@@ -374,6 +374,22 @@ impl SemanticAnalyzer {
         Ok(info.ty)
     }
 
+    /// Is this operand a bare integer literal for width-adaptation purposes?
+    /// Accepts an integer literal, a unary-negated integer literal (`-5`), and
+    /// either wrapped in parentheses.
+    fn is_adaptable_int_literal(expr: &Expr) -> bool {
+        use crate::ast::{Literal, UnaryOp};
+        match expr {
+            Expr::Literal(Literal::Integer(_)) => true,
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => matches!(&operand.node, Expr::Literal(Literal::Integer(_))),
+            Expr::Paren(inner) => Self::is_adaptable_int_literal(&inner.node),
+            _ => false,
+        }
+    }
+
     fn check_binary(
         &mut self,
         left: &Spanned<Expr>,
@@ -381,8 +397,37 @@ impl SemanticAnalyzer {
         right: &Spanned<Expr>,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
-        let left_ty = self.check_expr(left)?;
-        let right_ty = self.check_expr(right)?;
+        // Literals-only width adaptation: a bare integer literal operand adopts
+        // the other operand's (integer) type, so it participates at the correct
+        // width in any operand position and for any operator — including
+        // comparisons in a condition, where there is no ambient expected type
+        // (e.g. `if a < 5` with `a: u16`). Only literals adapt; two *variables*
+        // of different widths stay an error, because Wraith performs no implicit
+        // type conversions. The literal is type-checked with the sibling's type
+        // as the expected type; if it does not fit, adaptation simply does not
+        // happen and the usual mismatch error is produced. A negated literal
+        // (`-5`) and parenthesized literals count too (check_unary already
+        // honors the expected type for a negated literal).
+        let left_is_int_lit = Self::is_adaptable_int_literal(&left.node);
+        let right_is_int_lit = Self::is_adaptable_int_literal(&right.node);
+
+        let (left_ty, right_ty) = if right_is_int_lit && !left_is_int_lit {
+            let lt = self.check_expr(left)?;
+            let saved = self.expected_type.take();
+            self.expected_type = Some(lt.clone());
+            let rt = self.check_expr(right);
+            self.expected_type = saved;
+            (lt, rt?)
+        } else if left_is_int_lit && !right_is_int_lit {
+            let rt = self.check_expr(right)?;
+            let saved = self.expected_type.take();
+            self.expected_type = Some(rt.clone());
+            let lt = self.check_expr(left);
+            self.expected_type = saved;
+            (lt?, rt)
+        } else {
+            (self.check_expr(left)?, self.check_expr(right)?)
+        };
 
         // String concatenation: str + str = str
         if matches!((&left_ty, &right_ty), (Type::String, Type::String)) {

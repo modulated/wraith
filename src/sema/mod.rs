@@ -157,10 +157,26 @@ impl SemaError {
                 right_ty,
                 span,
             } => {
-                let msg = format!(
+                let mut msg = format!(
                     "cannot apply '{}' to types {} and {}",
                     op, left_ty, right_ty
                 );
+                // Wraith performs no implicit conversions, so a mixed-width
+                // integer operation (e.g. u16 + u8) is rejected. Point the user
+                // at the explicit cast, which is the intended way to do it.
+                let is_int = |t: &str| matches!(t, "u8" | "i8" | "u16" | "i16");
+                if left_ty != right_ty && is_int(left_ty) && is_int(right_ty) {
+                    let wider = if matches!(left_ty.as_str(), "u16" | "i16") {
+                        left_ty
+                    } else {
+                        right_ty
+                    };
+                    msg.push_str(&format!(
+                        "\n  = help: Wraith has no implicit conversions; cast one operand, \
+                         e.g. `(x as {})`",
+                        wider
+                    ));
+                }
                 format!(
                     "error: invalid binary operation\n{}",
                     span.format_error_context(source, filename, &msg)

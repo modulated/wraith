@@ -206,6 +206,43 @@ fn return_anonymous_struct_literal_type_checks() {
 }
 
 // ---------------------------------------------------------------------------
+// Literals-only width adaptation in binary ops (no implicit variable conversion).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn literal_adapts_width_in_comparison() {
+    // `a < 5` with a: u16 must type-check (the literal adopts u16) and compare
+    // the full 16-bit value — even though the condition provides no ambient
+    // expected type. 300 is not < 5, so the else branch runs.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: u16 = 300;
+            if a < 5 { OUT = 1; } else { OUT = 2; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 2, "300 < 5 is false under full-width compare");
+}
+
+#[test]
+fn negated_literal_adapts_width_in_comparison() {
+    // `a < -5` with a: i16: the negated literal adopts i16 and the compare is
+    // signed. -300 < -5 holds.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: i16 = -300;
+            if a < -5 { OUT = 1; } else { OUT = 2; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 1, "-300 < -5 holds (signed, full width)");
+}
+
+// ---------------------------------------------------------------------------
 // Signed 16-bit comparison with a complex left operand keeps signed semantics.
 // ---------------------------------------------------------------------------
 
