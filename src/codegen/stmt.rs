@@ -1038,6 +1038,27 @@ pub fn generate_stmt(
             let continue_label = emitter.next_label("fc");
             let end_label = emitter.next_label("fz");
 
+            // Slices iterate with a 16-bit counter (they can exceed 255 elements),
+            // so they use a dedicated loop that re-reads the descriptor each
+            // iteration and advances an element pointer. Handled separately here.
+            if is_slice {
+                generate_foreach_slice(
+                    iterable,
+                    iterable_base,
+                    &iterable_ty,
+                    var_name,
+                    index_var.as_ref(),
+                    body,
+                    &loop_label,
+                    &continue_label,
+                    &end_label,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                return Ok(());
+            }
+
             // Initialize counter to 0 in X register
             emitter.emit_inst("LDX", "#$00");
             emitter
@@ -1496,11 +1517,20 @@ fn generate_slice_materialize(
         return Ok(());
     }
 
-    // Runtime path: bounds are computed at run time. Inclusive `..=` is only
-    // supported with a constant end (so end+1 is a compile-time value).
-    if inclusive {
+    // Runtime path: bounds are computed at run time. Only u8-typed runtime
+    // bounds are supported (the arithmetic below is 8-bit); u16 runtime bounds
+    // would need 16-bit handling. Constant u16 bounds took the fast path above.
+    let bound_is_u16 = |sp: &crate::ast::Span| {
+        matches!(
+            info.resolved_types.get(sp),
+            Some(crate::sema::types::Type::Primitive(
+                crate::ast::PrimitiveType::U16 | crate::ast::PrimitiveType::I16
+            ))
+        )
+    };
+    if bound_is_u16(&start.span) || bound_is_u16(&end.span) {
         return Err(CodegenError::UnsupportedOperation(
-            "inclusive range with a runtime end is not supported in slice creation".to_string(),
+            "runtime 16-bit slice bounds are not yet supported (use constant bounds)".to_string(),
         ));
     }
 
@@ -1514,12 +1544,17 @@ fn generate_slice_materialize(
     generate_expr(start, emitter, info, string_collector)?;
     emitter.emit_inst("STA", "$20");
 
-    // len = end - start (u8 result, zero-extended to u16).
+    // len = (end - start) [+ 1 for an inclusive range], as a 16-bit value. The
+    // +1 can carry into the high byte (e.g. `0..=255` is 256 elements).
+    let len_addend = if inclusive { 1 } else { 0 };
     emitter.emit_inst("LDA", "$21");
     emitter.emit_inst("SEC", "");
     emitter.emit_inst("SBC", "$20");
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", &format!("#${:02X}", len_addend));
     emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
     emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("ADC", "#$00");
     emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
 
     // byte offset = start * elem_size, as a 16-bit value in $22/$23.
@@ -1546,6 +1581,157 @@ fn generate_slice_materialize(
     emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
 
     emitter.invalidate_registers();
+    Ok(())
+}
+
+/// Iterate a slice with a 16-bit counter (slices can exceed 255 elements). The
+/// slice descriptor (`slot[0..1]` = base, `slot[2..3]` = length) is re-read each
+/// iteration, and an element pointer is recomputed into $F0/$F1, so the loop is
+/// correct even for lengths past 255 and across page boundaries. The counter
+/// lives in a hidden frame slot (allocated by sema) so it survives the body.
+#[allow(clippy::too_many_arguments)]
+fn generate_foreach_slice(
+    iterable: &Spanned<crate::ast::Expr>,
+    slot: u8,
+    iterable_ty: &crate::sema::types::Type,
+    var_name: &Spanned<String>,
+    index_var: Option<&Spanned<String>>,
+    body: &Spanned<crate::ast::Stmt>,
+    loop_label: &str,
+    continue_label: &str,
+    end_label: &str,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let elem_multibyte = matches!(
+        iterable_ty,
+        Type::Slice(elem) if matches!(
+            &**elem,
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+        )
+    );
+
+    // Hidden 16-bit counter slot (frame-allocated by sema, keyed on the iterable).
+    let counter = match info
+        .loop_bound_slots
+        .get(&iterable.span)
+        .map(|s| &s.location)
+    {
+        Some(SymbolLocation::ZeroPage(a)) => *a,
+        _ => {
+            return Err(CodegenError::Internal(
+                "slice foreach: 16-bit counter slot was not allocated".to_string(),
+            ));
+        }
+    };
+
+    // Loop-variable storage.
+    let loopvar_addr = match info
+        .resolved_symbols
+        .get(&var_name.span)
+        .map(|s| s.location.clone())
+        .ok_or_else(|| CodegenError::SymbolNotFound(var_name.node.clone()))?
+    {
+        SymbolLocation::ZeroPage(a) => a,
+        SymbolLocation::Absolute(a) if a < 256 => a as u8,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "ForEach loop variable must be in zero page".to_string(),
+            ));
+        }
+    };
+
+    // Optional index variable (u8: the low byte of the counter).
+    let index_addr = index_var
+        .and_then(|iv| info.resolved_symbols.get(&iv.span))
+        .and_then(|s| match s.location {
+            SymbolLocation::ZeroPage(a) => Some(a),
+            _ => None,
+        });
+
+    emitter.emit_comment("Slice foreach (16-bit counter)");
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("STA", &format!("${:02X}", counter));
+    emitter.emit_inst("STA", &format!("${:02X}", counter + 1));
+
+    emitter.emit_label(loop_label);
+    // The loop head is a branch target (entry and the back-edge), so no register
+    // belief from a previous iteration is valid here.
+    emitter.invalidate_registers();
+
+    // Exit when counter >= length (unsigned 16-bit compare).
+    let body_label = emitter.next_label("fsb");
+    emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
+    emitter.emit_inst("CMP", &format!("${:02X}", slot + 3));
+    emitter.emit_inst("BCC", &body_label); // counter.hi < len.hi
+    emitter.emit_inst("BNE", end_label); // counter.hi > len.hi -> done
+    emitter.emit_inst("LDA", &format!("${:02X}", counter));
+    emitter.emit_inst("CMP", &format!("${:02X}", slot + 2));
+    emitter.emit_inst("BCS", end_label); // counter.lo >= len.lo -> done
+    emitter.emit_label(&body_label);
+
+    emitter.push_loop(continue_label.to_string(), end_label.to_string());
+
+    if let Some(ia) = index_addr {
+        emitter.emit_inst("LDA", &format!("${:02X}", counter));
+        emitter.emit_inst("STA", &format!("${:02X}", ia));
+    }
+
+    // Element pointer = base + counter*elem_size, into $F0/$F1 (byte offset in
+    // $22/$23). Recomputed every iteration, so it survives a body with calls.
+    if elem_multibyte {
+        emitter.emit_inst("LDA", &format!("${:02X}", counter));
+        emitter.emit_inst("ASL", "A");
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
+        emitter.emit_inst("ROL", "A");
+        emitter.emit_inst("STA", "$23");
+    } else {
+        emitter.emit_inst("LDA", &format!("${:02X}", counter));
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
+        emitter.emit_inst("STA", "$23");
+    }
+    emitter.emit_inst("LDA", &format!("${:02X}", slot));
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "$22");
+    emitter.emit_inst("STA", "$F0");
+    emitter.emit_inst("LDA", &format!("${:02X}", slot + 1));
+    emitter.emit_inst("ADC", "$23");
+    emitter.emit_inst("STA", "$F1");
+
+    // Load the element into the loop variable.
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_inst("LDA", "($F0),Y");
+    emitter.emit_inst("STA", &format!("${:02X}", loopvar_addr));
+    if elem_multibyte {
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("LDA", "($F0),Y");
+        emitter.emit_inst("STA", &format!("${:02X}", loopvar_addr + 1));
+    }
+    emitter.invalidate_registers();
+
+    generate_stmt(body, emitter, info, string_collector)?;
+    emitter.pop_loop();
+
+    // continue: counter += 1 (16-bit), then re-test.
+    emitter.emit_label(continue_label);
+    emitter.emit_inst("INC", &format!("${:02X}", counter));
+    let no_carry = emitter.next_label("fsc");
+    emitter.emit_inst("BNE", &no_carry);
+    emitter.emit_inst("INC", &format!("${:02X}", counter + 1));
+    emitter.emit_label(&no_carry);
+    emitter.emit_inst("JMP", loop_label);
+    emitter.emit_label(end_label);
+    // The exit is reached from the compare branches with A holding the counter,
+    // not any tracked value, so drop all beliefs before following code.
+    emitter.invalidate_registers();
+
     Ok(())
 }
 

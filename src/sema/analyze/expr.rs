@@ -978,27 +978,29 @@ impl SemanticAnalyzer {
         inclusive: bool,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
-        // Type check start bound (must be u8)
+        // Slice bounds are integers. u8/i8 cover the common case; u16/i16 are
+        // accepted so slices longer than 255 elements can be formed (e.g. with
+        // constant bounds). Runtime u16 bounds are rejected later in codegen.
+        let is_int_bound = |t: &Type| {
+            matches!(
+                t,
+                Type::Primitive(
+                    PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::U16 | PrimitiveType::I16
+                )
+            )
+        };
         let start_ty = self.check_expr(start)?;
-        if !matches!(
-            start_ty,
-            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
-        ) {
+        if !is_int_bound(&start_ty) {
             return Err(SemaError::TypeMismatch {
-                expected: "u8 or i8".to_string(),
+                expected: "integer index".to_string(),
                 found: start_ty.display_name(),
                 span: start.span,
             });
         }
-
-        // Type check end bound (must be u8)
         let end_ty = self.check_expr(end)?;
-        if !matches!(
-            end_ty,
-            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
-        ) {
+        if !is_int_bound(&end_ty) {
             return Err(SemaError::TypeMismatch {
-                expected: "u8 or i8".to_string(),
+                expected: "integer index".to_string(),
                 found: end_ty.display_name(),
                 span: end.span,
             });

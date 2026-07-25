@@ -565,6 +565,28 @@ impl SemanticAnalyzer {
         // Add to resolved_symbols so codegen can find it
         self.resolved_symbols.insert(var_name.span, info);
 
+        // Iterating a slice uses a 16-bit loop counter (slices can exceed 255
+        // elements). It must survive the whole body, so give it a hidden frame
+        // slot (colored with the call graph) keyed by the iterable's span, in
+        // the same map the for-range loop uses for non-constant bounds.
+        if matches!(iterable_ty, Type::Slice(_)) {
+            let counter_off = self.frame_alloc(2);
+            self.loop_bound_slots.insert(
+                iterable.span,
+                SymbolInfo {
+                    name: format!("<slice iter counter for {}>", var_name.node),
+                    kind: SymbolKind::Variable,
+                    ty: Type::Primitive(PrimitiveType::U16),
+                    location: SymbolLocation::FrameOffset(counter_off),
+                    mutable: true,
+                    access_mode: None,
+                    is_pub: false,
+                    containing_function: self.current_function.clone(),
+                    is_param: false,
+                },
+            );
+        }
+
         // Analyze body
         self.loop_depth += 1;
         self.analyze_stmt(body)?;

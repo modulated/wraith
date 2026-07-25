@@ -342,3 +342,47 @@ fn for_index_over_array_len() {
     "#);
     assert_eq!(e.mem(0x0400), 150, "sum via `for i in 0..a.len`");
 }
+
+#[test]
+fn slice_inclusive_runtime_end() {
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const LEN: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let a: [u8; 6] = [10, 20, 30, 40, 50, 60];
+            let i: u8 = 1;
+            let j: u8 = 4;
+            let s: &[u8] = a[i..=j];   // a[1..=4] -> 20,30,40,50
+            E0 = s[3 as u8];
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 50, "inclusive end includes a[4]");
+    assert_eq!(e.mem(0x0401), 4, "len == j - i + 1 == 4");
+}
+
+#[test]
+fn foreach_slice_over_255_elements() {
+    // Iterate a slice with 300 elements; count in a u16 to prove the 16-bit
+    // counter iterates past 255.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let big: [u8; 300] = [1; 300];
+            let s: &[u8] = big[0..300];
+            let count: u16 = 0;
+            for x in s {
+                count = count + (x as u16);
+            }
+            LO = count.low;
+            HI = count.high;
+            loop {}
+        }
+    "#);
+    // 300 elements each == 1 -> sum 300 == 0x012C.
+    assert_eq!(e.mem16(0x0400), 300, "iterated all 300 elements");
+}
