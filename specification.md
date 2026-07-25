@@ -1102,9 +1102,13 @@ fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
 - Re-sliceable (`s[a..b]`), reassignable, and passed to / returned from
   functions by value
 
-Current limits: inclusive `..=` needs a constant end, element widths above 2
-bytes are not yet supported, iteration is bounded to 255 elements, and there is
-no runtime bounds checking.
+Bounds may be `u8`/`i8` or `u16`/`i16` (the latter lets constant-bounds slices
+exceed 255 elements), inclusive ranges accept a runtime end, and `for x in s`
+iterates the full length with a 16-bit counter.
+
+Current limits: element widths above 2 bytes are not yet supported, runtime
+(non-constant) slice bounds must be `u8`, and there is no runtime bounds
+checking.
 
 ### Slice Memory Representation
 
