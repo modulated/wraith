@@ -1083,15 +1083,28 @@ let s: &[u8] = a[1..5];
 let total: u8 = sum(s);
 ```
 
+Slices support the full set of view operations:
+
+```rust
+let s: &[u8] = a[1..5];
+let s2: &[u8] = s[1..3];       // re-slice a slice (offsets compose)
+s = a[2..6];                   // reassign to a new view
+for x in s { /* iterate elements */ }
+
+fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
+```
+
 **Slice Characteristics:**
 - Size: 4 bytes (2-byte base address + 2-byte length)
 - View into array data; length tracked at runtime
 - Created with `arr[a..b]` (constant or runtime bounds)
-- `.len` and indexing `s[i]` are supported; passed to functions by value
+- `.len`, indexing `s[i]`, and `for x in s` iteration
+- Re-sliceable (`s[a..b]`), reassignable, and passed to / returned from
+  functions by value
 
 Current limits: inclusive `..=` needs a constant end, element widths above 2
-bytes and slicing a slice are not yet supported, and there is no runtime bounds
-checking.
+bytes are not yet supported, iteration is bounded to 255 elements, and there is
+no runtime bounds checking.
 
 ### Slice Memory Representation
 
