@@ -21,6 +21,56 @@ fn array_len_constant() {
     assert_eq!(e.mem(0x0400), 5, "a.len is the array size");
 }
 
+// ---------------------------------------------------------------------------
+// String equality / inequality.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_equality() {
+    // Returns 1 when the `==` branch is taken, else 2.
+    let eq = |a: &str, b: &str| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let a: str = "{a}";
+                let b: str = "{b}";
+                if a == b {{ OUT = 1; }} else {{ OUT = 2; }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(eq("hello", "hello"), 1, "identical strings are equal");
+    assert_eq!(eq("hello", "world"), 2, "same length, different bytes");
+    assert_eq!(eq("hi", "hiya"), 2, "different lengths are not equal");
+    assert_eq!(eq("", ""), 1, "empty strings are equal");
+    assert_eq!(eq("abc", "abd"), 2, "differ in last byte");
+}
+
+#[test]
+fn string_inequality() {
+    let ne = |a: &str, b: &str| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let a: str = "{a}";
+                let b: str = "{b}";
+                if a != b {{ OUT = 1; }} else {{ OUT = 2; }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(ne("cat", "dog"), 1, "different strings differ");
+    assert_eq!(ne("cat", "cat"), 2, "identical strings do not differ");
+}
+
 #[test]
 fn for_index_over_array_len() {
     let mut e = run(r#"

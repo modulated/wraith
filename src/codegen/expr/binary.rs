@@ -69,6 +69,67 @@ fn is_power_of_2(val: u64) -> Option<u8> {
     }
 }
 
+/// Compare two strings for (in)equality, leaving a canonical bool in A (1/0).
+///
+/// Strings are `[u8 length][bytes...]` pointed to by A:X. The two pointers are
+/// held in zero-page vectors $F0/$F1 and $F2/$F3; the length byte is compared
+/// first (unequal length ⇒ unequal), then each data byte. `invert` produces the
+/// `!=` result (the boolean negation of equality).
+fn generate_string_eq(
+    left: &Spanned<Expr>,
+    right: &Spanned<Expr>,
+    invert: bool,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    emitter.emit_comment(if invert {
+        "String inequality (!=)"
+    } else {
+        "String equality (==)"
+    });
+
+    // Left pointer -> $F0/$F1.
+    generate_expr(left, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$F0");
+    emitter.emit_inst("STX", "$F1");
+    // Right pointer -> $F2/$F3.
+    generate_expr(right, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$F2");
+    emitter.emit_inst("STX", "$F3");
+
+    let loop_label = emitter.next_label("streq_loop");
+    let equal_label = emitter.next_label("streq_eq");
+    let ne_label = emitter.next_label("streq_ne");
+    let done_label = emitter.next_label("streq_done");
+
+    // Compare length bytes (offset 0).
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_inst("LDA", "($F0),Y");
+    emitter.emit_inst("CMP", "($F2),Y");
+    emitter.emit_inst("BNE", &ne_label);
+    // Lengths match; A holds the length. Zero-length strings are equal.
+    emitter.emit_inst("TAX", "");
+    emitter.emit_inst("BEQ", &equal_label);
+    // Compare data bytes 1..=length.
+    emitter.emit_label(&loop_label);
+    emitter.emit_inst("INY", "");
+    emitter.emit_inst("LDA", "($F0),Y");
+    emitter.emit_inst("CMP", "($F2),Y");
+    emitter.emit_inst("BNE", &ne_label);
+    emitter.emit_inst("DEX", "");
+    emitter.emit_inst("BNE", &loop_label);
+
+    emitter.emit_label(&equal_label);
+    emitter.emit_inst("LDA", if invert { "#$00" } else { "#$01" });
+    emitter.emit_inst("JMP", &done_label);
+    emitter.emit_label(&ne_label);
+    emitter.emit_inst("LDA", if invert { "#$01" } else { "#$00" });
+    emitter.emit_label(&done_label);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
 pub(super) fn generate_binary(
     left: &Spanned<Expr>,
     op: crate::ast::BinaryOp,
@@ -86,6 +147,20 @@ pub(super) fn generate_binary(
             return generate_logical_or(left, right, emitter, info, string_collector);
         }
         _ => {}
+    }
+
+    // String equality/inequality: compare the length byte, then the bytes.
+    if matches!(op, crate::ast::BinaryOp::Eq | crate::ast::BinaryOp::Ne)
+        && matches!(info.resolved_types.get(&left.span), Some(Type::String))
+    {
+        return generate_string_eq(
+            left,
+            right,
+            matches!(op, crate::ast::BinaryOp::Ne),
+            emitter,
+            info,
+            string_collector,
+        );
     }
 
     // Determine operand width/signedness before generating code.

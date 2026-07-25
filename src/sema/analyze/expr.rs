@@ -429,16 +429,19 @@ impl SemanticAnalyzer {
             (self.check_expr(left)?, self.check_expr(right)?)
         };
 
-        // String concatenation: str + str = str
+        // String operators: `+` concatenates (str), `==`/`!=` compare (bool).
         if matches!((&left_ty, &right_ty), (Type::String, Type::String)) {
             match op {
                 BinaryOp::Add => {
                     // Result is also a string type
                     return Ok(Type::String);
                 }
+                BinaryOp::Eq | BinaryOp::Ne => {
+                    return Ok(Type::Primitive(PrimitiveType::Bool));
+                }
                 _ => {
                     return Err(SemaError::InvalidBinaryOp {
-                        op: format!("{:?} (only '+' is supported for strings)", op),
+                        op: format!("{:?} (strings support '+', '==', and '!=')", op),
                         left_ty: left_ty.display_name(),
                         right_ty: right_ty.display_name(),
                         span,
