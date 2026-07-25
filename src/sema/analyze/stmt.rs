@@ -489,13 +489,14 @@ impl SemanticAnalyzer {
         // Check the iterable expression (should be an array or string)
         let iterable_ty = self.check_expr(iterable)?;
 
-        // Extract element type from array type or string
+        // Extract element type from array, slice, or string
         let element_ty = match &iterable_ty {
             Type::Array(elem_ty, _size) => (**elem_ty).clone(),
+            Type::Slice(elem_ty) => (**elem_ty).clone(),
             Type::String => Type::Primitive(PrimitiveType::U8), // String elements are u8
             _ => {
                 return Err(SemaError::TypeMismatch {
-                    expected: "array or string".to_string(),
+                    expected: "array, slice, or string".to_string(),
                     found: iterable_ty.display_name(),
                     span: iterable.span,
                 });

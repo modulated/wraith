@@ -161,6 +161,46 @@ fn slice_with_runtime_bounds_u16() {
 }
 
 #[test]
+fn slice_reassignment() {
+    // `s = arr[a..b];` retargets an existing slice variable.
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const LEN: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+            let s: &[u8] = a[0..2];   // 1, 2
+            s = a[3..6];              // 4, 5, 6
+            E0 = s[0 as u8];
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 4, "s[0] == a[3] after reassignment");
+    assert_eq!(e.mem(0x0401), 3, "s.len == 3 after reassignment");
+}
+
+#[test]
+fn foreach_over_slice() {
+    // Iterate a slice directly with `for x in s`.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: [u8; 6] = [10, 20, 30, 40, 50, 60];
+            let s: &[u8] = a[1..5];   // 20, 30, 40, 50
+            let sum: u8 = 0;
+            for x in s {
+                sum = sum + x;
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 140, "20 + 30 + 40 + 50 = 140");
+}
+
+#[test]
 fn slice_returned_from_function() {
     // A function computes a sub-slice and returns it; the caller reads through
     // the returned descriptor (base still points into the original array).

@@ -487,6 +487,36 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Assign { target, value } => {
+            // Slice reassignment: `s = arr[a..b];` materializes a new descriptor
+            // into the slice variable's slot (same as the `let` form).
+            if let crate::ast::Expr::Variable(target_name) = &target.node
+                && let crate::ast::Expr::Slice {
+                    object,
+                    start,
+                    end,
+                    inclusive,
+                } = &value.node
+                && let Some(sym) = info
+                    .resolved_symbols
+                    .get(&target.span)
+                    .or_else(|| info.table.lookup(target_name))
+                && let crate::sema::types::Type::Slice(elem) = &sym.ty
+                && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+            {
+                generate_slice_materialize(
+                    dest,
+                    elem,
+                    object,
+                    start,
+                    end,
+                    *inclusive,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                return Ok(());
+            }
+
             // Optimization: detect x = x + 1 and x = x - 1 patterns
             // Use INC/DEC instead of LDA/ADC/STA or LDA/SBC/STA
             if let crate::ast::Expr::Variable(target_name) = &target.node
@@ -1002,6 +1032,7 @@ pub fn generate_stmt(
             };
 
             let (iterable_base, iterable_ty) = iterable_info;
+            let is_slice = matches!(&iterable_ty, crate::sema::types::Type::Slice(_));
 
             let loop_label = emitter.next_label("fe");
             let continue_label = emitter.next_label("fc");
@@ -1029,13 +1060,20 @@ pub fn generate_stmt(
                 // Store length in temp location for comparison
                 emitter.emit_inst("STA", "$F2");
                 None // Will compare against $F2
+            } else if is_slice {
+                // Slice: length is the low byte of the descriptor at base+2
+                // (iteration is bounded to 255 elements). Compare against $F2.
+                emitter.emit_comment("Slice iteration - load length");
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 2));
+                emitter.emit_inst("STA", "$F2");
+                None
             } else {
                 // For arrays, size is known at compile time
                 match &iterable_ty {
                     crate::sema::types::Type::Array(_, sz) => Some(*sz),
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(
-                            "ForEach requires array or string type".to_string(),
+                            "ForEach requires array, slice, or string type".to_string(),
                         ));
                     }
                 }
@@ -1045,8 +1083,8 @@ pub fn generate_stmt(
             emitter.emit_label(&loop_label);
 
             // Check if counter (X) >= length
-            if is_string {
-                // Compare X against string length in $F2
+            if is_string || is_slice {
+                // Compare X against the runtime length parked in $F2
                 emitter.emit_inst("CPX", "$F2");
             } else if let Some(size) = array_size {
                 // Compare X against known array size
@@ -1076,19 +1114,23 @@ pub fn generate_stmt(
                 }
             }
 
-            // Whether the array element type is 16-bit (u16/i16/b16). Strings
-            // always iterate u8 characters.
-            let elem_multibyte = matches!(
-                &iterable_ty,
-                crate::sema::types::Type::Array(elem, _) if matches!(
-                    &**elem,
-                    crate::sema::types::Type::Primitive(
+            // Whether the array/slice element type is 16-bit (u16/i16/b16).
+            // Strings always iterate u8 characters.
+            let elem_multibyte = {
+                let elem = match &iterable_ty {
+                    crate::sema::types::Type::Array(elem, _)
+                    | crate::sema::types::Type::Slice(elem) => Some(&**elem),
+                    _ => None,
+                };
+                matches!(
+                    elem,
+                    Some(crate::sema::types::Type::Primitive(
                         crate::ast::PrimitiveType::U16
                             | crate::ast::PrimitiveType::I16
                             | crate::ast::PrimitiveType::B16
-                    )
+                    ))
                 )
-            );
+            };
 
             // Resolve the loop variable's storage up front.
             let loopvar_loc = info
