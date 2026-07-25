@@ -270,3 +270,34 @@ fn match_multiple_arms() {
     assert_asm_contains(&asm, "CMP");
     assert_asm_contains(&asm, "JMP");
 }
+
+#[test]
+fn match_expression_incompatible_arms_error() {
+    // A match expression whose arms have no common type is now rejected;
+    // previously the first arm's type won and later arms were ignored.
+    assert_error_contains(
+        r#"
+        fn main() {
+            let k: u8 = 1;
+            let flag: bool = match k { 0 => true, _ => 5 };
+        }
+    "#,
+        "type mismatch",
+    );
+}
+
+#[test]
+fn match_expression_compatible_arms_ok() {
+    // Same-type arms unify cleanly.
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x0400;
+        fn main() {
+            let k: u8 = 1;
+            let v: u8 = match k { 0 => 10, 1 => 20, _ => 30 };
+            OUT = v;
+        }
+    "#,
+    );
+    assert_asm_contains(&asm, "Match expression");
+}

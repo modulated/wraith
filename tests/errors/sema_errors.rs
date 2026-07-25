@@ -36,6 +36,22 @@ fn invalid_operation() {
 }
 
 #[test]
+fn mixed_width_variables_suggest_cast() {
+    // u16 + u8 between variables stays an error (no implicit conversions), and
+    // the diagnostic points at the explicit cast.
+    assert_error_contains(
+        r#"
+        fn main() {
+            let a: u16 = 300;
+            let b: u8 = 5;
+            let c: u16 = a + b;
+        }
+        "#,
+        "cast one operand",
+    );
+}
+
+#[test]
 fn function_arity_mismatch() {
     assert_error_contains(
         r#"

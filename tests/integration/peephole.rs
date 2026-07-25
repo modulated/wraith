@@ -411,6 +411,86 @@ fn multiply_by_four() {
 // Address Loading Optimization
 // ============================================================================
 
+// ============================================================================
+// Volatile memory-mapped I/O must NOT be optimized away
+// ============================================================================
+
+#[test]
+fn volatile_write_only_store_not_folded() {
+    // Writing the same value to a write-only I/O register twice is a
+    // deliberate double-strobe; the peephole optimizer must keep both stores.
+    let asm = compile_success(
+        r#"
+        const STROBE: write addr = 0x6000;
+        fn main() {
+            STROBE = 1;
+            STROBE = 1;
+        }
+    "#,
+    );
+
+    let sta_count = asm
+        .lines()
+        .filter(|line| line.trim() == "STA STROBE")
+        .count();
+    assert_eq!(
+        sta_count, 2,
+        "both writes to a volatile W register must be preserved\n{}",
+        asm
+    );
+}
+
+#[test]
+fn volatile_read_after_write_not_folded() {
+    // A read-write I/O register can return different data than was just
+    // written (a command register that reads back status), so the load after
+    // the store must survive.
+    let asm = compile_success(
+        r#"
+        const PORT: addr = 0x6000;
+        fn main() {
+            let x: u8 = 5;
+            PORT = x;
+            let y: u8 = PORT;
+        }
+    "#,
+    );
+
+    assert!(
+        asm.lines().any(|line| line.trim() == "LDA PORT"),
+        "read-back of a volatile RW register must be preserved\n{}",
+        asm
+    );
+}
+
+#[test]
+fn volatile_read_only_loads_not_folded() {
+    // Two reads of a read-only status register are two distinct hardware
+    // reads; neither may be elided even when adjacent.
+    let asm = compile_success(
+        r#"
+        const STATUS: read addr = 0x6000;
+        const OUT: write addr = 0x6001;
+        fn main() {
+            let a: u8 = STATUS;
+            let b: u8 = STATUS;
+            OUT = a;
+            OUT = b;
+        }
+    "#,
+    );
+
+    let lda_count = asm
+        .lines()
+        .filter(|line| line.trim() == "LDA STATUS")
+        .count();
+    assert_eq!(
+        lda_count, 2,
+        "each read of a volatile R register must be preserved\n{}",
+        asm
+    );
+}
+
 #[test]
 fn redundant_immediate_loads_eliminated() {
     let asm = compile_success(

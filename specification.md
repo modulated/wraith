@@ -733,6 +733,23 @@ fn update_entity(e: Entity) {
 }
 ```
 
+### Returning Structs by Value
+
+A function may return a struct by value. The result is copied into the
+destination variable's storage, so returning and binding a struct is a true
+copy:
+
+```rust
+fn make() -> Point {
+    return Point { x: 7, y: 9 };
+}
+
+fn main() {
+    let p: Point = make();   // full struct copied into p
+    p = make();              // reassignment copies too
+}
+```
+
 ### Completion Status
 
 All items completed.
@@ -1033,28 +1050,65 @@ if i < 5 {
 
 ### Slice Operations
 
-Slices are references to array data with tracked length:
+Slices are references to a sub-range of an array, carrying a base pointer and a
+runtime length. A slice value is produced by slicing an array with `arr[a..b]`
+(or `arr[a..=b]`) and bound to a `&[T]` variable:
 
 ```rust
-// Function taking slice
-fn sum_values(values: [u8]) -> u16 {
-    let total: u16 = 0;
-    for v in values {
-        total = total + (v as u16);
+let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+let s: &[u8] = a[1..5];   // elements a[1]..a[4]
+
+let n: u16 = s.len;       // runtime length (here 4)
+let first: u8 = s[0];     // s[0] == a[1]
+for i in 0..s.len {
+    // iterate a slice by index
+}
+```
+
+Bounds may be constants or computed at run time (`a[i..j]`), and slices of
+`u8` and `u16` element arrays are supported (the index is scaled by the element
+width). A slice can be passed to a function, which reads its length and
+elements through the descriptor:
+
+```rust
+fn sum(s: &[u8]) -> u8 {
+    let acc: u8 = 0;
+    for i in 0..s.len {
+        acc = acc + s[i as u8];
     }
-    return total;
+    return acc;
 }
 
-// Arrays automatically coerce to slices
-let data: [u8; 5] = [10, 20, 30, 40, 50];
-let result: u16 = sum_values(data);  // Passes as slice
+let s: &[u8] = a[1..5];
+let total: u8 = sum(s);
+```
+
+Slices support the full set of view operations:
+
+```rust
+let s: &[u8] = a[1..5];
+let s2: &[u8] = s[1..3];       // re-slice a slice (offsets compose)
+s = a[2..6];                   // reassign to a new view
+for x in s { /* iterate elements */ }
+
+fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
 ```
 
 **Slice Characteristics:**
 - Size: 4 bytes (2-byte base address + 2-byte length)
-- Read-only view of array data
-- Length tracked at runtime
-- No slice syntax (e.g., `arr[1..3]`) - pass whole array only
+- View into array data; length tracked at runtime
+- Created with `arr[a..b]` (constant or runtime bounds)
+- `.len`, indexing `s[i]`, and `for x in s` iteration
+- Re-sliceable (`s[a..b]`), reassignable, and passed to / returned from
+  functions by value
+
+Bounds may be `u8`/`i8` or `u16`/`i16` (the latter lets constant-bounds slices
+exceed 255 elements), inclusive ranges accept a runtime end, and `for x in s`
+iterates the full length with a 16-bit counter.
+
+Current limits: element widths above 2 bytes are not yet supported, runtime
+(non-constant) slice bounds must be `u8`, and there is no runtime bounds
+checking.
 
 ### Slice Memory Representation
 
@@ -1182,6 +1236,19 @@ const PATH: str = "data/" + "level" + ".txt";
 - Both operands must be compile-time constant strings
 - Result must not exceed 255 bytes
 - Evaluated entirely at compile time (zero runtime cost)
+
+### String Comparison
+
+Compare two strings for equality with `==` / `!=` (result is `bool`). The
+comparison runs at runtime: the length bytes are compared first, then each
+character.
+
+```rust
+let a: str = "hello";
+let b: str = "hello";
+if a == b { /* equal */ }
+if a != "world" { /* differs */ }
+```
 
 ### String Slicing
 
@@ -1457,6 +1524,36 @@ let addr: u16 = 0x1000;
 
 **No implicit conversions** - all casts must be explicit.
 **No error checking** - casts that are invalid will overflow/underflow.
+
+### Integer Literals in Binary Operations
+
+A binary operation requires both operands to have the same type; two **variables**
+of different widths (e.g. `u16 + u8`) are a type error and must be reconciled with
+an explicit cast:
+
+```rust
+let a: u16 = 300;
+let b: u8 = 5;
+let c: u16 = a + (b as u16);   // explicit widening required
+```
+
+The single exception is a bare **integer literal** operand: it adopts the other
+operand's integer type when its value fits, in any operand position and for any
+operator (arithmetic *and* comparison). This is a compile-time typing of the
+literal, not a runtime conversion, so the no-implicit-conversion rule is
+preserved. A negated literal (`-5`) counts as a literal.
+
+```rust
+let a: u16 = 300;
+if a < 5 { ... }               // ok: `5` adopts u16
+let d: u16 = 1 + a;            // ok: `1` adopts u16
+
+let s: i16 = -300;
+if s < -5 { ... }              // ok: `-5` adopts i16 (signed compare)
+
+let e: u8 = 5;
+let f: u16 = e + 300;          // error: `e` is u8 and 300 does not fit u8
+```
 
 ### Valid Cast Combinations
 

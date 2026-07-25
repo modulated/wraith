@@ -163,6 +163,16 @@ fn generate_function(
             emit_interrupt_zp_save(&mut temp_emitter, &interrupt_zp);
         }
 
+        // Include the function-pointer prologue size (must match the real emit).
+        if info.address_taken_functions.contains(name)
+            && let Some(frame) = info.function_frames.get(name)
+        {
+            for _ in 0..frame.param_size {
+                temp_emitter.emit_inst("LDA", "$E0");
+                temp_emitter.emit_inst("STA", "$40");
+            }
+        }
+
         // Generate function body to measure size
         generate_stmt(&func.body, &mut temp_emitter, info, string_collector)?;
 
@@ -176,7 +186,9 @@ fn generate_function(
             temp_emitter.emit_inst("TAX", "");
             temp_emitter.emit_inst("PLA", "");
             temp_emitter.emit_inst("RTI", "");
-        } else if func.return_type.is_none() {
+        } else if !temp_emitter.last_was_terminal() {
+            // Mirror the real epilogue (see below): RTS unless the body already
+            // ended terminal, so the measured size matches the emitted size.
             temp_emitter.emit_inst("RTS", "");
         }
 
@@ -362,6 +374,28 @@ fn generate_function(
         emit_interrupt_zp_save(emitter, &interrupt_zp);
     }
 
+    // Address-taken function prologue: copy arguments from the fixed indirect-arg
+    // staging block into this function's colored frame parameter slots. Every
+    // caller (direct or indirect) writes args to the staging block, so this runs
+    // on every entry. The params occupy [frame.base, frame.base + param_size).
+    if info.address_taken_functions.contains(name)
+        && let Some(frame) = info.function_frames.get(name)
+        && frame.param_size > 0
+    {
+        emitter.emit_comment("Function-pointer prologue: copy staged args into frame");
+        for i in 0..frame.param_size {
+            emitter.emit_inst(
+                "LDA",
+                &format!(
+                    "${:02X}",
+                    crate::codegen::memory_layout::INDIRECT_ARG_BASE + i
+                ),
+            );
+            emitter.emit_inst("STA", &format!("${:02X}", frame.base + i));
+        }
+        emitter.invalidate_registers();
+    }
+
     // Body
     generate_stmt(&func.body, emitter, info, string_collector)?;
 
@@ -382,10 +416,14 @@ fn generate_function(
         emitter.emit_inst("PLA", "");
         emitter.emit_inst("RTI", "");
     } else {
-        // Emit RTS for functions without explicit return (void functions)
-        // Only emit if the last instruction wasn't already a terminal instruction (RTS, RTI, or JMP)
-        // This avoids duplicate RTS when the function body ends with a return statement
-        if func.return_type.is_none() && !emitter.last_was_terminal() {
+        // Emit a trailing RTS whenever the body does not already end in a
+        // terminal instruction (RTS, RTI, or JMP). This covers void functions
+        // that fall off the end AND value-returning functions whose body ends in
+        // an `asm { }` block that leaves the result in registers without an
+        // explicit `return` (e.g. the stdlib math routines) — those would
+        // otherwise fall through into the next function. `last_was_terminal`
+        // already prevents a duplicate RTS after an explicit `return`.
+        if !emitter.last_was_terminal() {
             emitter.emit_inst("RTS", "");
         }
     }

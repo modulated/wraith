@@ -25,6 +25,22 @@ fn is_simple_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_) | Expr::Variable(_))
 }
 
+/// Does evaluating this expression leave the Y register untouched?
+///
+/// The u8 binary fast path parks the left operand in Y while the right operand
+/// is evaluated, so any right operand that writes Y — array indexing (`arr[i]`
+/// scales the index through Y), casts and byte extraction (`.low`/`.high` load
+/// the u16 source's high byte into Y), nested binary ops (their own u8 save uses
+/// Y), field/pointer derefs, and calls — would silently corrupt it. Only
+/// literals and direct scalar variable reads are guaranteed to touch A alone.
+fn is_y_preserving(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Variable(_) => true,
+        Expr::Paren(inner) => is_y_preserving(&inner.node),
+        _ => false,
+    }
+}
+
 /// Does evaluating this expression involve a function call (direct or nested)?
 /// A call clobbers Y and the $F0 scratch pool, so a live left operand held there
 /// must instead be spilled across the call.
@@ -53,6 +69,67 @@ fn is_power_of_2(val: u64) -> Option<u8> {
     }
 }
 
+/// Compare two strings for (in)equality, leaving a canonical bool in A (1/0).
+///
+/// Strings are `[u8 length][bytes...]` pointed to by A:X. The two pointers are
+/// held in zero-page vectors $F0/$F1 and $F2/$F3; the length byte is compared
+/// first (unequal length ⇒ unequal), then each data byte. `invert` produces the
+/// `!=` result (the boolean negation of equality).
+fn generate_string_eq(
+    left: &Spanned<Expr>,
+    right: &Spanned<Expr>,
+    invert: bool,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    emitter.emit_comment(if invert {
+        "String inequality (!=)"
+    } else {
+        "String equality (==)"
+    });
+
+    // Left pointer -> $F0/$F1.
+    generate_expr(left, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$F0");
+    emitter.emit_inst("STX", "$F1");
+    // Right pointer -> $F2/$F3.
+    generate_expr(right, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$F2");
+    emitter.emit_inst("STX", "$F3");
+
+    let loop_label = emitter.next_label("streq_loop");
+    let equal_label = emitter.next_label("streq_eq");
+    let ne_label = emitter.next_label("streq_ne");
+    let done_label = emitter.next_label("streq_done");
+
+    // Compare length bytes (offset 0).
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_inst("LDA", "($F0),Y");
+    emitter.emit_inst("CMP", "($F2),Y");
+    emitter.emit_inst("BNE", &ne_label);
+    // Lengths match; A holds the length. Zero-length strings are equal.
+    emitter.emit_inst("TAX", "");
+    emitter.emit_inst("BEQ", &equal_label);
+    // Compare data bytes 1..=length.
+    emitter.emit_label(&loop_label);
+    emitter.emit_inst("INY", "");
+    emitter.emit_inst("LDA", "($F0),Y");
+    emitter.emit_inst("CMP", "($F2),Y");
+    emitter.emit_inst("BNE", &ne_label);
+    emitter.emit_inst("DEX", "");
+    emitter.emit_inst("BNE", &loop_label);
+
+    emitter.emit_label(&equal_label);
+    emitter.emit_inst("LDA", if invert { "#$00" } else { "#$01" });
+    emitter.emit_inst("JMP", &done_label);
+    emitter.emit_label(&ne_label);
+    emitter.emit_inst("LDA", if invert { "#$01" } else { "#$00" });
+    emitter.emit_label(&done_label);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
 pub(super) fn generate_binary(
     left: &Spanned<Expr>,
     op: crate::ast::BinaryOp,
@@ -72,10 +149,39 @@ pub(super) fn generate_binary(
         _ => {}
     }
 
-    // Check if we're doing 16-bit arithmetic (check before generating expressions)
-    let left_type = info.resolved_types.get(&left.span);
+    // String equality/inequality: compare the length byte, then the bytes.
+    if matches!(op, crate::ast::BinaryOp::Eq | crate::ast::BinaryOp::Ne)
+        && matches!(info.resolved_types.get(&left.span), Some(Type::String))
+    {
+        return generate_string_eq(
+            left,
+            right,
+            matches!(op, crate::ast::BinaryOp::Ne),
+            emitter,
+            info,
+            string_collector,
+        );
+    }
 
-    let is_u16 = left_type.is_some_and(|ty| {
+    // Determine operand width/signedness before generating code.
+    //
+    // Arithmetic and comparison operands share a type (Wraith has no implicit
+    // conversions), but a complex operand's span may be absent from
+    // resolved_types; deriving purely from the left then silently defaults to
+    // 8-bit unsigned and miscompiles a wide/signed comparison. So consult the
+    // right operand as a fallback. Shifts are the exception: `u16 >> u8` is
+    // allowed, so the value's width/signedness must come from the left operand
+    // (the value), never the right (a count that may be narrower).
+    let left_type = info.resolved_types.get(&left.span);
+    let right_type = info.resolved_types.get(&right.span);
+    let is_shift = matches!(op, crate::ast::BinaryOp::Shl | crate::ast::BinaryOp::Shr);
+    let op_type = if is_shift {
+        left_type
+    } else {
+        left_type.or(right_type)
+    };
+
+    let is_u16 = op_type.is_some_and(|ty| {
         matches!(
             ty,
             Type::Primitive(crate::ast::PrimitiveType::U16)
@@ -86,7 +192,7 @@ pub(super) fn generate_binary(
 
     // Whether the operands are signed (i8/i16). Comparisons, `>>`, and division
     // need signed-specific sequences; other ops are bit-identical either way.
-    let is_signed = left_type.is_some_and(|ty| ty.is_signed());
+    let is_signed = op_type.is_some_and(|ty| ty.is_signed());
 
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
@@ -175,14 +281,21 @@ pub(super) fn generate_binary(
     // correctly (LIFO) with the recursion frame saves in generate_call.
     let right_has_call = contains_call(&right.node);
 
+    // The u8 fast path additionally parks the left operand in Y, which any
+    // Y-writing right operand (even a call-free one, e.g. `arr[i]` or a cast)
+    // destroys. Route those through the same memory spill. The u16 fast path
+    // saves to a temp_alloc slot that nested ops never reuse, so it only needs
+    // the call guard.
+    let needs_spill = right_has_call || (!is_u16 && !is_y_preserving(&right.node));
+
     // Allocate temp storage for the u16 fast-path left-operand save (if needed)
-    let left_save_addr = if use_stack && is_u16 && !right_has_call {
+    let left_save_addr = if use_stack && is_u16 && !needs_spill {
         emitter.temp_alloc.alloc_high(2)
     } else {
         None
     };
 
-    if use_stack && right_has_call {
+    if use_stack && needs_spill {
         // Right operand contains a call: spill the left operand across it.
         let spill_size = if is_u16 { 2 } else { 1 };
 

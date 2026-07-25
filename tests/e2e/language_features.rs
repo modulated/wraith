@@ -1,0 +1,497 @@
+//! Runtime (emulator) tests for language features not otherwise exercised on
+//! the emulator: casts (widen/narrow/sign-extend), compound assignment,
+//! enum dispatch, array-fill init, nested calls, mutable globals, inclusive
+//! ranges, string iteration, and division/modulo specifics.
+
+use crate::common::exec::run;
+
+// ---------------------------------------------------------------------------
+// Casts.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cast_widen_u8_to_u16() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let a: u8 = 200;
+            let b: u16 = a as u16;
+            LO = b.low;
+            HI = b.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 200, "u8 200 widened to u16 (high byte 0)");
+}
+
+#[test]
+fn cast_narrow_u16_to_u8() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: u16 = 0x1234;
+            let b: u8 = a as u8;
+            OUT = b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x34, "u16 0x1234 narrowed to u8 keeps low byte");
+}
+
+#[test]
+fn cast_sign_extend_i8_to_i16() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let a: i8 = -5;
+            let b: i16 = a as i16;
+            LO = b.low;
+            HI = b.high;
+            loop {}
+        }
+    "#);
+    // -5 sign-extends to 0xFFFB (high byte 0xFF, not 0x00).
+    assert_eq!(e.mem16(0x0400), 0xFFFB, "i8 -5 sign-extended to i16");
+}
+
+// ---------------------------------------------------------------------------
+// Compound assignment operators.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compound_assignment_operators() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 10;
+            x += 5;   // 15
+            x -= 3;   // 12
+            x *= 2;   // 24
+            x <<= 1;  // 48
+            x |= 1;   // 49
+            x &= 0xF7;// 49 & 0xF7 = 0x31 = 49 (bit 3 clear; 49 = 0x31)
+            OUT = x;
+            loop {}
+        }
+    "#);
+    // 10 +5 -3 *2 <<1 = 48; |1 = 49 (0x31); &0xF7 leaves 0x31 (bit3 already 0).
+    assert_eq!(e.mem(0x0400), 0x31, "chained compound assignments");
+}
+
+#[test]
+fn compound_assignment_u16() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let x: u16 = 1000;
+            x += 500;  // 1500
+            x -= 100;  // 1400
+            LO = x.low;
+            HI = x.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 1400, "u16 compound assignment");
+}
+
+// ---------------------------------------------------------------------------
+// Enum dispatch over unit variants.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enum_unit_variant_dispatch() {
+    let classify = |v: &str| {
+        let src = format!(
+            r#"
+            enum Dir {{ North, South, East, West }}
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let d: Dir = Dir::{v};
+                match d {{
+                    Dir::North => {{ OUT = 1; }}
+                    Dir::South => {{ OUT = 2; }}
+                    Dir::East  => {{ OUT = 3; }}
+                    Dir::West  => {{ OUT = 4; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(classify("North"), 1);
+    assert_eq!(classify("East"), 3);
+    assert_eq!(classify("West"), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Array-fill initializer and read.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn array_fill_init() {
+    let mut e = run(r#"
+        const AV: addr = 0x0400;
+        const BV: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let buf: [u8; 8] = [7; 8];
+            let i: u8 = 3;
+            AV = buf[0];
+            BV = buf[i];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "buf[0] from fill");
+    assert_eq!(e.mem(0x0401), 7, "buf[i] from fill");
+}
+
+// ---------------------------------------------------------------------------
+// Nested / composed function calls.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_function_calls() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn inc2(n: u8) -> u8 { return n + 2; }
+        fn dbl(n: u8) -> u8 { return n + n; }
+        #[reset]
+        fn main() {
+            OUT = dbl(inc2(inc2(5)));
+            loop {}
+        }
+    "#);
+    // inc2(inc2(5)) = 9; dbl(9) = 18.
+    assert_eq!(e.mem(0x0400), 18, "dbl(inc2(inc2(5))) = 18");
+}
+
+// ---------------------------------------------------------------------------
+// Return position propagates the function's return type as expected type.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn struct_return_by_value_copies_fields() {
+    // A function returning a struct leaves a pointer in A:X; the caller must
+    // copy the whole struct into the local. Before the fix only the low byte of
+    // the pointer landed in the local, so p.y read garbage.
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const XV: addr = 0x0400;
+        const YV: addr = 0x0401;
+        fn make() -> Point { return Point { x: 7, y: 9 }; }
+        #[reset]
+        fn main() {
+            let p: Point = make();
+            XV = p.x;
+            YV = p.y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "p.x from returned struct");
+    assert_eq!(e.mem(0x0401), 9, "p.y from returned struct");
+}
+
+#[test]
+fn struct_return_by_value_u16_field() {
+    // A returned struct with a u16 field must copy both of its bytes.
+    let mut e = run(r#"
+        struct Wide { a: u8, w: u16 }
+        const AV: addr = 0x0400;
+        const LO: addr = 0x0401;
+        const HI: addr = 0x0402;
+        fn build() -> Wide { return Wide { a: 3, w: 0x1234 }; }
+        #[reset]
+        fn main() {
+            let s: Wide = build();
+            AV = s.a;
+            LO = s.w.low;
+            HI = s.w.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 3, "s.a");
+    assert_eq!(e.mem(0x0401), 0x34, "s.w low byte");
+    assert_eq!(e.mem(0x0402), 0x12, "s.w high byte");
+}
+
+#[test]
+fn struct_return_by_value_reassignment() {
+    // `p = make(...)` (assignment, not let) must also copy the struct.
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const XV: addr = 0x0400;
+        const YV: addr = 0x0401;
+        fn origin() -> Point { return Point { x: 0, y: 0 }; }
+        fn corner() -> Point { return Point { x: 200, y: 100 }; }
+        #[reset]
+        fn main() {
+            let p: Point = origin();
+            p = corner();
+            XV = p.x;
+            YV = p.y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 200, "p.x after reassignment");
+    assert_eq!(e.mem(0x0401), 100, "p.y after reassignment");
+}
+
+#[test]
+fn return_anonymous_struct_literal_type_checks() {
+    // An anonymous struct literal in return position can only be typed if the
+    // function's return type is propagated as the expected type (as `let x: T`
+    // does). Before the fix this failed sema with "cannot infer struct type".
+    // (Struct return-by-value codegen is a separate concern; here we assert the
+    // sema propagation lets it compile and lower the field initializers.)
+    let asm = crate::common::harness::compile_success(
+        r#"
+        struct Point { x: u8, y: u8 }
+        fn make() -> Point {
+            return { x: 7, y: 9 };
+        }
+        #[reset]
+        fn main() {
+            let p: Point = make();
+            loop {}
+        }
+    "#,
+    );
+    // The anonymous struct is const-folded into a static; both field bytes
+    // (7 and 9) must appear as its data, proving sema typed and lowered it.
+    assert!(asm.contains(".BYTE $07"), "field x=7 lowered\n{}", asm);
+    assert!(asm.contains(".BYTE $09"), "field y=9 lowered\n{}", asm);
+}
+
+// ---------------------------------------------------------------------------
+// Literals-only width adaptation in binary ops (no implicit variable conversion).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn literal_adapts_width_in_comparison() {
+    // `a < 5` with a: u16 must type-check (the literal adopts u16) and compare
+    // the full 16-bit value — even though the condition provides no ambient
+    // expected type. 300 is not < 5, so the else branch runs.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: u16 = 300;
+            if a < 5 { OUT = 1; } else { OUT = 2; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 2, "300 < 5 is false under full-width compare");
+}
+
+#[test]
+fn negated_literal_adapts_width_in_comparison() {
+    // `a < -5` with a: i16: the negated literal adopts i16 and the compare is
+    // signed. -300 < -5 holds.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: i16 = -300;
+            if a < -5 { OUT = 1; } else { OUT = 2; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 1, "-300 < -5 holds (signed, full width)");
+}
+
+// ---------------------------------------------------------------------------
+// Signed 16-bit comparison with a complex left operand keeps signed semantics.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signed_i16_comparison_complex_left() {
+    // (a - b) evaluates to -100 as i16 (0xFF9C). Compared to 5 it must be less
+    // (signed); an unsigned compare would read 0xFF9C as 65436 and get it wrong.
+    // Guards that comparison width/signedness is taken from the operands' type.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: i16 = -100;
+            let b: i16 = 0;
+            let c: i16 = 5;
+            if (a - b) < c {
+                OUT = 1;
+            } else {
+                OUT = 2;
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 1, "-100 < 5 must hold under signed comparison");
+}
+
+// ---------------------------------------------------------------------------
+// u8 binary op whose right operand clobbers Y.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u8_binary_right_operand_clobbers_y() {
+    // The left operand `(a + 1)` is complex, so codegen parks it in Y while it
+    // evaluates the right operand. `arr[i]` scales its index through Y, which
+    // destroyed the parked value before the fix (result came out as the index,
+    // not the sum).
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: u8 = 10;
+            let arr: [u8; 4] = [1, 2, 3, 5];
+            let i: u8 = 3;
+            let r: u8 = (a + 1) + arr[i];
+            OUT = r;
+            loop {}
+        }
+    "#);
+    // (10 + 1) + arr[3](=5) = 16.
+    assert_eq!(e.mem(0x0400), 16, "left operand must survive a Y-clobbering right");
+}
+
+// ---------------------------------------------------------------------------
+// foreach over a b16 (BCD) array reserves a full 2-byte loop-variable slot.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foreach_b16_loop_var_full_width() {
+    // b16 was omitted from the loop-variable width check, so the loop var got
+    // only 1 byte and the next body-local (`t`) overlapped its high byte. The
+    // cast reads the high byte back, which `t` had clobbered.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let arr: [b16; 2] = [1234 as b16, 5678 as b16];
+            for x in arr {
+                let t: u8 = 0x99;
+                let xu: u16 = x as u16;
+                LO = xu.low;
+                HI = xu.high;
+                LO = t;
+            }
+            loop {}
+        }
+    "#);
+    // Last element 5678 packs to BCD 0x5678; its high byte must be 0x56, not
+    // the 0x99 written into the overlapping slot.
+    assert_eq!(e.mem(0x0401), 0x56, "b16 loop var high byte must survive");
+}
+
+// ---------------------------------------------------------------------------
+// Inclusive for-range.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn inclusive_for_range() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let s: u8 = 0;
+            for i in 1..=5 {
+                s = s + i;
+            }
+            OUT = s;
+            loop {}
+        }
+    "#);
+    // 1 + 2 + 3 + 4 + 5 = 15.
+    assert_eq!(e.mem(0x0400), 15, "inclusive range 1..=5 sums to 15");
+}
+
+// ---------------------------------------------------------------------------
+// String iteration (ForEach over a string's characters).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_foreach_sum() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let s: str = "AB";
+            let sum: u8 = 0;
+            for c in s {
+                sum = sum + c;
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    // 'A'(65) + 'B'(66) = 131.
+    assert_eq!(e.mem(0x0400), 131, "sum of 'A' + 'B'");
+}
+
+// ---------------------------------------------------------------------------
+// Division and modulo specifics.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn division_and_modulo() {
+    let calc = |expr: &str| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let a: u8 = 23;
+                let b: u8 = 5;
+                OUT = {expr};
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(calc("a / b"), 4, "23 / 5 = 4");
+    assert_eq!(calc("a % b"), 3, "23 % 5 = 3");
+}
+
+// ---------------------------------------------------------------------------
+// else-if chain.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn else_if_chain() {
+    let grade = |score: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let s: u8 = {score};
+                if s >= 90 {{
+                    OUT = 4;
+                }} else if s >= 80 {{
+                    OUT = 3;
+                }} else if s >= 70 {{
+                    OUT = 2;
+                }} else {{
+                    OUT = 1;
+                }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(grade(95), 4);
+    assert_eq!(grade(85), 3);
+    assert_eq!(grade(72), 2);
+    assert_eq!(grade(50), 1);
+}

@@ -19,7 +19,8 @@
 //!                      overwritten by a callee's frame.
 //! $D0-$D8 (9 bytes):   Stdlib math working storage (mul16/div16/mod16 scratch)
 //! $D9-$DC (4 bytes):   Math routine call parameters (a.lo, a.hi, b.lo, b.hi)
-//! $DD-$EF (19 bytes):  Reserved (future frame-spill region)
+//! $DD-$DE (2 bytes):   PRNG state/seed (std/math.wr rand/rand16/srand)
+//! $DF-$EF (17 bytes):  Reserved (future frame-spill region)
 //! $F0-$F3 (4 bytes):   Binary op left-operand save (only when the right
 //!                      operand is call-free; see expr/binary.rs)
 //! $F4-$FE (11 bytes):  Function argument evaluation temp
@@ -39,6 +40,14 @@ pub const FRAME_REGION_END: u8 = 0xCF;
 /// $80-$83 param region (which now belongs to the frame region) into $D9-$DC,
 /// adjacent to the $D0-$D8 math working storage.
 pub const MATH_PARAM_BASE: u8 = 0xD9;
+
+/// Fixed staging block for arguments to address-taken functions (function
+/// pointers). Callers (direct or indirect) write args here; the callee's
+/// prologue copies them into its colored frame. Lives in the reserved
+/// $DD-$EF band, disjoint from the indirect-call vector at $EE/$EF.
+pub const INDIRECT_ARG_BASE: u8 = 0xE0;
+/// Maximum total parameter bytes an address-taken function may take.
+pub const INDIRECT_ARG_MAX: u8 = 8;
 
 /// Size in bytes of the software stack ($0200-$02FF, pointer in zero-page $FF)
 /// that Wraith uses to save/restore a callee's frame across a recursive call.

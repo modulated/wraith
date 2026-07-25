@@ -4,7 +4,44 @@
 //! the quality of generated assembly code by eliminating redundant instructions,
 //! dead code, and other inefficiencies.
 
+use std::collections::HashSet;
 use std::fmt;
+
+/// Names of memory-mapped I/O locations (`addr` declarations) whose accesses
+/// have side effects and must never be optimized away.
+///
+/// Reads and writes are tracked separately so the guard mirrors the declared
+/// access mode (the language's `R` / `W` / `RW` syntax): a read-only register
+/// only ever appears in loads, a write-only register only in stores, and a
+/// read-write register in both. A load that reads such a register can trigger a
+/// hardware side effect (e.g. clearing a status latch) and can return a
+/// different value than a preceding write, so redundant-load and
+/// load-after-store folding is unsafe on it; a store can likewise latch data or
+/// strobe a device, so redundant-store and dead-store folding is unsafe. Plain
+/// RAM variables are never listed here and optimize normally.
+#[derive(Default, Debug, Clone)]
+pub struct VolatileSymbols {
+    /// Symbols readable as volatile I/O (access mode `R` or `RW`).
+    pub reads: HashSet<String>,
+    /// Symbols writable as volatile I/O (access mode `W` or `RW`).
+    pub writes: HashSet<String>,
+}
+
+impl VolatileSymbols {
+    /// True if `operand` names a volatile-readable location.
+    fn is_volatile_read(&self, operand: &Option<String>) -> bool {
+        operand
+            .as_deref()
+            .is_some_and(|op| self.reads.contains(op))
+    }
+
+    /// True if `operand` names a volatile-writable location.
+    fn is_volatile_write(&self, operand: &Option<String>) -> bool {
+        operand
+            .as_deref()
+            .is_some_and(|op| self.writes.contains(op))
+    }
+}
 
 /// A parsed assembly instruction
 #[derive(Debug, Clone, PartialEq)]
@@ -115,8 +152,11 @@ pub fn parse_assembly(asm: &str) -> Vec<Line> {
         .collect()
 }
 
-/// Apply peephole optimizations to parsed assembly
-pub fn optimize(lines: &[Line]) -> Vec<Line> {
+/// Apply peephole optimizations to parsed assembly.
+///
+/// `volatile` names the memory-mapped I/O locations whose loads/stores must be
+/// preserved verbatim; pass `&VolatileSymbols::default()` when there are none.
+pub fn optimize(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
     let mut result = lines.to_vec();
     let mut changed = true;
 
@@ -126,10 +166,10 @@ pub fn optimize(lines: &[Line]) -> Vec<Line> {
 
         // Apply each optimization pass
         let before_len = result.len();
-        result = eliminate_redundant_loads(&result);
-        result = eliminate_redundant_stores(&result);
-        result = eliminate_load_after_store(&result);
-        result = eliminate_dead_stores(&result);
+        result = eliminate_redundant_loads(&result, volatile);
+        result = eliminate_redundant_stores(&result, volatile);
+        result = eliminate_load_after_store(&result, volatile);
+        result = eliminate_dead_stores(&result, volatile);
         result = eliminate_nop_operations(&result);
         result = eliminate_redundant_transfers(&result);
         result = eliminate_unreachable_after_terminator(&result);
@@ -162,7 +202,7 @@ pub fn optimize(lines: &[Line]) -> Vec<Line> {
 }
 
 /// Eliminate redundant consecutive loads: LDA $40; LDA $40 → LDA $40
-fn eliminate_redundant_loads(lines: &[Line]) -> Vec<Line> {
+fn eliminate_redundant_loads(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -181,8 +221,14 @@ fn eliminate_redundant_loads(lines: &[Line]) -> Vec<Line> {
                 },
             ) = (&lines[i], &lines[i + 1])
         {
-            // Check for same load instruction with same operand
-            if (m1 == "LDA" || m1 == "LDX" || m1 == "LDY") && m1 == m2 && op1 == op2 {
+            // Check for same load instruction with same operand. A load of a
+            // volatile I/O register is never redundant: the second read may
+            // return fresh hardware state or trigger a side effect.
+            if (m1 == "LDA" || m1 == "LDX" || m1 == "LDY")
+                && m1 == m2
+                && op1 == op2
+                && !volatile.is_volatile_read(op1)
+            {
                 // Keep only the first load
                 result.push(lines[i].clone());
                 i += 2; // Skip the redundant load
@@ -198,7 +244,7 @@ fn eliminate_redundant_loads(lines: &[Line]) -> Vec<Line> {
 }
 
 /// Eliminate redundant consecutive stores: STA $40; STA $40 → STA $40
-fn eliminate_redundant_stores(lines: &[Line]) -> Vec<Line> {
+fn eliminate_redundant_stores(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -217,8 +263,14 @@ fn eliminate_redundant_stores(lines: &[Line]) -> Vec<Line> {
                 },
             ) = (&lines[i], &lines[i + 1])
         {
-            // Check for same store instruction with same operand
-            if (m1 == "STA" || m1 == "STX" || m1 == "STY") && m1 == m2 && op1 == op2 {
+            // Check for same store instruction with same operand. A store to a
+            // volatile I/O register is never redundant: each write may latch
+            // data or strobe the device.
+            if (m1 == "STA" || m1 == "STX" || m1 == "STY")
+                && m1 == m2
+                && op1 == op2
+                && !volatile.is_volatile_write(op1)
+            {
                 // Keep only the first store
                 result.push(lines[i].clone());
                 i += 2; // Skip the redundant store
@@ -234,7 +286,7 @@ fn eliminate_redundant_stores(lines: &[Line]) -> Vec<Line> {
 }
 
 /// Eliminate load immediately after store to same location: STA $40; LDA $40 → STA $40
-fn eliminate_load_after_store(lines: &[Line]) -> Vec<Line> {
+fn eliminate_load_after_store(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -253,20 +305,25 @@ fn eliminate_load_after_store(lines: &[Line]) -> Vec<Line> {
                 },
             ) = (&lines[i], &lines[i + 1])
         {
+            // The load-back can only be dropped when the location is guaranteed
+            // to still hold what was just stored. For a volatile I/O register
+            // (a read-write mapping) the read may return different hardware
+            // state, so preserve it whenever the location is a volatile read.
+            let volatile_read = volatile.is_volatile_read(op1);
             // STA $40; LDA $40 → STA $40 (A already contains the value)
-            if m1 == "STA" && m2 == "LDA" && op1 == op2 {
+            if m1 == "STA" && m2 == "LDA" && op1 == op2 && !volatile_read {
                 result.push(lines[i].clone());
                 i += 2; // Skip the load
                 continue;
             }
             // STX $40; LDX $40 → STX $40
-            if m1 == "STX" && m2 == "LDX" && op1 == op2 {
+            if m1 == "STX" && m2 == "LDX" && op1 == op2 && !volatile_read {
                 result.push(lines[i].clone());
                 i += 2;
                 continue;
             }
             // STY $40; LDY $40 → STY $40
-            if m1 == "STY" && m2 == "LDY" && op1 == op2 {
+            if m1 == "STY" && m2 == "LDY" && op1 == op2 && !volatile_read {
                 result.push(lines[i].clone());
                 i += 2;
                 continue;
@@ -281,7 +338,7 @@ fn eliminate_load_after_store(lines: &[Line]) -> Vec<Line> {
 }
 
 /// Eliminate dead stores: STA $40; LDA #$05; STA $40 → LDA #$05; STA $40
-fn eliminate_dead_stores(lines: &[Line]) -> Vec<Line> {
+fn eliminate_dead_stores(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -302,8 +359,15 @@ fn eliminate_dead_stores(lines: &[Line]) -> Vec<Line> {
             ) = (&lines[i], &lines[i + 1], &lines[i + 2])
         {
             // STA $40; LDA #$05; STA $40 → LDA #$05; STA $40
-            // First store is dead because second store overwrites it
-            if m1 == "STA" && m2 == "LDA" && m3 == "STA" && op1 == op3 {
+            // First store is dead because second store overwrites it. A store to
+            // a volatile I/O register is never dead: the first write has its own
+            // side effect and must be kept.
+            if m1 == "STA"
+                && m2 == "LDA"
+                && m3 == "STA"
+                && op1 == op3
+                && !volatile.is_volatile_write(op1)
+            {
                 // Skip the first store
                 result.push(lines[i + 1].clone());
                 result.push(lines[i + 2].clone());
@@ -1108,7 +1172,7 @@ mod tests {
     fn test_redundant_load_elimination() {
         let asm = "    LDA $40\n    LDA $40\n";
         let lines = parse_assembly(asm);
-        let optimized = eliminate_redundant_loads(&lines);
+        let optimized = eliminate_redundant_loads(&lines, &VolatileSymbols::default());
         assert_eq!(optimized.len(), 1);
     }
 
@@ -1116,7 +1180,7 @@ mod tests {
     fn test_load_after_store_elimination() {
         let asm = "    STA $40\n    LDA $40\n";
         let lines = parse_assembly(asm);
-        let optimized = eliminate_load_after_store(&lines);
+        let optimized = eliminate_load_after_store(&lines, &VolatileSymbols::default());
         assert_eq!(optimized.len(), 1);
     }
 
@@ -1124,7 +1188,7 @@ mod tests {
     fn test_dead_store_elimination() {
         let asm = "    STA $40\n    LDA #$05\n    STA $40\n";
         let lines = parse_assembly(asm);
-        let optimized = eliminate_dead_stores(&lines);
+        let optimized = eliminate_dead_stores(&lines, &VolatileSymbols::default());
         assert_eq!(optimized.len(), 2);
     }
 
