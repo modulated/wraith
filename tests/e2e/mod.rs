@@ -22,3 +22,4 @@ mod stdlib;
 mod strings_slices;
 mod types;
 mod variables;
+mod vtable;

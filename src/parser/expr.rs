@@ -74,6 +74,31 @@ impl Parser<'_> {
                         span,
                     );
                 }
+            } else if self.check(&Token::LParen) {
+                // Call through a computed callee: `dev.read(r)`, `tbl[i](x)`.
+                // A bare `name(...)` never reaches here — the primary parser
+                // builds an `Expr::Call` (direct JSR) for that case.
+                self.advance();
+                let mut args = Vec::new();
+                if !self.check(&Token::RParen) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if self.check(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                let span = expr.span.merge(self.previous_span());
+                expr = Spanned::new(
+                    Expr::CallIndirect {
+                        callee: Box::new(expr),
+                        args,
+                    },
+                    span,
+                );
             } else if self.check(&Token::LBracket) {
                 self.advance();
                 let first = self.parse_expr()?;
@@ -166,8 +191,9 @@ impl Parser<'_> {
             Some(Token::LBrace) => {
                 let is_anon_struct = match self.peek_ahead(1) {
                     Some(Token::RBrace) => false, // Empty block {}
-                    Some(Token::Ident(_)) => {
+                    Some(Token::Ident(_) | Token::Read | Token::Write) => {
                         // Check if ident is followed by colon: { field: ... }
+                        // `read`/`write` are contextual keywords and may be field names.
                         matches!(self.peek_ahead(2), Some(Token::Colon))
                     }
                     _ => false,
@@ -308,8 +334,9 @@ impl Parser<'_> {
             // Lookahead to see if this is really a struct init
             let is_struct_init = match self.peek_ahead(1) {
                 Some(Token::RBrace) => true, // Empty struct: x {}
-                Some(Token::Ident(_)) => {
+                Some(Token::Ident(_) | Token::Read | Token::Write) => {
                     // Check if ident is followed by colon: x { field: ... }
+                    // `read`/`write` are contextual keywords and may be field names.
                     matches!(self.peek_ahead(2), Some(Token::Colon))
                 }
                 _ => false,
@@ -442,7 +469,7 @@ impl Parser<'_> {
             // and not something like `match Status::On { ... }`
             let is_struct_variant = match self.peek_ahead(1) {
                 Some(Token::RBrace) => true, // Empty struct variant
-                Some(Token::Ident(_)) => {
+                Some(Token::Ident(_) | Token::Read | Token::Write) => {
                     matches!(self.peek_ahead(2), Some(Token::Colon))
                 }
                 _ => false,

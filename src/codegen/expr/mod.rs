@@ -130,6 +130,9 @@ pub fn generate_expr(
         Expr::Index { object, index } => {
             generate_index(object, index, emitter, info, string_collector)
         }
+        Expr::CallIndirect { callee, args } => {
+            call::generate_call_indirect(callee, args, emitter, info, string_collector)
+        }
         Expr::Slice { .. } => {
             // Slices are only valid as assignment targets, not as expressions
             Err(CodegenError::UnsupportedOperation(

@@ -251,6 +251,16 @@ impl SemanticAnalyzer {
             // Record the startup value so the reset handler can write it: RAM
             // holds garbage at power-on and cannot be pre-loaded from ROM.
             let bytes = self.static_init_bytes(&stat.init, &declared_ty, size as usize);
+            // A function named in a static's initializer (e.g. a device vtable)
+            // has its address taken, even though the initializer is never
+            // checked as an expression. Record it so codegen gives that function
+            // the indirect-arg staging prologue; otherwise an indirect call
+            // through the table would find its parameters unset.
+            for b in &bytes {
+                if let crate::sema::InitByte::FnLow(f) = b {
+                    self.address_taken_functions.insert(f.clone());
+                }
+            }
             self.static_inits.push(crate::sema::StaticInit {
                 name: name.clone(),
                 addr,
@@ -286,30 +296,45 @@ impl SemanticAnalyzer {
         init: &Spanned<crate::ast::Expr>,
         ty: &Type,
         size: usize,
-    ) -> Vec<u8> {
+    ) -> Vec<crate::sema::InitByte> {
         use crate::ast::{Expr, Literal};
+        use crate::sema::InitByte;
 
         let elem_width = match ty {
             Type::Array(elem, _) => self.type_size(elem).max(1),
             _ => size,
         };
-        let push_int = |out: &mut Vec<u8>, v: i64, width: usize| {
+        let push_int = |out: &mut Vec<InitByte>, v: i64, width: usize| {
             for i in 0..width {
-                out.push(((v >> (i * 8)) & 0xFF) as u8);
+                out.push(InitByte::Byte(((v >> (i * 8)) & 0xFF) as u8));
             }
         };
+        // A bare name whose symbol is a function contributes that function's
+        // address; the label is resolved by the assembler.
+        let fn_ref = |out: &mut Vec<InitByte>, e: &Spanned<Expr>| -> bool {
+            if let Expr::Variable(n) = &e.node
+                && self
+                    .table
+                    .lookup(n)
+                    .is_some_and(|s| matches!(s.ty, Type::Function(..)))
+            {
+                out.push(InitByte::FnLow(n.clone()));
+                out.push(InitByte::FnHigh(n.clone()));
+                return true;
+            }
+            false
+        };
 
-        let mut bytes = Vec::with_capacity(size);
+        let mut bytes: Vec<InitByte> = Vec::with_capacity(size);
         match &init.node {
             Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, size),
-            Expr::Literal(Literal::Bool(b)) => bytes.push(*b as u8),
+            Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
             Expr::Literal(Literal::Array(elems)) => {
                 for e in elems {
                     match &e.node {
-                        Expr::Literal(Literal::Integer(v)) => {
-                            push_int(&mut bytes, *v, elem_width)
-                        }
-                        Expr::Literal(Literal::Bool(b)) => bytes.push(*b as u8),
+                        Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, elem_width),
+                        Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
+                        _ if fn_ref(&mut bytes, e) => {}
                         _ => break,
                     }
                 }
@@ -321,6 +346,25 @@ impl SemanticAnalyzer {
                     }
                 }
             }
+            // Struct literal: lay fields out in declaration order. Function
+            // fields become label references (a device vtable).
+            Expr::StructInit { name, fields } => {
+                if let Some(def) = self.type_registry.get_struct(&name.node) {
+                    for f in &def.fields {
+                        let Some(init_f) = fields.iter().find(|x| x.name.node == f.name) else {
+                            break;
+                        };
+                        let w = self.type_size(&f.ty).max(1);
+                        match &init_f.value.node {
+                            Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, w),
+                            Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
+                            _ if fn_ref(&mut bytes, &init_f.value) => {}
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            _ if fn_ref(&mut bytes, init) => {}
             // Fall back to constant folding (e.g. `1 + 2`, a const reference).
             _ => {
                 if let Ok(val) = eval_const_expr_with_env(init, &self.const_env)
@@ -330,7 +374,7 @@ impl SemanticAnalyzer {
                 }
             }
         }
-        bytes.resize(size, 0);
+        bytes.resize(size, InitByte::Byte(0));
         bytes
     }
 

@@ -843,13 +843,17 @@ pub(super) fn generate_field_access(
             // Multi-byte fields (u16/i16/b16) must load both bytes, ending with
             // the low byte in A and the high byte in Y (the u16 register
             // convention). A single LDA would truncate to the low byte.
+            // A function-pointer field holds a 2-byte code address, so it must be
+            // loaded as a pair like u16 — reading only the low byte would call
+            // through a half-formed vector.
             let is_multibyte = matches!(
                 &field_info.ty,
-                crate::sema::types::Type::Primitive(
-                    crate::ast::PrimitiveType::U16
-                        | crate::ast::PrimitiveType::I16
-                        | crate::ast::PrimitiveType::B16
-                )
+                crate::sema::types::Type::Function(..)
+                    | crate::sema::types::Type::Primitive(
+                        crate::ast::PrimitiveType::U16
+                            | crate::ast::PrimitiveType::I16
+                            | crate::ast::PrimitiveType::B16
+                    )
             );
 
             if is_parameter {

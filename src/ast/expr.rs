@@ -135,6 +135,15 @@ pub enum Expr {
         args: Vec<Spanned<Expr>>,
     },
 
+    /// Call through an arbitrary expression that evaluates to a function
+    /// pointer, e.g. `device.read(reg)` (vtable field) or `handlers[i](x)`
+    /// (dispatch table). A bare `name(...)` stays `Call`, which lowers to a
+    /// direct JSR; this form goes through the indirect-call trampoline.
+    CallIndirect {
+        callee: Box<Spanned<Expr>>,
+        args: Vec<Spanned<Expr>>,
+    },
+
     /// Struct construction: Point { x: 10, y: 20 }
     StructInit {
         name: Spanned<String>,

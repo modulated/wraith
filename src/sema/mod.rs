@@ -769,13 +769,26 @@ pub struct InterruptSaveInfo {
     pub shared_frames: Vec<(u8, u8)>,
 }
 
-/// A mutable global's RAM address and the bytes its declaration initializes it
-/// to. Emitted as startup stores by the reset handler.
+/// One byte of a mutable global's startup image. Function pointers cannot be
+/// resolved during analysis (code addresses are assigned later, during section
+/// allocation), so they are recorded as label references and emitted as
+/// `#<label` / `#>label` operands for the assembler to resolve.
+#[derive(Debug, Clone)]
+pub enum InitByte {
+    Byte(u8),
+    /// Low byte of a function's address.
+    FnLow(String),
+    /// High byte of a function's address.
+    FnHigh(String),
+}
+
+/// A mutable global's RAM address and the startup image its declaration gives
+/// it. Written into RAM by the reset handler.
 #[derive(Debug, Clone)]
 pub struct StaticInit {
     pub name: String,
     pub addr: u16,
-    pub bytes: Vec<u8>,
+    pub bytes: Vec<InitByte>,
 }
 
 pub struct ProgramInfo {

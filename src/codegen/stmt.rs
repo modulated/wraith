@@ -1954,9 +1954,12 @@ fn generate_field_assignment(
                     field.node, struct_name
                 ))
             })?;
+        // Function-pointer fields are 2-byte code addresses, so they must be
+        // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
         let is_multibyte = matches!(
             &field_info.ty,
             Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+                | Type::Function(..)
         );
         emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
         generate_expr(value, emitter, info, string_collector)?;
@@ -2024,11 +2027,14 @@ fn generate_field_assignment(
         })?;
 
         // Check if field is multi-byte
+        // Function-pointer fields hold a 2-byte code address, so they are stored
+        // as a pair like u16 — a device vtable depends on it.
         let is_multibyte = matches!(
             &field_info.ty,
             Type::Primitive(PrimitiveType::U16)
                 | Type::Primitive(PrimitiveType::I16)
                 | Type::Primitive(PrimitiveType::B16)
+                | Type::Function(..)
         );
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));

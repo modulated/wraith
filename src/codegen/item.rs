@@ -439,6 +439,8 @@ fn generate_function(
 /// `= 0` / `[0; N]` case) becomes a compact fill loop; other values are written
 /// byte by byte, coalescing runs that share a value so `A` is reloaded rarely.
 fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
+    use crate::sema::InitByte;
+
     if info.static_inits.is_empty() {
         return;
     }
@@ -449,7 +451,7 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
             continue;
         }
         // Large all-zero blocks: fill with a loop instead of `len` stores.
-        if len > 8 && init.bytes.iter().all(|b| *b == 0) {
+        if len > 8 && init.bytes.iter().all(|b| matches!(b, InitByte::Byte(0))) {
             let loop_label = emitter.next_label("bssz");
             emitter.emit_comment(&format!("{}: zero {} bytes", init.name, len));
             emitter.emit_inst("LDA", "#$00");
@@ -460,7 +462,6 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
                 emitter.emit_inst("STA", &format!("${:04X},X", base));
             }
             emitter.emit_inst("INX", "");
-            // Loop until X wraps past the block length (rounded up to a page).
             let count = if len >= 256 { 0u8 } else { len as u8 };
             emitter.emit_inst("CPX", &format!("#${:02X}", count));
             emitter.emit_inst("BNE", &loop_label);
@@ -468,11 +469,25 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
             continue;
         }
         emitter.emit_comment(&format!("{} = {} byte(s)", init.name, len));
+        // Track the last value loaded into A so runs of equal bytes reload rarely.
         let mut last: Option<u8> = None;
         for (i, b) in init.bytes.iter().enumerate() {
-            if last != Some(*b) {
-                emitter.emit_inst("LDA", &format!("#${:02X}", b));
-                last = Some(*b);
+            match b {
+                InitByte::Byte(v) => {
+                    if last != Some(*v) {
+                        emitter.emit_inst("LDA", &format!("#${:02X}", v));
+                        last = Some(*v);
+                    }
+                }
+                // Function addresses are only known to the assembler.
+                InitByte::FnLow(f) => {
+                    emitter.emit_inst("LDA", &format!("#<{}", f));
+                    last = None;
+                }
+                InitByte::FnHigh(f) => {
+                    emitter.emit_inst("LDA", &format!("#>{}", f));
+                    last = None;
+                }
             }
             emitter.emit_inst("STA", &format!("${:04X}", init.addr as usize + i));
         }
