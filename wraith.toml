@@ -17,9 +17,9 @@ description = "Constants and data (8KB)"
 
 [[sections]]
 name = "BSS"
-start = 0x6000
-end = 0x7EFF
-description = "Writable RAM for mutable globals (`static`), high RAM to leave low pages free"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals (`static`): 1KB above the zero page, hardware stack and software-stack page"
 
 # Default section for functions without explicit #[org] or #[section]
 default_section = "CODE"

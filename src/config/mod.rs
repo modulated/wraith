@@ -71,10 +71,11 @@ impl Config {
             sections: vec![
                 Section::new("CODE", 0x8000, 0xBFFF), // 16KB for user code
                 Section::new("DATA", 0xD000, 0xEFFF), // 8KB for constants/data
-                // Writable RAM for mutable globals (`static`). Starts above the
-                // zero page ($00-$FF), the hardware stack ($0100-$01FF) and the
-                // compiler's software stack page ($0200-$02FF).
-                Section::new("BSS", 0x6000, 0x7EFF),
+                // User RAM for mutable globals (`static`): 1KB clear of the zero
+                // page ($0000-$00FF), the hardware stack ($0100-$01FF) and the
+                // compiler's software-stack page ($0200-$02FF). Override this in
+                // wraith.toml to match a different board.
+                Section::new("BSS", 0x0400, 0x07FF),
             ],
             default_section: "CODE".to_string(),
         }
@@ -148,7 +149,8 @@ mod tests {
         assert_eq!(config.sections.len(), 3);
         assert_eq!(config.default_section, "CODE");
         let bss = config.sections.iter().find(|s| s.name == "BSS").unwrap();
-        assert_eq!(bss.start, 0x6000);
+        assert_eq!(bss.start, 0x0400);
+        assert_eq!(bss.end, 0x07FF);
     }
 
     #[test]

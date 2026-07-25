@@ -220,6 +220,61 @@ Constants are checked for overflow at compile time:
 const INVALID: u8 = 256;  // ERROR: constant overflow (256 doesn't fit in u8)
 ```
 
+### Mutable Globals (`static`)
+
+`const` declares immutable data that lives in ROM. Use `static` for state that
+must be **written at runtime and shared across functions** — including interrupt
+handlers:
+
+```rust
+static RX_HEAD: u8 = 0;
+static RX_BUF: [u8; 64] = [0; 64];
+static TICKS: u16 = 0;
+
+#[irq]
+fn on_irq() {
+    TICKS = TICKS + 1;      // handler updates shared state
+}
+
+#[reset]
+fn main() {
+    RX_BUF[RX_HEAD] = 0x41;
+    loop {}
+}
+```
+
+This is the only way to share state between an interrupt handler and the main
+program: local variables are allocated in per-function frames that the compiler
+*colors* by the call graph, so a handler cannot see another function's locals.
+
+**Characteristics:**
+- Stored in the `BSS` section (RAM), allocated in declaration order
+- Initial values are written by the reset handler, because RAM contents are
+  undefined at power-on (large all-zero blocks use a compact fill loop)
+- Arrays and structs are supported; arrays are indexed with absolute-indexed
+  addressing
+- `addr` may not be declared `static` — an `addr` names a fixed hardware
+  location, so it stays `const`
+- Statics shared with interrupt handlers are **not** protected: guard multi-byte
+  updates with a `SEI`/`CLI` critical section
+
+**Configuring RAM.** The `BSS` region defaults to `$0400-$07FF` (1 KB of user
+RAM, clear of the zero page, the hardware stack at `$0100-$01FF`, and the
+compiler's software-stack page at `$0200-$02FF`). Override it in `wraith.toml`
+to match your board:
+
+```toml
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals"
+```
+
+The compiler warns if an `addr` declaration falls inside the `BSS` range, since
+it would collide with allocated globals, and errors if the globals overflow the
+configured region.
+
 ### Memory-Mapped Addresses
 
 Use the `addr` keyword to declare memory-mapped I/O addresses:

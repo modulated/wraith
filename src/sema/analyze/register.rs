@@ -343,7 +343,7 @@ impl SemanticAnalyzer {
         // predates the BSS section, so existing configs keep working. The
         // default sits above the zero page, the hardware stack, and the
         // compiler's software-stack page ($0200).
-        const DEFAULT_BSS: (u16, u16) = (0x6000, 0x7EFF);
+        const DEFAULT_BSS: (u16, u16) = (0x0400, 0x07FF);
         let (start, end) = self
             .memory_config
             .get_section("BSS")
