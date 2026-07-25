@@ -769,6 +769,28 @@ pub struct InterruptSaveInfo {
     pub shared_frames: Vec<(u8, u8)>,
 }
 
+/// One byte of a mutable global's startup image. Function pointers cannot be
+/// resolved during analysis (code addresses are assigned later, during section
+/// allocation), so they are recorded as label references and emitted as
+/// `#<label` / `#>label` operands for the assembler to resolve.
+#[derive(Debug, Clone)]
+pub enum InitByte {
+    Byte(u8),
+    /// Low byte of a function's address.
+    FnLow(String),
+    /// High byte of a function's address.
+    FnHigh(String),
+}
+
+/// A mutable global's RAM address and the startup image its declaration gives
+/// it. Written into RAM by the reset handler.
+#[derive(Debug, Clone)]
+pub struct StaticInit {
+    pub name: String,
+    pub addr: u16,
+    pub bytes: Vec<InitByte>,
+}
+
 pub struct ProgramInfo {
     // Placeholder for analyzed program data
     pub table: table::SymbolTable,
@@ -798,9 +820,16 @@ pub struct ProgramInfo {
     /// Global string pool for cross-module string deduplication
     /// Maps string content to a unique label (e.g., "Hello" -> "str_0")
     pub string_pool: HashMap<String, String>,
+    /// Initial values for mutable `static` globals, in declaration order. The
+    /// reset handler writes these into RAM at startup, since RAM cannot be
+    /// pre-loaded from ROM on a bare machine.
+    pub static_inits: Vec<StaticInit>,
     /// Per-function zero-page frame assignment (base + size), colored by the
     /// call graph. Populated by `finalize_frames`.
     pub function_frames: HashMap<String, FrameInfo>,
+    /// Memory layout from wraith.toml, so codegen can place the software stack
+    /// and other regions where the board actually has RAM.
+    pub memory_config: crate::config::MemoryConfig,
     /// Function signatures (Type::Function) keyed by name, covering local and
     /// imported functions (including imported-module functions this module did
     /// not name). Codegen falls back to this to marshal call arguments when the

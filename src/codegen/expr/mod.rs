@@ -33,7 +33,9 @@ use unary::generate_unary;
 
 // Re-export for use in other codegen modules
 pub use aggregate::generate_struct_init_runtime;
-pub(crate) use aggregate::{emit_array_struct_field_indexed, resolve_static_struct_lvalue};
+pub(crate) use aggregate::{
+    emit_array_struct_field_indexed, resolve_static_struct_lvalue, type_byte_size,
+};
 pub use call::generate_tail_recursive_update;
 
 pub fn generate_expr(
@@ -127,6 +129,9 @@ pub fn generate_expr(
         } => generate_type_cast(inner, target_type, emitter, info, string_collector),
         Expr::Index { object, index } => {
             generate_index(object, index, emitter, info, string_collector)
+        }
+        Expr::CallIndirect { callee, args } => {
+            call::generate_call_indirect(callee, args, emitter, info, string_collector)
         }
         Expr::Slice { .. } => {
             // Slices are only valid as assignment targets, not as expressions

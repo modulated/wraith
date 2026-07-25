@@ -50,6 +50,41 @@ impl SemanticAnalyzer {
 
             Expr::Call { function, args } => self.check_call(function, args, expr.span)?,
 
+            Expr::CallIndirect { callee, args } => {
+                // The callee must evaluate to a function pointer; check the
+                // arguments against its signature and yield its return type.
+                let callee_ty = self.check_expr(callee)?;
+                let Type::Function(param_types, ret_ty) = callee_ty else {
+                    return Err(SemaError::TypeMismatch {
+                        expected: "function pointer".to_string(),
+                        found: callee_ty.display_name(),
+                        span: callee.span,
+                    });
+                };
+                if args.len() != param_types.len() {
+                    return Err(SemaError::ArityMismatch {
+                        expected: param_types.len(),
+                        found: args.len(),
+                        span: expr.span,
+                    });
+                }
+                for (arg, param_ty) in args.iter().zip(param_types.iter()) {
+                    let saved = self.expected_type.take();
+                    self.expected_type = Some(param_ty.clone());
+                    let arg_ty = self.check_expr(arg);
+                    self.expected_type = saved;
+                    let arg_ty = arg_ty?;
+                    if !arg_ty.is_implicitly_convertible_to(param_ty) {
+                        return Err(SemaError::TypeMismatch {
+                            expected: param_ty.display_name(),
+                            found: arg_ty.display_name(),
+                            span: arg.span,
+                        });
+                    }
+                }
+                (*ret_ty).clone()
+            }
+
             Expr::Unary { op, operand } => self.check_unary(op, operand, expr.span)?,
 
             Expr::Paren(inner) => self.check_expr(inner)?,
@@ -362,8 +397,11 @@ impl SemanticAnalyzer {
 
         // Using a function's bare name as a value takes its address: record it so
         // codegen routes its arguments through the fixed indirect-arg staging block.
+        // Taking the address also counts as using the function (it will be reached
+        // through a function pointer), so it is not reported as dead code.
         if info.kind == SymbolKind::Function {
             self.address_taken_functions.insert(name.to_string());
+            self.called_functions.insert(name.to_string());
         }
 
         // Mark variable as used (for unused variable/parameter warnings)

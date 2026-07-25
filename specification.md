@@ -220,6 +220,61 @@ Constants are checked for overflow at compile time:
 const INVALID: u8 = 256;  // ERROR: constant overflow (256 doesn't fit in u8)
 ```
 
+### Mutable Globals (`static`)
+
+`const` declares immutable data that lives in ROM. Use `static` for state that
+must be **written at runtime and shared across functions** — including interrupt
+handlers:
+
+```rust
+static RX_HEAD: u8 = 0;
+static RX_BUF: [u8; 64] = [0; 64];
+static TICKS: u16 = 0;
+
+#[irq]
+fn on_irq() {
+    TICKS = TICKS + 1;      // handler updates shared state
+}
+
+#[reset]
+fn main() {
+    RX_BUF[RX_HEAD] = 0x41;
+    loop {}
+}
+```
+
+This is the only way to share state between an interrupt handler and the main
+program: local variables are allocated in per-function frames that the compiler
+*colors* by the call graph, so a handler cannot see another function's locals.
+
+**Characteristics:**
+- Stored in the `BSS` section (RAM), allocated in declaration order
+- Initial values are written by the reset handler, because RAM contents are
+  undefined at power-on (large all-zero blocks use a compact fill loop)
+- Arrays and structs are supported; arrays are indexed with absolute-indexed
+  addressing
+- `addr` may not be declared `static` — an `addr` names a fixed hardware
+  location, so it stays `const`
+- Statics shared with interrupt handlers are **not** protected: guard multi-byte
+  updates with a `SEI`/`CLI` critical section
+
+**Configuring RAM.** The `BSS` region defaults to `$0400-$07FF` (1 KB of user
+RAM, clear of the zero page, the hardware stack at `$0100-$01FF`, and the
+compiler's software-stack page at `$0200-$02FF`). Override it in `wraith.toml`
+to match your board:
+
+```toml
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals"
+```
+
+The compiler warns if an `addr` declaration falls inside the `BSS` range, since
+it would collide with allocated globals, and errors if the globals overflow the
+configured region.
+
 ### Memory-Mapped Addresses
 
 Use the `addr` keyword to declare memory-mapped I/O addresses:
@@ -608,6 +663,63 @@ fn main() {
 ```
 
 Because parameters live in the callee's own frame rather than shared fixed registers or a fixed address range, a caller's own parameters and locals are never at risk of being overwritten by a call it makes - see [Zero Page Allocation](#zero-page-allocation) for how frames are placed to guarantee this, and [Appendix C](#appendix-c-calling-convention) for the full call sequence.
+
+### Function Pointers
+
+A function's bare name used as a value is its address. The type is written
+`fn(params) -> ret` (the `-> ret` is omitted for a function returning nothing):
+
+```rust
+fn double(x: u8) -> u8 { return x + x; }
+
+fn main() {
+    let f: fn(u8) -> u8 = double;
+    let y: u8 = f(21);      // 42
+}
+```
+
+A function pointer is a 2-byte code address. Calls through one go via an
+indirect trampoline rather than a direct `JSR`, so they cost a few extra cycles.
+
+**Indirect arguments.** A function whose address is taken receives its arguments
+through a fixed staging block and copies them into its frame in a prologue, so
+direct and indirect callers agree on where arguments live. Only scalar
+(1- and 2-byte) parameters may be passed to an indirect call.
+
+### Vtables and Dynamic Dispatch
+
+Function pointers can be stored in struct fields and called through them. This
+is how a driver or device interface is expressed: the calling code names only the
+struct, not the implementation.
+
+```rust
+struct Device {
+    read:  fn(u8) -> u8,
+    write: fn(u8),
+}
+
+fn uart_read(reg: u8) -> u8  { return UART_BASE; }
+fn uart_write(v: u8)         { UART_TX = v; }
+fn via_read(reg: u8) -> u8   { return VIA_PORTA; }
+
+static DEV: Device = Device { read: uart_read, write: uart_write };
+
+fn main() {
+    // Bind a different driver at runtime; callers are unaffected.
+    DEV.read = via_read;
+
+    let status: u8 = DEV.read(5);   // dispatched through the vtable
+    DEV.write(0x41);
+}
+```
+
+Any expression whose type is a function pointer may be called, so a field, a
+variable, or a returned pointer all work. A bare `name(...)` still compiles to a
+direct `JSR`; only computed callees pay the indirect cost.
+
+`read` and `write` are *contextual* keywords: they act as access modifiers only
+in `const NAME: read addr = ...`, and are ordinary identifiers everywhere else,
+so `struct Device { read, write }` and `dev.write(v)` are legal.
 
 ### Completion Status
 
@@ -3252,7 +3364,11 @@ Applied roughly in this order during compilation:
 | $40-$CF | 144 bytes | Frame region (all function parameters and locals) |
 | $D0-$D8 | 9 bytes | `mul16`/`div16`/`mod16` working storage |
 | $D9-$DC | 4 bytes | `mul16`/`div16`/`mod16` call parameters |
-| $DD-$EF | 19 bytes | Reserved (future frame-spill region) |
+| $DD-$DE | 2 bytes | PRNG state (`rand`/`rand16`/`srand` in `std/math.wr`) |
+| $DF | 1 byte | Reserved |
+| $E0-$E7 | 8 bytes | Argument staging for address-taken functions (indirect calls) |
+| $E8-$ED | 6 bytes | Reserved |
+| $EE-$EF | 2 bytes | Indirect-call vector (function-pointer trampoline) |
 | $F0-$F3 | 4 bytes | Binary operation left-operand save |
 | $F4-$FE | 11 bytes | Function-call argument staging |
 | $FF | 1 byte | Software stack pointer |
@@ -3262,14 +3378,83 @@ Applied roughly in this order during compilation:
 | Range | Purpose |
 |-------|---------|
 | $0100-$01FF | Hardware stack (JSR/RTS, interrupt register save) |
-| $0200-$02FF | Software stack (recursion frame save/restore, operand spill) |
+| $0200-$02FF | Default `STACK` section — software stack (recursion frame save/restore, operand spill) |
+| $0400-$07FF | Default `BSS` section (1KB) — **RAM** for mutable globals (`static`) |
 | $8000-$BFFF | Default `CODE` section (16KB) |
 | $D000-$EFFF | Default `DATA` section (8KB) |
 | $FFFA-$FFFF | 6502 hardware vectors (NMI, RESET, IRQ) |
 
+Only `BSS` is written at runtime; `CODE` and `DATA` are read-only on a ROM-based
+machine. See [Mutable Globals](#mutable-globals-static) for how `static` storage
+is allocated and initialized, and the configuration notes below for choosing the
+range.
+
 #### Section Placement
 
 Code and data are placed into named **sections**, either the default `CODE`/`DATA` sections above or sections you define in `wraith.toml` (see the `#[section]` and `#[org]` function attributes under [Function Attributes](#function-attributes)). A function with no placement attribute goes into the configured default section; `#[section("NAME")]` places it in a named section; `#[org(address)]` places it at an exact address, overriding section placement entirely.
+
+#### Configuring RAM (`BSS`)
+
+The `BSS` section is where every `static` is allocated, in declaration order.
+It is the one region the program writes to at runtime, so it must name real RAM:
+
+```toml
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals"
+```
+
+Constraints to observe when choosing the range:
+
+- **Avoid the reserved low pages.** The zero page holds codegen scratch and
+  function frames, `$0100-$01FF` is the hardware stack (fixed by the processor),
+  and the `STACK` section holds the software stack. The default starts at `$0400`
+  to clear all three.
+- **Avoid memory-mapped I/O.** The compiler warns when an `addr` declaration
+  falls inside `BSS`, because a `static` placed there would collide with the
+  device register.
+- **Budget the space.** Exceeding the region is a compile error naming the range.
+  Large buffers dominate: an 80×25 text framebuffer is 2000 bytes, well beyond
+  the 1 KB default, so either enlarge `BSS`, choose a smaller geometry, or place
+  video memory outside `BSS` and reach it with `addr`.
+- A configuration that omits `BSS` falls back to `$0400-$07FF`.
+
+Because statics are allocated in declaration order and never reused, moving a
+`static` in the source changes the addresses of the ones after it — relevant only
+if you depend on fixed addresses from a debugger or external tooling.
+
+#### Configuring the software stack (`STACK`)
+
+The `STACK` section is one page of RAM used to save a callee's frame across a
+recursive call and to spill operands across call-bearing sub-expressions:
+
+```toml
+[[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+```
+
+Its size is fixed at 256 bytes (the stack pointer is a single zero-page byte),
+but the page itself is configurable. It must be RAM and must not overlap `BSS`
+or memory-mapped I/O. It is distinct from the 6502 **hardware** stack at
+`$0100-$01FF`, which the processor mandates for `JSR`/`RTS` and interrupt entry
+and which cannot be relocated.
+
+#### What the compiler fixes
+
+Only what the hardware or the zero-page addressing modes require:
+
+| Region | Why it is fixed |
+|--------|-----------------|
+| `$0000-$00FF` | Zero page — codegen scratch, function frames, pointers; zero-page and indirect addressing modes only reach this page |
+| `$0100-$01FF` | 6502 hardware stack (`JSR`/`RTS`, interrupt entry) |
+| `$FFFA-$FFFF` | NMI / RESET / IRQ vectors |
+
+Everything else — code, constant data, the software stack and mutable-global
+RAM — is placed by `wraith.toml` and can be moved to match the board.
 
 #### Custom Memory Layout Example
 

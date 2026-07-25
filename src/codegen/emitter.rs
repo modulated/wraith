@@ -514,6 +514,16 @@ impl Emitter {
     // SOFTWARE STACK FOR PARAMETER PRESERVATION IN RECURSION
     // ========================================================================
 
+    /// Operand text for the software stack base, e.g. `$0200`.
+    fn software_stack(&self) -> String {
+        format!("${:04X}", self.memory_layout.software_stack_base)
+    }
+
+    /// Operand text for the software stack base plus a byte offset.
+    fn software_stack_offset(&self, off: u16) -> String {
+        format!("${:04X}", self.memory_layout.software_stack_base + off)
+    }
+
     /// Spill a live scalar onto the software stack so it survives evaluation of a
     /// sub-expression that contains a call. `size` is 1 (value in A) or 2 (low in
     /// A, high in Y). This uses the software stack ($0200/$FF), NOT the 6502
@@ -521,11 +531,12 @@ impl Emitter {
     /// A/Y are preserved.
     pub fn spill_scalar(&mut self, size: u8) {
         self.emit_inst("LDX", "$FF");
-        self.emit_inst("STA", "$0200,X"); // low byte / u8 value
+        let base = self.software_stack();
+        self.emit_inst("STA", &format!("{},X", base)); // low byte / u8 value
         if size >= 2 {
             self.emit_inst("INX", "");
             self.emit_inst("TYA", ""); // A = high byte
-            self.emit_inst("STA", "$0200,X");
+            self.emit_inst("STA", &format!("{},X", base));
         }
         self.emit_inst("INX", "");
         self.emit_inst("STX", "$FF");
@@ -543,11 +554,14 @@ impl Emitter {
         self.emit_inst("STX", "$FF");
         if size >= 2 {
             // High byte was stored second (at higher offset), low byte first.
-            self.emit_inst("LDA", "$0201,X");
+            let base = self.software_stack();
+            let base_hi = self.software_stack_offset(1);
+            self.emit_inst("LDA", &format!("{},X", base_hi));
             self.emit_inst("TAY", "");
-            self.emit_inst("LDA", "$0200,X");
+            self.emit_inst("LDA", &format!("{},X", base));
         } else {
-            self.emit_inst("LDA", "$0200,X");
+            let base = self.software_stack();
+            self.emit_inst("LDA", &format!("{},X", base));
         }
         self.reg_state.invalidate_all();
     }
@@ -564,7 +578,8 @@ impl Emitter {
         self.emit_inst("LDX", "$FF");
         for i in 0..size {
             self.emit_inst("LDA", &format!("${:02X}", base + i));
-            self.emit_inst("STA", "$0200,X");
+            let stack = self.software_stack();
+            self.emit_inst("STA", &format!("{},X", stack));
             if i + 1 < size {
                 self.emit_inst("INX", "");
             }
@@ -591,7 +606,8 @@ impl Emitter {
 
         // Restore the frame bytes.
         for i in 0..size {
-            self.emit_inst("LDA", "$0200,X");
+            let stack = self.software_stack();
+            self.emit_inst("LDA", &format!("{},X", stack));
             self.emit_inst("STA", &format!("${:02X}", base + i));
             if i + 1 < size {
                 self.emit_inst("INX", "");

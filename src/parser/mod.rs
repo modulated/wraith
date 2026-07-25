@@ -82,6 +82,19 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Spanned::new(name, span))
             }
+            // `read` and `write` are *contextual* keywords: they only act as
+            // access modifiers in `const NAME: read addr = ...`, which is checked
+            // before this point. Everywhere else they are ordinary identifiers,
+            // so natural names like `struct Device { read: fn(u8) -> u8 }` and
+            // `dev.write(v)` are legal.
+            Some(Token::Read) => {
+                self.advance();
+                Ok(Spanned::new("read".to_string(), span))
+            }
+            Some(Token::Write) => {
+                self.advance();
+                Ok(Spanned::new("write".to_string(), span))
+            }
             tok => Err(ParseError::unexpected_token(span, "identifier", tok)),
         }
     }

@@ -48,7 +48,14 @@ pub(super) fn generate_call(
     {
         let loc = sym.location.clone();
         let ptypes = param_types.clone();
-        return generate_indirect_call(loc, &ptypes, args, emitter, info, string_collector);
+        return generate_indirect_call(
+            CalleeSource::Location(loc),
+            &ptypes,
+            args,
+            emitter,
+            info,
+            string_collector,
+        );
     }
 
     // 6502 calling convention: arguments are passed in the callee's zero-page
@@ -462,8 +469,16 @@ pub(super) fn generate_call(
 /// loaded into the indirect vector at $EE/$EF and the shared trampoline
 /// (`JMP ($EE)`) is JSR'd; the callee's RTS returns here. The return value
 /// arrives in A (u8) / A:Y (u16) per the normal convention.
+/// How the callee's address is obtained for an indirect call: either it is
+/// stored in a variable at a known location, or it is produced by evaluating an
+/// expression (a vtable field, a dispatch-table element, ...).
+enum CalleeSource<'a> {
+    Location(crate::sema::table::SymbolLocation),
+    Expr(&'a Spanned<Expr>),
+}
+
 fn generate_indirect_call(
-    location: crate::sema::table::SymbolLocation,
+    callee: CalleeSource<'_>,
     param_types: &[Type],
     args: &[Spanned<Expr>],
     emitter: &mut Emitter,
@@ -545,32 +560,71 @@ fn generate_indirect_call(
         emitter.temp_alloc.free_arg(temp_base, total);
     }
 
-    let addr = match location {
-        SymbolLocation::ZeroPage(a) => a as u16,
-        SymbolLocation::Absolute(a) => a,
-        _ => {
-            return Err(CodegenError::UnsupportedOperation(
-                "function-pointer variable has no concrete storage location".to_string(),
-            ));
+    // Copy the callee's address into the indirect vector $EE/$EF. Done after
+    // argument staging, since evaluating the callee clobbers A/Y.
+    match callee {
+        CalleeSource::Location(location) => {
+            let addr = match location {
+                SymbolLocation::ZeroPage(a) => a as u16,
+                SymbolLocation::Absolute(a) => a,
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "function-pointer variable has no concrete storage location".to_string(),
+                    ));
+                }
+            };
+            if addr < 0x100 {
+                emitter.emit_inst("LDA", &format!("${:02X}", addr));
+                emitter.emit_inst("STA", "$EE");
+                emitter.emit_inst("LDA", &format!("${:02X}", addr + 1));
+                emitter.emit_inst("STA", "$EF");
+            } else {
+                emitter.emit_inst("LDA", &format!("${:04X}", addr));
+                emitter.emit_inst("STA", "$EE");
+                emitter.emit_inst("LDA", &format!("${:04X}", addr + 1));
+                emitter.emit_inst("STA", "$EF");
+            }
         }
-    };
-
-    // Copy the pointer into the indirect vector $EE/$EF.
-    if addr < 0x100 {
-        emitter.emit_inst("LDA", &format!("${:02X}", addr));
-        emitter.emit_inst("STA", "$EE");
-        emitter.emit_inst("LDA", &format!("${:02X}", addr + 1));
-        emitter.emit_inst("STA", "$EF");
-    } else {
-        emitter.emit_inst("LDA", &format!("${:04X}", addr));
-        emitter.emit_inst("STA", "$EE");
-        emitter.emit_inst("LDA", &format!("${:04X}", addr + 1));
-        emitter.emit_inst("STA", "$EF");
+        CalleeSource::Expr(e) => {
+            // A function-pointer value lands in A (low) : Y (high).
+            generate_expr(e, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", "$EE");
+            emitter.emit_inst("STY", "$EF");
+        }
     }
     emitter.needs_indirect_call = true;
     emitter.emit_inst("JSR", "__indirect_call");
     emitter.invalidate_registers();
     Ok(())
+}
+
+/// Call through a computed callee (`dev.read(r)`, `handlers[i](x)`). The callee
+/// expression yields a function pointer, which is loaded into the indirect
+/// vector and invoked through the trampoline.
+pub(super) fn generate_call_indirect(
+    callee: &Spanned<Expr>,
+    args: &[Spanned<Expr>],
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    // Sema resolved the callee's type; its parameter list drives arg staging.
+    let param_types = match info.resolved_types.get(&callee.span) {
+        Some(Type::Function(params, _)) => params.clone(),
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "callee expression is not a function pointer".to_string(),
+            ));
+        }
+    };
+    generate_indirect_call(
+        CalleeSource::Expr(callee),
+        &param_types,
+        args,
+        emitter,
+        info,
+        string_collector,
+    )
 }
 
 /// Generate inline function call expansion
@@ -691,6 +745,8 @@ fn generate_inline_call(
             resolved_struct_names: info.resolved_struct_names.clone(),
             string_pool: info.string_pool.clone(),
             function_frames: info.function_frames.clone(),
+            static_inits: info.static_inits.clone(),
+            memory_config: info.memory_config.clone(),
             function_signatures: info.function_signatures.clone(),
             recursive_call_edges: info.recursive_call_edges.clone(),
             interrupt_save_info: info.interrupt_save_info.clone(),
