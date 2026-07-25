@@ -184,8 +184,21 @@ pub fn generate_expr(
 
                         Ok(())
                     }
+                    crate::sema::types::Type::Array(_, n) => {
+                        // Array length is a compile-time constant: emit it as a
+                        // u16 immediate (A = low byte, Y = high byte). This makes
+                        // `arr.len` and idioms like `for i in 0..arr.len` work.
+                        let n = *n as u16;
+                        emitter.emit_comment(&format!("Array .len (constant {})", n));
+                        emitter.emit_lda_immediate((n & 0xFF) as i64);
+                        emitter.emit_inst("LDY", &format!("#${:02X}", (n >> 8) & 0xFF));
+                        emitter.mark_a_unknown();
+                        Ok(())
+                    }
                     _ => {
-                        // Other types not yet supported
+                        // Slices are not yet first-class values, so a runtime
+                        // slice length is unreachable here; other types have no
+                        // length.
                         Err(CodegenError::UnsupportedOperation(format!(
                             "Length access (.len) not yet implemented for type: {}",
                             obj_ty.display_name()

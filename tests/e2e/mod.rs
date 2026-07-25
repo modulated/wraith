@@ -18,5 +18,6 @@ mod math16;
 mod memory;
 mod operators;
 mod stdlib;
+mod strings_slices;
 mod types;
 mod variables;
