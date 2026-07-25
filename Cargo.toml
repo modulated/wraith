@@ -10,4 +10,16 @@ toml = "0.9.8"
 rustc-hash = "2.1"
 
 [dev-dependencies]
+# Emulator used only by the test harness (tests/common/exec.rs). Being a
+# dev-dependency, it is excluded from `cargo build --release`, so the release
+# compiler carries no emulator or test code.
 mos6502 = "0.10"
+
+# Release profile: fully optimized, link-time-optimized, symbol-stripped binary.
+# The compiler's only job in release is to emit optimized 6502 assembly.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
