@@ -161,6 +161,34 @@ fn slice_with_runtime_bounds_u16() {
 }
 
 #[test]
+fn slice_returned_from_function() {
+    // A function computes a sub-slice and returns it; the caller reads through
+    // the returned descriptor (base still points into the original array).
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const E1: addr = 0x0401;
+        const LEN: addr = 0x0402;
+        fn middle(a: &[u8]) -> &[u8] {
+            let m: &[u8] = a[1..4];
+            return m;
+        }
+        #[reset]
+        fn main() {
+            let arr: [u8; 6] = [10, 20, 30, 40, 50, 60];
+            let s: &[u8] = arr[0..6];
+            let r: &[u8] = middle(s);   // 20, 30, 40
+            E0 = r[0 as u8];
+            E1 = r[2 as u8];
+            LEN = r.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 20, "r[0] == arr[1]");
+    assert_eq!(e.mem(0x0401), 40, "r[2] == arr[3]");
+    assert_eq!(e.mem(0x0402), 3, "r.len == 3");
+}
+
+#[test]
 fn slice_of_slice() {
     // Re-slicing a slice narrows the view further; offsets compose.
     let mut e = run(r#"

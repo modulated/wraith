@@ -212,6 +212,25 @@ pub fn generate_stmt(
                     return Ok(());
                 }
 
+                // Slice returned from a call: the callee left a pointer to its
+                // 4-byte descriptor in A:X; copy the descriptor into this slot.
+                if let Type::Slice(_) = &sym.ty
+                    && matches!(&init.node, crate::ast::Expr::Call { .. })
+                    && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                {
+                    emitter.emit_comment("Slice return-by-value: copy 4-byte descriptor");
+                    generate_expr(init, emitter, info, string_collector)?;
+                    emitter.emit_inst("STA", "$20");
+                    emitter.emit_inst("STX", "$21");
+                    for k in 0..4u8 {
+                        emitter.emit_inst("LDY", &format!("#${:02X}", k));
+                        emitter.emit_inst("LDA", "($20),Y");
+                        emitter.emit_inst("STA", &format!("${:02X}", dest + k));
+                    }
+                    emitter.invalidate_registers();
+                    return Ok(());
+                }
+
                 // Array of structs: stored inline. Runtime-initialize each element
                 // struct literal directly at addr + i*element_size.
                 if let Type::Array(elem, _n) = &sym.ty
@@ -421,8 +440,38 @@ pub fn generate_stmt(
                         }
                     }
                 } else {
-                    // Normal return with value
-                    generate_expr(e, emitter, info, string_collector)?;
+                    // Slice return-by-value: a slice variable returns a pointer
+                    // to its 4-byte descriptor in A:X (the descriptor lives in the
+                    // callee frame, valid until the caller copies it out right
+                    // after the call). Mirrors struct return-by-value.
+                    let slice_var_return = matches!(
+                        info.resolved_types.get(&e.span),
+                        Some(crate::sema::types::Type::Slice(_))
+                    )
+                    .then(|| {
+                        if let crate::ast::Expr::Variable(vname) = &e.node
+                            && let Some(sym) = info
+                                .resolved_symbols
+                                .get(&e.span)
+                                .or_else(|| info.table.lookup(vname))
+                            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+                        {
+                            Some(addr)
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten();
+
+                    if let Some(addr) = slice_var_return {
+                        emitter.emit_comment("Return slice descriptor pointer (A:X)");
+                        emitter.emit_inst("LDA", &format!("#${:02X}", addr));
+                        emitter.emit_inst("LDX", "#$00");
+                        emitter.mark_a_unknown();
+                    } else {
+                        // Normal return with value
+                        generate_expr(e, emitter, info, string_collector)?;
+                    }
 
                     // Only emit RTS if we're not in an inline context
                     if !emitter.is_inlining() {
