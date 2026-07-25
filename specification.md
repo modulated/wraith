@@ -1050,28 +1050,48 @@ if i < 5 {
 
 ### Slice Operations
 
-Slices are references to array data with tracked length:
+Slices are references to a sub-range of an array, carrying a base pointer and a
+runtime length. A slice value is produced by slicing an array with `arr[a..b]`
+(or `arr[a..=b]`) and bound to a `&[T]` variable:
 
 ```rust
-// Function taking slice
-fn sum_values(values: [u8]) -> u16 {
-    let total: u16 = 0;
-    for v in values {
-        total = total + (v as u16);
+let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+let s: &[u8] = a[1..5];   // elements a[1]..a[4]
+
+let n: u16 = s.len;       // runtime length (here 4)
+let first: u8 = s[0];     // s[0] == a[1]
+for i in 0..s.len {
+    // iterate a slice by index
+}
+```
+
+Bounds may be constants or computed at run time (`a[i..j]`), and slices of
+`u8` and `u16` element arrays are supported (the index is scaled by the element
+width). A slice can be passed to a function, which reads its length and
+elements through the descriptor:
+
+```rust
+fn sum(s: &[u8]) -> u8 {
+    let acc: u8 = 0;
+    for i in 0..s.len {
+        acc = acc + s[i as u8];
     }
-    return total;
+    return acc;
 }
 
-// Arrays automatically coerce to slices
-let data: [u8; 5] = [10, 20, 30, 40, 50];
-let result: u16 = sum_values(data);  // Passes as slice
+let s: &[u8] = a[1..5];
+let total: u8 = sum(s);
 ```
 
 **Slice Characteristics:**
 - Size: 4 bytes (2-byte base address + 2-byte length)
-- Read-only view of array data
-- Length tracked at runtime
-- No slice syntax (e.g., `arr[1..3]`) - pass whole array only
+- View into array data; length tracked at runtime
+- Created with `arr[a..b]` (constant or runtime bounds)
+- `.len` and indexing `s[i]` are supported; passed to functions by value
+
+Current limits: inclusive `..=` needs a constant end, element widths above 2
+bytes and slicing a slice are not yet supported, and there is no runtime bounds
+checking.
 
 ### Slice Memory Representation
 
