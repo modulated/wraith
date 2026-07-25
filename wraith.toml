@@ -15,5 +15,11 @@ start = 0xD000
 end = 0xEFFF
 description = "Constants and data (8KB)"
 
+[[sections]]
+name = "BSS"
+start = 0x6000
+end = 0x7EFF
+description = "Writable RAM for mutable globals (`static`), high RAM to leave low pages free"
+
 # Default section for functions without explicit #[org] or #[section]
 default_section = "CODE"

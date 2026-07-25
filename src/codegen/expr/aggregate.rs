@@ -17,7 +17,7 @@ use super::generate_expr;
 
 /// Byte size of a type, resolving `Named` struct/enum types via the registry
 /// (unlike `Type::size()`, which returns 0 for `Named`).
-pub(super) fn type_byte_size(ty: &crate::sema::types::Type, info: &ProgramInfo) -> usize {
+pub(crate) fn type_byte_size(ty: &crate::sema::types::Type, info: &ProgramInfo) -> usize {
     use crate::sema::types::Type;
     match ty {
         Type::Primitive(p) => p.size_bytes(),
@@ -157,12 +157,19 @@ pub(super) fn generate_index(
                 .or_else(|| info.table.lookup(name))
                 .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
-            // A global const array lives inline at its data label (e.g. a lookup
-            // table). Index it with absolute-indexed addressing through the
-            // label, not the pointer-indirect path used for local ZP arrays.
-            if sym.kind == crate::sema::table::SymbolKind::Constant
-                && matches!(sym.ty, crate::sema::types::Type::Array(..))
-            {
+            // A global array lives inline at its own label — a `const` lookup
+            // table in ROM, or a mutable `static` in RAM. Both are indexed with
+            // absolute-indexed addressing through the label, not the
+            // pointer-indirect path used for local (zero-page) arrays, whose
+            // slot holds a pointer rather than the data.
+            let is_global_inline_array = matches!(sym.ty, crate::sema::types::Type::Array(..))
+                && (sym.kind == crate::sema::table::SymbolKind::Constant
+                    || (sym.containing_function.is_none()
+                        && matches!(
+                            sym.location,
+                            crate::sema::table::SymbolLocation::Absolute(_)
+                        )));
+            if is_global_inline_array {
                 let is_multibyte = matches!(
                     &sym.ty,
                     crate::sema::types::Type::Array(elem, _) if matches!(

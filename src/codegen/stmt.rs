@@ -1344,6 +1344,10 @@ fn generate_index_assignment(
     if is_multibyte {
         emitter.emit_inst("STY", "$21"); // Save high byte for u16
     }
+    // The value expression and these raw stores bypass register tracking, so a
+    // belief left from before (e.g. `a = ZeroPage(i)` after `let i = 3`) would
+    // wrongly elide the index load below, indexing by the *value* instead.
+    emitter.invalidate_registers();
 
     // Step 4: Evaluate index expression
     emitter.emit_comment("Evaluate index");
@@ -1360,6 +1364,30 @@ fn generate_index_assignment(
             .get(&object.span)
             .or_else(|| info.table.lookup(array_name))
             .ok_or_else(|| CodegenError::SymbolNotFound(array_name.clone()))?;
+
+        // A mutable `static` array lives inline at its own label in RAM, so it is
+        // stored with absolute-indexed addressing (`STA NAME,Y`) rather than the
+        // indirect path used for local arrays, whose slot holds a pointer.
+        if sym.containing_function.is_none()
+            && matches!(sym.location, SymbolLocation::Absolute(_))
+            && matches!(sym.ty, Type::Array(..))
+        {
+            if is_multibyte {
+                emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+                emitter.emit_inst("TYA", "");
+                emitter.emit_inst("ASL", "A");
+                emitter.emit_inst("TAY", "");
+            }
+            emitter.emit_inst("LDA", "$20");
+            emitter.emit_inst("STA", &format!("{},Y", array_name));
+            if is_multibyte {
+                emitter.emit_inst("INY", "");
+                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("STA", &format!("{},Y", array_name));
+            }
+            emitter.invalidate_registers();
+            return Ok(());
+        }
 
         match sym.location {
             SymbolLocation::ZeroPage(addr) => {

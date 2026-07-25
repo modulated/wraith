@@ -242,20 +242,126 @@ impl SemanticAnalyzer {
             }
         }
 
+        // A mutable `static` needs writable storage, so give it a real address in
+        // the BSS (RAM) section. Immutable consts stay at Absolute(0): they are
+        // emitted as ROM data referenced by label, not by a computed address.
+        let (kind, location) = if stat.mutable {
+            let size = self.type_size(&declared_ty).max(1) as u16;
+            let addr = self.bss_alloc(size, stat.name.span)?;
+            // Record the startup value so the reset handler can write it: RAM
+            // holds garbage at power-on and cannot be pre-loaded from ROM.
+            let bytes = self.static_init_bytes(&stat.init, &declared_ty, size as usize);
+            self.static_inits.push(crate::sema::StaticInit {
+                name: name.clone(),
+                addr,
+                bytes,
+            });
+            (SymbolKind::Variable, SymbolLocation::Absolute(addr))
+        } else {
+            (SymbolKind::Constant, SymbolLocation::Absolute(0))
+        };
+
         let info = SymbolInfo {
             name: name.clone(),
-            kind: SymbolKind::Constant,
+            kind,
             ty: declared_ty,
-            location: SymbolLocation::Absolute(0),
+            location,
             mutable: stat.mutable,
             access_mode: None,
             is_pub: stat.is_pub,
-            containing_function: None, // Constants are global
+            containing_function: None, // Globals are not scoped to a function
             is_param: false,
         };
         self.table.insert(name, info);
 
         Ok(())
+    }
+
+    /// Flatten a mutable static's initializer into the exact bytes to write at
+    /// startup. Integers are little-endian across the type's width, arrays and
+    /// fills expand element-wise. Anything not constant-evaluable becomes zeros
+    /// (BSS semantics), which is also the common `= 0` / `[0; N]` case.
+    fn static_init_bytes(
+        &self,
+        init: &Spanned<crate::ast::Expr>,
+        ty: &Type,
+        size: usize,
+    ) -> Vec<u8> {
+        use crate::ast::{Expr, Literal};
+
+        let elem_width = match ty {
+            Type::Array(elem, _) => self.type_size(elem).max(1),
+            _ => size,
+        };
+        let push_int = |out: &mut Vec<u8>, v: i64, width: usize| {
+            for i in 0..width {
+                out.push(((v >> (i * 8)) & 0xFF) as u8);
+            }
+        };
+
+        let mut bytes = Vec::with_capacity(size);
+        match &init.node {
+            Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, size),
+            Expr::Literal(Literal::Bool(b)) => bytes.push(*b as u8),
+            Expr::Literal(Literal::Array(elems)) => {
+                for e in elems {
+                    match &e.node {
+                        Expr::Literal(Literal::Integer(v)) => {
+                            push_int(&mut bytes, *v, elem_width)
+                        }
+                        Expr::Literal(Literal::Bool(b)) => bytes.push(*b as u8),
+                        _ => break,
+                    }
+                }
+            }
+            Expr::Literal(Literal::ArrayFill { value, count }) => {
+                if let Expr::Literal(Literal::Integer(v)) = &value.node {
+                    for _ in 0..*count {
+                        push_int(&mut bytes, *v, elem_width);
+                    }
+                }
+            }
+            // Fall back to constant folding (e.g. `1 + 2`, a const reference).
+            _ => {
+                if let Ok(val) = eval_const_expr_with_env(init, &self.const_env)
+                    && let Some(v) = val.as_integer()
+                {
+                    push_int(&mut bytes, v, size);
+                }
+            }
+        }
+        bytes.resize(size, 0);
+        bytes
+    }
+
+    /// Reserve `size` bytes of BSS (RAM) for a mutable global, returning its
+    /// address. Statics are allocated in declaration order from the start of the
+    /// BSS section; unlike function frames they are never reused or colored,
+    /// because they are live for the whole program and shared with interrupts.
+    fn bss_alloc(&mut self, size: u16, span: crate::ast::Span) -> Result<u16, SemaError> {
+        // Fall back to a built-in RAM range when the project's wraith.toml
+        // predates the BSS section, so existing configs keep working. The
+        // default sits above the zero page, the hardware stack, and the
+        // compiler's software-stack page ($0200).
+        const DEFAULT_BSS: (u16, u16) = (0x6000, 0x7EFF);
+        let (start, end) = self
+            .memory_config
+            .get_section("BSS")
+            .map(|s| (s.start, s.end))
+            .unwrap_or(DEFAULT_BSS);
+        let base = self.bss_cursor.unwrap_or(start);
+        let last = base as u32 + size as u32 - 1;
+        if last > end as u32 {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "BSS section overflow: mutable globals exceed ${:04X}-${:04X}",
+                    start, end
+                ),
+                span,
+            });
+        }
+        self.bss_cursor = Some(base + size);
+        Ok(base)
     }
 
     fn register_address(&mut self, addr: &crate::ast::AddressDecl) -> Result<(), SemaError> {

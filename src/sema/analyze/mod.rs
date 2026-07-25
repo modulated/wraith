@@ -69,6 +69,12 @@ pub struct SemanticAnalyzer {
     /// Bump cursor for the current function's frame (offset from frame base).
     /// Reset to 0 at the start of each function; params then locals allocate upward.
     pub(super) frame_cursor: u8,
+    /// Next free address in the BSS (RAM) section for mutable `static` globals.
+    /// None until the first static is allocated. Unlike frames, BSS is never
+    /// reused or colored: statics live for the whole program.
+    pub(super) bss_cursor: Option<u16>,
+    /// Startup values for mutable statics, in declaration order.
+    pub(super) static_inits: Vec<crate::sema::StaticInit>,
     /// Per-function frame size in bytes (params + locals), the high-water mark of
     /// `frame_cursor` after analyzing each function. Consumed by `finalize_frames`.
     pub(super) frame_sizes: HashMap<String, u8>,
@@ -126,6 +132,8 @@ impl SemanticAnalyzer {
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
             frame_cursor: 0,
+            bss_cursor: None,
+            static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
             function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
@@ -164,6 +172,8 @@ impl SemanticAnalyzer {
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
             frame_cursor: 0,
+            bss_cursor: None,
+            static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
             function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
@@ -264,6 +274,7 @@ impl SemanticAnalyzer {
             resolved_struct_names: self.resolved_struct_names.clone(),
             string_pool: HashMap::default(), // Will be populated during codegen
             function_frames,
+            static_inits: self.static_inits.clone(),
             function_signatures: self.function_signatures.clone(),
             recursive_call_edges,
             interrupt_save_info,

@@ -17,6 +17,7 @@ mod language_features;
 mod math16;
 mod memory;
 mod operators;
+mod statics;
 mod stdlib;
 mod strings_slices;
 mod types;
