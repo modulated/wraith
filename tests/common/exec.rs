@@ -578,6 +578,9 @@ pub struct TestBus {
     ram: Vec<u8>,
     irq: bool,
     nmi: bool,
+    /// Memory-mapped devices. Addresses they claim bypass RAM entirely, so a
+    /// read can have side effects (consuming a FIFO byte, clearing a flag).
+    pub devices: super::devices::Devices,
 }
 
 impl TestBus {
@@ -586,19 +589,26 @@ impl TestBus {
             ram: vec![0u8; 65536],
             irq: false,
             nmi: false,
+            devices: super::devices::Devices::default(),
         }
     }
 }
 
 impl Bus for TestBus {
     fn get_byte(&mut self, address: u16) -> u8 {
-        self.ram[address as usize]
+        match self.devices.read(address) {
+            Some(v) => v,
+            None => self.ram[address as usize],
+        }
     }
     fn set_byte(&mut self, address: u16, value: u8) {
-        self.ram[address as usize] = value;
+        if !self.devices.write(address, value) {
+            self.ram[address as usize] = value;
+        }
     }
     fn irq_pending(&mut self) -> bool {
-        self.irq
+        // Either the harness pulsed the line, or a device is asserting it.
+        self.irq || self.devices.irq_asserted()
     }
     fn nmi_pending(&mut self) -> bool {
         self.nmi
@@ -616,6 +626,38 @@ pub struct Exec {
 }
 
 impl Exec {
+    /// The attached devices, for feeding input and inspecting captured output.
+    pub fn devices(&mut self) -> &mut super::devices::Devices {
+        &mut self.cpu.memory.devices
+    }
+
+    /// Bytes the program transmitted through the UART, as a string.
+    pub fn uart_output(&mut self) -> String {
+        let tx = &self.cpu.memory.devices.uart.as_ref().expect("no UART attached").tx;
+        String::from_utf8_lossy(tx).to_string()
+    }
+
+    /// Queue bytes for the program to receive on the UART.
+    pub fn uart_feed(&mut self, bytes: &[u8]) {
+        self.cpu.memory.devices.uart.as_mut().expect("no UART attached").feed(bytes);
+    }
+
+    /// Run up to `max_steps` more instructions, stopping early if the program
+    /// settles back into a JMP-to-self idle loop. Used after feeding a device so
+    /// the driver can observe the new state.
+    pub fn resume(&mut self, max_steps: usize) {
+        for _ in 0..max_steps {
+            let pc_before = self.cpu.registers.program_counter;
+            if !self.cpu.single_step() {
+                break;
+            }
+            if self.cpu.registers.program_counter == pc_before {
+                self.idle_pc = pc_before;
+                break;
+            }
+        }
+    }
+
     /// Read a byte of memory after execution.
     pub fn mem(&mut self, addr: u16) -> u8 {
         self.cpu.memory.get_byte(addr)
@@ -710,10 +752,23 @@ impl Exec {
 /// the program counter no longer advancing) or a step budget is exhausted.
 /// Panics if the program does not halt within the budget.
 pub fn run(source: &str) -> Exec {
+    run_with_devices(source, super::devices::Devices::default())
+}
+
+/// Compile and run a program against a machine with the given memory-mapped
+/// devices attached. Device reads/writes have real side effects (FIFOs drain,
+/// flags clear, timers count), so drivers can be exercised end to end.
+///
+/// Unlike [`run`], execution stops as soon as the program reaches its idle
+/// `loop {}` *or* the step budget runs out — a driver that spins waiting on a
+/// device the test has not fed would otherwise never halt. Inspect
+/// [`Exec::halted`] when that distinction matters.
+pub fn run_with_devices(source: &str, devices: super::devices::Devices) -> Exec {
     let asm = compile_success(source);
     let image = assemble(&asm);
 
     let mut bus = TestBus::new();
+    bus.devices = devices;
     // Load the full 64 KB image directly: the default Bus::set_bytes truncates
     // its length to u16 (65536 -> 0), so it would copy nothing.
     bus.ram.copy_from_slice(&image);
@@ -742,7 +797,7 @@ pub fn run(source: &str) -> Exec {
         }
     }
     assert!(
-        halted,
+        halted || cpu.memory.devices.uart.is_some() || cpu.memory.devices.via.is_some(),
         "program did not halt within {} steps (possible infinite loop or missing `loop {{}}`)",
         BUDGET
     );

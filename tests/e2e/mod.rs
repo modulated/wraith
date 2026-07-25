@@ -7,6 +7,7 @@ mod bcd_validation;
 mod complex_features;
 mod control_flow;
 mod cpu_flags;
+mod devices;
 mod enums;
 mod execution;
 mod frames;
