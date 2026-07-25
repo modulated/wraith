@@ -19,7 +19,8 @@
 //!                      overwritten by a callee's frame.
 //! $D0-$D8 (9 bytes):   Stdlib math working storage (mul16/div16/mod16 scratch)
 //! $D9-$DC (4 bytes):   Math routine call parameters (a.lo, a.hi, b.lo, b.hi)
-//! $DD-$EF (19 bytes):  Reserved (future frame-spill region)
+//! $DD-$DE (2 bytes):   PRNG state/seed (std/math.wr rand/rand16/srand)
+//! $DF-$EF (17 bytes):  Reserved (future frame-spill region)
 //! $F0-$F3 (4 bytes):   Binary op left-operand save (only when the right
 //!                      operand is call-free; see expr/binary.rs)
 //! $F4-$FE (11 bytes):  Function argument evaluation temp

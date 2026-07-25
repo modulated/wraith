@@ -333,6 +333,161 @@ pub fn swap_nibbles(value: u8) -> u8 {
 }
 
 // ============================================================================
+// Widening / combined arithmetic
+// ============================================================================
+
+/// Widening multiply: u8 * u8 -> u16 (full 16-bit product, never truncates).
+/// The plain `*` on two u8 values yields a u8 (low byte only); use this when
+/// the product can exceed 255.
+/// Algorithm: 8-iteration shift-and-add. Uses zero page $20-$24 as scratch.
+/// Returns: a * b as a full u16 (A = low, Y = high).
+pub fn mul_wide(a: u8, b: u8) -> u16 {
+    asm {
+        "LDA #$00",
+        "STA $20",        // product low
+        "STA $21",        // product high
+        "LDA {a}",
+        "STA $22",        // multiplicand low
+        "LDA #$00",
+        "STA $23",        // multiplicand high (a is 8-bit)
+        "LDA {b}",
+        "STA $24",        // multiplier
+        "LDX #$08",
+        "mulwide_loop:",
+        "LSR $24",        // multiplier >>= 1, LSB -> carry
+        "BCC mulwide_skip",
+        "CLC",
+        "LDA $20",
+        "ADC $22",
+        "STA $20",
+        "LDA $21",
+        "ADC $23",
+        "STA $21",
+        "mulwide_skip:",
+        "ASL $22",        // multiplicand <<= 1
+        "ROL $23",
+        "DEX",
+        "BNE mulwide_loop",
+        "LDA $20",        // low byte -> A
+        "LDY $21",        // high byte -> Y
+    }
+}
+
+/// Combined division and remainder for u8 operands, computed in a single pass.
+/// Returns both results packed into a u16: the **quotient** in the low byte
+/// (`.low`) and the **remainder** in the high byte (`.high`). This avoids
+/// computing `a / b` and `a % b` separately (each a full division).
+///
+/// Division by zero returns 0xFFFF (quotient 0xFF, remainder 0xFF), matching
+/// the div16 convention.
+///
+/// Example:
+/// ```
+/// let qr: u16 = divmod(23, 5);
+/// let q: u8 = qr.low;   // 4
+/// let r: u8 = qr.high;  // 3
+/// ```
+pub fn divmod(a: u8, b: u8) -> u16 {
+    asm {
+        "LDA {b}",
+        "BNE divmod_ok",
+        "LDA #$FF",       // divide by zero -> 0xFFFF
+        "TAY",
+        "JMP divmod_done",
+        "divmod_ok:",
+        "LDA {a}",
+        "STA $20",        // dividend, becomes quotient
+        "LDA #$00",
+        "STA $21",        // remainder
+        "LDX #$08",
+        "divmod_loop:",
+        "ASL $20",        // shift dividend left, MSB -> carry
+        "ROL $21",        // carry into remainder
+        "LDA $21",
+        "SEC",
+        "SBC {b}",
+        "BCC divmod_no",  // remainder < divisor: don't subtract
+        "STA $21",        // remainder -= divisor
+        "INC $20",        // set quotient bit 0
+        "divmod_no:",
+        "DEX",
+        "BNE divmod_loop",
+        "LDA $20",        // quotient -> A (low)
+        "LDY $21",        // remainder -> Y (high)
+        "divmod_done:",
+    }
+}
+
+// ============================================================================
+// Pseudo-random number generator (16-bit Galois LFSR)
+// ============================================================================
+//
+// State is a 16-bit seed held at zero page $DD-$DE (reserved for the PRNG in the
+// compiler memory map). The generator is a maximal-period (65535) Galois LFSR
+// with tap mask $B400. It self-seeds to a fixed nonzero value on first use, so
+// rand() works without an explicit srand(); call srand() for a chosen sequence.
+
+/// Advance the PRNG and return the next pseudo-random byte (0..=255).
+pub fn rand() -> u8 {
+    asm {
+        "LDA $DD",
+        "ORA $DE",
+        "BNE rand_step",  // state != 0: use it
+        "LDA #$E1",       // first use: self-seed to $ACE1
+        "STA $DD",
+        "LDA #$AC",
+        "STA $DE",
+        "rand_step:",
+        "LSR $DE",        // 16-bit right shift: high first...
+        "ROR $DD",        // ...then low; carry = bit shifted out (the LSB)
+        "BCC rand_noxor",
+        "LDA $DE",
+        "EOR #$B4",       // feedback tap $B400 (low byte is 0)
+        "STA $DE",
+        "rand_noxor:",
+        "LDA $DD",        // return low byte of new state
+    }
+}
+
+/// Advance the PRNG and return the next pseudo-random 16-bit value.
+pub fn rand16() -> u16 {
+    asm {
+        "LDA $DD",
+        "ORA $DE",
+        "BNE rand16_step",
+        "LDA #$E1",
+        "STA $DD",
+        "LDA #$AC",
+        "STA $DE",
+        "rand16_step:",
+        "LSR $DE",
+        "ROR $DD",
+        "BCC rand16_noxor",
+        "LDA $DE",
+        "EOR #$B4",
+        "STA $DE",
+        "rand16_noxor:",
+        "LDA $DD",        // low -> A
+        "LDY $DE",        // high -> Y
+    }
+}
+
+/// Seed the PRNG. A zero seed is replaced with 1 so the LFSR never gets stuck.
+pub fn srand(seed: u16) {
+    asm {
+        "LDA {seed}",
+        "STA $DD",
+        "LDA {seed}+1",
+        "STA $DE",
+        "ORA $DD",        // seed == 0?
+        "BNE srand_done",
+        "LDA #$01",
+        "STA $DD",
+        "srand_done:",
+    }
+}
+
+// ============================================================================
 // 16-bit Arithmetic Operations
 // ============================================================================
 

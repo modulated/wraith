@@ -186,7 +186,9 @@ fn generate_function(
             temp_emitter.emit_inst("TAX", "");
             temp_emitter.emit_inst("PLA", "");
             temp_emitter.emit_inst("RTI", "");
-        } else if func.return_type.is_none() {
+        } else if !temp_emitter.last_was_terminal() {
+            // Mirror the real epilogue (see below): RTS unless the body already
+            // ended terminal, so the measured size matches the emitted size.
             temp_emitter.emit_inst("RTS", "");
         }
 
@@ -414,10 +416,14 @@ fn generate_function(
         emitter.emit_inst("PLA", "");
         emitter.emit_inst("RTI", "");
     } else {
-        // Emit RTS for functions without explicit return (void functions)
-        // Only emit if the last instruction wasn't already a terminal instruction (RTS, RTI, or JMP)
-        // This avoids duplicate RTS when the function body ends with a return statement
-        if func.return_type.is_none() && !emitter.last_was_terminal() {
+        // Emit a trailing RTS whenever the body does not already end in a
+        // terminal instruction (RTS, RTI, or JMP). This covers void functions
+        // that fall off the end AND value-returning functions whose body ends in
+        // an `asm { }` block that leaves the result in registers without an
+        // explicit `return` (e.g. the stdlib math routines) — those would
+        // otherwise fall through into the next function. `last_was_terminal`
+        // already prevents a duplicate RTS after an explicit `return`.
+        if !emitter.last_was_terminal() {
             emitter.emit_inst("RTS", "");
         }
     }

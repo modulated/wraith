@@ -87,3 +87,104 @@ fn memset16_fills_across_page_boundary() {
     assert_eq!(e.mem(0x0601), 0x99);
     assert_eq!(e.mem(0x0602), 0x00, "one past end untouched");
 }
+
+// ---------------------------------------------------------------------------
+// std/math.wr — mul_wide / divmod / rand
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mul_wide_produces_full_u16_product() {
+    let prod = |a: u8, b: u8| {
+        let src = format!(
+            r#"
+            import {{ mul_wide }} from "std/math.wr";
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let p: u16 = mul_wide({a}, {b});
+                LO = p.low;
+                HI = p.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    assert_eq!(prod(200, 3), 600, "200*3 = 600 (exceeds u8)");
+    assert_eq!(prod(255, 255), 65025, "max u8 product");
+    assert_eq!(prod(0, 42), 0, "zero product");
+    assert_eq!(prod(16, 16), 256, "16*16 = 256 (just over u8)");
+}
+
+#[test]
+fn divmod_returns_quotient_and_remainder() {
+    let qr = |a: u8, b: u8| {
+        let src = format!(
+            r#"
+            import {{ divmod }} from "std/math.wr";
+            const Q: addr = 0x0400;
+            const R: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let d: u16 = divmod({a}, {b});
+                Q = d.low;
+                R = d.high;
+                loop {{}}
+            }}
+        "#
+        );
+        let mut e = run(&src);
+        (e.mem(0x0400), e.mem(0x0401))
+    };
+    assert_eq!(qr(23, 5), (4, 3), "23 / 5 = 4 rem 3");
+    assert_eq!(qr(100, 10), (10, 0), "100 / 10 = 10 rem 0");
+    assert_eq!(qr(7, 8), (0, 7), "7 / 8 = 0 rem 7");
+    assert_eq!(qr(255, 16), (15, 15), "255 / 16 = 15 rem 15");
+    assert_eq!(qr(42, 0), (0xFF, 0xFF), "divide by zero -> 0xFFFF");
+}
+
+#[test]
+fn rand_is_deterministic_and_varies() {
+    // With a fixed seed the sequence is reproducible; consecutive draws differ
+    // (the LFSR advances) and stay in range. Emit four draws to four addresses.
+    let mut e = run(r#"
+        import { rand, srand } from "std/math.wr";
+        const R0: addr = 0x0400;
+        const R1: addr = 0x0401;
+        const R2: addr = 0x0402;
+        const R3: addr = 0x0403;
+        #[reset]
+        fn main() {
+            srand(0x1234);
+            R0 = rand();
+            R1 = rand();
+            R2 = rand();
+            R3 = rand();
+            loop {}
+        }
+    "#);
+    let seq = [e.mem(0x0400), e.mem(0x0401), e.mem(0x0402), e.mem(0x0403)];
+    // Not all equal (the generator actually advances).
+    assert!(
+        !(seq[0] == seq[1] && seq[1] == seq[2] && seq[2] == seq[3]),
+        "rand() must advance, got {:?}",
+        seq
+    );
+
+    // Same seed -> identical sequence (determinism).
+    let mut e2 = run(r#"
+        import { rand, srand } from "std/math.wr";
+        const R0: addr = 0x0400;
+        const R1: addr = 0x0401;
+        #[reset]
+        fn main() {
+            srand(0x1234);
+            R0 = rand();
+            R1 = rand();
+            loop {}
+        }
+    "#);
+    assert_eq!(e2.mem(0x0400), seq[0], "deterministic first draw");
+    assert_eq!(e2.mem(0x0401), seq[1], "deterministic second draw");
+}
