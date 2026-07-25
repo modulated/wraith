@@ -536,7 +536,25 @@ pub fn generate_stmt(
                             .get(&target.span)
                             .or_else(|| info.table.lookup(target_name));
 
-                        if let Some(sym) = sym {
+                        // INC/DEC operate on a single byte and do not touch the
+                        // carry, so they cannot implement ±1 on a multi-byte
+                        // value: `a = a + 1` on a u16 holding $00FF must carry
+                        // into the high byte, which INC alone never does.
+                        let is_single_byte = sym.is_some_and(|s| {
+                            matches!(
+                                s.ty,
+                                crate::sema::types::Type::Primitive(
+                                    crate::ast::PrimitiveType::U8
+                                        | crate::ast::PrimitiveType::I8
+                                        | crate::ast::PrimitiveType::B8
+                                        | crate::ast::PrimitiveType::Bool
+                                )
+                            )
+                        });
+
+                        if let Some(sym) = sym
+                            && is_single_byte
+                        {
                             match (op, &sym.location) {
                                 (
                                     crate::ast::BinaryOp::Add,

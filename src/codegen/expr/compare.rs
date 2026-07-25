@@ -330,12 +330,17 @@ pub(super) fn generate_compare_gt(
         emitter.emit_label(&true_label);
         emitter.emit_inst("LDA", "#$01");
     } else {
-        // 8-bit comparison
+        // 8-bit comparison. The equal case must fall into the false path and
+        // load 0: branching straight to the end would leave the left operand in
+        // A, which a following `CMP #$00 / BNE` reads as *true*, so `a > b`
+        // would wrongly hold for a == b.
+        let false_label = emitter.next_label("gf");
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
-        emitter.emit_inst("BEQ", &end_label); // If equal, result is 0 (false)
-        emitter.emit_inst("BCS", &true_label); // If carry set and not equal, A > TEMP
+        emitter.emit_inst("BEQ", &false_label); // equal -> not greater
+        emitter.emit_inst("BCS", &true_label); // carry set and not equal -> A > TEMP
 
-        // False case (carry clear, meaning A < TEMP)
+        // False case (A < TEMP, or A == TEMP via the branch above)
+        emitter.emit_label(&false_label);
         emitter.emit_inst("LDA", "#$00");
         emitter.emit_inst("JMP", &end_label);
 
