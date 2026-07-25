@@ -150,7 +150,13 @@ pub(super) fn generate_call(
         let is_string = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::String));
-        total_bytes += if is_16bit || is_struct || is_array || is_string {
+        // A slice parameter is a 4-byte fat-pointer descriptor (base + length).
+        let is_slice = param_types
+            .get(i)
+            .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
+        total_bytes += if is_slice {
+            4
+        } else if is_16bit || is_struct || is_array || is_string {
             2
         } else {
             1
@@ -221,7 +227,7 @@ pub(super) fn generate_call(
             emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
 
             temp_offset += 2;
-            arg_info.push((temp_addr, true));
+            arg_info.push((temp_addr, 2));
             continue;
         }
 
@@ -242,7 +248,32 @@ pub(super) fn generate_call(
             emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
 
             temp_offset += 2;
-            arg_info.push((temp_addr, true));
+            arg_info.push((temp_addr, 2));
+            continue;
+        }
+
+        // Check if argument is a slice (4-byte fat-pointer descriptor). Copy the
+        // descriptor by value from the slice variable's frame slot to the temp
+        // pool; the callee reads it inline from its parameter slot.
+        let is_slice_arg = arg_type.is_some_and(|ty| matches!(ty, Type::Slice(_)));
+        let param_is_slice = param_types
+            .get(i)
+            .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
+        if is_slice_arg
+            && param_is_slice
+            && let crate::ast::Expr::Variable(var_name) = &arg.node
+            && let Some(sym) = info
+                .resolved_symbols
+                .get(&arg.span)
+                .or_else(|| info.table.lookup(var_name))
+            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+        {
+            for k in 0..4u8 {
+                emitter.emit_inst("LDA", &format!("${:02X}", addr + k));
+                emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
+            }
+            temp_offset += 4;
+            arg_info.push((temp_addr, 4));
             continue;
         }
 
@@ -286,7 +317,7 @@ pub(super) fn generate_call(
             emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
             emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
             temp_offset += 2;
-            arg_info.push((temp_addr, true)); // 2-byte pointer
+            arg_info.push((temp_addr, 2)); // 2-byte pointer
             continue;
         }
 
@@ -308,7 +339,7 @@ pub(super) fn generate_call(
                 emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
                 emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
                 temp_offset += 2;
-                arg_info.push((temp_addr, true)); // 2-byte pointer
+                arg_info.push((temp_addr, 2)); // 2-byte pointer
                 continue;
             }
             // If not a simple variable, fall through to normal expression handling
@@ -343,7 +374,7 @@ pub(super) fn generate_call(
             temp_offset += 1;
         }
 
-        arg_info.push((temp_addr, is_16bit));
+        arg_info.push((temp_addr, if is_16bit { 2 } else { 1 }));
     }
 
     // RECURSION SAVE: for a call inside a cycle, preserve the callee's frame
@@ -354,23 +385,16 @@ pub(super) fn generate_call(
         emitter.push_frame(frame.base, frame.size);
     }
 
-    // STEP 2: Copy arguments from temporary storage to the callee's parameter slots.
+    // STEP 2: Copy each argument (arg_size bytes) from temp storage to the
+    // callee's parameter slots.
     let mut byte_offset = 0u8;
-    for (temp_addr, is_16bit) in arg_info.iter() {
+    for (temp_addr, arg_size) in arg_info.iter() {
         let param_addr = param_base + byte_offset;
-
-        // Copy from temp to param location
-        emitter.emit_inst("LDA", &format!("${:02X}", temp_addr));
-        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
-
-        if *is_16bit {
-            // For 16-bit types, also copy high byte
-            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + 1));
-            emitter.emit_inst("STA", &format!("${:02X}", param_addr + 1));
-            byte_offset += 2;
-        } else {
-            byte_offset += 1;
+        for k in 0..*arg_size {
+            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + k));
+            emitter.emit_inst("STA", &format!("${:02X}", param_addr + k));
         }
+        byte_offset += arg_size;
     }
 
     // Free the temp storage after copying to parameters

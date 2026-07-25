@@ -114,6 +114,30 @@ fn slice_of_u16_array_scales_index() {
     assert_eq!(e.mem(0x0402), 2, "s.len == 2");
 }
 
+#[test]
+fn slice_passed_to_function() {
+    // A slice passed to a function: the callee reads its length and elements
+    // from the descriptor copied into its parameter slot.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn sum(s: &[u8]) -> u8 {
+            let acc: u8 = 0;
+            for i in 0..s.len {
+                acc = acc + s[i as u8];
+            }
+            return acc;
+        }
+        #[reset]
+        fn main() {
+            let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+            let s: &[u8] = a[1..5];   // 2, 3, 4, 5
+            OUT = sum(s);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 14, "2 + 3 + 4 + 5 = 14");
+}
+
 // ---------------------------------------------------------------------------
 // String equality / inequality.
 // ---------------------------------------------------------------------------
