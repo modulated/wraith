@@ -536,7 +536,25 @@ pub fn generate_stmt(
                             .get(&target.span)
                             .or_else(|| info.table.lookup(target_name));
 
-                        if let Some(sym) = sym {
+                        // INC/DEC operate on a single byte and do not touch the
+                        // carry, so they cannot implement ±1 on a multi-byte
+                        // value: `a = a + 1` on a u16 holding $00FF must carry
+                        // into the high byte, which INC alone never does.
+                        let is_single_byte = sym.is_some_and(|s| {
+                            matches!(
+                                s.ty,
+                                crate::sema::types::Type::Primitive(
+                                    crate::ast::PrimitiveType::U8
+                                        | crate::ast::PrimitiveType::I8
+                                        | crate::ast::PrimitiveType::B8
+                                        | crate::ast::PrimitiveType::Bool
+                                )
+                            )
+                        });
+
+                        if let Some(sym) = sym
+                            && is_single_byte
+                        {
                             match (op, &sym.location) {
                                 (
                                     crate::ast::BinaryOp::Add,
@@ -1338,11 +1356,19 @@ fn generate_index_assignment(
     emitter.emit_comment("Evaluate value to assign");
     generate_expr(value, emitter, info, string_collector)?;
 
-    // Step 3: Save value to temp storage
+    // Step 3: Save the value while the index is evaluated. It cannot live in the
+    // shared $20 temp: evaluating a compound index like `a[i + 2]` uses $20 for
+    // its own operand, overwriting the value, and the store below would then
+    // write the index expression's operand instead. Take a dedicated slot.
     emitter.emit_comment("Save value to temp");
-    emitter.emit_inst("STA", "$20"); // Save low byte
+    let save = emitter.temp_alloc.alloc_high(2);
+    let (save_lo, save_hi) = match save {
+        Some(a) => (a, a + 1),
+        None => (0x20, 0x21),
+    };
+    emitter.emit_inst("STA", &format!("${:02X}", save_lo));
     if is_multibyte {
-        emitter.emit_inst("STY", "$21"); // Save high byte for u16
+        emitter.emit_inst("STY", &format!("${:02X}", save_hi));
     }
     // The value expression and these raw stores bypass register tracking, so a
     // belief left from before (e.g. `a = ZeroPage(i)` after `let i = 3`) would
@@ -1378,14 +1404,17 @@ fn generate_index_assignment(
                 emitter.emit_inst("ASL", "A");
                 emitter.emit_inst("TAY", "");
             }
-            emitter.emit_inst("LDA", "$20");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
             emitter.emit_inst("STA", &format!("{},Y", array_name));
             if is_multibyte {
                 emitter.emit_inst("INY", "");
-                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
                 emitter.emit_inst("STA", &format!("{},Y", array_name));
             }
             emitter.invalidate_registers();
+            if let Some(a) = save {
+                emitter.temp_alloc.free_high(a, 2);
+            }
             return Ok(());
         }
 
@@ -1394,7 +1423,7 @@ fn generate_index_assignment(
                 // For u8 arrays: direct indexed addressing
                 if !is_multibyte {
                     // Restore value
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     // Store to array[index]
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
                 } else {
@@ -1405,12 +1434,12 @@ fn generate_index_assignment(
                     emitter.emit_inst("TAY", ""); // Back to Y
 
                     // Restore and store low byte
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
 
                     // Store high byte at next position
                     emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", "$21");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
                 }
             }
@@ -1419,7 +1448,7 @@ fn generate_index_assignment(
                 // For u8 arrays: direct indexed addressing
                 if !is_multibyte {
                     // Restore value
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     // Store to array[index]
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
                 } else {
@@ -1430,12 +1459,12 @@ fn generate_index_assignment(
                     emitter.emit_inst("TAY", ""); // Back to Y
 
                     // Restore and store low byte
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
 
                     // Store high byte at next position
                     emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", "$21");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
                 }
             }
@@ -1450,6 +1479,10 @@ fn generate_index_assignment(
         return Err(CodegenError::UnsupportedOperation(
             "Can only assign to array variables, not expressions".to_string(),
         ));
+    }
+
+    if let Some(a) = save {
+        emitter.temp_alloc.free_high(a, 2);
     }
 
     // This path mutates A/X/Y through raw instructions the register tracker does

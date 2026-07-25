@@ -80,13 +80,13 @@ const ASCII_DEL: u8 = 0x7F;    // Delete
 // ============================================================================
 
 /// Initialize UART to 9600 baud, 8N1 (8 data bits, no parity, 1 stop bit)
-fn uart_init() {
+pub fn uart_init() {
     // Set DLAB = 1 to access divisor latches
     UART_LCR = UART_LCR_DLAB;
 
     // Set baud rate divisor (9600 baud)
     // Split 16-bit divisor into low and high bytes
-    divisor: u16 = BAUD_9600;
+    let divisor: u16 = BAUD_9600;
     UART_DLL = divisor as u8;              // Low byte
     UART_DLM = (divisor >> 8) as u8;       // High byte
 
@@ -106,7 +106,7 @@ fn uart_init() {
 // ============================================================================
 
 /// Check if transmitter is ready to send
-fn uart_tx_ready() -> u8 {
+pub fn uart_tx_ready() -> u8 {
     if (UART_LSR & UART_LSR_THRE) != 0 {
         return 1;
     }
@@ -114,7 +114,7 @@ fn uart_tx_ready() -> u8 {
 }
 
 /// Check if receiver has data available
-fn uart_rx_ready() -> u8 {
+pub fn uart_rx_ready() -> u8 {
     if (UART_LSR & UART_LSR_DR) != 0 {
         return 1;
     }
@@ -122,7 +122,7 @@ fn uart_rx_ready() -> u8 {
 }
 
 /// Wait for transmitter to be ready
-fn uart_wait_tx() {
+pub fn uart_wait_tx() {
     loop {
         if uart_tx_ready() != 0 {
             break;
@@ -131,7 +131,7 @@ fn uart_wait_tx() {
 }
 
 /// Wait for receiver to have data
-fn uart_wait_rx() {
+pub fn uart_wait_rx() {
     loop {
         if uart_rx_ready() != 0 {
             break;
@@ -140,13 +140,13 @@ fn uart_wait_rx() {
 }
 
 /// Send a single byte over UART
-fn uart_putc(ch: u8) {
+pub fn uart_putc(ch: u8) {
     uart_wait_tx();
     UART_THR = ch;
 }
 
 /// Receive a single byte from UART
-fn uart_getc() -> u8 {
+pub fn uart_getc() -> u8 {
     uart_wait_rx();
     return UART_RBR;
 }
@@ -157,7 +157,7 @@ fn uart_getc() -> u8 {
 
 /// Send a string over UART (null-terminated not supported, use fixed arrays)
 /// This is a helper that would need to be called multiple times for each char
-fn uart_puts_char(ch: u8) {
+pub fn uart_puts_char(ch: u8) {
     if ch == 0 {
         return;  // Null terminator
     }
@@ -172,20 +172,19 @@ fn uart_puts_char(ch: u8) {
 }
 
 /// Send newline (CRLF)
-fn uart_newline() {
+pub fn uart_newline() {
     uart_putc(ASCII_CR);
     uart_putc(ASCII_LF);
 }
 
 /// Send a space character
-fn uart_space() {
+pub fn uart_space() {
     uart_putc(ASCII_SPACE);
 }
 
 /// Print a single hex digit (0-F)
-fn uart_puthex_digit(value: u8) {
-    digit: u8 = value & 0x0F;
-
+pub fn uart_puthex_digit(value: u8) {
+    let digit: u8 = value & 0x0F;
     if digit < 10 {
         uart_putc(0x30 + digit);  // '0' + digit
     } else {
@@ -194,13 +193,13 @@ fn uart_puthex_digit(value: u8) {
 }
 
 /// Print a byte as 2 hex digits
-fn uart_puthex_byte(value: u8) {
+pub fn uart_puthex_byte(value: u8) {
     uart_puthex_digit(value >> 4);   // High nibble
     uart_puthex_digit(value);         // Low nibble
 }
 
 /// Print a 16-bit word as 4 hex digits
-fn uart_puthex_word(value: u16) {
+pub fn uart_puthex_word(value: u16) {
     uart_puthex_byte((value >> 8) as u8);  // High byte
     uart_puthex_byte(value as u8);         // Low byte
 }
@@ -208,17 +207,15 @@ fn uart_puthex_word(value: u16) {
 /// Get a line of input from UART (stores in buffer, returns length)
 /// Since we can't return arrays, this stores at a fixed location
 /// Returns: number of characters read
-fn uart_getline(buffer_addr: u16, max_len: u8) -> u8 {
-    pos: u8 = 0;
-    done: u8 = 0;
-
+pub fn uart_getline(buffer_addr: u16, max_len: u8) -> u8 {
+    let pos: u8 = 0;
+    let done: u8 = 0;
     loop {
         if done != 0 {
             break;
         }
 
-        ch: u8 = uart_getc();
-
+        let ch: u8 = uart_getc();
         if ch == ASCII_CR || ch == ASCII_LF {
             // End of line
             uart_newline();
@@ -251,7 +248,7 @@ fn uart_getline(buffer_addr: u16, max_len: u8) -> u8 {
 }
 
 /// Convert ASCII hex digit to value (returns 0xFF on error)
-fn hex_to_nibble(ch: u8) -> u8 {
+pub fn hex_to_nibble(ch: u8) -> u8 {
     if ch >= 0x30 && ch <= 0x39 {
         // '0' - '9'
         return ch - 0x30;
@@ -266,10 +263,9 @@ fn hex_to_nibble(ch: u8) -> u8 {
 }
 
 /// Convert 2 ASCII hex digits to byte
-fn hex_to_byte(high: u8, low: u8) -> u8 {
-    h: u8 = hex_to_nibble(high);
-    l: u8 = hex_to_nibble(low);
-
+pub fn hex_to_byte(high: u8, low: u8) -> u8 {
+    let h: u8 = hex_to_nibble(high);
+    let l: u8 = hex_to_nibble(low);
     if h == 0xFF || l == 0xFF {
         return 0;
     }

@@ -106,6 +106,11 @@ impl Emitter {
         self.output.push_str(":\n");
         // A label means control flow can continue from elsewhere
         self.last_was_terminal = false;
+        // ...and control arriving from elsewhere carries unknown registers, so
+        // no cached belief survives a label. Keeping one here silently elides
+        // loads: after a loop, a read of a variable the body last stored would
+        // reuse whatever the exit branch happened to leave in A.
+        self.reg_state.invalidate_all();
     }
 
     pub fn emit_inst(&mut self, mnemonic: &str, operand: &str) {

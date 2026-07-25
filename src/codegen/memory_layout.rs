@@ -100,9 +100,16 @@ impl MemoryLayout {
     }
 
     /// Get the jump table indirect pointer address (2 bytes for JMP indirect)
-    /// Used by match statement jump table dispatch
+    /// Used by match statement jump table dispatch.
+    ///
+    /// This *must not* overlap the enum-pointer triple the match dispatch keeps
+    /// at `pointer_ops_start..pointer_ops_start+2` (pointer low/high plus the
+    /// cached discriminant tag): the arm bodies dereference that pointer to
+    /// extract payload bindings, so a jump vector written over it makes every
+    /// arm read its own code bytes instead of the payload. Hence +4, i.e.
+    /// $34/$35 with the default $30 pointer-ops base.
     pub fn jump_ptr(&self) -> u8 {
-        self.pointer_ops_start // $30 by default
+        self.pointer_ops_start + 4
     }
 }
 

@@ -38,8 +38,7 @@ fn nmi_handler() {
 #[irq]
 fn irq_handler() {
     // Read current counter value
-    count: u8 = IRQ_COUNTER;
-
+    let count: u8 = IRQ_COUNTER;
     // Increment counter
     count = count + 1;
     IRQ_COUNTER = count;
@@ -79,7 +78,7 @@ fn main() {
 
     // Main loop - interrupts are now enabled!
     // IRQ and NMI handlers will fire when triggered
-    counter: u8 = 0;
+    let counter: u8 = 0;
     while true {
         counter = counter + 1;
         // CPU executes this loop while waiting for interrupts

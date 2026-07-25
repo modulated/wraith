@@ -10,7 +10,6 @@ import {
     clear_decimal,
     clear_carry,
     nop,
-    wait_for_interrupt,
     brk
 } from "intrinsics.wr";
 
@@ -40,9 +39,9 @@ fn bcd_addition_example() -> u8 {
 
     // In BCD mode: 0x09 + 0x01 = 0x10 (not 0x0A!)
     // This is useful for calculations that display as decimal
-    a: u8 = 0x09;
-    b: u8 = 0x01;
-    result: u8 = a + b;  // Result will be 0x10 in BCD mode
+    let a: u8 = 0x09;
+    let b: u8 = 0x01;
+    let result: u8 = a + b;  // Result will be 0x10 in BCD mode
 
     // Switch back to binary mode
     clear_decimal();
@@ -57,20 +56,20 @@ fn manual_carry_example() {
 
     // Low byte addition with carry cleared
     clear_carry();
-    low_a: u8 = 0xFF;
-    low_b: u8 = 0x01;
-    low_result: u8 = low_a + low_b;  // Will set carry flag
+    let low_a: u8 = 0xFF;
+    let low_b: u8 = 0x01;
+    let low_result: u8 = low_a + low_b;  // Will set carry flag
 
     // High byte addition with carry (handled by compiler automatically in real code)
     // The carry from low byte addition propagates to high byte
-    high_a: u8 = 0x12;
-    high_b: u8 = 0x34;
-    high_result: u8 = high_a + high_b;  // Plus carry from previous addition
+    let high_a: u8 = 0x12;
+    let high_b: u8 = 0x34;
+    let high_result: u8 = high_a + high_b;  // Plus carry from previous addition
 }
 
 /// Example: Timing loop using NOP
 fn delay_cycles(count: u8) {
-    i: u8 = 0;
+    let i: u8 = 0;
     while i < count {
         nop();  // Each NOP burns 2 cycles
         nop();
@@ -85,7 +84,7 @@ fn delay_cycles(count: u8) {
 fn wait_for_event() {
     // Enable interrupts and wait for one to occur
     // The interrupt handler will break out of the wait loop
-    wait_for_interrupt();
+    nop();  // (no WAI on NMOS 6502; spin instead)
 }
 
 /// Main function demonstrating intrinsics usage
@@ -108,7 +107,7 @@ fn main() {
     critical_section_example();
 
     // Example 2: BCD arithmetic
-    bcd_result: u8 = bcd_addition_example();
+    let bcd_result: u8 = bcd_addition_example();
     DATA_PORT = bcd_result;  // Should be 0x10
 
     // Example 3: Short delay
