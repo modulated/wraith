@@ -1,38 +1,142 @@
 // Wraith Standard Library
 // Memory manipulation functions optimized for 6502
 
-/// Copy memory from source to destination
-/// - dest: Destination pointer address
-/// - src: Source pointer address
-/// - len: Number of bytes to copy
+/// Copy up to 255 bytes from source to destination.
+/// - dest: Destination pointer (u16 address)
+/// - src: Source pointer (u16 address)
+/// - len: Number of bytes to copy (0..=255)
 ///
-/// Note: Uses indexed addressing with dest/src as base addresses
+/// The pointers are dereferenced: bytes are read from *(src+i) and written to
+/// *(dest+i). Uses zero-page vectors $F0/$F1 (src) and $F2/$F3 (dest) with
+/// indirect-indexed addressing. For lengths above 255 use `memcpy16`.
 pub fn memcpy(dest: u16, src: u16, len: u8) {
-    // For simplicity in this demo, we use inline assembly
     asm {
+        "LDA {src}",
+        "STA $F0",
+        "LDA {src}+1",
+        "STA $F1",
+        "LDA {dest}",
+        "STA $F2",
+        "LDA {dest}+1",
+        "STA $F3",
         "LDY #$00",
-        "loop_memcpy:",
-        "LDA {src},Y",
-        "STA {dest},Y",
-        "INY",
+        "memcpy_loop:",
         "CPY {len}",
-        "BNE loop_memcpy",
+        "BEQ memcpy_done",
+        "LDA ($F0),Y",
+        "STA ($F2),Y",
+        "INY",
+        "JMP memcpy_loop",
+        "memcpy_done:",
     }
 }
 
-/// Fill memory with a constant byte value
-/// - dest: Destination address
+/// Copy up to 65535 bytes from source to destination (true 16-bit length).
+/// - dest: Destination pointer (u16 address)
+/// - src: Source pointer (u16 address)
+/// - len: Number of bytes to copy (0..=65535)
+///
+/// Dereferences both pointers. Copies one byte at a time, advancing the src and
+/// dest zero-page vectors ($F0/$F1 and $F2/$F3) and counting down a 16-bit byte
+/// counter ($F4/$F5), so it handles copies that cross page boundaries.
+pub fn memcpy16(dest: u16, src: u16, len: u16) {
+    asm {
+        "LDA {src}",
+        "STA $F0",
+        "LDA {src}+1",
+        "STA $F1",
+        "LDA {dest}",
+        "STA $F2",
+        "LDA {dest}+1",
+        "STA $F3",
+        "LDA {len}",
+        "STA $F4",
+        "LDA {len}+1",
+        "STA $F5",
+        "LDY #$00",
+        "memcpy16_loop:",
+        "LDA $F4",
+        "ORA $F5",
+        "BEQ memcpy16_done",
+        "LDA ($F0),Y",
+        "STA ($F2),Y",
+        "INC $F0",
+        "BNE memcpy16_s1",
+        "INC $F1",
+        "memcpy16_s1:",
+        "INC $F2",
+        "BNE memcpy16_s2",
+        "INC $F3",
+        "memcpy16_s2:",
+        "LDA $F4",
+        "BNE memcpy16_s3",
+        "DEC $F5",
+        "memcpy16_s3:",
+        "DEC $F4",
+        "JMP memcpy16_loop",
+        "memcpy16_done:",
+    }
+}
+
+/// Fill up to 255 bytes with a constant byte value.
+/// - dest: Destination pointer (u16 address)
 /// - value: Byte value to fill with
-/// - len: Number of bytes to fill
+/// - len: Number of bytes to fill (0..=255)
+///
+/// Dereferences dest and writes *(dest+i) = value. For longer fills use
+/// `memset16`.
 pub fn memset(dest: u16, value: u8, len: u8) {
     asm {
+        "LDA {dest}",
+        "STA $F2",
+        "LDA {dest}+1",
+        "STA $F3",
         "LDA {value}",
         "LDY #$00",
-        "loop_memset:",
-        "STA {dest},Y",
-        "INY",
+        "memset_loop:",
         "CPY {len}",
-        "BNE loop_memset",
+        "BEQ memset_done",
+        "STA ($F2),Y",
+        "INY",
+        "JMP memset_loop",
+        "memset_done:",
+    }
+}
+
+/// Fill up to 65535 bytes with a constant byte value (true 16-bit length).
+/// - dest: Destination pointer (u16 address)
+/// - value: Byte value to fill with
+/// - len: Number of bytes to fill (0..=65535)
+pub fn memset16(dest: u16, value: u8, len: u16) {
+    asm {
+        "LDA {dest}",
+        "STA $F2",
+        "LDA {dest}+1",
+        "STA $F3",
+        "LDA {len}",
+        "STA $F4",
+        "LDA {len}+1",
+        "STA $F5",
+        "LDA {value}",
+        "LDY #$00",
+        "memset16_loop:",
+        "LDX $F4",
+        "BNE memset16_go",
+        "LDX $F5",
+        "BEQ memset16_done",
+        "memset16_go:",
+        "STA ($F2),Y",
+        "INC $F2",
+        "BNE memset16_s1",
+        "INC $F3",
+        "memset16_s1:",
+        "LDX $F4",
+        "BNE memset16_s2",
+        "DEC $F5",
+        "memset16_s2:",
+        "DEC $F4",
+        "JMP memset16_loop",
+        "memset16_done:",
     }
 }
 

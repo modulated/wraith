@@ -313,10 +313,10 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
 
     // Indexed: ",X" / ",Y"
     if let Some(base) = op.strip_suffix(",X") {
-        return index_operand(base, true);
+        return index_operand(base, true, mnem);
     }
     if let Some(base) = op.strip_suffix(",Y") {
-        return index_operand(base, false);
+        return index_operand(base, false, mnem);
     }
 
     // Branches take a relative label target.
@@ -344,15 +344,26 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
     po(Mode::Abs, ValueExpr::Label(l, off))
 }
 
-fn index_operand(base: &str, x: bool) -> ParsedOperand {
+fn index_operand(base: &str, x: bool, mnem: &str) -> ParsedOperand {
     let base = base.trim();
     if let Some(v) = parse_num(base) {
         // A `$XXXX` operand (4+ hex digits) forces absolute indexing even for
         // low addresses — matching how real assemblers select abs,Y when the
         // mnemonic has no zp,Y form (e.g. LDA $0040,Y).
         let force_abs = base.strip_prefix('$').is_some_and(|h| h.len() >= 4);
+        // On the 6502 only LDX/STX have a zero-page,Y form; every other mnemonic
+        // (LDA, STA, CMP, ...) must use absolute,Y for a low address. Real
+        // assemblers promote `LDA $40,Y` to `LDA $0040,Y` automatically — mirror
+        // that so stdlib routines using the `{param},Y` idiom assemble.
+        let zp_y_ok = matches!(mnem, "LDX" | "STX");
         let mode = if v <= 0xFF && !force_abs {
-            if x { Mode::ZpX } else { Mode::ZpY }
+            if x {
+                Mode::ZpX
+            } else if zp_y_ok {
+                Mode::ZpY
+            } else {
+                Mode::AbsY
+            }
         } else if x {
             Mode::AbsX
         } else {
