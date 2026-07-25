@@ -267,9 +267,7 @@ impl SemanticAnalyzer {
     /// themselves; otherwise the narrower widens to the other if implicitly
     /// convertible (e.g. u8 + u16 -> u16). Returns None if incompatible.
     fn unify_types(a: &Type, b: &Type) -> Option<Type> {
-        if a == b {
-            Some(a.clone())
-        } else if b.is_implicitly_convertible_to(a) {
+        if a == b || b.is_implicitly_convertible_to(a) {
             Some(a.clone())
         } else if a.is_implicitly_convertible_to(b) {
             Some(b.clone())
