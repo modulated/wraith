@@ -88,6 +88,27 @@ fn memset16_fills_across_page_boundary() {
     assert_eq!(e.mem(0x0602), 0x00, "one past end untouched");
 }
 
+#[test]
+fn str_copy_writes_string_bytes_to_buffer() {
+    // str_copy must skip the 1-byte length prefix and write the character bytes
+    // (dereferencing the destination pointer), returning the count copied.
+    let mut e = run(r#"
+        import { str_copy } from "std/mem.wr";
+        const N: addr = 0x0410;
+        #[reset]
+        fn main() {
+            let s: str = "ABC";
+            let n: u16 = str_copy(0x0600, 0x0010, s);
+            N = n.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0600), 0x41, "'A' at dest[0]");
+    assert_eq!(e.mem(0x0601), 0x42, "'B' at dest[1]");
+    assert_eq!(e.mem(0x0602), 0x43, "'C' at dest[2]");
+    assert_eq!(e.mem(0x0410), 3, "returned copied count = 3");
+}
+
 // ---------------------------------------------------------------------------
 // std/math.wr — mul_wide / divmod / rand
 // ---------------------------------------------------------------------------

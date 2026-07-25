@@ -801,6 +801,11 @@ pub struct ProgramInfo {
     /// Per-function zero-page frame assignment (base + size), colored by the
     /// call graph. Populated by `finalize_frames`.
     pub function_frames: HashMap<String, FrameInfo>,
+    /// Function signatures (Type::Function) keyed by name, covering local and
+    /// imported functions (including imported-module functions this module did
+    /// not name). Codegen falls back to this to marshal call arguments when the
+    /// symbol table has no entry for the callee.
+    pub function_signatures: HashMap<String, types::Type>,
     /// Call-graph edges (caller, callee) that lie within a recursion cycle.
     /// A call across such an edge must save/restore the callee's frame.
     pub recursive_call_edges: HashSet<(String, String)>,

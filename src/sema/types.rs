@@ -13,9 +13,9 @@ pub enum Type {
     Array(Box<Type>, usize),
     /// Slice type &[T] - fat pointer with base address and length
     Slice(Box<Type>),
-    /// String type - represented as length-prefixed byte array
-    /// In memory: [u16 length (little-endian)] [bytes...]
-    /// The type points to the start of the length field
+    /// String type - represented as a length-prefixed byte array.
+    /// In memory: [u8 length] [bytes...] (so max 255 bytes).
+    /// A `str` value is a 16-bit pointer to the start of the length byte.
     String,
     /// Function type (params, return_type)
     Function(Vec<Type>, Box<Type>),

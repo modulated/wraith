@@ -106,15 +106,19 @@ pub(super) fn generate_call(
         ));
     }
 
-    // Get function parameter types from symbol table
-    let param_types = if let Some(sym) = info.table.lookup(&function.node) {
-        if let crate::sema::types::Type::Function(params, _) = &sym.ty {
-            params.clone()
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
+    // Get the callee's parameter types to marshal arguments correctly. Prefer
+    // the symbol table, but fall back to the function-signature side-table, which
+    // also covers imported-module functions this module never named (e.g. one
+    // imported stdlib function calling another). Without the signature every
+    // argument would be treated as a single byte and the call would be corrupt.
+    let signature_ty = info
+        .table
+        .lookup(&function.node)
+        .map(|sym| &sym.ty)
+        .or_else(|| info.function_signatures.get(&function.node));
+    let param_types = match signature_ty {
+        Some(crate::sema::types::Type::Function(params, _)) => params.clone(),
+        _ => Vec::new(),
     };
 
     // STEP 1: Evaluate all arguments into TEMPORARY storage first
@@ -170,6 +174,14 @@ pub(super) fn generate_call(
     };
     let mut temp_offset = 0u8;
     let mut arg_info = Vec::new(); // Track argument sizes and temp locations
+
+    // Argument staging below interleaves generate_expr (which consults register
+    // tracking to elide loads) with raw STA temp-pool stores (which don't update
+    // it). A belief left over from before the call — e.g. `a = ZeroPage($40)`
+    // after storing a string local there — would otherwise wrongly elide a
+    // later argument's own load from that same address, passing a stale value.
+    // Evaluating arguments clobbers the registers anyway, so drop all beliefs.
+    emitter.invalidate_registers();
 
     for (i, arg) in args.iter().enumerate() {
         let temp_addr = temp_base + temp_offset;
@@ -655,6 +667,7 @@ fn generate_inline_call(
             resolved_struct_names: info.resolved_struct_names.clone(),
             string_pool: info.string_pool.clone(),
             function_frames: info.function_frames.clone(),
+            function_signatures: info.function_signatures.clone(),
             recursive_call_edges: info.recursive_call_edges.clone(),
             interrupt_save_info: info.interrupt_save_info.clone(),
             address_taken_functions: info.address_taken_functions.clone(),

@@ -86,6 +86,8 @@ impl SemanticAnalyzer {
             containing_function: None, // Functions are global
             is_param: false,
         };
+        self.function_signatures
+            .insert(name.clone(), info.ty.clone());
         self.table.insert(name.clone(), info);
 
         // Extract org and section attributes if present
@@ -443,6 +445,28 @@ impl SemanticAnalyzer {
                     reason: format!("symbol '{}' not found in imported file", name),
                     span: symbol_name.span,
                 });
+            }
+        }
+
+        // Record every function defined in the imported module in a signature
+        // side-table (not the symbol table, to avoid duplicate-symbol collisions
+        // and visibility leaks). An imported function may call sibling functions
+        // in the same module that were never named here (e.g. str_copy calls
+        // memcpy); codegen looks up the callee's signature by name to marshal
+        // arguments, and without it would treat every argument as a single byte
+        // and corrupt the call.
+        for item in ast
+            .items
+            .iter()
+            .chain(imported_analyzer.imported_items.iter())
+        {
+            if let crate::ast::Item::Function(f) = &item.node {
+                let fname = &f.name.node;
+                if let Some(sym) = imported_analyzer.table.lookup(fname) {
+                    self.function_signatures
+                        .entry(fname.clone())
+                        .or_insert_with(|| sym.ty.clone());
+                }
             }
         }
 

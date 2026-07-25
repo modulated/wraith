@@ -22,6 +22,28 @@ fn array_len_constant() {
 }
 
 // ---------------------------------------------------------------------------
+// Pointer/string parameter passed after other parameters.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_param_after_u16_params() {
+    // A str (pointer) parameter positioned after u16 params must receive the
+    // correct pointer. A stale register belief used to elide the pointer's
+    // low-byte load, passing the previous argument's value instead.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn pick(a: u16, b: u16, s: str) -> u8 { return s[1]; }
+        #[reset]
+        fn main() {
+            let s: str = "XYZ";
+            OUT = pick(1, 2, s);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x59, "s[1] == 'Y' when str is the 3rd arg");
+}
+
+// ---------------------------------------------------------------------------
 // String equality / inequality.
 // ---------------------------------------------------------------------------
 
