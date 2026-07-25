@@ -207,6 +207,7 @@ pub fn generate_stmt(
                         *inclusive,
                         emitter,
                         info,
+                        string_collector,
                     )?;
                     return Ok(());
                 }
@@ -1333,6 +1334,7 @@ fn generate_slice_materialize(
     inclusive: bool,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
     use crate::sema::const_eval::eval_const_expr_with_env;
@@ -1363,47 +1365,94 @@ fn generate_slice_materialize(
         }
     };
 
-    // Evaluate constant bounds.
     let env = HashMap::default();
-    let s = eval_const_expr_with_env(start, &env)
+    let const_s = eval_const_expr_with_env(start, &env)
         .ok()
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| {
-            CodegenError::UnsupportedOperation(
-                "slice start must be a compile-time constant".to_string(),
-            )
-        })? as usize;
-    let e = eval_const_expr_with_env(end, &env)
+        .and_then(|v| v.as_integer());
+    let const_e = eval_const_expr_with_env(end, &env)
         .ok()
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| {
-            CodegenError::UnsupportedOperation(
-                "slice end must be a compile-time constant".to_string(),
-            )
-        })? as usize;
-    let actual_end = if inclusive { e + 1 } else { e };
-    let len = actual_end.saturating_sub(s);
-    let byte_offset = s * elem_size;
+        .and_then(|v| v.as_integer());
 
-    emitter.emit_comment(&format!(
-        "Slice materialize: base = {}+{}, len = {}",
-        arr_name, byte_offset, len
-    ));
+    if elem_size > 2 {
+        return Err(CodegenError::UnsupportedOperation(
+            "slices of elements larger than 2 bytes are not yet supported".to_string(),
+        ));
+    }
 
-    // base = arr pointer + byte_offset (16-bit add of a constant).
+    if let (Some(s), Some(e)) = (const_s, const_e) {
+        // Fast path: both bounds are compile-time constants.
+        let s = s as usize;
+        let actual_end = if inclusive { e as usize + 1 } else { e as usize };
+        let len = actual_end.saturating_sub(s);
+        let byte_offset = s * elem_size;
+
+        emitter.emit_comment(&format!(
+            "Slice materialize: base = {}+{}, len = {}",
+            arr_name, byte_offset, len
+        ));
+        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+        emitter.emit_inst("CLC", "");
+        emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest));
+        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+        emitter.emit_inst("ADC", &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
+        emitter.emit_inst("LDA", &format!("#${:02X}", (len & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
+        emitter.emit_inst("LDA", &format!("#${:02X}", ((len >> 8) & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
+        emitter.invalidate_registers();
+        return Ok(());
+    }
+
+    // Runtime path: bounds are computed at run time. Inclusive `..=` is only
+    // supported with a constant end (so end+1 is a compile-time value).
+    if inclusive {
+        return Err(CodegenError::UnsupportedOperation(
+            "inclusive range with a runtime end is not supported in slice creation".to_string(),
+        ));
+    }
+
+    emitter.emit_comment(&format!("Slice materialize (runtime bounds) from {}", arr_name));
+
+    // Evaluate end first and park it at $21, then start at $20 (leaving start in
+    // A). Bounds are expected to be simple (variable/literal) so this does not
+    // clobber $20/$21; complex bounds may.
+    generate_expr(end, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$21");
+    generate_expr(start, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$20");
+
+    // len = end - start (u8 result, zero-extended to u16).
+    emitter.emit_inst("LDA", "$21");
+    emitter.emit_inst("SEC", "");
+    emitter.emit_inst("SBC", "$20");
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
+
+    // byte offset = start * elem_size, as a 16-bit value in $22/$23.
+    emitter.emit_inst("LDA", "$20");
+    if elem_size == 2 {
+        emitter.emit_inst("ASL", "A"); // start * 2 (low byte, carry = bit 8)
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("ADC", "#$00"); // capture the carry into the high byte
+        emitter.emit_inst("STA", "$23");
+    } else {
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("STA", "$23");
+    }
+
+    // base = arr pointer + byte offset (16-bit add).
     emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
     emitter.emit_inst("CLC", "");
-    emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
+    emitter.emit_inst("ADC", "$22");
     emitter.emit_inst("STA", &format!("${:02X}", dest));
     emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
-    emitter.emit_inst("ADC", &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8));
+    emitter.emit_inst("ADC", "$23");
     emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
-
-    // len (u16) into dest+2/dest+3.
-    emitter.emit_inst("LDA", &format!("#${:02X}", (len & 0xFF) as u8));
-    emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
-    emitter.emit_inst("LDA", &format!("#${:02X}", ((len >> 8) & 0xFF) as u8));
-    emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
 
     emitter.invalidate_registers();
     Ok(())

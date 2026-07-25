@@ -115,6 +115,52 @@ fn slice_of_u16_array_scales_index() {
 }
 
 #[test]
+fn slice_with_runtime_bounds() {
+    // Slice bounds computed from variables at runtime.
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const E1: addr = 0x0401;
+        const LEN: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let a: [u8; 6] = [10, 20, 30, 40, 50, 60];
+            let i: u8 = 2;
+            let j: u8 = 5;
+            let s: &[u8] = a[i..j];   // 30, 40, 50
+            E0 = s[0 as u8];
+            E1 = s[2 as u8];
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 30, "s[0] == a[2]");
+    assert_eq!(e.mem(0x0401), 50, "s[2] == a[4]");
+    assert_eq!(e.mem(0x0402), 3, "s.len == j - i == 3");
+}
+
+#[test]
+fn slice_with_runtime_bounds_u16() {
+    // Runtime bounds with u16 elements (base offset must scale by 2).
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let a: [u16; 5] = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555];
+            let i: u8 = 1;
+            let j: u8 = 4;
+            let s: &[u16] = a[i..j];  // 0x2222, 0x3333, 0x4444
+            let v: u16 = s[2 as u8];  // 0x4444
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x44, "s[2] low byte");
+    assert_eq!(e.mem(0x0401), 0x44, "s[2] high byte");
+}
+
+#[test]
 fn slice_passed_to_function() {
     // A slice passed to a function: the callee reads its length and elements
     // from the descriptor copied into its parameter slot.
