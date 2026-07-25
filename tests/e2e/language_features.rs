@@ -180,6 +180,73 @@ fn nested_function_calls() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn struct_return_by_value_copies_fields() {
+    // A function returning a struct leaves a pointer in A:X; the caller must
+    // copy the whole struct into the local. Before the fix only the low byte of
+    // the pointer landed in the local, so p.y read garbage.
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const XV: addr = 0x0400;
+        const YV: addr = 0x0401;
+        fn make() -> Point { return Point { x: 7, y: 9 }; }
+        #[reset]
+        fn main() {
+            let p: Point = make();
+            XV = p.x;
+            YV = p.y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "p.x from returned struct");
+    assert_eq!(e.mem(0x0401), 9, "p.y from returned struct");
+}
+
+#[test]
+fn struct_return_by_value_u16_field() {
+    // A returned struct with a u16 field must copy both of its bytes.
+    let mut e = run(r#"
+        struct Wide { a: u8, w: u16 }
+        const AV: addr = 0x0400;
+        const LO: addr = 0x0401;
+        const HI: addr = 0x0402;
+        fn build() -> Wide { return Wide { a: 3, w: 0x1234 }; }
+        #[reset]
+        fn main() {
+            let s: Wide = build();
+            AV = s.a;
+            LO = s.w.low;
+            HI = s.w.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 3, "s.a");
+    assert_eq!(e.mem(0x0401), 0x34, "s.w low byte");
+    assert_eq!(e.mem(0x0402), 0x12, "s.w high byte");
+}
+
+#[test]
+fn struct_return_by_value_reassignment() {
+    // `p = make(...)` (assignment, not let) must also copy the struct.
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        const XV: addr = 0x0400;
+        const YV: addr = 0x0401;
+        fn origin() -> Point { return Point { x: 0, y: 0 }; }
+        fn corner() -> Point { return Point { x: 200, y: 100 }; }
+        #[reset]
+        fn main() {
+            let p: Point = origin();
+            p = corner();
+            XV = p.x;
+            YV = p.y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 200, "p.x after reassignment");
+    assert_eq!(e.mem(0x0401), 100, "p.y after reassignment");
+}
+
+#[test]
 fn return_anonymous_struct_literal_type_checks() {
     // An anonymous struct literal in return position can only be typed if the
     // function's return type is propagated as the expected type (as `let x: T`

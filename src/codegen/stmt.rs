@@ -154,6 +154,35 @@ pub fn generate_stmt(
                         )?;
                         return Ok(());
                     }
+
+                    // Struct-by-value initialization from a call, e.g.
+                    // `let p: Point = make();`. A struct-returning function
+                    // leaves a pointer to the struct bytes in A:X; copy the
+                    // whole struct into this local's inline storage (frame
+                    // coloring keeps the returned pointer valid until the next
+                    // call, and the copy is the first thing after the call).
+                    if is_struct_type
+                        && matches!(&init.node, crate::ast::Expr::Call { .. })
+                        && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                        && let Some(sdef) = info.type_registry.get_struct(struct_name)
+                    {
+                        let total = sdef.total_size as u8;
+                        emitter.emit_comment(&format!(
+                            "Struct return-by-value: copy {} bytes into ${:02X}",
+                            total, dest
+                        ));
+                        generate_expr(init, emitter, info, string_collector)?;
+                        // A = pointer low, X = pointer high -> $20/$21 vector.
+                        emitter.emit_inst("STA", "$20");
+                        emitter.emit_inst("STX", "$21");
+                        for i in 0..total {
+                            emitter.emit_inst("LDY", &format!("#${:02X}", i));
+                            emitter.emit_inst("LDA", "($20),Y");
+                            emitter.emit_inst("STA", &format!("${:02X}", dest + i));
+                        }
+                        emitter.invalidate_registers();
+                        return Ok(());
+                    }
                 }
 
                 // Array of structs: stored inline. Runtime-initialize each element
@@ -464,6 +493,32 @@ pub fn generate_stmt(
                     if let Some(sym) = sym {
                         use crate::sema::table::SymbolKind;
                         use crate::sema::types::Type;
+
+                        // Struct-by-value assignment from a call, e.g.
+                        // `p = make();`. The value expression (already generated
+                        // above) left a pointer to the struct bytes in A:X; copy
+                        // the whole struct into the target's inline storage
+                        // rather than storing just the low byte of the pointer.
+                        if matches!(&value.node, crate::ast::Expr::Call { .. })
+                            && let Type::Named(sname) = &sym.ty
+                            && let Some(sdef) = info.type_registry.get_struct(sname)
+                            && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                        {
+                            let total = sdef.total_size as u8;
+                            emitter.emit_comment(&format!(
+                                "Struct return-by-value assign: copy {} bytes into ${:02X}",
+                                total, dest
+                            ));
+                            emitter.emit_inst("STA", "$20");
+                            emitter.emit_inst("STX", "$21");
+                            for i in 0..total {
+                                emitter.emit_inst("LDY", &format!("#${:02X}", i));
+                                emitter.emit_inst("LDA", "($20),Y");
+                                emitter.emit_inst("STA", &format!("${:02X}", dest + i));
+                            }
+                            emitter.invalidate_registers();
+                            return Ok(());
+                        }
 
                         // Check if this is an enum type
                         let is_enum = if let Type::Named(type_name) = &sym.ty {

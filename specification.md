@@ -733,6 +733,23 @@ fn update_entity(e: Entity) {
 }
 ```
 
+### Returning Structs by Value
+
+A function may return a struct by value. The result is copied into the
+destination variable's storage, so returning and binding a struct is a true
+copy:
+
+```rust
+fn make() -> Point {
+    return Point { x: 7, y: 9 };
+}
+
+fn main() {
+    let p: Point = make();   // full struct copied into p
+    p = make();              // reassignment copies too
+}
+```
+
 ### Completion Status
 
 All items completed.
