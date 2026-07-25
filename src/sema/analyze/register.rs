@@ -259,6 +259,11 @@ impl SemanticAnalyzer {
             for b in &bytes {
                 if let crate::sema::InitByte::FnLow(f) = b {
                     self.address_taken_functions.insert(f.clone());
+                    // Installing a function in a vtable is a use of it, even if
+                    // it is never named at a call site; otherwise every driver
+                    // entry point would be reported as unused.
+                    self.called_functions.insert(f.clone());
+                    self.all_used_symbols.insert(f.clone());
                 }
             }
             self.static_inits.push(crate::sema::StaticInit {

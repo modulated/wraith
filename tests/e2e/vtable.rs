@@ -80,6 +80,37 @@ fn vtable_with_two_methods() {
 }
 
 #[test]
+fn vtable_functions_are_not_reported_unused() {
+    // A driver entry point installed in a vtable is reached only through the
+    // function pointer. It must not be flagged as dead code, or every driver in
+    // an OS would warn.
+    let result = crate::common::harness::compile(
+        r#"
+        const OUT: addr = 0x0900;
+        struct Device { read: fn(u8) -> u8 }
+        fn uart_read(r: u8) -> u8 { return r; }
+        fn via_read(r: u8) -> u8 { return r; }
+        static DEV: Device = Device { read: uart_read };
+        #[reset]
+        fn main() {
+            DEV.read = via_read;
+            OUT = DEV.read(1);
+            loop {}
+        }
+    "#,
+    );
+    let warnings = match result {
+        crate::common::harness::CompileResult::Success(w, _) => w,
+        other => panic!("expected success, got {:?}", other),
+    };
+    assert!(
+        !warnings.contains("unused function"),
+        "vtable-installed functions must not warn as unused, got:\n{}",
+        warnings
+    );
+}
+
+#[test]
 fn function_pointer_variable_still_direct() {
     // The pre-existing function-pointer-variable path must keep working.
     let mut e = run(r#"

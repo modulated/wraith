@@ -10,7 +10,10 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 - **Modern Syntax** - Rust-inspired syntax with explicit types and pattern matching
 - **Tail Call Optimization** - Recursive functions optimized to loops when possible
 - **Module System** - No more header files, no more macros
-- **Configurable Memory Sections** - Control code placement for different memory layouts
+- **Configurable Memory Sections** - Control code, data and RAM placement for different memory layouts
+- **Mutable Globals** - `static` state in RAM, shareable between interrupt handlers and main code
+- **Function Pointers & Vtables** - Call through struct fields (`device.read(reg)`) for driver-style dispatch
+- **Slices** - `&[T]` views over arrays with runtime length, passable to and returnable from functions
 
 ## Quick Setup
 
@@ -65,6 +68,12 @@ start = 0xC000
 end = 0xCFFF
 description = "Constants and data (4KB)"
 
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals (1KB)"
+
 default_section = "CODE"
 ```
 
@@ -72,10 +81,41 @@ default_section = "CODE"
 
 If no `wraith.toml` is present, the compiler uses these defaults:
 
-- **CODE**: `0x8000-0xBFFF` (16KB) - User code (default)
-- **DATA**: `0xD000-0xEFFF` (8KB) - Constants and data
+- **CODE**: `0x8000-0xBFFF` (16KB) — user code (default)
+- **DATA**: `0xD000-0xEFFF` (8KB) — constants and read-only data
+- **BSS**: `0x0400-0x07FF` (1KB) — **RAM** for mutable globals (`static`)
 
 Functions without an explicit `#[org]` or `#[section]` attribute are placed in the default section.
+
+### The BSS section (RAM)
+
+`BSS` is the only section the compiler writes to at runtime: every `static` is
+allocated there, in declaration order, and the reset handler writes their
+initial values (RAM contents are undefined at power-on).
+
+Point it at whatever RAM your board actually has:
+
+```toml
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+```
+
+Things to keep in mind when choosing the range:
+
+- **Do not overlap the reserved low pages.** The zero page (`$0000-$00FF`) holds
+  codegen scratch and call-graph-colored function frames, `$0100-$01FF` is the
+  6502 hardware stack, and `$0200-$02FF` is Wraith's software stack (used for
+  recursion and operand spills). The default starts at `$0400` to clear all three.
+- **Do not overlap memory-mapped I/O.** The compiler warns if an `addr`
+  declaration falls inside `BSS`, since a `static` allocated there would collide
+  with the device register.
+- **Size it for your data.** Overflowing the region is a compile error naming the
+  range. A text framebuffer is often the largest consumer (an 80×25 screen is
+  2000 bytes — more than the 1 KB default), so either enlarge `BSS`, use a
+  smaller geometry, or map video memory separately with `addr`.
+- If a config omits `BSS` entirely, the compiler falls back to `$0400-$07FF`.
 
 ## Examples
 
