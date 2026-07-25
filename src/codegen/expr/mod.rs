@@ -195,6 +195,27 @@ pub fn generate_expr(
                         emitter.mark_a_unknown();
                         Ok(())
                     }
+                    crate::sema::types::Type::Slice(_) => {
+                        // A slice's length is the u16 stored at descriptor bytes
+                        // 2..3 (slot[0..1] is the base pointer). Load it into A:Y.
+                        if let Expr::Variable(name) = &object.node
+                            && let Some(sym) = info
+                                .resolved_symbols
+                                .get(&object.span)
+                                .or_else(|| info.table.lookup(name))
+                            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+                        {
+                            emitter.emit_comment("Slice .len (from descriptor)");
+                            emitter.emit_inst("LDA", &format!("${:02X}", addr + 2));
+                            emitter.emit_inst("LDY", &format!("${:02X}", addr + 3));
+                            emitter.mark_a_unknown();
+                            Ok(())
+                        } else {
+                            Err(CodegenError::UnsupportedOperation(
+                                ".len is only supported on slice variables".to_string(),
+                            ))
+                        }
+                    }
                     _ => {
                         // Slices are not yet first-class values, so a runtime
                         // slice length is unreachable here; other types have no

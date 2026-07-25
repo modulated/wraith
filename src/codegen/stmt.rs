@@ -185,6 +185,32 @@ pub fn generate_stmt(
                     }
                 }
 
+                // Slice value: `let s: &[T] = arr[start..end];`. Materialize the
+                // 4-byte fat-pointer descriptor into s's frame slot:
+                //   slot[0..1] = base = arr's data pointer + start*elem_size
+                //   slot[2..3] = len  = (end - start) in elements
+                if let Type::Slice(elem) = &sym.ty
+                    && let crate::ast::Expr::Slice {
+                        object,
+                        start,
+                        end,
+                        inclusive,
+                    } = &init.node
+                    && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                {
+                    generate_slice_materialize(
+                        dest,
+                        elem,
+                        object,
+                        start,
+                        end,
+                        *inclusive,
+                        emitter,
+                        info,
+                    )?;
+                    return Ok(());
+                }
+
                 // Array of structs: stored inline. Runtime-initialize each element
                 // struct literal directly at addr + i*element_size.
                 if let Type::Array(elem, _n) = &sym.ty
@@ -1290,6 +1316,96 @@ fn generate_index_assignment(
     // of a variable the tracker thinks is still in A would be wrongly elided.
     emitter.invalidate_registers();
 
+    Ok(())
+}
+
+/// Materialize a slice descriptor `arr[start..end]` into the 4-byte frame slot
+/// at `dest`: `dest[0..1] = base` (arr's data pointer + start*elem_size),
+/// `dest[2..3] = len` (element count). Bounds must be compile-time constants for
+/// now; the array must be a zero-page local (its slot holds the data pointer).
+#[allow(clippy::too_many_arguments)]
+fn generate_slice_materialize(
+    dest: u8,
+    elem: &crate::sema::types::Type,
+    object: &Spanned<crate::ast::Expr>,
+    start: &Spanned<crate::ast::Expr>,
+    end: &Spanned<crate::ast::Expr>,
+    inclusive: bool,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use crate::sema::const_eval::eval_const_expr_with_env;
+    use crate::sema::table::SymbolLocation;
+
+    let elem_size = elem.size().max(1);
+
+    // Resolve the sliced array variable's zero-page slot (holds the data pointer).
+    let arr_name = if let Expr::Variable(name) = &object.node {
+        name
+    } else {
+        return Err(CodegenError::UnsupportedOperation(
+            "slice source must be an array variable".to_string(),
+        ));
+    };
+    let arr_sym = info
+        .resolved_symbols
+        .get(&object.span)
+        .or_else(|| info.table.lookup(arr_name))
+        .ok_or_else(|| CodegenError::SymbolNotFound(arr_name.clone()))?;
+    let arr_addr = match arr_sym.location {
+        SymbolLocation::ZeroPage(a) => a,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "slice source array '{}' must be a zero-page local",
+                arr_name
+            )));
+        }
+    };
+
+    // Evaluate constant bounds.
+    let env = HashMap::default();
+    let s = eval_const_expr_with_env(start, &env)
+        .ok()
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(
+                "slice start must be a compile-time constant".to_string(),
+            )
+        })? as usize;
+    let e = eval_const_expr_with_env(end, &env)
+        .ok()
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(
+                "slice end must be a compile-time constant".to_string(),
+            )
+        })? as usize;
+    let actual_end = if inclusive { e + 1 } else { e };
+    let len = actual_end.saturating_sub(s);
+    let byte_offset = s * elem_size;
+
+    emitter.emit_comment(&format!(
+        "Slice materialize: base = {}+{}, len = {}",
+        arr_name, byte_offset, len
+    ));
+
+    // base = arr pointer + byte_offset (16-bit add of a constant).
+    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
+    emitter.emit_inst("STA", &format!("${:02X}", dest));
+    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+    emitter.emit_inst("ADC", &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8));
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
+
+    // len (u16) into dest+2/dest+3.
+    emitter.emit_inst("LDA", &format!("#${:02X}", (len & 0xFF) as u8));
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
+    emitter.emit_inst("LDA", &format!("#${:02X}", ((len >> 8) & 0xFF) as u8));
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
+
+    emitter.invalidate_registers();
     Ok(())
 }
 

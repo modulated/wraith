@@ -953,12 +953,17 @@ impl SemanticAnalyzer {
                 // Return the element type
                 Ok((**element_ty).clone())
             }
+            Type::Slice(element_ty) => {
+                // Slice indexing returns the element type. Length is a runtime
+                // value, so no compile-time bounds check.
+                Ok((**element_ty).clone())
+            }
             Type::String => {
                 // String indexing returns u8 (a single byte)
                 Ok(Type::Primitive(PrimitiveType::U8))
             }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array or string".to_string(),
+                expected: "array, slice, or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),
@@ -1043,8 +1048,14 @@ impl SemanticAnalyzer {
                     }
                 }
 
-                // Slices return the same array type (for assignment compatibility)
-                Ok(object_ty.clone())
+                // As an assignment target (`arr[a..b] = [...]`) the slice keeps
+                // the array type so length/element checks line up. As a value
+                // (`let s: &[u8] = arr[a..b]`) it is a slice of the element type.
+                if self.checking_assignment_target {
+                    Ok(object_ty.clone())
+                } else {
+                    Ok(Type::Slice(_element_ty.clone()))
+                }
             }
             Type::String => {
                 // COMPILE-TIME STRING SLICING

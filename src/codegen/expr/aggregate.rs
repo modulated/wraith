@@ -48,11 +48,16 @@ fn emit_indexed_load(
     use crate::ast::PrimitiveType;
     use crate::sema::types::Type;
 
-    // Determine whether the element type occupies two bytes.
+    // Determine whether the element type occupies two bytes (arrays and slices
+    // share the indirect-indexed load path; a slice's slot holds the base
+    // pointer just like an array variable's slot).
+    let elem_ty = match info.resolved_types.get(&object.span) {
+        Some(Type::Array(elem, _)) | Some(Type::Slice(elem)) => Some(&**elem),
+        _ => None,
+    };
     let is_multibyte = matches!(
-        info.resolved_types.get(&object.span),
-        Some(Type::Array(elem, _)) if matches!(
-            &**elem,
+        elem_ty,
+        Some(
             Type::Primitive(PrimitiveType::U16)
                 | Type::Primitive(PrimitiveType::I16)
                 | Type::Primitive(PrimitiveType::B16)

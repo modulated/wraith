@@ -44,6 +44,77 @@ fn string_param_after_u16_params() {
 }
 
 // ---------------------------------------------------------------------------
+// First-class slices: `let s: &[T] = arr[a..b]`, `s.len`, `s[i]`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slice_of_u8_array_index_and_len() {
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const E1: addr = 0x0401;
+        const E2: addr = 0x0402;
+        const LEN: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let a: [u8; 5] = [10, 20, 30, 40, 50];
+            let s: &[u8] = a[1..4];   // elements 20, 30, 40
+            E0 = s[0 as u8];
+            E1 = s[1 as u8];
+            E2 = s[2 as u8];
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 20, "s[0] == a[1]");
+    assert_eq!(e.mem(0x0401), 30, "s[1] == a[2]");
+    assert_eq!(e.mem(0x0402), 40, "s[2] == a[3]");
+    assert_eq!(e.mem(0x0403), 3, "s.len == 3");
+}
+
+#[test]
+fn slice_iteration_with_len() {
+    // Sum a slice's elements using its runtime length.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+            let s: &[u8] = a[2..5];   // 3, 4, 5
+            let sum: u8 = 0;
+            for i in 0..s.len {
+                sum = sum + s[i as u8];
+            }
+            OUT = sum;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 12, "3 + 4 + 5 = 12");
+}
+
+#[test]
+fn slice_of_u16_array_scales_index() {
+    // u16-element slice: each element is 2 bytes, index must scale.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        const LEN: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let a: [u16; 4] = [0x1111, 0x2222, 0x3333, 0x4444];
+            let s: &[u16] = a[1..3];  // 0x2222, 0x3333
+            let v: u16 = s[1 as u8];  // 0x3333
+            LO = v.low;
+            HI = v.high;
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x33, "s[1] low byte");
+    assert_eq!(e.mem(0x0401), 0x33, "s[1] high byte");
+    assert_eq!(e.mem(0x0402), 2, "s.len == 2");
+}
+
+// ---------------------------------------------------------------------------
 // String equality / inequality.
 // ---------------------------------------------------------------------------
 
