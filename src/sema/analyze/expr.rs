@@ -340,18 +340,37 @@ impl SemanticAnalyzer {
                 Ok(Type::String)
             }
             crate::ast::Literal::Array(elements) => {
+                // A declared element type is the expected type for every element,
+                // so literals adopt it: `let a: [u16; 3] = [0, 0, 0];` gives u16
+                // elements rather than inferring u8 from the first one and then
+                // failing to match. Same rule as literals in a binary operation —
+                // it types the literal, it does not convert a value.
+                let declared_elem = match &self.expected_type {
+                    Some(Type::Array(elem, _)) => Some((**elem).clone()),
+                    _ => None,
+                };
+
                 if elements.is_empty() {
-                    // Empty array - need type context to determine element type
-                    // For now, default to [u8; 0]
-                    return Ok(Type::Array(Box::new(Type::Primitive(PrimitiveType::U8)), 0));
+                    // An empty array takes its element type from context when
+                    // there is one, else defaults to u8.
+                    let elem = declared_elem.unwrap_or(Type::Primitive(PrimitiveType::U8));
+                    return Ok(Type::Array(Box::new(elem), 0));
                 }
 
-                // Infer element type from first element
-                let element_ty = self.check_expr(&elements[0])?;
+                let saved = self.expected_type.take();
+                self.expected_type = declared_elem.clone();
+                let first = self.check_expr(&elements[0]);
+                self.expected_type = saved.clone();
+                let element_ty = first?;
 
-                // Check that all elements have the same type
+                // Every element must agree; each is checked against the declared
+                // element type so a wider literal is not misread from the first.
                 for elem in &elements[1..] {
-                    let elem_ty = self.check_expr(elem)?;
+                    let saved_inner = self.expected_type.take();
+                    self.expected_type = declared_elem.clone().or(Some(element_ty.clone()));
+                    let checked = self.check_expr(elem);
+                    self.expected_type = saved_inner;
+                    let elem_ty = checked?;
                     if elem_ty != element_ty {
                         return Err(SemaError::TypeMismatch {
                             expected: element_ty.display_name(),
@@ -364,7 +383,16 @@ impl SemanticAnalyzer {
                 Ok(Type::Array(Box::new(element_ty), elements.len()))
             }
             crate::ast::Literal::ArrayFill { value, count } => {
-                let element_ty = self.check_expr(value)?;
+                // `[0; 8]` for a `[u16; 8]` fills u16 elements, same rule.
+                let declared_elem = match &self.expected_type {
+                    Some(Type::Array(elem, _)) => Some((**elem).clone()),
+                    _ => None,
+                };
+                let saved = self.expected_type.take();
+                self.expected_type = declared_elem;
+                let checked = self.check_expr(value);
+                self.expected_type = saved;
+                let element_ty = checked?;
                 Ok(Type::Array(Box::new(element_ty), *count))
             }
         }

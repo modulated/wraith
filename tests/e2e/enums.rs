@@ -1,542 +1,357 @@
-//! End-to-end tests for enum types and pattern matching
+//! Enum and pattern-matching tests, verified by execution.
 //!
-//! Tests cover:
-//! - Simple enum creation and matching
-//! - Tuple variant pattern matching with data extraction
-//! - Multi-field tuple variants
-//! - u16/multi-byte fields in tuple variants
-//! - Mixed variant types
-//! - Edge cases
+//! These previously asserted that comments like `; Enum variant: Outer::Contains`
+//! and `; Match statement` appeared in the output — which says the codegen took a
+//! path, not that the right arm ran or that the payload arrived intact. Payload
+//! extraction is exactly where truncation hides (a u16 field silently losing its
+//! high byte compiles to entirely reasonable assembly), so the values are now
+//! read back.
 
-use crate::common::*;
+use crate::common::exec::run;
 
-// ============================================================
-// Simple Enum Tests (Unit Variants)
-// ============================================================
-
-#[test]
-fn simple_enum_creation() {
-    let asm = compile_success(
-        r#"
-        enum Direction {
-            North,
-            South,
-            East,
-            West,
-        }
-
-        fn main() {
-            let dir: Direction = Direction::North;
-        }
-    "#,
-    );
-
-    assert_asm_contains(&asm, "Direction::North");
-    assert_asm_contains(&asm, ".BYTE $00");
+/// Run a program and read the u8 left at `$0900`.
+fn out8(src: &str) -> u8 {
+    run(src).mem(0x0900)
 }
 
-#[test]
-fn simple_enum_match() {
-    let asm = compile_success(
-        r#"
-        enum Status {
-            Off,
-            On,
-            Error,
-        }
+// ============================================================================
+// Unit variants
+// ============================================================================
 
-        fn main() {
-            let s: Status = Status::On;
-            match s {
-                Status::Off => {
-                    let x: u8 = 0;
+#[test]
+fn simple_enum_match_selects_the_right_arm() {
+    let pick = |v: &str| {
+        out8(&format!(
+            r#"
+            enum Direction {{ North, South, East, West }}
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                let d: Direction = Direction::{v};
+                match d {{
+                    Direction::North => {{ OUT = 1; }}
+                    Direction::South => {{ OUT = 2; }}
+                    Direction::East  => {{ OUT = 3; }}
+                    Direction::West  => {{ OUT = 4; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        ))
+    };
+    assert_eq!(pick("North"), 1);
+    assert_eq!(pick("South"), 2);
+    assert_eq!(pick("East"), 3);
+    assert_eq!(pick("West"), 4);
+}
+
+// ============================================================================
+// Tuple payloads
+// ============================================================================
+
+#[test]
+fn tuple_variant_single_u8_payload() {
+    assert_eq!(
+        out8(
+            r#"
+            enum Msg { Empty, Value(u8) }
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {
+                let m: Msg = Msg::Value(42);
+                match m {
+                    Msg::Empty    => { OUT = 0; }
+                    Msg::Value(v) => { OUT = v; }
                 }
-                Status::On => {
-                    let x: u8 = 1;
-                }
-                Status::Error => {
-                    let x: u8 = 255;
-                }
+                loop {}
             }
-        }
-    "#,
+        "#
+        ),
+        42
     );
-
-    // With 3 variants, uses jump table dispatch
-    assert_asm_contains(&asm, "; Match statement (jump table)");
-    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
-}
-
-// ============================================================
-// Tuple Variant Creation Tests
-// ============================================================
-
-#[test]
-fn tuple_variant_single_field_u8() {
-    let asm = compile_success(
-        r#"
-        enum Option {
-            None,
-            Some(u8),
-        }
-
-        fn main() {
-            let opt: Option = Option::Some(42);
-        }
-    "#,
-    );
-
-    // Should generate enum data with tag and field
-    assert_asm_contains(&asm, "; Enum variant: Option::Some");
-    assert_asm_contains(&asm, "en_");
-    assert_asm_contains(&asm, ".BYTE $01"); // Tag for Some (second variant)
-    assert_asm_contains(&asm, ".BYTE $2A"); // 42 in hex
 }
 
 #[test]
-fn tuple_variant_multi_field_u8() {
-    let asm = compile_success(
-        r#"
-        enum Color {
-            RGB(u8, u8, u8),
-        }
-
+fn tuple_variant_multi_field_payload() {
+    // Each binding must get *its own* field, not the same byte twice.
+    let src = r#"
+        enum Message { Quit, Move(u8, u8) }
+        const X: addr = 0x0900;
+        const Y: addr = 0x0901;
+        #[reset]
         fn main() {
-            let red: Color = Color::RGB(255, 0, 0);
-        }
-    "#,
-    );
-
-    // Should generate enum data with tag and three fields
-    assert_asm_contains(&asm, "; Enum variant: Color::RGB");
-    assert_asm_contains(&asm, ".BYTE $00"); // Tag
-    assert_asm_contains(&asm, ".BYTE $FF"); // Red = 255
-    assert_asm_contains(&asm, ".BYTE $00"); // Green = 0
-    // Third .BYTE $00 for blue
-}
-
-#[test]
-fn tuple_variant_u16_field() {
-    let asm = compile_success(
-        r#"
-        enum Result {
-            Ok(u16),
-            Err,
-        }
-
-        fn main() {
-            let res: Result = Result::Ok(1000);
-        }
-    "#,
-    );
-
-    // Should generate enum with tag + 2 bytes for u16
-    assert_asm_contains(&asm, "; Enum variant: Result::Ok");
-    assert_asm_contains(&asm, ".BYTE $00"); // Tag
-    // 1000 = 0x03E8, little-endian: E8 03
-    assert_asm_contains(&asm, ".BYTE $E8"); // Low byte
-    assert_asm_contains(&asm, ".BYTE $03"); // High byte
-}
-
-#[test]
-fn tuple_variant_mixed_types() {
-    let asm = compile_success(
-        r#"
-        enum Message {
-            SetValue(u8),
-            SetAddress(u16),
-            SetColor(u8, u8, u8),
-        }
-
-        fn main() {
-            let msg: Message = Message::SetColor(128, 64, 32);
-        }
-    "#,
-    );
-
-    // Should generate enum with tag + three u8 fields
-    assert_asm_contains(&asm, "; Enum variant: Message::SetColor");
-    assert_asm_contains(&asm, ".BYTE $02"); // Tag for third variant
-    assert_asm_contains(&asm, ".BYTE $80"); // 128
-    assert_asm_contains(&asm, ".BYTE $40"); // 64
-    assert_asm_contains(&asm, ".BYTE $20"); // 32
-}
-
-// ============================================================
-// Tuple Variant Pattern Matching Tests
-// ============================================================
-
-#[test]
-fn match_tuple_variant_single_field_extract() {
-    let asm = compile_success(
-        r#"
-        enum Option {
-            None,
-            Some(u8),
-        }
-
-        const RESULT: addr = 0x6000;
-
-        fn main() {
-            let opt: Option = Option::Some(42);
-            match opt {
-                Option::Some(value) => {
-                    RESULT = value;
-                }
-                Option::None => {
-                    RESULT = 0;
-                }
+            let m: Message = Message::Move(10, 20);
+            match m {
+                Message::Move(x, y) => { X = x; Y = y; }
+                Message::Quit       => { X = 0; Y = 0; }
             }
+            loop {}
         }
-    "#,
-    );
-
-    // Should have match structure with tag comparison
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "STA $30"); // Store pointer low
-    assert_asm_contains(&asm, "STX $31"); // Store pointer high
-    assert_asm_contains(&asm, "LDA ($30),Y"); // Load tag byte
-
-    // Should compare tags
-    assert_asm_contains(&asm, "CMP #$01"); // Compare with Some tag
-    // Note: CMP #$00 is optimized away since LDA sets the Z flag
-    // and BEQ can be used directly to check for zero (None)
-
-    // Should have field extraction code
-    // The binding extraction happens after tag match
+    "#;
+    let mut e = run(src);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (10, 20));
 }
 
 #[test]
-fn match_tuple_variant_multi_field_extract() {
-    let asm = compile_success(
-        r#"
-        enum Color {
-            RGB(u8, u8, u8),
-            Grayscale(u8),
-        }
-
-        const RED_OUT: addr = 0x6000;
-        const GREEN_OUT: addr = 0x6001;
-        const BLUE_OUT: addr = 0x6002;
-
+fn tuple_variant_three_fields() {
+    let src = r#"
+        enum Message { Quit, ChangeColor(u8, u8, u8) }
+        const R: addr = 0x0900;
+        const G: addr = 0x0901;
+        const B: addr = 0x0902;
+        #[reset]
         fn main() {
-            let color: Color = Color::RGB(255, 128, 64);
-            match color {
-                Color::RGB(r, g, b) => {
-                    RED_OUT = r;
-                    GREEN_OUT = g;
-                    BLUE_OUT = b;
-                }
-                Color::Grayscale(gray) => {
-                    RED_OUT = gray;
-                    GREEN_OUT = gray;
-                    BLUE_OUT = gray;
-                }
+            let m: Message = Message::ChangeColor(1, 2, 3);
+            match m {
+                Message::ChangeColor(r, g, b) => { R = r; G = g; B = b; }
+                Message::Quit                 => { R = 0; G = 0; B = 0; }
             }
+            loop {}
         }
-    "#,
-    );
-
-    // Should have match structure
-    assert_asm_contains(&asm, "; Match statement");
-
-    // Should compare with both variant tags
-    assert_asm_contains(&asm, "CMP #$00"); // RGB tag
-    assert_asm_contains(&asm, "CMP #$01"); // Grayscale tag
-
-    // Should extract multiple fields using indirect indexed addressing
-    assert_asm_contains(&asm, "($30),Y");
+    "#;
+    let mut e = run(src);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (1, 2, 3));
 }
 
 #[test]
-fn match_tuple_variant_u16_extract() {
-    let asm = compile_success(
-        r#"
-        enum Result {
-            Ok(u16),
-            Err(u8),
-        }
-
-        const VALUE_LOW: addr = 0x6000;
-        const VALUE_HIGH: addr = 0x6001;
-
+fn tuple_variant_u16_payload_keeps_both_bytes() {
+    // The high byte is where a truncating extraction shows up: 1000 is $03E8,
+    // so a low-byte-only read gives $E8 and looks plausible.
+    let src = r#"
+        enum Result16 { Err(u8), Ok(u16) }
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
         fn main() {
-            let res: Result = Result::Ok(1000);
-            match res {
-                Result::Ok(value) => {
-                    // value is u16, should be extracted properly
-                    VALUE_LOW = value as u8;
-                    VALUE_HIGH = (value >> 8) as u8;
-                }
-                Result::Err(code) => {
-                    VALUE_LOW = code;
-                    VALUE_HIGH = 0;
-                }
+            let r: Result16 = Result16::Ok(1000);
+            match r {
+                Result16::Ok(v)  => { LO = v.low; HI = v.high; }
+                Result16::Err(e) => { LO = e; HI = 0; }
             }
+            loop {}
         }
-    "#,
-    );
-
-    // Should have match structure
-    assert_asm_contains(&asm, "; Match statement");
-
-    // Should extract u16 value (2 bytes)
-    assert_asm_contains(&asm, "($30),Y");
+    "#;
+    assert_eq!(run(src).mem16(0x0900), 1000);
 }
+
+#[test]
+fn tuple_variant_mixed_width_fields() {
+    // A u8 followed by a u16: the second field's offset depends on the first
+    // field's width, so a wrong stride reads the boundary between them.
+    let src = r#"
+        enum Packet { None, Header(u8, u16) }
+        const TAG: addr = 0x0900;
+        const LO: addr = 0x0901;
+        const HI: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let p: Packet = Packet::Header(7, 0x1234);
+            match p {
+                Packet::Header(t, v) => { TAG = t; LO = v.low; HI = v.high; }
+                Packet::None         => { TAG = 0; LO = 0; HI = 0; }
+            }
+            loop {}
+        }
+    "#;
+    let mut e = run(src);
+    assert_eq!(e.mem(0x0900), 7, "u8 field");
+    assert_eq!(e.mem16(0x0901), 0x1234, "u16 field after a u8");
+}
+
+// ============================================================================
+// Match forms
+// ============================================================================
 
 #[test]
 fn match_tuple_variant_with_wildcard() {
-    let asm = compile_success(
-        r#"
-        enum Option {
-            None,
-            Some(u8),
-        }
-
-        const OUTPUT: addr = 0x6000;
-
-        fn main() {
-            let opt: Option = Option::Some(99);
-            match opt {
-                Option::Some(val) => {
-                    OUTPUT = val;
-                }
-                _ => {
-                    OUTPUT = 0;
-                }
-            }
-        }
-    "#,
-    );
-
-    // Should have match with wildcard pattern
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "CMP #$01"); // Check for Some
-    assert_asm_contains(&asm, "JMP"); // Wildcard jumps
+    let pick = |v: u8| {
+        out8(&format!(
+            r#"
+            enum Msg {{ A(u8), B(u8), C }}
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                let sel: u8 = {v};
+                let m: Msg = Msg::A(9);
+                if sel == 1 {{ m = Msg::B(5); }}
+                if sel == 2 {{ m = Msg::C; }}
+                match m {{
+                    Msg::A(x) => {{ OUT = x; }}
+                    _         => {{ OUT = 99; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        ))
+    };
+    assert_eq!(pick(0), 9, "the A arm binds its payload");
+    assert_eq!(pick(1), 99, "B falls to the wildcard");
+    assert_eq!(pick(2), 99, "C falls to the wildcard");
 }
 
 #[test]
-fn match_tuple_variant_nested_enums() {
-    let asm = compile_success(
-        r#"
-        enum Inner {
-            Value(u8),
-        }
-
-        enum Outer {
-            Contains(u8),
-            Empty,
-        }
-
-        const OUTPUT: addr = 0x6000;
-
-        fn main() {
-            let inner: Inner = Inner::Value(42);
-            let outer: Outer = Outer::Contains(10);
-
-            match outer {
-                Outer::Contains(x) => {
-                    OUTPUT = x;
+fn match_tuple_variant_ignoring_payload() {
+    // Matching a payload-carrying variant without binding it must still work.
+    assert_eq!(
+        out8(
+            r#"
+            enum Msg { Value(u8), Empty }
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {
+                let m: Msg = Msg::Value(42);
+                match m {
+                    Msg::Value(_v) => { OUT = 1; }
+                    Msg::Empty     => { OUT = 2; }
                 }
-                Outer::Empty => {
-                    OUTPUT = 0;
-                }
+                loop {}
             }
-        }
-    "#,
+        "#
+        ),
+        1
     );
-
-    // Both enums should compile and generate proper structures
-    assert_asm_contains(&asm, "; Enum variant: Inner::Value");
-    assert_asm_contains(&asm, "; Enum variant: Outer::Contains");
-    assert_asm_contains(&asm, "; Match statement");
-}
-
-// ============================================================
-// Edge Cases and Error Conditions
-// ============================================================
-
-#[test]
-fn match_tuple_variant_no_bindings() {
-    let asm = compile_success(
-        r#"
-        enum Option {
-            None,
-            Some(u8),
-        }
-
-        const MATCHED: addr = 0x6000;
-
-        fn main() {
-            let opt: Option = Option::Some(42);
-            match opt {
-                Option::Some(_) => {
-                    // Don't extract the value, just match
-                    MATCHED = 1;
-                }
-                Option::None => {
-                    MATCHED = 0;
-                }
-            }
-        }
-    "#,
-    );
-
-    // Should match but not extract
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "CMP");
 }
 
 #[test]
-fn match_multiple_tuple_variants() {
-    let asm = compile_success(
-        r#"
-        enum Input {
-            Key(u8),
-            Mouse(u8, u8),
-            Joystick(u8),
-            None,
-        }
-
-        const OUTPUT: addr = 0x6000;
-
-        fn main() {
-            let input: Input = Input::Mouse(100, 50);
-            match input {
-                Input::Key(code) => {
-                    OUTPUT = code;
-                }
-                Input::Mouse(x, y) => {
-                    OUTPUT = x;
-                }
-                Input::Joystick(dir) => {
-                    OUTPUT = dir;
-                }
-                Input::None => {
-                    OUTPUT = 255;
-                }
-            }
-        }
-    "#,
-    );
-
-    // With 4 variants, uses jump table dispatch
-    assert_asm_contains(&asm, "; Match statement (jump table)");
-    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
-    assert_asm_contains(&asm, "($30),Y"); // Should extract fields using indirect indexed
+fn match_selects_among_several_payload_variants() {
+    let pick = |v: u8| {
+        out8(&format!(
+            r#"
+            enum Op {{ Add(u8), Sub(u8), Nop }}
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                let sel: u8 = {v};
+                let o: Op = Op::Add(10);
+                if sel == 1 {{ o = Op::Sub(3); }}
+                if sel == 2 {{ o = Op::Nop; }}
+                match o {{
+                    Op::Add(n) => {{ OUT = 100 + n; }}
+                    Op::Sub(n) => {{ OUT = 100 - n; }}
+                    Op::Nop    => {{ OUT = 0; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        ))
+    };
+    assert_eq!(pick(0), 110);
+    assert_eq!(pick(1), 97);
+    assert_eq!(pick(2), 0);
 }
 
 #[test]
-fn tuple_variant_return_from_function() {
-    let asm = compile_success(
-        r#"
-        enum Option {
-            None,
-            Some(u8),
-        }
-
-        fn unwrap_or(opt: Option, default: u8) -> u8 {
-            match opt {
-                Option::Some(value) => {
-                    return value;
-                }
-                Option::None => {
-                    return default;
-                }
-            }
-        }
-
+fn two_enums_coexist() {
+    // Distinct enum types must not share discriminant storage.
+    let src = r#"
+        enum Inner { Value(u8) }
+        enum Outer { Contains(u8), Empty }
+        const OUTER: addr = 0x0900;
+        const INNER: addr = 0x0901;
+        #[reset]
         fn main() {
-            let opt: Option = Option::Some(42);
-            let result: u8 = unwrap_or(opt, 0);
+            let i: Inner = Inner::Value(42);
+            let o: Outer = Outer::Contains(10);
+            match o {
+                Outer::Contains(x) => { OUTER = x; }
+                Outer::Empty       => { OUTER = 0; }
+            }
+            match i {
+                Inner::Value(y) => { INNER = y; }
+            }
+            loop {}
         }
-    "#,
-    );
+    "#;
+    let mut e = run(src);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (10, 42));
+}
 
-    // Should compile function that takes enum and extracts value
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "RTS");
+// ============================================================================
+// Enums across functions and loops
+// ============================================================================
+
+#[test]
+fn tuple_variant_returned_from_function() {
+    assert_eq!(
+        out8(
+            r#"
+            enum Status { Ok(u8), Fail }
+            const OUT: addr = 0x0900;
+            fn make() -> Status { return Status::Ok(55); }
+            #[reset]
+            fn main() {
+                let s: Status = make();
+                match s {
+                    Status::Ok(v) => { OUT = v; }
+                    Status::Fail  => { OUT = 0; }
+                }
+                loop {}
+            }
+        "#
+        ),
+        55
+    );
 }
 
 #[test]
-fn tuple_variant_in_loop() {
-    let asm = compile_success(
-        r#"
-        enum Option {
-            None,
-            Some(u8),
-        }
-
-        const OUTPUT: addr = 0x6000;
-
-        fn main() {
-            let i: u8 = 0;
-            loop {
-                // Note: Enum variant creation requires constants, so we use 42 instead of i
-                let opt: Option = Option::Some(42);
-                match opt {
-                    Option::Some(val) => {
-                        OUTPUT = val;
-                    }
-                    Option::None => {
-                        break;
+fn tuple_variant_matched_in_a_loop() {
+    // The payload must be re-extracted each iteration, not read once.
+    assert_eq!(
+        out8(
+            r#"
+            enum Item { Val(u8), None }
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {
+                let total: u8 = 0;
+                for i in 0..4 {
+                    let it: Item = Item::Val(i);
+                    match it {
+                        Item::Val(v) => { total = total + v; }
+                        Item::None   => { }
                     }
                 }
-
-                i = i + 1;
-                if i >= 10 {
-                    break;
-                }
+                OUT = total;
+                loop {}
             }
-        }
-    "#,
+        "#
+        ),
+        6 // 0 + 1 + 2 + 3
     );
-
-    // Should handle pattern matching in loop context
-    assert_asm_contains(&asm, "; Match statement");
-    assert_asm_contains(&asm, "($30),Y"); // Field extraction
-    assert_asm_contains(&asm, "JMP"); // Loop structure
 }
 
 #[test]
-fn complex_tuple_variant_pattern() {
-    let asm = compile_success(
-        r#"
-        enum Message {
-            Quit,
-            Move(u8, u8),
-            Write(u8),
-            ChangeColor(u8, u8, u8),
-        }
-
-        const X_POS: addr = 0x6000;
-        const Y_POS: addr = 0x6001;
-
-        fn main() {
-            let msg: Message = Message::Move(10, 20);
-
-            match msg {
-                Message::Move(x, y) => {
-                    X_POS = x;
-                    Y_POS = y;
-                }
-                Message::Write(ch) => {
-                    X_POS = ch;
-                }
-                Message::ChangeColor(r, g, b) => {
-                    X_POS = r;
-                }
-                Message::Quit => {
-                    X_POS = 0;
-                }
-            }
-        }
-    "#,
-    );
-
-    // Complex enum with multiple variant types - uses jump table for 4+ variants
-    assert_asm_contains(&asm, "; Enum variant: Message::Move");
-    assert_asm_contains(&asm, "; Match statement (jump table)");
-    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
-    assert_asm_contains(&asm, ".WORD match_"); // Jump table entries
+fn jump_table_dispatch_preserves_the_payload_pointer() {
+    // Regression: with 3+ arms the match switches from sequential BEQ dispatch
+    // to a jump table, and the jump vector used to be written over the very
+    // zero-page pointer the arm bodies dereference to read their payload. Every
+    // arm then extracted a byte of its own code. Four payload-carrying variants
+    // keep the jump-table strategy selected.
+    let pick = |v: u8| {
+        out8(&format!(
+            r#"
+            enum Op {{ A(u8), B(u8), C(u8), D(u8) }}
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                let sel: u8 = {v};
+                let o: Op = Op::A(11);
+                if sel == 1 {{ o = Op::B(22); }}
+                if sel == 2 {{ o = Op::C(33); }}
+                if sel == 3 {{ o = Op::D(44); }}
+                match o {{
+                    Op::A(n) => {{ OUT = n; }}
+                    Op::B(n) => {{ OUT = n; }}
+                    Op::C(n) => {{ OUT = n; }}
+                    Op::D(n) => {{ OUT = n; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        ))
+    };
+    assert_eq!(pick(0), 11);
+    assert_eq!(pick(1), 22);
+    assert_eq!(pick(2), 33);
+    assert_eq!(pick(3), 44);
 }

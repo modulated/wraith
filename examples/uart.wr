@@ -73,8 +73,7 @@ fn uart_init() {
 
 /// Wait for transmitter to be ready
 fn uart_wait_tx() {
-    status: u8 = 0;
-
+    let status: u8 = 0;
     // Poll LSR until THR is empty
     while (status & LSR_THR_EMPTY) == 0 {
         status = UART_LSR;
@@ -95,7 +94,7 @@ fn uart_newline() {
 
 /// Check if data is available to read
 fn uart_data_ready() -> u8 {
-    status: u8 = UART_LSR;
+    let status: u8 = UART_LSR;
     return status & LSR_DATA_RDY;
 }
 
@@ -110,8 +109,8 @@ fn uart_getc() -> u8 {
 
 /// Print a byte as two hex digits
 fn uart_print_hex(value: u8) {
-    high: u8 = value >> 4;
-    low: u8 = value & 0b00001111;  // Mask low nibble
+    let high: u8 = value >> 4;
+    let low: u8 = value & 0b00001111;  // Mask low nibble
 
     // Print high nibble
     if high < 10 {
@@ -130,8 +129,7 @@ fn uart_print_hex(value: u8) {
 
 /// Echo demo - echoes back received characters
 fn echo_loop() {
-    received: u8 = 0;
-
+    let received: u8 = 0;
     // Send prompt '> '
     uart_putc(62);
     uart_putc(32);

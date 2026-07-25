@@ -72,7 +72,7 @@ fn uart_init() {
 }
 
 fn uart_wait_tx() {
-    done: u8 = 0;
+    let done: u8 = 0;
     loop {
         if done != 0 { break; }
         if (UART_LSR & UART_LSR_THRE) != 0 {
@@ -82,7 +82,7 @@ fn uart_wait_tx() {
 }
 
 fn uart_wait_rx() {
-    done: u8 = 0;
+    let done: u8 = 0;
     loop {
         if done != 0 { break; }
         if (UART_LSR & UART_LSR_DR) != 0 {
@@ -102,7 +102,7 @@ fn uart_getc() -> u8 {
 }
 
 fn uart_puts(s: str) {
-    i: u16 = 0 as u16;
+    let i: u16 = 0 as u16;
     loop {
         if i >= s.len { break; }
         uart_putc(s[i as u8]);
@@ -138,14 +138,12 @@ fn uart_puthex_word(value: u16) {
 }
 
 fn uart_getline(buffer: u16, max_len: u8) -> u8 {
-    pos: u8 = 0;
-    done: u8 = 0;
-
+    let pos: u8 = 0;
+    let done: u8 = 0;
     loop {
         if done != 0 { break; }
 
-        ch: u8 = uart_getc();
-
+        let ch: u8 = uart_getc();
         if ch == ASCII_CR || ch == ASCII_LF {
             uart_newline();
             done = 1;
@@ -182,8 +180,8 @@ fn hex_to_nibble(ch: u8) -> u8 {
 }
 
 fn hex_to_byte(ch1: u8, ch2: u8) -> u8 {
-    n1: u8 = hex_to_nibble(ch1);
-    n2: u8 = hex_to_nibble(ch2);
+    let n1: u8 = hex_to_nibble(ch1);
+    let n2: u8 = hex_to_nibble(ch2);
     if n1 == 0xFF || n2 == 0xFF {
         return 0xFF;
     }
@@ -228,8 +226,8 @@ fn set_temp_addr(value: u16) {
 }
 
 fn get_temp_addr() -> u16 {
-    lo: u8 = TEMP_ADDR_LO;
-    hi: u8 = TEMP_ADDR_HI;
+    let lo: u8 = TEMP_ADDR_LO;
+    let hi: u8 = TEMP_ADDR_HI;
     return ((hi as u16) << 8) | (lo as u16);
 }
 
@@ -239,8 +237,8 @@ fn set_temp_addr2(value: u16) {
 }
 
 fn get_temp_addr2() -> u16 {
-    lo: u8 = TEMP_ADDR2_LO;
-    hi: u8 = TEMP_ADDR2_HI;
+    let lo: u8 = TEMP_ADDR2_LO;
+    let hi: u8 = TEMP_ADDR2_HI;
     return ((hi as u16) << 8) | (lo as u16);
 }
 
@@ -274,12 +272,11 @@ fn mem_jump(address: u16) {
 // ============================================================================
 
 fn skip_spaces(pos: u8) -> u8 {
-    p: u8 = pos;
-    done: u8 = 0;
-
+    let p: u8 = pos;
+    let done: u8 = 0;
     loop {
         if done != 0 { break; }
-        ch: u8 = 0;
+        let ch: u8 = 0;
         asm {
             "LDX {p}",
             "LDA $0200,X",
@@ -295,19 +292,18 @@ fn skip_spaces(pos: u8) -> u8 {
 }
 
 fn parse_hex_word(pos: u8) -> u8 {
-    p: u8 = pos;
-    result: u16 = 0 as u16;
-    i: u8 = 0;
-
+    let p: u8 = pos;
+    let result: u16 = 0 as u16;
+    let i: u8 = 0;
     loop {
         if i >= 4 { break; }
-        ch: u8 = 0;
+        let ch: u8 = 0;
         asm {
             "LDX {p}",
             "LDA $0200,X",
             "STA {ch}"
         }
-        nibble: u8 = hex_to_nibble(ch);
+        let nibble: u8 = hex_to_nibble(ch);
         if nibble == 0xFF {
             return 0xFF;
         }
@@ -321,10 +317,9 @@ fn parse_hex_word(pos: u8) -> u8 {
 }
 
 fn parse_hex_byte(pos: u8) -> u8 {
-    p: u8 = pos;
-    ch1: u8 = 0;
-    ch2: u8 = 0;
-
+    let p: u8 = pos;
+    let ch1: u8 = 0;
+    let ch2: u8 = 0;
     asm {
         "LDX {p}",
         "LDA $0200,X",
@@ -334,7 +329,7 @@ fn parse_hex_byte(pos: u8) -> u8 {
         "STA {ch2}"
     }
 
-    result: u8 = hex_to_byte(ch1, ch2);
+    let result: u8 = hex_to_byte(ch1, ch2);
     TEMP_VAL = result;
     return p + 2;
 }
@@ -344,8 +339,8 @@ fn parse_hex_byte(pos: u8) -> u8 {
 // ============================================================================
 
 fn cmd_read() {
-    address: u16 = get_temp_addr();
-    value: u8 = mem_read(address);
+    let address: u16 = get_temp_addr();
+    let value: u8 = mem_read(address);
     uart_puthex_word(address);
     uart_putc(0x3A);  // :
     uart_space();
@@ -359,7 +354,7 @@ fn cmd_write() {
 }
 
 fn cmd_go() {
-    address: u16 = get_temp_addr();
+    let address: u16 = get_temp_addr();
     uart_puts(JUMP_TO);
     uart_puthex_word(address);
     uart_newline();
@@ -368,10 +363,9 @@ fn cmd_go() {
 }
 
 fn cmd_dump() {
-    address: u16 = get_temp_addr();
-    end: u16 = get_temp_addr2();
-    count: u8 = 0;
-
+    let address: u16 = get_temp_addr();
+    let end: u16 = get_temp_addr2();
+    let count: u8 = 0;
     loop {
         if address > end { break; }
 
@@ -381,7 +375,7 @@ fn cmd_dump() {
             uart_space();
         }
 
-        value: u8 = mem_read(address);
+        let value: u8 = mem_read(address);
         uart_puthex_byte(value);
         uart_space();
 
@@ -406,7 +400,7 @@ fn cmd_dump() {
 fn process_command(len: u8) {
     if len == 0 { return; }
 
-    cmd: u8 = 0;
+    let cmd: u8 = 0;
     asm {
         "LDA $0200",
         "STA {cmd}"
@@ -416,7 +410,7 @@ fn process_command(len: u8) {
         cmd = cmd - 0x20;
     }
 
-    pos: u8 = 1;
+    let pos: u8 = 1;
     pos = skip_spaces(pos);
 
     if cmd == 0x48 {
@@ -447,7 +441,7 @@ fn process_command(len: u8) {
     } else if cmd == 0x44 {
         pos = parse_hex_word(pos);
         if pos != 0xFF {
-            start: u16 = get_temp_addr();
+            let start: u16 = get_temp_addr();
             pos = skip_spaces(pos);
             pos = parse_hex_word(pos);
             if pos != 0xFF {
@@ -481,7 +475,7 @@ fn main() {
 
     loop {
         print_prompt();
-        len: u8 = uart_getline(CMD_BUFFER, CMD_MAX_LEN);
+        let len: u8 = uart_getline(CMD_BUFFER, CMD_MAX_LEN);
         process_command(len);
     }
 }

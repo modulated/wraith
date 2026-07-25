@@ -583,80 +583,74 @@ pub fn mul16(a: u16, b: u16) -> u16 {
 /// $27: temp for division by zero check
 pub fn div16(a: u16, b: u16) -> u16 {
     asm {
-        // Check for division by zero (b == 0)
-        "LDA {b}",      // b.low
-        "ORA {b}+1",    // OR with b.high
+        // Divide by zero -> 0xFFFF (documented sentinel).
+        "LDA {b}",
+        "ORA {b}+1",
         "BNE div16_not_zero",
-        // Return 0xFFFF for division by zero
         "LDA #$FF",
         "TAY",
         "JMP div16_done",
 
         "div16_not_zero:",
-        // Initialize quotient to 0
+        // Restoring long division. $20/$21 starts as the dividend and is
+        // shifted left 16 times, each bit moving into the remainder at
+        // $24/$25; the vacated low bit becomes the quotient bit, so $20/$21
+        // holds the quotient once the loop finishes.
+        //   $20/$21: dividend -> quotient
+        //   $22/$23: divisor
+        //   $24/$25: remainder (starts at 0)
+        //   $26:     loop counter
+        "LDA {a}",
+        "STA $20",
+        "LDA {a}+1",
+        "STA $21",
+        "LDA {b}",
+        "STA $22",
+        "LDA {b}+1",
+        "STA $23",
         "LDA #$00",
         "STA $24",
         "STA $25",
-
-        // Load dividend from parameter a into $20-$21
-        "LDA {a}",      // a.low
-        "STA $20",
-        "LDA {a}+1",    // a.high
-        "STA $21",
-
-        // Load divisor from parameter b into $22-$23
-        "LDA {b}",      // b.low
-        "STA $22",
-        "LDA {b}+1",    // b.high
-        "STA $23",
-
-        // Initialize loop counter to 16
         "LDX #$10",
         "STX $26",
 
         "div16_loop:",
-        // Shift quotient left by 1 (make room for new bit)
-        "ASL $24",
-        "ROL $25",
-
-        // Shift remainder left by 1
+        // Shift the dividend left; its MSB falls out into the carry...
         "ASL $20",
         "ROL $21",
+        // ...and rotates into the remainder.
+        "ROL $24",
+        "ROL $25",
 
-        // Compare remainder with divisor
-        // First compare high bytes
-        "LDA $21",
+        // remainder >= divisor ?
+        "LDA $25",
         "CMP $23",
-        "BCC div16_skip_sub",  // remainder.high < divisor.high, skip
-        "BNE div16_do_sub",    // remainder.high > divisor.high, do subtract
-
-        // High bytes equal, compare low bytes
-        "LDA $20",
+        "BCC div16_skip_sub",
+        "BNE div16_do_sub",
+        "LDA $24",
         "CMP $22",
-        "BCC div16_skip_sub",  // remainder.low < divisor.low, skip
+        "BCC div16_skip_sub",
 
         "div16_do_sub:",
-        // Subtract divisor from remainder
         "SEC",
-        "LDA $20",
+        "LDA $24",
         "SBC $22",
-        "STA $20",
-        "LDA $21",
+        "STA $24",
+        "LDA $25",
         "SBC $23",
-        "STA $21",
-
-        // Set bit 0 of quotient
-        "INC $24",
+        "STA $25",
+        // The bit shifted out of the dividend is free: use it for the quotient.
+        "INC $20",
 
         "div16_skip_sub:",
-        // Decrement counter and loop if not zero
         "DEC $26",
         "BNE div16_loop",
 
-        // Load quotient into A (low) and Y (high) per u16 return convention
-        "LDA $24",
-        "LDY $25",
+        // Quotient in A (low) / Y (high), per the u16 return convention.
+        "LDA $20",
+        "LDY $21",
 
         "div16_done:",
     }
 }
+
