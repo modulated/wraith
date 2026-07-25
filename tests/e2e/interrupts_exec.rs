@@ -110,7 +110,11 @@ fn irq_does_not_corrupt_main_state() {
     // 345 = 0x0159 (low 0x59 = 89); 7000 = 0x1B58 (low 0x58 = 88): distinct.
     assert_eq!(e.mem(0x0400), 89, "main's result before the interrupt");
     e.pulse_irq();
-    assert_eq!(e.mem(0x0401), 88, "handler computed 1000 * 7 = 7000 (low byte)");
+    assert_eq!(
+        e.mem(0x0401),
+        88,
+        "handler computed 1000 * 7 = 7000 (low byte)"
+    );
     assert_eq!(e.mem(0x0400), 89, "main's result untouched by the handler");
 }
 
@@ -158,6 +162,9 @@ fn irq_masked_when_disabled() {
             CTR = CTR + 1;
         }
     "#);
-    assert!(e.irq_stays_masked(), "IRQ must not fire while the I-flag is set");
+    assert!(
+        e.irq_stays_masked(),
+        "IRQ must not fire while the I-flag is set"
+    );
     assert_eq!(e.mem(0x0400), 0, "handler never ran");
 }

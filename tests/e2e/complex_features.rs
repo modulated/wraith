@@ -78,7 +78,11 @@ fn struct_passed_by_reference() {
         fn get_x(p: Point) -> u8 { return p.x; }
         fn get_y(p: Point) -> u16 { return p.y; }
     "#);
-    assert_eq!(e.mem(0x0400), 7, "get_x reads the struct field by reference");
+    assert_eq!(
+        e.mem(0x0400),
+        7,
+        "get_x reads the struct field by reference"
+    );
     assert_eq!(e.mem16(0x0401), 0x1234, "get_y reads the u16 field");
 }
 
@@ -132,7 +136,11 @@ fn short_circuit_and_skips_rhs() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 0, "&& must not evaluate touch() when lhs is false");
+    assert_eq!(
+        e.mem(0x0400),
+        0,
+        "&& must not evaluate touch() when lhs is false"
+    );
     assert_eq!(e.mem(0x0401), 0, "branch not taken");
 }
 
@@ -154,7 +162,11 @@ fn short_circuit_or_skips_rhs() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 0, "|| must not evaluate touch() when lhs is true");
+    assert_eq!(
+        e.mem(0x0400),
+        0,
+        "|| must not evaluate touch() when lhs is true"
+    );
     assert_eq!(e.mem(0x0401), 1, "branch taken");
 }
 
@@ -322,5 +334,9 @@ fn const_lookup_table_u16() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem16(0x0400), 0xBEEF, "TABLE[3] (u16 const lookup) == 0xBEEF");
+    assert_eq!(
+        e.mem16(0x0400),
+        0xBEEF,
+        "TABLE[3] (u16 const lookup) == 0xBEEF"
+    );
 }

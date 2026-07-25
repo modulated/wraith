@@ -1555,7 +1555,11 @@ fn generate_slice_materialize(
     if let (Some(s), Some(e)) = (const_s, const_e) {
         // Fast path: both bounds are compile-time constants.
         let s = s as usize;
-        let actual_end = if inclusive { e as usize + 1 } else { e as usize };
+        let actual_end = if inclusive {
+            e as usize + 1
+        } else {
+            e as usize
+        };
         let len = actual_end.saturating_sub(s);
         let byte_offset = s * elem_size;
 
@@ -1568,7 +1572,10 @@ fn generate_slice_materialize(
         emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
         emitter.emit_inst("STA", &format!("${:02X}", dest));
         emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
-        emitter.emit_inst("ADC", &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8));
+        emitter.emit_inst(
+            "ADC",
+            &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8),
+        );
         emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
         emitter.emit_inst("LDA", &format!("#${:02X}", (len & 0xFF) as u8));
         emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
@@ -1595,7 +1602,10 @@ fn generate_slice_materialize(
         ));
     }
 
-    emitter.emit_comment(&format!("Slice materialize (runtime bounds) from {}", arr_name));
+    emitter.emit_comment(&format!(
+        "Slice materialize (runtime bounds) from {}",
+        arr_name
+    ));
 
     // Evaluate end first and park it at $21, then start at $20 (leaving start in
     // A). Bounds are expected to be simple (variable/literal) so this does not

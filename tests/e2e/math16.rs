@@ -9,8 +9,8 @@
 //! guard against a specific regression (the routine reading its parameters from
 //! stale fixed addresses) that is a property of the emitted code, not a value.
 
-use crate::common::exec::run;
 use crate::common::compile_success;
+use crate::common::exec::run;
 
 /// Call a 16-bit math routine and return its result.
 fn call16(func: &str, a: u32, b: u32) -> u16 {

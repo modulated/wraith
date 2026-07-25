@@ -31,7 +31,11 @@ fn static_initial_value_written_at_reset() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0900), 0xA5, "declared initial value present at startup");
+    assert_eq!(
+        e.mem(0x0900),
+        0xA5,
+        "declared initial value present at startup"
+    );
 }
 
 #[test]

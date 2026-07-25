@@ -30,9 +30,7 @@ pub struct VolatileSymbols {
 impl VolatileSymbols {
     /// True if `operand` names a volatile-readable location.
     fn is_volatile_read(&self, operand: &Option<String>) -> bool {
-        operand
-            .as_deref()
-            .is_some_and(|op| self.reads.contains(op))
+        operand.as_deref().is_some_and(|op| self.reads.contains(op))
     }
 
     /// True if `operand` names a volatile-writable location.

@@ -254,7 +254,11 @@ impl Via {
         if underflowed {
             self.ifr |= VIA_IRQ_T1;
             // Free-run mode (ACR bit 6) reloads from the latch; one-shot stops.
-            self.t1_counter = if self.acr & 0x40 != 0 { self.t1_latch } else { 0 };
+            self.t1_counter = if self.acr & 0x40 != 0 {
+                self.t1_latch
+            } else {
+                0
+            };
         } else {
             self.t1_counter = next;
         }

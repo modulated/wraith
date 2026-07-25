@@ -633,13 +633,26 @@ impl Exec {
 
     /// Bytes the program transmitted through the UART, as a string.
     pub fn uart_output(&mut self) -> String {
-        let tx = &self.cpu.memory.devices.uart.as_ref().expect("no UART attached").tx;
+        let tx = &self
+            .cpu
+            .memory
+            .devices
+            .uart
+            .as_ref()
+            .expect("no UART attached")
+            .tx;
         String::from_utf8_lossy(tx).to_string()
     }
 
     /// Queue bytes for the program to receive on the UART.
     pub fn uart_feed(&mut self, bytes: &[u8]) {
-        self.cpu.memory.devices.uart.as_mut().expect("no UART attached").feed(bytes);
+        self.cpu
+            .memory
+            .devices
+            .uart
+            .as_mut()
+            .expect("no UART attached")
+            .feed(bytes);
     }
 
     /// Run up to `max_steps` more instructions, stopping early if the program
@@ -741,7 +754,10 @@ impl Exec {
             self.cpu.single_step();
             budget -= 1;
         }
-        assert!(budget > 0, "interrupt handler did not return to the idle loop");
+        assert!(
+            budget > 0,
+            "interrupt handler did not return to the idle loop"
+        );
     }
 }
 

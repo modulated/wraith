@@ -49,8 +49,14 @@ fn eval16(body: &str) -> u16 {
 
 #[test]
 fn array_literal_elements_readable() {
-    assert_eq!(eval("let a: [u8; 5] = [1, 2, 3, 4, 5]; OUT = a[0 as u8];"), 1);
-    assert_eq!(eval("let a: [u8; 5] = [1, 2, 3, 4, 5]; OUT = a[4 as u8];"), 5);
+    assert_eq!(
+        eval("let a: [u8; 5] = [1, 2, 3, 4, 5]; OUT = a[0 as u8];"),
+        1
+    );
+    assert_eq!(
+        eval("let a: [u8; 5] = [1, 2, 3, 4, 5]; OUT = a[4 as u8];"),
+        5
+    );
 }
 
 #[test]
@@ -61,7 +67,10 @@ fn array_fill_sets_every_element() {
 
 #[test]
 fn array_index_constant() {
-    assert_eq!(eval("let a: [u8; 5] = [10, 20, 30, 40, 50]; OUT = a[2 as u8];"), 30);
+    assert_eq!(
+        eval("let a: [u8; 5] = [10, 20, 30, 40, 50]; OUT = a[2 as u8];"),
+        30
+    );
 }
 
 #[test]
@@ -286,8 +295,14 @@ fn i8_negative_values_are_twos_complement() {
 
 #[test]
 fn i8_arithmetic_across_zero() {
-    assert_eq!(eval("let a: i8 = -5; let b: i8 = 3; OUT = (a + b) as u8;"), 0xFE); // -2
-    assert_eq!(eval("let a: i8 = 5; let b: i8 = 10; OUT = (a - b) as u8;"), 0xFB); // -5
+    assert_eq!(
+        eval("let a: i8 = -5; let b: i8 = 3; OUT = (a + b) as u8;"),
+        0xFE
+    ); // -2
+    assert_eq!(
+        eval("let a: i8 = 5; let b: i8 = 10; OUT = (a - b) as u8;"),
+        0xFB
+    ); // -5
 }
 
 #[test]

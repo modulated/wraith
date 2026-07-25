@@ -54,16 +54,16 @@ fn variable_declaration_u8() {
 #[test]
 fn variable_declaration_u16() {
     // 1000 is $03E8: both bytes must survive, which an `LDA` check never showed.
-    assert_eq!(
-        eval16("let x: u16 = 1000; LO = x.low; HI = x.high;"),
-        1000
-    );
+    assert_eq!(eval16("let x: u16 = 1000; LO = x.low; HI = x.high;"), 1000);
 }
 
 #[test]
 fn variable_declaration_u16_high_byte_only() {
     // $0100 has a zero low byte; a low-byte-only store would read back as 0.
-    assert_eq!(eval16("let x: u16 = 0x0100; LO = x.low; HI = x.high;"), 0x0100);
+    assert_eq!(
+        eval16("let x: u16 = 0x0100; LO = x.low; HI = x.high;"),
+        0x0100
+    );
 }
 
 #[test]
@@ -115,7 +115,10 @@ fn literal_notations_agree() {
 
 #[test]
 fn hex_literal_u16() {
-    assert_eq!(eval16("let x: u16 = 0xBEEF; LO = x.low; HI = x.high;"), 0xBEEF);
+    assert_eq!(
+        eval16("let x: u16 = 0xBEEF; LO = x.low; HI = x.high;"),
+        0xBEEF
+    );
 }
 
 // ============================================================================

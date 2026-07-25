@@ -478,7 +478,11 @@ fn match_expr_u16_literal_and_variable_binding() {
     };
     assert_eq!(run(&src(256)).mem16(0x0400), 0x0999, "256 arm selected");
     // 0x0305 hits the variable arm and must come back whole, high byte intact.
-    assert_eq!(run(&src(0x0305)).mem16(0x0400), 0x0305, "variable arm keeps u16");
+    assert_eq!(
+        run(&src(0x0305)).mem16(0x0400),
+        0x0305,
+        "variable arm keeps u16"
+    );
 }
 
 #[test]
@@ -2168,7 +2172,11 @@ fn bool_cast_does_not_stale_register() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 42, "x must still read as 42 (not the bool 1)");
+    assert_eq!(
+        e.mem(0x0400),
+        42,
+        "x must still read as 42 (not the bool 1)"
+    );
 }
 
 #[test]
@@ -2190,5 +2198,9 @@ fn field_assignment_does_not_stale_register() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 0x34, "q must read 0x34 after the u16 field store");
+    assert_eq!(
+        e.mem(0x0400),
+        0x34,
+        "q must read 0x34 after the u16 field store"
+    );
 }

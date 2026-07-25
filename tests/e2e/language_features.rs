@@ -38,7 +38,11 @@ fn cast_narrow_u16_to_u8() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 0x34, "u16 0x1234 narrowed to u8 keeps low byte");
+    assert_eq!(
+        e.mem(0x0400),
+        0x34,
+        "u16 0x1234 narrowed to u8 keeps low byte"
+    );
 }
 
 #[test]
@@ -290,7 +294,11 @@ fn literal_adapts_width_in_comparison() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 2, "300 < 5 is false under full-width compare");
+    assert_eq!(
+        e.mem(0x0400),
+        2,
+        "300 < 5 is false under full-width compare"
+    );
 }
 
 #[test]
@@ -333,7 +341,11 @@ fn signed_i16_comparison_complex_left() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 1, "-100 < 5 must hold under signed comparison");
+    assert_eq!(
+        e.mem(0x0400),
+        1,
+        "-100 < 5 must hold under signed comparison"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +371,11 @@ fn u8_binary_right_operand_clobbers_y() {
         }
     "#);
     // (10 + 1) + arr[3](=5) = 16.
-    assert_eq!(e.mem(0x0400), 16, "left operand must survive a Y-clobbering right");
+    assert_eq!(
+        e.mem(0x0400),
+        16,
+        "left operand must survive a Y-clobbering right"
+    );
 }
 
 // ---------------------------------------------------------------------------
