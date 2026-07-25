@@ -1156,8 +1156,20 @@ impl SemanticAnalyzer {
                     }
                 }
             }
+            Type::Slice(element_ty) => {
+                // Slicing a slice yields another slice of the same element type.
+                // The length is a runtime value, so bounds are unchecked. As an
+                // assignment target this form is not supported.
+                if self.checking_assignment_target {
+                    return Err(SemaError::Custom {
+                        message: "cannot assign through a slice-of-slice".to_string(),
+                        span,
+                    });
+                }
+                Ok(Type::Slice(element_ty.clone()))
+            }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array or string".to_string(),
+                expected: "array, slice, or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),

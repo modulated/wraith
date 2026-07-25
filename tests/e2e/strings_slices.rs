@@ -161,6 +161,29 @@ fn slice_with_runtime_bounds_u16() {
 }
 
 #[test]
+fn slice_of_slice() {
+    // Re-slicing a slice narrows the view further; offsets compose.
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const E1: addr = 0x0401;
+        const LEN: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let a: [u8; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+            let s: &[u8] = a[1..7];   // 20,30,40,50,60,70
+            let s2: &[u8] = s[2..5];  // 40,50,60
+            E0 = s2[0 as u8];
+            E1 = s2[2 as u8];
+            LEN = s2.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 40, "s2[0] == a[3]");
+    assert_eq!(e.mem(0x0401), 60, "s2[2] == a[5]");
+    assert_eq!(e.mem(0x0402), 3, "s2.len == 3");
+}
+
+#[test]
 fn slice_passed_to_function() {
     // A slice passed to a function: the callee reads its length and elements
     // from the descriptor copied into its parameter slot.
