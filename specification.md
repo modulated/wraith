@@ -1200,6 +1200,19 @@ const PATH: str = "data/" + "level" + ".txt";
 - Result must not exceed 255 bytes
 - Evaluated entirely at compile time (zero runtime cost)
 
+### String Comparison
+
+Compare two strings for equality with `==` / `!=` (result is `bool`). The
+comparison runs at runtime: the length bytes are compared first, then each
+character.
+
+```rust
+let a: str = "hello";
+let b: str = "hello";
+if a == b { /* equal */ }
+if a != "world" { /* differs */ }
+```
+
 ### String Slicing
 
 Extract substrings at compile time:
