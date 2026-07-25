@@ -1655,6 +1655,15 @@ operator (arithmetic *and* comparison). This is a compile-time typing of the
 literal, not a runtime conversion, so the no-implicit-conversion rule is
 preserved. A negated literal (`-5`) counts as a literal.
 
+The same rule applies wherever a target type is known, notably array elements:
+
+```rust
+let a: [u16; 3] = [1, 2, 300];   // elements are u16, from the declaration
+let b: [u16; 4] = [0; 4];        // fill value is u16
+let c: [i16; 2] = [-100, -200];  // signed elements
+let d: [u8; 2]  = [1, 300];      // error: 300 does not fit a u8 element
+```
+
 ```rust
 let a: u16 = 300;
 if a < 5 { ... }               // ok: `5` adopts u16

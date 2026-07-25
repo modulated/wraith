@@ -394,3 +394,49 @@ fn shorthand_array_size_one_does_not_expand() {
     assert!(!asm.contains("Expanding [value]"));
     assert_asm_contains(&asm, ".BYTE $2A");
 }
+
+// ============================================================================
+// Array element literals adopt the declared element type
+// ============================================================================
+
+#[test]
+fn array_literal_elements_adopt_declared_type() {
+    // The element type is stated in the declaration, so the literals take it.
+    // Previously the array's type was inferred bottom-up from the first element,
+    // so `[u16; 3] = [0, 0, 0]` inferred `[u8; 3]` and failed to match, and
+    // `[1, 2, 300]` failed because 300 did not match the u8 inferred from `1`.
+    assert_eq!(
+        eval16("let a: [u16; 3] = [1, 2, 300]; let v: u16 = a[2 as u8]; LO = v.low; HI = v.high;"),
+        300
+    );
+    assert_eq!(
+        eval16("let a: [u16; 3] = [0, 0, 0]; let v: u16 = a[1 as u8]; LO = v.low; HI = v.high;"),
+        0
+    );
+}
+
+#[test]
+fn array_fill_adopts_declared_element_type() {
+    assert_eq!(
+        eval16("let a: [u16; 4] = [1000; 4]; let v: u16 = a[3 as u8]; LO = v.low; HI = v.high;"),
+        1000
+    );
+}
+
+#[test]
+fn signed_array_literals_adopt_declared_type() {
+    assert_eq!(
+        eval16("let a: [i16; 2] = [-100, -200]; let v: i16 = a[0 as u8]; LO = v.low; HI = v.high;"),
+        0xFF9C // -100
+    );
+}
+
+#[test]
+fn array_element_out_of_range_still_errors() {
+    // Adoption types the literal; it does not silently truncate one that cannot fit.
+    let r = crate::common::compile("fn main() { let a: [u8; 2] = [1, 300]; }");
+    assert!(
+        !matches!(r, crate::common::harness::CompileResult::Success(..)),
+        "300 does not fit a u8 element"
+    );
+}
