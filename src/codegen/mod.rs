@@ -496,6 +496,11 @@ pub fn generate(
     use rustc_hash::FxHashMap as HashMap;
 
     let mut emitter = Emitter::new(verbosity);
+    // Place the software stack where the board's config says RAM is, rather than
+    // baking a page into the compiler. Only its size and zero-page pointer are fixed.
+    if let Some(stack) = program.memory_config.get_section("STACK") {
+        emitter.memory_layout.software_stack_base = stack.start;
+    }
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
 

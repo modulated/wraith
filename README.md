@@ -69,6 +69,12 @@ end = 0xCFFF
 description = "Constants and data (4KB)"
 
 [[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+description = "Compiler software stack (256B)"
+
+[[sections]]
 name = "BSS"
 start = 0x0400
 end = 0x07FF
@@ -83,7 +89,13 @@ If no `wraith.toml` is present, the compiler uses these defaults:
 
 - **CODE**: `0x8000-0xBFFF` (16KB) — user code (default)
 - **DATA**: `0xD000-0xEFFF` (8KB) — constants and read-only data
+- **STACK**: `0x0200-0x02FF` (256B) — **RAM** for the compiler's software stack
 - **BSS**: `0x0400-0x07FF` (1KB) — **RAM** for mutable globals (`static`)
+
+Every one of these is a `wraith.toml` section, so the whole map is yours to
+define. The only addresses the compiler fixes are those the 6502 itself
+mandates — the zero page (scratch and function frames), the hardware stack at
+`$0100-$01FF`, and the vectors at `$FFFA-$FFFF`.
 
 Functions without an explicit `#[org]` or `#[section]` attribute are placed in the default section.
 
@@ -116,6 +128,24 @@ Things to keep in mind when choosing the range:
   2000 bytes — more than the 1 KB default), so either enlarge `BSS`, use a
   smaller geometry, or map video memory separately with `addr`.
 - If a config omits `BSS` entirely, the compiler falls back to `$0400-$07FF`.
+
+### The STACK section
+
+`STACK` is one page of RAM holding Wraith's software stack, used to save a
+callee's frame across a recursive call and to spill operands. Its size is fixed
+at 256 bytes (the pointer is a single zero-page byte), but the page is yours to
+place:
+
+```toml
+[[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+```
+
+It must be RAM, must not overlap `BSS` or I/O, and is distinct from the 6502
+hardware stack at `$0100-$01FF` (used by `JSR`/`RTS` and interrupts), which the
+processor fixes and the compiler cannot move.
 
 ## Examples
 

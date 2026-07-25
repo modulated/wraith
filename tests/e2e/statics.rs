@@ -143,3 +143,29 @@ fn static_array_indexed_read_write() {
     assert_eq!(e.mem(0x0900), 0x11, "BUF[0] written and read back");
     assert_eq!(e.mem(0x0901), 0x5A, "BUF[i] with a runtime index");
 }
+
+#[test]
+fn software_stack_page_comes_from_config() {
+    // The software stack must not be baked into the compiler: with the default
+    // configuration it sits at $0200. (A custom STACK section relocates it; that
+    // path is exercised by compiling with an alternate wraith.toml.)
+    let asm = crate::common::harness::compile_success(
+        r#"
+        const OUT: addr = 0x0900;
+        fn fact(n: u8, acc: u8) -> u8 {
+            if n == 0 { return acc; }
+            return fact(n - 1, acc);
+        }
+        fn id(a: u8) -> u8 { return a; }
+        #[reset]
+        fn main() {
+            OUT = id(fact(3, 1)) + id(2);
+            loop {}
+        }
+    "#,
+    );
+    assert!(
+        asm.contains("$0200,X"),
+        "software stack should use the configured page ($0200 by default)"
+    );
+}

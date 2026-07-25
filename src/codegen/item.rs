@@ -146,6 +146,8 @@ fn generate_function(
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
         let mut temp_emitter = Emitter::new(emitter.verbosity);
+        // Same layout as the real emitter, or the measured size would differ.
+        temp_emitter.memory_layout = emitter.memory_layout.clone();
         // Copy register state and label counter to avoid label conflicts
         temp_emitter.reg_state = emitter.reg_state.clone();
         temp_emitter.label_counter = emitter.label_counter;

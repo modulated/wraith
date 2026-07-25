@@ -275,6 +275,7 @@ impl SemanticAnalyzer {
             string_pool: HashMap::default(), // Will be populated during codegen
             function_frames,
             static_inits: self.static_inits.clone(),
+            memory_config: self.memory_config.clone(),
             function_signatures: self.function_signatures.clone(),
             recursive_call_edges,
             interrupt_save_info,

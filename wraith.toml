@@ -16,6 +16,12 @@ end = 0xEFFF
 description = "Constants and data (8KB)"
 
 [[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+description = "Compiler software stack (recursion frame save, operand spill)"
+
+[[sections]]
 name = "BSS"
 start = 0x0400
 end = 0x07FF

@@ -71,10 +71,14 @@ impl Config {
             sections: vec![
                 Section::new("CODE", 0x8000, 0xBFFF), // 16KB for user code
                 Section::new("DATA", 0xD000, 0xEFFF), // 8KB for constants/data
+                // Compiler's software stack: one page of RAM used to save a
+                // callee's frame across a recursive call and to spill operands.
+                // Only the size (256 bytes) is fixed; the page is configurable.
+                Section::new("STACK", 0x0200, 0x02FF),
                 // User RAM for mutable globals (`static`): 1KB clear of the zero
                 // page ($0000-$00FF), the hardware stack ($0100-$01FF) and the
-                // compiler's software-stack page ($0200-$02FF). Override this in
-                // wraith.toml to match a different board.
+                // software-stack page. Override this in wraith.toml to match a
+                // different board.
                 Section::new("BSS", 0x0400, 0x07FF),
             ],
             default_section: "CODE".to_string(),
@@ -145,12 +149,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        // CODE (ROM), DATA (const data), BSS (RAM for mutable statics)
-        assert_eq!(config.sections.len(), 3);
+        // CODE (ROM), DATA (const data), STACK (software stack), BSS (RAM)
+        assert_eq!(config.sections.len(), 4);
         assert_eq!(config.default_section, "CODE");
         let bss = config.sections.iter().find(|s| s.name == "BSS").unwrap();
         assert_eq!(bss.start, 0x0400);
         assert_eq!(bss.end, 0x07FF);
+        let stack = config.sections.iter().find(|s| s.name == "STACK").unwrap();
+        assert_eq!(stack.start, 0x0200);
     }
 
     #[test]

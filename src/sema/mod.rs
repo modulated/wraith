@@ -827,6 +827,9 @@ pub struct ProgramInfo {
     /// Per-function zero-page frame assignment (base + size), colored by the
     /// call graph. Populated by `finalize_frames`.
     pub function_frames: HashMap<String, FrameInfo>,
+    /// Memory layout from wraith.toml, so codegen can place the software stack
+    /// and other regions where the board actually has RAM.
+    pub memory_config: crate::config::MemoryConfig,
     /// Function signatures (Type::Function) keyed by name, covering local and
     /// imported functions (including imported-module functions this module did
     /// not name). Codegen falls back to this to marshal call arguments when the

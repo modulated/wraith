@@ -746,6 +746,7 @@ fn generate_inline_call(
             string_pool: info.string_pool.clone(),
             function_frames: info.function_frames.clone(),
             static_inits: info.static_inits.clone(),
+            memory_config: info.memory_config.clone(),
             function_signatures: info.function_signatures.clone(),
             recursive_call_edges: info.recursive_call_edges.clone(),
             interrupt_save_info: info.interrupt_save_info.clone(),

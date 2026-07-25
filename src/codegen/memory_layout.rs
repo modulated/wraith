@@ -66,6 +66,10 @@ pub struct MemoryLayout {
     pub temp_storage_start: u8,
     /// Pointer operations scratch space (default $30-$3F)
     pub pointer_ops_start: u8,
+    /// Base address of the software stack (one page). Taken from the `STACK`
+    /// section in wraith.toml, so the page is not baked into the compiler; only
+    /// its 256-byte size and the zero-page pointer are fixed.
+    pub software_stack_base: u16,
 }
 
 impl Default for MemoryLayout {
@@ -73,6 +77,7 @@ impl Default for MemoryLayout {
         Self {
             temp_storage_start: 0x20,
             pointer_ops_start: 0x30,
+            software_stack_base: 0x0200,
         }
     }
 }

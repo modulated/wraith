@@ -3378,7 +3378,7 @@ Applied roughly in this order during compilation:
 | Range | Purpose |
 |-------|---------|
 | $0100-$01FF | Hardware stack (JSR/RTS, interrupt register save) |
-| $0200-$02FF | Software stack (recursion frame save/restore, operand spill) |
+| $0200-$02FF | Default `STACK` section — software stack (recursion frame save/restore, operand spill) |
 | $0400-$07FF | Default `BSS` section (1KB) — **RAM** for mutable globals (`static`) |
 | $8000-$BFFF | Default `CODE` section (16KB) |
 | $D000-$EFFF | Default `DATA` section (8KB) |
@@ -3409,8 +3409,9 @@ description = "User RAM for mutable globals"
 Constraints to observe when choosing the range:
 
 - **Avoid the reserved low pages.** The zero page holds codegen scratch and
-  function frames, `$0100-$01FF` is the hardware stack, and `$0200-$02FF` is the
-  software stack. The default starts at `$0400` to clear all three.
+  function frames, `$0100-$01FF` is the hardware stack (fixed by the processor),
+  and the `STACK` section holds the software stack. The default starts at `$0400`
+  to clear all three.
 - **Avoid memory-mapped I/O.** The compiler warns when an `addr` declaration
   falls inside `BSS`, because a `static` placed there would collide with the
   device register.
@@ -3423,6 +3424,37 @@ Constraints to observe when choosing the range:
 Because statics are allocated in declaration order and never reused, moving a
 `static` in the source changes the addresses of the ones after it — relevant only
 if you depend on fixed addresses from a debugger or external tooling.
+
+#### Configuring the software stack (`STACK`)
+
+The `STACK` section is one page of RAM used to save a callee's frame across a
+recursive call and to spill operands across call-bearing sub-expressions:
+
+```toml
+[[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+```
+
+Its size is fixed at 256 bytes (the stack pointer is a single zero-page byte),
+but the page itself is configurable. It must be RAM and must not overlap `BSS`
+or memory-mapped I/O. It is distinct from the 6502 **hardware** stack at
+`$0100-$01FF`, which the processor mandates for `JSR`/`RTS` and interrupt entry
+and which cannot be relocated.
+
+#### What the compiler fixes
+
+Only what the hardware or the zero-page addressing modes require:
+
+| Region | Why it is fixed |
+|--------|-----------------|
+| `$0000-$00FF` | Zero page — codegen scratch, function frames, pointers; zero-page and indirect addressing modes only reach this page |
+| `$0100-$01FF` | 6502 hardware stack (`JSR`/`RTS`, interrupt entry) |
+| `$FFFA-$FFFF` | NMI / RESET / IRQ vectors |
+
+Everything else — code, constant data, the software stack and mutable-global
+RAM — is placed by `wraith.toml` and can be moved to match the board.
 
 #### Custom Memory Layout Example
 
