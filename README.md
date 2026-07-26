@@ -37,6 +37,49 @@ ca65 my_program.asm -o my_program.o
 ld65 my_program.o -o my_program.bin
 ```
 
+### Command-line options
+
+```
+Usage: wraith [OPTIONS] <input.wr>
+
+  -h, --help              Print help
+  -v, --version           Print version information
+  -c, --comments LEVEL    Comment verbosity in the generated assembly
+                          LEVEL: minimal, normal (default), verbose
+  -o, --out DIR           Write the .asm output to DIR instead of alongside
+                          the source. DIR is created if it does not exist.
+      --completions SHELL Print a shell completion script and exit
+                          SHELL: bash, zsh, fish
+```
+
+By default the assembly is written next to its source, so `src/main.wr`
+produces `src/main.asm`. `--out` keeps the file name but replaces the
+directory, which keeps generated assembly out of the source tree:
+
+```bash
+wraith --out build src/main.wr    # writes build/main.asm
+```
+
+### Shell completion
+
+Completion covers the flags, their argument values (verbosity levels, shell
+names), directories after `--out`, and `.wr` files for the source argument.
+The scripts live in [`completions/`](completions/) and the compiler can also
+print them:
+
+```bash
+# bash — source it from ~/.bashrc, or install system-wide
+wraith --completions bash > ~/.local/share/bash-completion/completions/wraith
+
+# zsh — drop it somewhere on your $fpath, with compinit enabled in ~/.zshrc
+wraith --completions zsh > ~/.zsh/completions/_wraith
+
+# fish
+wraith --completions fish > ~/.config/fish/completions/wraith.fish
+```
+
+Completion applies to the installed `wraith` binary, not to `cargo run`.
+
 ## Documentation
 
 For complete language specification including syntax, types, and standard library, see [specification.md](specification.md).
