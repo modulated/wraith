@@ -19,23 +19,49 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 
 ### Prerequisites
 
-- Rust toolchain (cargo)
-- A 6502 assembler (e.g., ca65, DASM, or your preferred 6502 assembler)
+- Rust toolchain (cargo) — builds the compiler and the bundled `flatasm`
+  assembler; no external 6502 assembler is required
 
 ### Build and Run
 
 ```bash
-# Build the Wraith compiler
+# Build the Wraith compiler and the flatasm assembler
 cargo build --release
 
-# Compile a Wraith program
+# Compile a Wraith program -> my_program.asm
 cargo run --release my_program.wr
 
-# This generates my_program.asm
-# Assemble it with your 6502 assembler of choice
-ca65 my_program.asm -o my_program.o
-ld65 my_program.o -o my_program.bin
+# Assemble the output into a flat ROM image
+cargo run --release --bin flatasm -- my_program.asm -o my_program.rom --rom
 ```
+
+### Assembling to a binary (`flatasm`)
+
+Wraith emits **absolute** assembly: every function is placed with `.ORG` at its
+final address and the interrupt vector table is written directly at
+`$FFFA`-`$FFFF`. That is a flat-image model, not the relocatable-segment model
+that `ca65`/`ld65` (and a linker `.cfg`) assume — `ca65`'s `.ORG` only moves the
+logical program counter, it does not seek or pad the output, so it packs the
+`.ORG` blocks together and drops the vectors, producing a broken image. Use the
+bundled `flatasm` instead; it honours `.ORG` as an absolute seek and shares its
+implementation with the compiler's own test harness.
+
+```bash
+# Full 64 KB image (byte i = memory address i)
+flatasm my_program.asm -o my_program.bin
+
+# $8000-$FFFF ROM image (32 KB), e.g. for a ROM at the top of memory
+flatasm my_program.asm -o my_program.rom --rom
+
+# An arbitrary address range
+flatasm my_program.asm -o my_program.bin --start 0x8000 --end 0xFFFF
+```
+
+`flatasm` prints the resolved reset vector (`$FFFC`) on completion as a sanity
+check and exits non-zero with a message on malformed input (undefined label,
+out-of-range branch, unknown mnemonic). Run it via `cargo run --bin flatasm --`
+from the source tree, or use the `flatasm` binary from `cargo build --release`
+(`target/release/flatasm`).
 
 ### Command-line options
 

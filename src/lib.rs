@@ -5,6 +5,7 @@
 
 #![warn(clippy::all)]
 
+pub mod asm;
 pub mod ast;
 pub mod codegen;
 pub mod config;

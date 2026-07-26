@@ -2,6 +2,9 @@
 name = "wraith"
 version = "0.5.0"
 edition = "2024"
+# The compiler is the primary binary; `flatasm` (src/bin/) is a secondary tool.
+# Keep bare `cargo run` invoking the compiler now that a second binary exists.
+default-run = "wraith"
 
 [dependencies]
 logos = "0.16"
