@@ -14,7 +14,7 @@ use crate::sema::ProgramInfo;
 use emitter::Emitter;
 use item::generate_item;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use section_allocator::SectionAllocator;
+use section_allocator::{AllocationSource, SectionAllocator};
 
 /// Controls the verbosity level of generated assembly comments
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,7 +34,14 @@ pub enum CodegenError {
     UnsupportedOperation(String),
     SymbolNotFound(String),
     SectionError(String),
-    AddressConflict(String),
+    /// Two things were placed at overlapping addresses, or an `#[org]` was
+    /// placed where no section covers it. Carries the span of the offending
+    /// declaration so the diagnostic can point at it like any other error.
+    AddressConflict {
+        message: String,
+        notes: Vec<String>,
+        span: Option<crate::ast::Span>,
+    },
     /// An internal compiler invariant was violated (a bug in the compiler, not the input).
     Internal(String),
 }
@@ -46,8 +53,40 @@ impl std::fmt::Display for CodegenError {
             CodegenError::UnsupportedOperation(msg) => write!(f, "unsupported operation: {}", msg),
             CodegenError::SymbolNotFound(name) => write!(f, "undefined symbol '{}'", name),
             CodegenError::SectionError(msg) => write!(f, "section error: {}", msg),
-            CodegenError::AddressConflict(msg) => write!(f, "{}", msg),
+            CodegenError::AddressConflict { message, notes, .. } => {
+                write!(f, "{}", message)?;
+                for note in notes {
+                    write!(f, "\n  = note: {}", note)?;
+                }
+                Ok(())
+            }
             CodegenError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
+        }
+    }
+}
+
+impl CodegenError {
+    /// Render with a source excerpt and caret, matching how parse and semantic
+    /// errors are reported. Falls back to the plain message when the error
+    /// carries no span.
+    pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
+        match self {
+            CodegenError::AddressConflict {
+                message,
+                notes,
+                span: Some(span),
+            } => {
+                let mut out = format!(
+                    "error: {}\n{}",
+                    message,
+                    span.format_error_context(source, filename, message)
+                );
+                for note in notes {
+                    out.push_str(&format!("\n  = note: {}", note));
+                }
+                out
+            }
+            other => format!("error: {}", other),
         }
     }
 }
@@ -162,6 +201,13 @@ impl StringCollector {
             let addr = section_alloc
                 .allocate("DATA", data_size)
                 .map_err(CodegenError::SectionError)?;
+            section_alloc.record_allocation(
+                format!("string literal {}", label),
+                addr,
+                data_size,
+                AllocationSource::Section("DATA".to_string()),
+                None,
+            );
 
             emitter.emit_org(addr);
             emitter.emit_label(label);
@@ -487,6 +533,57 @@ fn emit_stdlib_math_functions(
     Ok(())
 }
 
+/// Turn any overlapping address ranges into a compile error.
+///
+/// Overlaps are reported against everything that occupies space — functions,
+/// string and const-array data, and the hardware's interrupt vectors — because
+/// an `#[org]` landing on data or on the reset vector fails just as completely
+/// as one landing on another function, and does so silently.
+///
+/// The diagnostic points at whichever of the two was placed by hand, since that
+/// is the one the programmer can move; the allocator's own placements can only
+/// collide with something that was pinned.
+fn report_address_conflicts(section_alloc: &SectionAllocator) -> Result<(), CodegenError> {
+    let conflicts = section_alloc.check_conflicts();
+    let Some((first, second)) = conflicts.first() else {
+        return Ok(());
+    };
+
+    // Prefer to blame — and point at — the explicitly placed side.
+    let (blamed, other) = if second.source.is_fixed() && !first.source.is_fixed() {
+        (second, first)
+    } else {
+        (first, second)
+    };
+
+    let mut notes = vec![
+        format!(
+            "'{}' occupies ${:04X}-${:04X} ({})",
+            blamed.name, blamed.start, blamed.end, blamed.source
+        ),
+        format!(
+            "'{}' occupies ${:04X}-${:04X} ({})",
+            other.name, other.start, other.end, other.source
+        ),
+    ];
+    if matches!(other.source, AllocationSource::Reserved) {
+        notes.push("the 6502 reads its reset and interrupt vectors from this range".to_string());
+    }
+    if conflicts.len() > 1 {
+        notes.push(format!(
+            "{} further conflict{} not shown",
+            conflicts.len() - 1,
+            if conflicts.len() == 2 { "" } else { "s" }
+        ));
+    }
+
+    Err(CodegenError::AddressConflict {
+        message: format!("'{}' overlaps '{}'", blamed.name, other.name),
+        notes,
+        span: blamed.span.or(other.span),
+    })
+}
+
 /// Is this item a non-mutable array `static`, i.e. a const table for the DATA
 /// section?
 fn is_const_array(item: &crate::ast::Spanned<crate::ast::Item>) -> bool {
@@ -729,30 +826,6 @@ pub fn generate(
         )?;
     }
 
-    // Check for address conflicts after all functions have been generated
-    let conflicts = section_alloc.check_conflicts();
-    if !conflicts.is_empty() {
-        // Format detailed error message showing all conflicts
-        let mut error_msg = String::from("address conflict detected\n");
-
-        for (i, (alloc1, alloc2)) in conflicts.iter().enumerate() {
-            if i > 0 {
-                error_msg.push('\n');
-            }
-
-            error_msg.push_str(&format!(
-                "  = note: function '{}' at ${:04X}-${:04X} ({})\n",
-                alloc1.name, alloc1.start, alloc1.end, alloc1.source
-            ));
-            error_msg.push_str(&format!(
-                "  = note: conflicts with '{}' at ${:04X}-${:04X} ({})\n",
-                alloc2.name, alloc2.start, alloc2.end, alloc2.source
-            ));
-        }
-
-        return Err(CodegenError::AddressConflict(error_msg));
-    }
-
     // Emit collected string literals to DATA section
     // Content-based labels ensure cross-module deduplication
     string_collector.emit_strings(&mut emitter, &mut section_alloc)?;
@@ -773,7 +846,24 @@ pub fn generate(
     }
 
     // Generate interrupt vector table
-    generate_interrupt_vectors(ast, &mut emitter)?;
+    if generate_interrupt_vectors(ast, &mut emitter)? {
+        // The 6502 fetches its reset and interrupt vectors from $FFFA-$FFFF, so
+        // that range belongs to the hardware. Record it: an #[org] overlapping
+        // it silently corrupts either the handler or the reset vector, and a
+        // machine that will not boot is a poor way to find out.
+        section_alloc.record_allocation(
+            "interrupt vector table".to_string(),
+            0xFFFA,
+            6,
+            AllocationSource::Reserved,
+            None,
+        );
+    }
+
+    // Every address-space occupant has now been recorded, so overlaps can be
+    // checked once, over all of them. Doing this earlier only ever compared
+    // functions against each other.
+    report_address_conflicts(&section_alloc)?;
 
     // Collect memory-mapped I/O symbols so the peephole optimizer never folds
     // their accesses. Reads and writes are tracked by declared access mode
@@ -807,8 +897,14 @@ pub fn generate(
     Ok((final_asm, section_alloc))
 }
 
-/// Generate the 6502 interrupt vector table at $FFFA-$FFFF
-fn generate_interrupt_vectors(ast: &SourceFile, emitter: &mut Emitter) -> Result<(), CodegenError> {
+/// Generate the 6502 interrupt vector table at $FFFA-$FFFF.
+///
+/// Returns whether the table was emitted, so the caller can reserve the range
+/// it occupies for conflict checking.
+fn generate_interrupt_vectors(
+    ast: &SourceFile,
+    emitter: &mut Emitter,
+) -> Result<bool, CodegenError> {
     use crate::ast::{FnAttribute, Item};
 
     // Find interrupt handlers
@@ -884,7 +980,8 @@ fn generate_interrupt_vectors(ast: &SourceFile, emitter: &mut Emitter) -> Result
             emitter.emit_comment("IRQ/BRK vector (not used)");
             emitter.emit_word(0);
         }
+        return Ok(true);
     }
 
-    Ok(())
+    Ok(false)
 }

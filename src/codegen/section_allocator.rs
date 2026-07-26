@@ -2,6 +2,7 @@
 //!
 //! Manages allocation of addresses within memory sections.
 
+use crate::ast::Span;
 use crate::config::{MemoryConfig, Section};
 use rustc_hash::FxHashMap as HashMap;
 
@@ -12,6 +13,9 @@ pub struct Allocation {
     pub end: u16,
     pub name: String,
     pub source: AllocationSource,
+    /// Where the item was declared, when it came from source. `None` for
+    /// compiler-reserved regions such as the interrupt vector table.
+    pub span: Option<Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +23,20 @@ pub enum AllocationSource {
     ExplicitOrg,
     Section(String),
     AutoAllocated,
+    /// A region the compiler must place at a fixed address the hardware
+    /// defines, such as the 6502 interrupt vector table at $FFFA.
+    Reserved,
+}
+
+impl AllocationSource {
+    /// Was this address chosen by the programmer rather than the allocator?
+    ///
+    /// Two auto-allocated items can never overlap — the allocator hands out
+    /// addresses in sequence — so any real conflict involves at least one of
+    /// these, and the diagnostic should point at it.
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, AllocationSource::ExplicitOrg)
+    }
 }
 
 impl std::fmt::Display for AllocationSource {
@@ -27,6 +45,7 @@ impl std::fmt::Display for AllocationSource {
             AllocationSource::ExplicitOrg => write!(f, "explicit #[org]"),
             AllocationSource::Section(s) => write!(f, "section '{}'", s),
             AllocationSource::AutoAllocated => write!(f, "auto-allocated"),
+            AllocationSource::Reserved => write!(f, "reserved by the hardware"),
         }
     }
 }
@@ -96,20 +115,60 @@ impl SectionAllocator {
     }
 
     /// Record an allocation (for conflict detection)
+    ///
+    /// Everything that occupies address space in the output must be recorded,
+    /// not just functions: an `#[org]` that lands on a string table or on the
+    /// interrupt vectors is as broken as one that lands on another function,
+    /// and is harder to spot by eye.
     pub fn record_allocation(
         &mut self,
         name: String,
         start: u16,
         size: u16,
         source: AllocationSource,
+        span: Option<Span>,
     ) {
+        // A zero-length item occupies nothing and cannot collide; recording it
+        // as `start..=start-1` would wrap and produce a bogus conflict.
+        if size == 0 {
+            return;
+        }
         let end = start.saturating_add(size).saturating_sub(1);
         self.allocations.push(Allocation {
             start,
             end,
             name,
             source,
+            span,
         });
+    }
+
+    /// A short `NAME $start-$end` list of the configured sections, for
+    /// diagnostics that need to say where an address could legally go.
+    pub fn section_summary(&self) -> Option<String> {
+        if self.config.sections.is_empty() {
+            return None;
+        }
+        Some(
+            self.config
+                .sections
+                .iter()
+                .map(|s| format!("{} ${:04X}-${:04X}", s.name, s.start, s.end))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+
+    /// The configured section wholly containing `start..=end`, if any.
+    ///
+    /// A range that falls outside every section, or straddles the boundary
+    /// between two, has no section to be checked against — capacity accounting
+    /// does not see it, so it can silently overrun into whatever follows.
+    pub fn containing_section(&self, start: u16, end: u16) -> Option<&Section> {
+        self.config
+            .sections
+            .iter()
+            .find(|s| start >= s.start && end <= s.end)
     }
 
     /// Check for conflicts in all recorded allocations

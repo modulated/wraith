@@ -170,7 +170,7 @@ fn main() {
     let (code, section_alloc) = match codegen::generate(&ast, &program_info, verbosity) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("{}Error:{} {}", RED, RESET, e);
+            eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));
             std::process::exit(1);
         }
     };

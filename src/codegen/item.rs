@@ -57,7 +57,7 @@ pub fn generate_item(
         Item::Function(func) => {
             generate_function(func, emitter, info, section_alloc, string_collector)
         }
-        Item::Static(stat) => generate_static(stat, emitter, info, string_collector),
+        Item::Static(stat) => generate_static(stat, emitter, info, section_alloc, string_collector),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
     }
@@ -200,64 +200,84 @@ fn generate_function(
 
     // Determine function address
     // Priority: explicit org > section attribute > default section
-    let (_function_addr, _allocation_source) =
-        if let Some(metadata) = info.function_metadata.get(name) {
-            if let Some(org_addr) = metadata.org_address {
-                // Explicit org address takes precedence
-                emitter.emit_org(org_addr);
-                (org_addr, AllocationSource::ExplicitOrg)
-            } else if let Some(section_name) = &metadata.section {
-                // Allocate in specified section using actual measured size
-                let addr = section_alloc
-                    .allocate(section_name, function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::Section(section_name.clone()))
-            } else {
-                // Use default section (CODE)
-                let addr = section_alloc
-                    .allocate_default(function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::AutoAllocated)
+    let (function_addr, allocation_source) = if let Some(metadata) =
+        info.function_metadata.get(name)
+    {
+        if let Some(org_addr) = metadata.org_address {
+            // Explicit org address takes precedence, but it still has to
+            // land somewhere the memory map accounts for. Outside every
+            // configured section there is nothing to check it against and
+            // nothing guaranteeing the bytes exist at run time, so a silent
+            // success would be the misleading answer.
+            let org_end = org_addr.saturating_add(function_size.saturating_sub(1));
+
+            // Check the vector range before the section check. The vectors
+            // sit outside every section in the default map, so the generic
+            // "not inside any section" message would technically be right
+            // and would bury the part that matters — and a board whose
+            // config *does* cover $FFFA would otherwise get no warning at
+            // all until it failed to boot.
+            if org_end >= 0xFFFA {
+                return Err(CodegenError::AddressConflict {
+                    message: format!("#[org] places '{}' over the interrupt vector table", name),
+                    notes: vec![
+                        format!("'{}' would occupy ${:04X}-${:04X}", name, org_addr, org_end),
+                        "the 6502 reads its NMI, RESET and IRQ vectors from $FFFA-$FFFF"
+                            .to_string(),
+                        "code written there replaces the reset vector, so the machine will \
+                             not start"
+                            .to_string(),
+                    ],
+                    span: Some(func.name.span),
+                });
             }
+
+            if section_alloc
+                .containing_section(org_addr, org_end)
+                .is_none()
+            {
+                let sections = section_alloc
+                    .section_summary()
+                    .unwrap_or_else(|| "none configured".to_string());
+                return Err(CodegenError::AddressConflict {
+                    message: format!(
+                        "#[org] address ${:04X} for '{}' is not inside any configured section",
+                        org_addr, name
+                    ),
+                    notes: vec![
+                        format!("'{}' would occupy ${:04X}-${:04X}", name, org_addr, org_end),
+                        format!("configured sections: {}", sections),
+                        "add a section covering this range to wraith.toml, or move the #[org]"
+                            .to_string(),
+                    ],
+                    span: Some(func.name.span),
+                });
+            }
+            emitter.emit_org(org_addr);
+            (org_addr, AllocationSource::ExplicitOrg)
+        } else if let Some(section_name) = &metadata.section {
+            // Allocate in specified section using actual measured size
+            let addr = section_alloc
+                .allocate(section_name, function_size)
+                .map_err(CodegenError::SectionError)?;
+            emitter.emit_org(addr);
+            (addr, AllocationSource::Section(section_name.clone()))
         } else {
-            // No metadata - use default section
+            // Use default section (CODE)
             let addr = section_alloc
                 .allocate_default(function_size)
                 .map_err(CodegenError::SectionError)?;
             emitter.emit_org(addr);
             (addr, AllocationSource::AutoAllocated)
-        };
-    let (function_addr, allocation_source) =
-        if let Some(metadata) = info.function_metadata.get(name) {
-            if let Some(org_addr) = metadata.org_address {
-                // Explicit org address takes precedence
-                emitter.emit_org(org_addr);
-                (org_addr, AllocationSource::ExplicitOrg)
-            } else if let Some(section_name) = &metadata.section {
-                // Allocate in specified section using actual measured size
-                let addr = section_alloc
-                    .allocate(section_name, function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::Section(section_name.clone()))
-            } else {
-                // Use default section (CODE)
-                let addr = section_alloc
-                    .allocate_default(function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::AutoAllocated)
-            }
-        } else {
-            // No metadata - use default section
-            let addr = section_alloc
-                .allocate_default(function_size)
-                .map_err(CodegenError::SectionError)?;
-            emitter.emit_org(addr);
-            (addr, AllocationSource::AutoAllocated)
-        };
+        }
+    } else {
+        // No metadata - use default section
+        let addr = section_alloc
+            .allocate_default(function_size)
+            .map_err(CodegenError::SectionError)?;
+        emitter.emit_org(addr);
+        (addr, AllocationSource::AutoAllocated)
+    };
 
     // Record this allocation for conflict detection
     section_alloc.record_allocation(
@@ -265,6 +285,7 @@ fn generate_function(
         function_addr,
         function_size,
         allocation_source,
+        Some(func.name.span),
     );
 
     // Emit function header comment with signature and location
@@ -323,10 +344,6 @@ fn generate_function(
     emitter.emit_label(name);
 
     // Initialize software stack pointer for reset handler
-    let _is_reset = func
-        .attributes
-        .iter()
-        .any(|attr| matches!(attr, FnAttribute::Reset));
     let is_reset = func
         .attributes
         .iter()
@@ -501,6 +518,7 @@ fn generate_static(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Handle const declarations specially - they may need to emit data
@@ -541,13 +559,21 @@ fn generate_static(
         .lookup(name)
         .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
     if let crate::sema::table::SymbolLocation::Absolute(addr) = sym.location {
+        let size = crate::codegen::expr::type_byte_size(&sym.ty, info).max(1);
         emitter.emit_comment(&format!(
             "static {} @ ${:04X} ({} bytes, RAM)",
-            name,
-            addr,
-            crate::codegen::expr::type_byte_size(&sym.ty, info).max(1)
+            name, addr, size
         ));
         emitter.emit_raw(&format!("{} = ${:04X}", name, addr));
+        // Statics occupy RAM for the whole program, so an #[org] placed over
+        // one is a conflict even though no bytes are emitted here.
+        section_alloc.record_allocation(
+            name.clone(),
+            addr,
+            size as u16,
+            AllocationSource::Section("BSS".to_string()),
+            Some(stat.name.span),
+        );
     } else {
         return Err(CodegenError::Internal(format!(
             "mutable static '{}' was not assigned a RAM address",

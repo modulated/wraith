@@ -3450,6 +3450,38 @@ range.
 
 Code and data are placed into named **sections**, either the default `CODE`/`DATA` sections above or sections you define in `wraith.toml` (see the `#[section]` and `#[org]` function attributes under [Function Attributes](#function-attributes)). A function with no placement attribute goes into the configured default section; `#[section("NAME")]` places it in a named section; `#[org(address)]` places it at an exact address, overriding section placement entirely.
 
+#### `#[org]` Placement Errors
+
+`#[org]` overrides the allocator, so the compiler cannot move a pinned function
+out of the way of anything. Every case where the placement cannot work is a
+compile error, reported against the function with a source excerpt:
+
+- **Overlapping another item.** Whether the other item is a function, a string
+  or const-array table, or a `static` in RAM, an overlap is rejected. The size
+  is the measured size of the generated code, so a function that merely *grows*
+  into its neighbour is caught too.
+- **Overlapping the interrupt vector table.** `$FFFA-$FFFF` holds the NMI, RESET
+  and IRQ vectors that the 6502 fetches in hardware. Code placed there replaces
+  the reset vector, so the machine never starts — reported specifically rather
+  than as a generic overlap.
+- **Outside every configured section.** An address covered by no section is not
+  accounted for by capacity checks and, in a ROM image, may hold nothing at run
+  time. The error lists the configured sections so the address can be moved or a
+  section added.
+- **Overrunning the end of its section.** The whole range must fit, not just the
+  start address.
+
+Two functions whose ranges merely touch — one ending exactly where the next
+begins — do not conflict.
+
+```rust
+#[org(0xFFF8)]
+fn boot() { }        // error: places 'boot' over the interrupt vector table
+
+#[org(0x0100)]
+fn helper() { }      // error: $0100 is not inside any configured section
+```
+
 #### Configuring RAM (`BSS`)
 
 The `BSS` section is where every `static` is allocated, in declaration order.
