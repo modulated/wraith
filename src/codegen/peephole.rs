@@ -512,11 +512,135 @@ fn eliminate_unreachable_after_terminator(lines: &[Line]) -> Vec<Line> {
     result
 }
 
-/// Eliminate redundant CMP #$00 after LDA
+// ============================================================================
+// Flags liveness analysis
+// ============================================================================
+//
+// Several peephole rules want to remove or rewrite instructions whose only
+// side effect beyond a register/memory value is on the CPU status flags.
+// Whether that is sound depends on whether anything downstream *reads* those
+// flags before they are overwritten. Hand-reasoning about this per-rule has
+// produced repeated miscompiles (the CMP #$00 carry bug here; the disabled
+// CLC/ADC #$00 and SEC/SBC #$00 passes). This backward dataflow answers the
+// question once, properly, over the branch graph.
+
+/// Flag bit masks for the liveness sets.
+const FLAG_N: u8 = 0b0001;
+const FLAG_Z: u8 = 0b0010;
+const FLAG_C: u8 = 0b0100;
+const FLAG_V: u8 = 0b1000;
+const FLAG_ALL: u8 = 0b1111;
+
+/// Flags an instruction writes (defines).
+fn flags_written(mnemonic: &str) -> u8 {
+    match mnemonic {
+        "LDA" | "LDX" | "LDY" | "TAX" | "TAY" | "TXA" | "TYA" | "TSX" | "INX" | "INY" | "DEX"
+        | "DEY" | "INC" | "DEC" | "AND" | "ORA" | "EOR" | "PLA" => FLAG_N | FLAG_Z,
+        "ASL" | "LSR" | "ROL" | "ROR" | "CMP" | "CPX" | "CPY" => FLAG_N | FLAG_Z | FLAG_C,
+        "ADC" | "SBC" => FLAG_ALL,
+        "CLC" | "SEC" => FLAG_C,
+        "CLV" => FLAG_V,
+        "BIT" => FLAG_N | FLAG_Z | FLAG_V,
+        "PLP" | "RTI" => FLAG_ALL,
+        _ => 0,
+    }
+}
+
+/// Flags an instruction reads (uses). Conservative: anything that leaves the
+/// analyzed code (JSR, RTS, BRK) is treated as reading everything.
+fn flags_read(mnemonic: &str) -> u8 {
+    match mnemonic {
+        "BCC" | "BCS" => FLAG_C,
+        "BEQ" | "BNE" => FLAG_Z,
+        "BMI" | "BPL" => FLAG_N,
+        "BVC" | "BVS" => FLAG_V,
+        "ADC" | "SBC" | "ROL" | "ROR" => FLAG_C,
+        "PHP" | "JSR" | "RTS" | "BRK" => FLAG_ALL,
+        _ => 0,
+    }
+}
+
+fn is_branch_mnemonic(m: &str) -> bool {
+    matches!(
+        m,
+        "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS"
+    )
+}
+
+/// Compute, for every line, the set of flags that may be read after that line
+/// executes (before being overwritten) - i.e. the live-out flag set.
 ///
-/// LDA sets the Z flag based on the loaded value, so CMP #$00 is redundant
-/// when we only care about the zero flag for BEQ/BNE.
+/// Backward fixpoint over the assembly's control flow: fallthrough edges,
+/// branch/JMP label edges. Unknown control flow (indirect JMP, missing label)
+/// is treated as all-flags-live. Non-instruction lines pass liveness through.
+fn compute_flag_liveness(lines: &[Line]) -> Vec<u8> {
+    use std::collections::HashMap;
+
+    // Label name -> line index.
+    let mut label_at: HashMap<&str, usize> = HashMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Line::Label(name) = line {
+            label_at.insert(name.as_str(), i);
+        }
+    }
+
+    let n = lines.len();
+    let mut live_in: Vec<u8> = vec![0; n + 1]; // live_in[n] = end of stream
+    let mut live_out: Vec<u8> = vec![0; n];
+
+    // Iterate to fixpoint (flag sets only grow, 4 bits each => fast).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in (0..n).rev() {
+            let (new_out, new_in) = match &lines[i] {
+                Line::Instruction {
+                    mnemonic, operand, ..
+                } => {
+                    let mut out = 0u8;
+                    if mnemonic == "JMP" {
+                        // Indirect JMP or unknown target: assume all live.
+                        match operand.as_deref().and_then(|op| label_at.get(op)) {
+                            Some(&t) => out |= live_in[t],
+                            None => out = FLAG_ALL,
+                        }
+                    } else if mnemonic == "RTS" || mnemonic == "RTI" || mnemonic == "BRK" {
+                        // No successor inside this stream; reads handled below.
+                    } else {
+                        out |= live_in[i + 1]; // fallthrough
+                        if is_branch_mnemonic(mnemonic) {
+                            match operand.as_deref().and_then(|op| label_at.get(op)) {
+                                Some(&t) => out |= live_in[t],
+                                None => out = FLAG_ALL,
+                            }
+                        }
+                    }
+                    let inn = flags_read(mnemonic) | (out & !flags_written(mnemonic));
+                    (out, inn)
+                }
+                // Labels, comments, directives, empty lines: pass through.
+                _ => (live_in[i + 1], live_in[i + 1]),
+            };
+            if new_out != live_out[i] || new_in != live_in[i] {
+                live_out[i] = new_out;
+                live_in[i] = new_in;
+                changed = true;
+            }
+        }
+    }
+
+    live_out
+}
+
+/// Eliminate redundant CMP #$00 after LDA/AND/ORA/EOR.
+///
+/// Those instructions already set N and Z exactly as CMP #$00 would (both
+/// reflect the value in A). CMP #$00 additionally sets the carry (A >= 0
+/// always holds), so the CMP is removable precisely when the carry is dead
+/// afterwards - decided by flags liveness over the branch graph, not by
+/// pattern-matching the next instruction.
 fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
+    let live_out = compute_flag_liveness(lines);
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -530,34 +654,14 @@ fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
                     ..
                 },
             ) = (&lines[i], &lines[i + 1])
+            && (m1 == "LDA" || m1 == "AND" || m1 == "ORA" || m1 == "EOR")
+            && m2 == "CMP"
+            && op2.as_deref() == Some("#$00")
+            && live_out[i + 1] & FLAG_C == 0
         {
-            // Unlike LDA/AND/ORA/EOR, CMP #$00 also sets the carry (A >= 0
-            // always holds), so it is only removable when the following
-            // instruction reads just the Z flag. A multi-byte compare like
-            // `LDA lo; CMP #$00; LDA hi; SBC hi2` needs that carry as the
-            // borrow seed - eliminating the CMP there miscompiles it.
-            let next_reads_only_z = matches!(
-                lines.get(i + 2),
-                Some(Line::Instruction { mnemonic, .. }) if mnemonic == "BEQ" || mnemonic == "BNE"
-            );
-
-            // LDA followed by CMP #$00 - the CMP is redundant
-            // LDA already sets Z flag if value is 0
-            if m1 == "LDA" && m2 == "CMP" && op2.as_deref() == Some("#$00") && next_reads_only_z {
-                result.push(lines[i].clone());
-                i += 2; // Skip the CMP
-                continue;
-            }
-            // Also handle AND, ORA, EOR which set Z flag
-            if (m1 == "AND" || m1 == "ORA" || m1 == "EOR")
-                && m2 == "CMP"
-                && op2.as_deref() == Some("#$00")
-                && next_reads_only_z
-            {
-                result.push(lines[i].clone());
-                i += 2;
-                continue;
-            }
+            result.push(lines[i].clone());
+            i += 2; // Skip the CMP
+            continue;
         }
 
         result.push(lines[i].clone());
@@ -1235,22 +1339,55 @@ mod tests {
 
     #[test]
     fn test_redundant_cmp_zero_after_lda() {
-        let asm = "    LDA $40\n    CMP #$00\n    BEQ label\n";
+        let asm = "    LDA $40\n    CMP #$00\n    BEQ label\nlabel:\n";
         let lines = parse_assembly(asm);
         let optimized = eliminate_redundant_cmp_zero(&lines);
         // CMP #$00 should be removed, LDA sets Z flag
-        assert_eq!(optimized.len(), 2);
+        assert_eq!(optimized.len(), 3);
         assert!(matches!(&optimized[0], Line::Instruction { mnemonic, .. } if mnemonic == "LDA"));
         assert!(matches!(&optimized[1], Line::Instruction { mnemonic, .. } if mnemonic == "BEQ"));
     }
 
     #[test]
     fn test_redundant_cmp_zero_after_and() {
-        let asm = "    AND #$0F\n    CMP #$00\n    BNE label\n";
+        let asm = "    AND #$0F\n    CMP #$00\n    BNE label\nlabel:\n";
         let lines = parse_assembly(asm);
         let optimized = eliminate_redundant_cmp_zero(&lines);
         // CMP #$00 should be removed, AND sets Z flag
-        assert_eq!(optimized.len(), 2);
+        assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn test_cmp_zero_kept_when_carry_consumed_by_sbc() {
+        // Multi-byte compare: the carry from CMP #$00 seeds the SBC borrow.
+        let asm = "    LDA $40\n    CMP #$00\n    LDA $41\n    SBC #$01\n    BCC label\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_cmp_zero(&lines);
+        assert_eq!(optimized.len(), 6, "CMP #$00 must survive: carry is live");
+    }
+
+    #[test]
+    fn test_cmp_zero_kept_when_carry_live_at_branch_target() {
+        // The carry is dead on the fallthrough but read at the branch target;
+        // liveness must join over both edges.
+        let asm = "    LDA $40\n    CMP #$00\n    BEQ tgt\n    RTS\ntgt:\n    BCS other\nother:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_cmp_zero(&lines);
+        let cmp_count = optimized
+            .iter()
+            .filter(|l| matches!(l, Line::Instruction { mnemonic, .. } if mnemonic == "CMP"))
+            .count();
+        assert_eq!(cmp_count, 1, "CMP #$00 must survive: carry live at target");
+    }
+
+    #[test]
+    fn test_cmp_zero_removed_across_non_flag_instruction() {
+        // STA doesn't touch flags; the BNE still only needs Z, so liveness
+        // removes the CMP even though the branch is not immediately adjacent.
+        let asm = "    LDA $40\n    CMP #$00\n    STA $50\n    BNE label\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_cmp_zero(&lines);
+        assert_eq!(optimized.len(), 4, "CMP #$00 removable across STA");
     }
 
     #[test]
