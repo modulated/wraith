@@ -219,12 +219,8 @@ fn via_timer1_raises_interrupt_flag() {
 
     // Reading the low counter clears the flag, as the real device does.
     let via = e.devices().via.as_mut().unwrap();
-    let _ = via.tick(0);
-    assert_ne!(
-        e.mem(VIA_BASE + via_reg::T1CL) & 0xFF,
-        0xFF,
-        "counter readable"
-    );
+    via.tick(0);
+    assert_ne!(e.mem(VIA_BASE + via_reg::T1CL), 0xFF, "counter readable");
     let via = e.devices().via.as_ref().unwrap();
     assert!(
         !via.irq_asserted(),

@@ -8,6 +8,11 @@
 //!
 //! Devices are decoded by address range. Anything not claimed by a device is
 //! ordinary RAM.
+//!
+//! This is a complete hardware model: register banks and device behaviours
+//! mirror the real chips, so individual tests exercise different subsets.
+//! Unused portions of that model are expected, hence the module-wide allow.
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 
