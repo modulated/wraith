@@ -5,6 +5,7 @@ pub mod expr;
 pub mod item;
 pub mod memory_layout;
 pub mod peephole;
+pub mod placement;
 pub mod regstate;
 pub mod section_allocator;
 pub mod stmt;
@@ -605,7 +606,7 @@ fn is_const_array(item: &crate::ast::Spanned<crate::ast::Item>) -> bool {
 /// and sema has already warned about the ones written here.
 ///
 /// Type definitions carry no code, and imports are handled by the caller.
-fn is_live(item: &crate::ast::Spanned<crate::ast::Item>, program: &ProgramInfo) -> bool {
+pub(crate) fn is_live(item: &crate::ast::Spanned<crate::ast::Item>, program: &ProgramInfo) -> bool {
     match &item.node {
         crate::ast::Item::Function(f) => program.reachable_symbols.contains(&f.name.node),
         crate::ast::Item::Static(s) => program.reachable_symbols.contains(&s.name.node),
@@ -629,6 +630,21 @@ pub fn generate(
     }
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
+
+    // Decide where every function goes before emitting anything. Doing this up
+    // front is what lets `#[org]` reserve its range: the allocator can only
+    // route other functions around a pinned one if it knows about it before it
+    // starts handing out addresses. Const arrays and string literals allocate
+    // from DATA further down, so this has to come before them too.
+    let placement = placement::plan(
+        &program.imported_items,
+        ast,
+        program,
+        verbosity,
+        &emitter.memory_layout.clone(),
+        &mut section_alloc,
+        &mut string_collector,
+    )?;
 
     // Build a map of symbol names to their import source file
     let mut import_sources: HashMap<String, String> = HashMap::default();
@@ -694,6 +710,7 @@ pub fn generate(
                         item,
                         &mut emitter,
                         program,
+                        &placement,
                         &mut section_alloc,
                         &mut string_collector,
                     )?;
@@ -714,6 +731,7 @@ pub fn generate(
                         item,
                         &mut emitter,
                         program,
+                        &placement,
                         &mut section_alloc,
                         &mut string_collector,
                     )?;
@@ -777,6 +795,7 @@ pub fn generate(
             item,
             &mut emitter,
             program,
+            &placement,
             &mut section_alloc,
             &mut string_collector,
         )?;
@@ -831,6 +850,7 @@ pub fn generate(
             item,
             &mut emitter,
             program,
+            &placement,
             &mut section_alloc,
             &mut string_collector,
         )?;

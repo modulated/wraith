@@ -3483,16 +3483,40 @@ range.
 
 Code and data are placed into named **sections**, either the default `CODE`/`DATA` sections above or sections you define in `wraith.toml` (see the `#[section]` and `#[org]` function attributes under [Function Attributes](#function-attributes)). A function with no placement attribute goes into the configured default section; `#[section("NAME")]` places it in a named section; `#[org(address)]` places it at an exact address, overriding section placement entirely.
 
+#### How Placement Works
+
+Addresses are decided before any code is emitted, in three steps: every function
+is measured, the ranges claimed by `#[org]` are reserved, and everything else is
+allocated into what is left. A pinned function therefore does not have to sit
+out of the way of the rest of the program — the allocator routes around it, and
+`#[org]` can be used at a section's base address:
+
+```rust
+#[org(0x8000)]          // the base of CODE
+#[reset]
+fn main() { … }
+
+fn helper() { … }       // allocated after main, not on top of it
+```
+
+Data placed in a section works the same way: a function pinned into `DATA` is
+stepped over by the string table and const arrays that share it.
+
+Auto-allocated functions are placed in declaration order, so the same source
+always produces the same layout.
+
 #### `#[org]` Placement Errors
 
-`#[org]` overrides the allocator, so the compiler cannot move a pinned function
-out of the way of anything. Every case where the placement cannot work is a
-compile error, reported against the function with a source excerpt:
+A pinned address cannot be moved, so where two of them cannot both be satisfied
+the compiler reports it rather than choosing. Every case where a placement
+cannot work is a compile error, reported against the function with a source
+excerpt:
 
-- **Overlapping another item.** Whether the other item is a function, a string
-  or const-array table, or a `static` in RAM, an overlap is rejected. The size
-  is the measured size of the generated code, so a function that merely *grows*
-  into its neighbour is caught too.
+- **Overlapping another pinned function.** Two `#[org]` ranges that intersect
+  cannot both be honoured. The size used is the measured size of the generated
+  code, so a function that merely *grows* into its pinned neighbour is caught
+  too. (An `#[org]` overlapping something the allocator placed is not an error:
+  the allocator moves that other thing instead.)
 - **Overlapping the interrupt vector table.** `$FFFA-$FFFF` holds the NMI, RESET
   and IRQ vectors that the 6502 fetches in hardware. Code placed there replaces
   the reset vector, so the machine never starts — reported specifically rather

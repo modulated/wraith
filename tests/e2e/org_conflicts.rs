@@ -106,8 +106,11 @@ fn an_org_over_a_mutable_static_conflicts() {
 }
 
 #[test]
-fn an_org_over_string_data_conflicts() {
-    let err = expect_error(
+fn data_is_allocated_around_a_pinned_function() {
+    // A function pinned into DATA reserves its range, so the string table is
+    // placed after it rather than on top of it. Before placement reserved
+    // ranges this was a conflict; now it simply works.
+    let asm = crate::common::harness::compile_success(
         r#"
         const OUT: addr = 0x0900;
         const MSG: str = "hello world";
@@ -117,7 +120,19 @@ fn an_org_over_string_data_conflicts() {
         fn main() { let s: str = MSG; OUT = alpha(); loop {} }
     "#,
     );
-    assert!(err.contains("string literal"), "{err}");
+    assert!(asm.contains(".ORG $D000"), "alpha keeps its address: {asm}");
+    // The string starts past alpha's range rather than at the section base.
+    let str_org = asm
+        .lines()
+        .zip(asm.lines().skip(1))
+        .find(|(_, next)| next.starts_with("str_"))
+        .map(|(org, _)| org.to_string())
+        .expect("string literal should be emitted");
+    assert_ne!(
+        str_org.trim(),
+        ".ORG $D000",
+        "the string must not be placed on top of the pinned function"
+    );
 }
 
 // ============================================================================

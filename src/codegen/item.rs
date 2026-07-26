@@ -50,13 +50,19 @@ pub fn generate_item(
     item: &Spanned<Item>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    placement: &crate::codegen::placement::Placement,
     section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match &item.node {
-        Item::Function(func) => {
-            generate_function(func, emitter, info, section_alloc, string_collector)
-        }
+        Item::Function(func) => generate_function(
+            func,
+            emitter,
+            info,
+            placement,
+            section_alloc,
+            string_collector,
+        ),
         Item::Static(stat) => generate_static(stat, emitter, info, section_alloc, string_collector),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
@@ -69,7 +75,7 @@ pub fn generate_item(
 /// handler can preempt main code mid-expression, it must preserve the shared
 /// codegen scratch/pools/math region plus the frame span its own call graph
 /// touches (frames overlap main frames under unified coloring).
-fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
+pub(super) fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
     let mut addrs = Vec::new();
     if let Some(si) = info.interrupt_save_info.get(name) {
         if si.save_scratch {
@@ -88,7 +94,7 @@ fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
     addrs
 }
 
-fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
+pub(super) fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
     if addrs.is_empty() {
         return;
     }
@@ -99,7 +105,7 @@ fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
     }
 }
 
-fn emit_interrupt_zp_restore(emitter: &mut Emitter, addrs: &[u8]) {
+pub(super) fn emit_interrupt_zp_restore(emitter: &mut Emitter, addrs: &[u8]) {
     if addrs.is_empty() {
         return;
     }
@@ -114,6 +120,7 @@ fn generate_function(
     func: &Function,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    placement: &crate::codegen::placement::Placement,
     section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
@@ -143,141 +150,29 @@ fn generate_function(
         Vec::new()
     };
 
-    // First pass: Generate function into temporary emitter to measure size
-    let function_size = {
-        let mut temp_emitter = Emitter::new(emitter.verbosity);
-        // Same layout as the real emitter, or the measured size would differ.
-        temp_emitter.memory_layout = emitter.memory_layout.clone();
-        // Copy register state and label counter to avoid label conflicts
-        temp_emitter.reg_state = emitter.reg_state.clone();
-        temp_emitter.label_counter = emitter.label_counter;
-        temp_emitter.match_counter = emitter.match_counter;
-        // Set current function for inline asm variable scoping
-        temp_emitter.set_current_function(name.clone());
-
-        // Include interrupt prologue size if needed (5 instructions = 10 bytes)
-        if is_interrupt {
-            temp_emitter.emit_inst("PHA", "");
-            temp_emitter.emit_inst("TXA", "");
-            temp_emitter.emit_inst("PHA", "");
-            temp_emitter.emit_inst("TYA", "");
-            temp_emitter.emit_inst("PHA", "");
-            emit_interrupt_zp_save(&mut temp_emitter, &interrupt_zp);
+    // Where this function goes was decided before anything was emitted, so
+    // that ranges pinned by #[org] could be reserved before the allocator
+    // handed out the addresses around them (see `codegen::placement`).
+    let placed = placement
+        .get(name)
+        .ok_or_else(|| CodegenError::Internal(format!("function '{}' was never placed", name)))?;
+    let function_addr = placed.addr;
+    let function_size = placed.size;
+    let allocation_source = match placed.source {
+        crate::codegen::placement::AllocationSourceKind::ExplicitOrg => {
+            AllocationSource::ExplicitOrg
         }
-
-        // Include the function-pointer prologue size (must match the real emit).
-        if info.address_taken_functions.contains(name)
-            && let Some(frame) = info.function_frames.get(name)
-        {
-            for _ in 0..frame.param_size {
-                temp_emitter.emit_inst("LDA", "$E0");
-                temp_emitter.emit_inst("STA", "$40");
-            }
+        crate::codegen::placement::AllocationSourceKind::Section => AllocationSource::Section(
+            info.function_metadata
+                .get(name)
+                .and_then(|m| m.section.clone())
+                .unwrap_or_else(|| "CODE".to_string()),
+        ),
+        crate::codegen::placement::AllocationSourceKind::AutoAllocated => {
+            AllocationSource::AutoAllocated
         }
-
-        // Generate function body to measure size
-        generate_stmt(&func.body, &mut temp_emitter, info, string_collector)?;
-
-        // Include epilogue size
-        if is_interrupt {
-            emit_interrupt_zp_restore(&mut temp_emitter, &interrupt_zp);
-            // 6 instructions for epilogue
-            temp_emitter.emit_inst("PLA", "");
-            temp_emitter.emit_inst("TAY", "");
-            temp_emitter.emit_inst("PLA", "");
-            temp_emitter.emit_inst("TAX", "");
-            temp_emitter.emit_inst("PLA", "");
-            temp_emitter.emit_inst("RTI", "");
-        } else if !temp_emitter.last_was_terminal() {
-            // Mirror the real epilogue (see below): RTS unless the body already
-            // ended terminal, so the measured size matches the emitted size.
-            temp_emitter.emit_inst("RTS", "");
-        }
-
-        // Get the actual size + 10 bytes padding for safety
-        temp_emitter.byte_count() + 10
     };
-
-    // Determine function address
-    // Priority: explicit org > section attribute > default section
-    let (function_addr, allocation_source) = if let Some(metadata) =
-        info.function_metadata.get(name)
-    {
-        if let Some(org_addr) = metadata.org_address {
-            // Explicit org address takes precedence, but it still has to
-            // land somewhere the memory map accounts for. Outside every
-            // configured section there is nothing to check it against and
-            // nothing guaranteeing the bytes exist at run time, so a silent
-            // success would be the misleading answer.
-            let org_end = org_addr.saturating_add(function_size.saturating_sub(1));
-
-            // Check the vector range before the section check. The vectors
-            // sit outside every section in the default map, so the generic
-            // "not inside any section" message would technically be right
-            // and would bury the part that matters — and a board whose
-            // config *does* cover $FFFA would otherwise get no warning at
-            // all until it failed to boot.
-            if org_end >= 0xFFFA {
-                return Err(CodegenError::AddressConflict {
-                    message: format!("#[org] places '{}' over the interrupt vector table", name),
-                    notes: vec![
-                        format!("'{}' would occupy ${:04X}-${:04X}", name, org_addr, org_end),
-                        "the 6502 reads its NMI, RESET and IRQ vectors from $FFFA-$FFFF"
-                            .to_string(),
-                        "code written there replaces the reset vector, so the machine will \
-                             not start"
-                            .to_string(),
-                    ],
-                    span: Some(func.name.span),
-                });
-            }
-
-            if section_alloc
-                .containing_section(org_addr, org_end)
-                .is_none()
-            {
-                let sections = section_alloc
-                    .section_summary()
-                    .unwrap_or_else(|| "none configured".to_string());
-                return Err(CodegenError::AddressConflict {
-                    message: format!(
-                        "#[org] address ${:04X} for '{}' is not inside any configured section",
-                        org_addr, name
-                    ),
-                    notes: vec![
-                        format!("'{}' would occupy ${:04X}-${:04X}", name, org_addr, org_end),
-                        format!("configured sections: {}", sections),
-                        "add a section covering this range to wraith.toml, or move the #[org]"
-                            .to_string(),
-                    ],
-                    span: Some(func.name.span),
-                });
-            }
-            emitter.emit_org(org_addr);
-            (org_addr, AllocationSource::ExplicitOrg)
-        } else if let Some(section_name) = &metadata.section {
-            // Allocate in specified section using actual measured size
-            let addr = section_alloc
-                .allocate(section_name, function_size)
-                .map_err(CodegenError::SectionError)?;
-            emitter.emit_org(addr);
-            (addr, AllocationSource::Section(section_name.clone()))
-        } else {
-            // Use default section (CODE)
-            let addr = section_alloc
-                .allocate_default(function_size)
-                .map_err(CodegenError::SectionError)?;
-            emitter.emit_org(addr);
-            (addr, AllocationSource::AutoAllocated)
-        }
-    } else {
-        // No metadata - use default section
-        let addr = section_alloc
-            .allocate_default(function_size)
-            .map_err(CodegenError::SectionError)?;
-        emitter.emit_org(addr);
-        (addr, AllocationSource::AutoAllocated)
-    };
+    emitter.emit_org(function_addr);
 
     // Record this allocation for conflict detection
     section_alloc.record_allocation(

@@ -21,6 +21,7 @@ mod language_features;
 mod math16;
 mod memory;
 mod operators;
+mod placement;
 mod org_conflicts;
 mod statics;
 mod stdlib;

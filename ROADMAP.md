@@ -15,29 +15,7 @@ needs.
 
 ## 🔴 BLOCKING THE OS
 
-### 1. `#[org]` placement should reserve its range
-
-`#[org]` pins a function to an address but does not tell the section allocator,
-which keeps handing the same addresses to auto-allocated functions. Pinning
-anything at a section's base address therefore collides with the next function
-placed — `examples/uart.wr` fails exactly this way, with `main` at `$8000` and
-`uart_init` auto-allocated to `$8000`.
-
-Collisions are now a compile error rather than silent corruption (see
-[`#[org]` Placement Errors](specification.md#org-placement-errors)), so this is
-loud rather than dangerous — but `#[org]` and auto-allocation still cannot be
-used in the same program.
-
-**Fix**: two-phase placement. Measure every function, reserve the explicitly
-placed ranges, then allocate the rest around them. The allocator needs to become
-a range list rather than a per-section bump pointer.
-
-**Complexity**: Medium. Sizes are already measured in a first pass, so the
-information exists; the allocator and the generation loop need reordering.
-
----
-
-### 2. Address-of (`&x`)
+### 1. Address-of (`&x`)
 
 `&x` does not parse. A driver cannot be handed a caller's buffer, so anything
 that fills a buffer must either own it as a `static` or take an address as a
@@ -60,7 +38,7 @@ soundness risk sits.
 
 ---
 
-### 3. Console and keyboard drivers
+### 2. Console and keyboard drivers
 
 The device models exist (see *What the emulator can simulate* below) but no
 driver is written against them.
@@ -72,7 +50,7 @@ driver is written against them.
 - Monitor command loop: `peek` / `poke` / `dump` / `load` / `run` / `help` over
   the modelled UART
 
-Depends on (1) for placement and benefits from (2) for buffer passing.
+Benefits from (1) for buffer passing.
 
 **Complexity**: Medium — mostly Wraith code rather than compiler work.
 
@@ -80,7 +58,7 @@ Depends on (1) for placement and benefits from (2) for buffer passing.
 
 ## 🟡 HIGH PRIORITY
 
-### 4. Standard library gaps
+### 3. Standard library gaps
 
 Present: `mul16`, `div16`, `divmod`, `mul_wide`, `memcpy`/`memcpy16`,
 `memset`/`memset16`, `memcmp`, `str_copy`, PRNG (`rand`, `rand16`, `srand`), bit
@@ -99,7 +77,7 @@ building).
 
 ## 🟢 MEDIUM PRIORITY
 
-### 5. Bitfield access syntax
+### 4. Bitfield access syntax
 
 Manual shifts and masks today. Device registers are almost entirely bitfields, so
 this is the ergonomic gap the OS work runs into most often.
@@ -118,7 +96,7 @@ On a 65C02 target these lower to `BBR`/`BBS`/`SMB`/`RMB` directly (see
 
 ---
 
-### 6. Branch optimization intelligence
+### 5. Branch optimization intelligence
 
 Status flags are discarded after every comparison, so a repeated test re-emits
 the `CMP`.
@@ -137,7 +115,7 @@ does this for registers).
 
 ---
 
-### 7. Disassembly output mode
+### 6. Disassembly output mode
 
 Emit an annotated listing with resolved addresses and cycle counts, for
 performance work and for reading what the peephole actually did.
@@ -157,7 +135,7 @@ table is new.
 
 ## 🔵 LOWER PRIORITY
 
-### 8. Inline data directive
+### 7. Inline data directive
 
 Lookup tables and sprite data colocated with the code that uses them, rather than
 hoisted to a `static`.
@@ -172,7 +150,7 @@ stays visible to `#[org]` conflict detection.
 
 ---
 
-### 9. Reclaim BSS from dropped statics
+### 8. Reclaim BSS from dropped statics
 
 Unreachable statics are no longer emitted, but sema assigns their RAM addresses
 before liveness is known, so the space stays reserved. Ordering BSS allocation
@@ -197,10 +175,10 @@ work builds on, listed here so it is not re-planned.
 | `tests/e2e/interrupts_exec.rs` | 5 tests: IRQ handler execution, register preservation, main-state integrity, NMI edges, masking |
 | `tests/e2e/frames.rs` | 14 tests: call-graph frame coloring, recursion, deep chains |
 
-`examples/monitor/` and `examples/uart.wr` hold an earlier monitor sketch. They
-do not currently compile — `uart.wr` on item (1) above, `simple_monitor.wr` on an
-unresolved `uart_putc` — and should be treated as reference material to be
-rewritten as part of item (3), not as working examples.
+`examples/monitor/` holds an earlier monitor sketch. `simple_monitor.wr` does not
+compile (an unresolved `uart_putc`), and the set should be treated as reference
+material to be rewritten as part of item (2) rather than as working examples.
+`examples/uart.wr` compiles again now that `#[org]` reserves its range.
 
 ---
 
@@ -233,6 +211,9 @@ rewritten as part of item (3), not as working examples.
   (`rand`/`rand16`/`srand`)
 
 **Diagnostics and correctness**
+- Two-phase function placement: sizes are measured, `#[org]` ranges reserved,
+  and everything else allocated into the gaps, so pinned and auto-allocated
+  functions can coexist
 - Dead code elimination across the whole program, the file being compiled
   included, with warnings naming exactly what is dropped
 - Const arrays allocate from the configured `DATA` section instead of a
