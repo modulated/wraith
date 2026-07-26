@@ -191,6 +191,18 @@ impl Emitter {
         self.byte_count = 0;
     }
 
+    /// Current length of the emitted output buffer. Pair with
+    /// [`Self::output_since`] to inspect what a nested generation step emitted
+    /// (e.g. whether a loop body clobbers a register).
+    pub fn output_len(&self) -> usize {
+        self.output.len()
+    }
+
+    /// The output emitted since the given buffer position.
+    pub fn output_since(&self, pos: usize) -> &str {
+        &self.output[pos..]
+    }
+
     /// Calculate the size of a 6502 instruction in bytes
     fn instruction_size(mnemonic: &str, operand: &str) -> u16 {
         if operand.is_empty() {

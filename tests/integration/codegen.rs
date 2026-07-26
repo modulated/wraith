@@ -214,8 +214,8 @@ fn no_loop_unrolling_large_count() {
         "Large loops should not be unrolled"
     );
 
-    // Should use normal loop with labels and branches
-    assert_asm_contains(&asm, "fl_");
+    // Should use a normal (bottom-tested) loop with labels and branches
+    assert_asm_contains(&asm, "fb_");
 }
 
 #[test]

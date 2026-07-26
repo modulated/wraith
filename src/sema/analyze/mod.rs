@@ -69,6 +69,11 @@ pub struct SemanticAnalyzer {
     /// Bump cursor for the current function's frame (offset from frame base).
     /// Reset to 0 at the start of each function; params then locals allocate upward.
     pub(super) frame_cursor: u8,
+    /// Released loop-bound slots (offset, size) available for reuse within the
+    /// current function. Sibling loops are never live at the same time, so
+    /// their hidden bound slots can share zero-page bytes; nested loops find
+    /// the list empty (the outer slot is still held) and allocate fresh.
+    pub(super) loop_bound_free: Vec<(u8, u8)>,
     /// Next free address in the BSS (RAM) section for mutable `static` globals.
     /// None until the first static is allocated. Unlike frames, BSS is never
     /// reused or colored: statics live for the whole program.
@@ -132,6 +137,7 @@ impl SemanticAnalyzer {
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
             frame_cursor: 0,
+            loop_bound_free: Vec::new(),
             bss_cursor: None,
             static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
@@ -172,6 +178,7 @@ impl SemanticAnalyzer {
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
             frame_cursor: 0,
+            loop_bound_free: Vec::new(),
             bss_cursor: None,
             static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
@@ -292,6 +299,23 @@ impl SemanticAnalyzer {
         offset
     }
 
+    /// Allocate a hidden loop-bound slot, preferring a slot released by an
+    /// earlier (sibling) loop over growing the frame. Only bound slots ever
+    /// enter the free list, so reuse cannot alias user variables.
+    pub(super) fn loop_bound_alloc(&mut self, size: u8) -> u8 {
+        if let Some(pos) = self.loop_bound_free.iter().position(|&(_, s)| s == size) {
+            let (offset, _) = self.loop_bound_free.swap_remove(pos);
+            offset
+        } else {
+            self.frame_alloc(size)
+        }
+    }
+
+    /// Release a loop-bound slot for reuse by later sibling loops.
+    pub(super) fn loop_bound_release(&mut self, offset: u8, size: u8) {
+        self.loop_bound_free.push((offset, size));
+    }
+
     fn analyze_item(&mut self, item: &Spanned<Item>) -> Result<(), SemaError> {
         if let Item::Function(func) = &item.node {
             let func_name = func.name.node.clone();
@@ -302,6 +326,7 @@ impl SemanticAnalyzer {
             // Each function gets a fresh frame; params then locals allocate upward
             // from offset 0. finalize_frames assigns the concrete base later.
             self.frame_cursor = 0;
+            self.loop_bound_free.clear();
 
             // Check if this is an inline function
             let is_inline = func

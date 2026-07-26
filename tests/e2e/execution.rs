@@ -478,7 +478,11 @@ fn match_expr_u16_literal_and_variable_binding() {
     };
     assert_eq!(run(&src(256)).mem16(0x0400), 0x0999, "256 arm selected");
     // 0x0305 hits the variable arm and must come back whole, high byte intact.
-    assert_eq!(run(&src(0x0305)).mem16(0x0400), 0x0305, "variable arm keeps u16");
+    assert_eq!(
+        run(&src(0x0305)).mem16(0x0400),
+        0x0305,
+        "variable arm keeps u16"
+    );
 }
 
 #[test]
@@ -1552,6 +1556,276 @@ fn i8_match_range_signed() {
 }
 
 // ---------------------------------------------------------------------------
+// Loop strategy correctness: count-down, bottom-test guard, far branches
+// ---------------------------------------------------------------------------
+
+#[test]
+fn countdown_loop_runtime_bounds_exact_count() {
+    // Counter unused + runtime bounds: the count-down strategy must compute
+    // end - start at runtime and run exactly that many iterations.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn lo() -> u8 { return 3; }
+        fn hi() -> u8 { return 200; }
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in lo()..hi() {
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 197, "3..200 must run 197 iterations");
+}
+
+#[test]
+fn countdown_loop_runtime_empty_ranges() {
+    // end == start and end < start must both run zero iterations.
+    let mut e = run(r#"
+        const OUT_EQ: addr = 0x0400;
+        const OUT_LT: addr = 0x0401;
+        fn five() -> u8 { return 5; }
+        fn three() -> u8 { return 3; }
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in five()..five() {
+                n = n + 1;
+            }
+            OUT_EQ = n;
+            let m: u8 = 0;
+            for j in five()..three() {
+                m = m + 1;
+            }
+            OUT_LT = m;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0, "5..5 must run zero iterations");
+    assert_eq!(e.mem(0x0401), 0, "5..3 must run zero iterations");
+}
+
+#[test]
+fn countdown_loop_runtime_inclusive_full_domain() {
+    // Inclusive runtime range 0..=255: count is 256, encoded as $00 via the
+    // mod-256 wrap; the DEC/BNE loop must still run exactly 256 times.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn maxv() -> u8 { return 255; }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            let one: u16 = 1;
+            for i in 0..=maxv() {
+                n = n + one;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 256, "0..=255 must run 256 iterations");
+}
+
+#[test]
+fn bottom_test_loop_runtime_empty_range() {
+    // Counter used + runtime bounds with end < start: the entry guard must
+    // skip the body entirely.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn five() -> u8 { return 5; }
+        fn three() -> u8 { return 3; }
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in five()..three() {
+                n = n + i;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0, "empty range must skip a counting loop");
+}
+
+#[test]
+fn u16_bottom_test_empty_range() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn big() -> u16 { return 0x0200; }
+        fn small() -> u16 { return 0x0100; }
+        #[reset]
+        fn main() {
+            let n: u16 = 0;
+            for i: u16 in big()..small() {
+                n = n + i;
+            }
+            LO = n.low;
+            HI = n.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0, "empty u16 range must skip the loop");
+}
+
+#[test]
+fn nested_counting_loops_reload_counter() {
+    // Both counters are read, so both loops take the counting shape; the
+    // inner loop's X usage forces the outer loop's reload path.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn outer_lim() -> u8 { return 4; }
+        fn inner_lim() -> u8 { return 5; }
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0..outer_lim() {
+                for j in 0..inner_lim() {
+                    n = n + i + j;
+                }
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    // sum over i in 0..4, j in 0..5 of (i+j) = 5*(0+1+2+3) + 4*(0+1+2+3+4) = 30 + 40 = 70
+    assert_eq!(
+        e.mem(0x0400),
+        70,
+        "nested counting loops must not corrupt X"
+    );
+}
+
+#[test]
+fn large_body_loop_uses_far_branch() {
+    // A body larger than the short-branch window forces the JMP-trampoline
+    // back edge; the loop must still count correctly. Each OUT store is ~6
+    // bytes so 30 of them comfortably exceed the window.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        const SINK: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for i in 0..12 {
+                SINK = i; SINK = i; SINK = i; SINK = i; SINK = i;
+                SINK = i; SINK = i; SINK = i; SINK = i; SINK = i;
+                SINK = i; SINK = i; SINK = i; SINK = i; SINK = i;
+                SINK = i; SINK = i; SINK = i; SINK = i; SINK = i;
+                SINK = i; SINK = i; SINK = i; SINK = i; SINK = i;
+                SINK = i; SINK = i; SINK = i; SINK = i; SINK = i;
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 12, "far-branch loop must count correctly");
+    assert_eq!(e.mem(0x0401), 11, "last SINK write is i = 11");
+}
+
+#[test]
+fn sequential_runtime_loops_share_bound_slots() {
+    // Three sibling runtime-bounded loops (slot reuse) plus a nested pair
+    // (distinct slots) must all count correctly.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn l1() -> u8 { return 10; }
+        fn l2() -> u8 { return 20; }
+        fn l3() -> u8 { return 30; }
+        fn l4() -> u8 { return 4; }
+        #[reset]
+        fn main() {
+            let n: u8 = 0;
+            for a in 0..l1() {
+                n = n + 1;
+            }
+            for b in 0..l2() {
+                n = n + 1;
+            }
+            for c in 0..l3() {
+                for d in 0..l4() {
+                    n = n + 1;
+                }
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    // 10 + 20 + 30*4 = 150
+    assert_eq!(
+        e.mem(0x0400),
+        150,
+        "slot sharing must not corrupt any bound"
+    );
+}
+
+/// Not a correctness test: reports emulator instruction counts for benchmark
+/// loops so codegen changes can be compared. Run with:
+/// `cargo test --test lib -- --ignored perf_report --nocapture`
+#[test]
+#[ignore]
+fn perf_report_loop_benchmarks() {
+    let delay_u16 = run(r#"
+        #[reset]
+        fn main() {
+            for i: u16 in 0..30000 {
+            }
+            loop {}
+        }
+    "#);
+    println!("PERF delay_u16_30000: {} instructions", delay_u16.steps);
+
+    let delay_u8_nested = run(r#"
+        #[reset]
+        fn main() {
+            for r in 0..100 {
+                for i in 0..200 {
+                }
+            }
+            loop {}
+        }
+    "#);
+    println!(
+        "PERF delay_u8_nested_20000: {} instructions",
+        delay_u8_nested.steps
+    );
+
+    let counting = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            for r in 0..100 {
+                for i in 0..200 {
+                    OUT = i;
+                }
+            }
+            loop {}
+        }
+    "#);
+    println!("PERF counting_20000: {} instructions", counting.steps);
+
+    let inclusive_u16 = run(r#"
+        #[reset]
+        fn main() {
+            let sink: u16 = 0;
+            for i: u16 in 0..=10000 {
+                sink = i;
+            }
+            loop {}
+        }
+    "#);
+    println!(
+        "PERF inclusive_u16_10001: {} instructions",
+        inclusive_u16.steps
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Nested field access (a.b.c) and array-of-struct element fields (arr[i].f).
 // ---------------------------------------------------------------------------
 
@@ -2168,7 +2442,11 @@ fn bool_cast_does_not_stale_register() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 42, "x must still read as 42 (not the bool 1)");
+    assert_eq!(
+        e.mem(0x0400),
+        42,
+        "x must still read as 42 (not the bool 1)"
+    );
 }
 
 #[test]
@@ -2190,5 +2468,9 @@ fn field_assignment_does_not_stale_register() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 0x34, "q must read 0x34 after the u16 field store");
+    assert_eq!(
+        e.mem(0x0400),
+        0x34,
+        "q must read 0x34 after the u16 field store"
+    );
 }
