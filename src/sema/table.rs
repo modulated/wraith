@@ -28,7 +28,7 @@ pub enum SymbolLocation {
     FrameOffset(u8),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SymbolInfo {
     pub name: String,
     pub kind: SymbolKind,

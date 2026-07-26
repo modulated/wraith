@@ -720,10 +720,42 @@ fn generate_inline_call(
     // Push inline context so return statements won't emit RTS
     emitter.push_inline();
 
+    // The body about to be emitted belongs to the *callee*, even though it lands
+    // in the caller's output. Anything that scopes a lookup by "current function"
+    // — inline-asm `{param}` substitution above all, which matches a symbol's
+    // `containing_function` — must therefore see the callee's name. Leaving the
+    // caller's name here made every `{param}` reference in an inline function's
+    // assembly fail to resolve: the parameter belongs to `min`, the lookup asked
+    // for one belonging to `main`.
+    let saved_function = emitter.take_current_function();
+    emitter.set_current_function(function.node.clone());
+
     // For inline functions from imported modules, we need to merge the parameter symbols
     // from the original module into the current ProgramInfo so the function body can
     // reference its parameters correctly
     let result = if let Some(ref param_symbols) = metadata.inline_param_symbols {
+        // The merge below costs a full ProgramInfo clone — every symbol map, the
+        // type registry, and every imported module's AST — at *each* inline call
+        // site, so skip it when it would change nothing. It usually would: a
+        // local inline function was analyzed by this same pass, and an imported
+        // one had its `resolved_symbols` merged into ours by `process_import`,
+        // so in both cases these entries are already present and identical.
+        //
+        // The comparison is by value, not just by key. Spans are byte offsets
+        // with no file identity, so two modules can collide on one; there the
+        // callee's own symbol must win for the duration of its body, which is
+        // exactly what the merge does.
+        if param_symbols
+            .iter()
+            .all(|(span, sym)| info.resolved_symbols.get(span).is_some_and(|e| e == sym))
+        {
+            use crate::codegen::stmt::generate_stmt;
+            let r = generate_stmt(body, emitter, info, string_collector);
+            emitter.restore_current_function(saved_function);
+            emitter.pop_inline();
+            return r;
+        }
+
         // Create a modified ProgramInfo with merged resolved_symbols
         let mut merged_resolved = info.resolved_symbols.clone();
         for (span, symbol) in param_symbols {
@@ -766,6 +798,7 @@ fn generate_inline_call(
     };
 
     // Pop inline context
+    emitter.restore_current_function(saved_function);
     emitter.pop_inline();
 
     result

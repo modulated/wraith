@@ -508,6 +508,21 @@ impl Emitter {
         self.current_function.as_deref()
     }
 
+    /// Take the current function name, leaving none set.
+    ///
+    /// Paired with [`Self::restore_current_function`] to swap in a different
+    /// function for the duration of a nested body — an inline expansion emits
+    /// the callee's body into the caller's output, and lookups scoped by
+    /// "current function" have to follow the body, not the surrounding code.
+    pub fn take_current_function(&mut self) -> Option<String> {
+        self.current_function.take()
+    }
+
+    /// Put back a name taken by [`Self::take_current_function`].
+    pub fn restore_current_function(&mut self, name: Option<String>) {
+        self.current_function = name;
+    }
+
     /// Get the loop restart label for tail recursive functions
     pub fn tail_call_loop_label(&self) -> Option<String> {
         self.current_function
