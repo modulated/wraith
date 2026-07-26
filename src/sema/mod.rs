@@ -588,6 +588,9 @@ pub enum Warning {
     /// Unused function
     UnusedFunction { name: String, span: Span },
 
+    /// Unused `static` or `const` that nothing reaches
+    UnusedStatic { name: String, span: Span },
+
     /// Non-exhaustive match (missing enum variants)
     NonExhaustiveMatch {
         missing_patterns: Vec<String>,
@@ -640,6 +643,9 @@ impl Warning {
             }
             Warning::UnusedFunction { name, span } => {
                 (format!("unused function: `{}`", name), span)
+            }
+            Warning::UnusedStatic { name, span } => {
+                (format!("unused constant or static: `{}`", name), span)
             }
             Warning::NonExhaustiveMatch {
                 missing_patterns,

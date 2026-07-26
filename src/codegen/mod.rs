@@ -595,16 +595,17 @@ fn is_const_array(item: &crate::ast::Spanned<crate::ast::Item>) -> bool {
     }
 }
 
-/// Should this item from an imported module be emitted?
+/// Should this item be emitted?
 ///
-/// Importing a module pulls in its entire file — an imported function may call
-/// siblings the importing program never named — so every item arrives here and
-/// liveness decides. `program.reachable_symbols` is the closure of calls and
-/// references from the root module (see `SemanticAnalyzer::reachable_symbols`);
-/// anything outside it cannot be executed and would only pad the ROM.
+/// `program.reachable_symbols` is the closure of calls and references from the
+/// program's entry points (see `SemanticAnalyzer::reachable_symbols`); anything
+/// outside it cannot be executed and would only pad the ROM. This applies to
+/// the file being compiled as well as to imported modules — importing a module
+/// pulls in its entire file, but an unreachable function is dead either way,
+/// and sema has already warned about the ones written here.
 ///
 /// Type definitions carry no code, and imports are handled by the caller.
-fn is_live_import(item: &crate::ast::Spanned<crate::ast::Item>, program: &ProgramInfo) -> bool {
+fn is_live(item: &crate::ast::Spanned<crate::ast::Item>, program: &ProgramInfo) -> bool {
     match &item.node {
         crate::ast::Item::Function(f) => program.reachable_symbols.contains(&f.name.node),
         crate::ast::Item::Static(s) => program.reachable_symbols.contains(&s.name.node),
@@ -662,20 +663,22 @@ pub fn generate(
 
     // Emit const arrays to DATA section FIRST
     // This separates read-only data from code
-    let has_const_arrays = ast.items.iter().any(is_const_array)
+    let has_const_arrays = ast
+        .items
+        .iter()
+        .any(|item| is_const_array(item) && is_live(item, program))
         || program
             .imported_items
             .iter()
-            .any(|item| is_const_array(item) && is_live_import(item, program));
+            .any(|item| is_const_array(item) && is_live(item, program));
 
     if has_const_arrays {
         emitter.emit_comment("============================================================");
         emitter.emit_comment("Data Section (Const Arrays)");
         emitter.emit_comment("============================================================");
 
-        // Emit .ORG for DATA section (default location $C000)
-        // TODO: Make this configurable via wraith.toml
-        emitter.emit_data_org(0xC000);
+        // Each array now emits its own .ORG at an address taken from the DATA
+        // section in wraith.toml, so there is no blanket origin here.
         emitter.emit_raw("");
 
         // Emit const arrays from imported modules first
@@ -683,7 +686,7 @@ pub fn generate(
             if let crate::ast::Item::Static(s) = &item.node
                 && !s.mutable
                 && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
-                && is_live_import(item, program)
+                && is_live(item, program)
             {
                 let name = s.name.node.clone();
                 if emitted_items.insert(name) {
@@ -703,6 +706,7 @@ pub fn generate(
             if let crate::ast::Item::Static(s) = &item.node
                 && !s.mutable
                 && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
+                && is_live(item, program)
             {
                 let name = s.name.node.clone();
                 if emitted_items.insert(name) {
@@ -729,7 +733,7 @@ pub fn generate(
             crate::ast::Item::Import(_)
                 | crate::ast::Item::Address(_)
                 | crate::ast::Item::Static(_)
-        ) && is_live_import(item, program)
+        ) && is_live(item, program)
     });
 
     if has_imported_code {
@@ -741,7 +745,7 @@ pub fn generate(
     for item in &program.imported_items {
         // Importing a module makes its whole file available, but only the part
         // the program actually reaches is worth emitting.
-        if !is_live_import(item, program) {
+        if !is_live(item, program) {
             continue;
         }
 
@@ -786,7 +790,7 @@ pub fn generate(
             crate::ast::Item::Import(_)
                 | crate::ast::Item::Address(_)
                 | crate::ast::Item::Static(_)
-        )
+        ) && is_live(item, program)
     });
 
     if has_main_code {
@@ -796,6 +800,12 @@ pub fn generate(
     }
 
     for item in &ast.items {
+        // Unreachable items are dropped here as well as for imports; sema has
+        // already warned about the ones written in this file.
+        if !is_live(item, program) {
+            continue;
+        }
+
         // Get the item name to check for duplicates
         let item_name = match &item.node {
             crate::ast::Item::Function(f) => Some(f.name.node.clone()),

@@ -97,24 +97,9 @@ building).
 
 ---
 
-### 5. Dead code elimination for the root module
-
-Unreferenced items from *imported* modules are now dropped (see
-[Unused Imports Are Not Emitted](specification.md#unused-imports-are-not-emitted)),
-but the file being compiled always emits everything it defines, dead or not. It
-warns instead.
-
-The liveness machinery is already in place — `SemanticAnalyzer::reachable_symbols`
-computes the closure over the whole program — so this is a question of whether
-dropping a warned-about function is the behaviour we want, not of new analysis.
-
-**Complexity**: Low (the analysis exists); the decision is a design call.
-
----
-
 ## 🟢 MEDIUM PRIORITY
 
-### 6. Bitfield access syntax
+### 5. Bitfield access syntax
 
 Manual shifts and masks today. Device registers are almost entirely bitfields, so
 this is the ergonomic gap the OS work runs into most often.
@@ -133,7 +118,7 @@ On a 65C02 target these lower to `BBR`/`BBS`/`SMB`/`RMB` directly (see
 
 ---
 
-### 7. Branch optimization intelligence
+### 6. Branch optimization intelligence
 
 Status flags are discarded after every comparison, so a repeated test re-emits
 the `CMP`.
@@ -152,7 +137,7 @@ does this for registers).
 
 ---
 
-### 8. Disassembly output mode
+### 7. Disassembly output mode
 
 Emit an annotated listing with resolved addresses and cycle counts, for
 performance work and for reading what the peephole actually did.
@@ -172,7 +157,7 @@ table is new.
 
 ## 🔵 LOWER PRIORITY
 
-### 9. Inline data directive
+### 8. Inline data directive
 
 Lookup tables and sprite data colocated with the code that uses them, rather than
 hoisted to a `static`.
@@ -181,30 +166,19 @@ hoisted to a `static`.
 data lookup_table: [u8; 16] = [0x00, 0x01, 0x04, 0x09, /* … */];
 ```
 
-**Complexity**: Low, but note the const-array path currently emits to a hardcoded
-`$C000` org and does not go through the section allocator — item (10) should be
-fixed first, or inline data will not be covered by conflict detection either.
+**Complexity**: Low. Const arrays and string literals already allocate from
+`DATA` through `SectionAllocator`; inline data should do the same, so that it
+stays visible to `#[org]` conflict detection.
 
 ---
 
-### 10. Const-array placement through the allocator
+### 9. Reclaim BSS from dropped statics
 
-Const arrays are emitted at a hardcoded `.ORG $C000` and never recorded as
-allocations, so they are the one kind of output the `#[org]` conflict check
-cannot see. Route them through `SectionAllocator` like string literals.
+Unreachable statics are no longer emitted, but sema assigns their RAM addresses
+before liveness is known, so the space stays reserved. Ordering BSS allocation
+after the liveness walk would recover it.
 
 **Complexity**: Low.
-
----
-
-### 11. Span identity across modules
-
-`Span` is a bare byte offset with no file identity, so two modules can collide on
-one. The inline-expansion path works around this by preferring the callee's own
-symbol for the duration of its body; nothing else does. Adding a file id to
-`Span` closes the class.
-
-**Complexity**: Medium (touches every diagnostic).
 
 ---
 
@@ -259,6 +233,11 @@ rewritten as part of item (3), not as working examples.
   (`rand`/`rand16`/`srand`)
 
 **Diagnostics and correctness**
+- Dead code elimination across the whole program, the file being compiled
+  included, with warnings naming exactly what is dropped
+- Const arrays allocate from the configured `DATA` section instead of a
+  hardcoded `$C000` outside the memory map
+- Spans carry a file id, so two modules can no longer collide on one map key
 - `#[org]` collisions are compile errors, against functions, data, statics and
   the interrupt vector table, with source excerpts
 - BCD `SED`/`CLD` peephole consolidation

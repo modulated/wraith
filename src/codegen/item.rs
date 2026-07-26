@@ -460,11 +460,19 @@ fn generate_function(
 fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
     use crate::sema::InitByte;
 
-    if info.static_inits.is_empty() {
+    // Only statics that survived dead-code elimination are declared in the
+    // output; initializing a dropped one would write to an address no label
+    // names.
+    let live: Vec<&crate::sema::StaticInit> = info
+        .static_inits
+        .iter()
+        .filter(|init| info.reachable_symbols.contains(&init.name))
+        .collect();
+    if live.is_empty() {
         return;
     }
     emitter.emit_comment("Initialize mutable statics (RAM is undefined at reset)");
-    for init in &info.static_inits {
+    for init in live {
         let len = init.bytes.len();
         if len == 0 {
             continue;
@@ -525,7 +533,7 @@ fn generate_static(
     if !stat.mutable {
         // Check if this is a const array - if so, emit it to data section
         if matches!(stat.ty.node, TypeExpr::Array { .. }) {
-            return emit_const_array(stat, emitter, info, string_collector);
+            return emit_const_array(stat, emitter, info, section_alloc, string_collector);
         }
 
         // Handle const strings - register folded constants with string collector
@@ -616,14 +624,10 @@ fn emit_const_array(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    section_alloc: &mut SectionAllocator,
     _string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     let name = &stat.name.node;
-
-    emitter.emit_comment(&format!("Const array: {}", name));
-
-    // Emit data label
-    emitter.emit_data_label(name);
 
     // Element width so u16/i16/b16 arrays emit two little-endian bytes each.
     let elem_size = match &stat.ty.node {
@@ -633,6 +637,31 @@ fn emit_const_array(
         },
         _ => 1,
     };
+
+    let elem_count = match &stat.ty.node {
+        crate::ast::TypeExpr::Array { size, .. } => *size,
+        _ => 0,
+    };
+    let byte_size = (elem_count * elem_size) as u16;
+
+    // Take an address from the DATA section rather than emitting at a fixed
+    // .ORG. Every const array used to be written at $C000, so two of them
+    // overlapped, the address ignored whatever the memory map said, and none of
+    // them were visible to the #[org] conflict check.
+    let addr = section_alloc
+        .allocate("DATA", byte_size)
+        .map_err(CodegenError::SectionError)?;
+    section_alloc.record_allocation(
+        name.clone(),
+        addr,
+        byte_size,
+        AllocationSource::Section("DATA".to_string()),
+        Some(stat.name.span),
+    );
+
+    emitter.emit_comment(&format!("Const array: {} ({} bytes)", name, byte_size));
+    emitter.emit_data_org(addr);
+    emitter.emit_data_label(name);
 
     // Emit array data based on initialization expression
     match &stat.init.node {

@@ -247,9 +247,11 @@ impl SemanticAnalyzer {
             return Err(self.errors[0].clone());
         }
 
-        // Check for unused imports and functions after all analysis is complete
+        // Check for unused imports after all analysis is complete. Unused
+        // *functions* are reported from `analyze` instead: whether one is dead
+        // is a whole-program question, and only the root sees the whole
+        // program.
         self.check_unused_imports();
-        self.check_unused_functions();
 
         // Analyze tail calls after all other analysis is complete
         Ok(self.analyze_tail_calls(source))
@@ -258,9 +260,12 @@ impl SemanticAnalyzer {
     pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
         let tail_call_info = self.analyze_module(source)?;
 
-        // Which imported items the output actually needs. Computed here, at the
-        // root, because only the root sees the merged reference graph.
+        // What the output actually needs. Computed here, at the root, because
+        // only the root sees the merged reference graph. Everything outside
+        // this set is dropped by codegen; warn about the root module's share of
+        // it so the report and the output agree.
         let reachable_symbols = self.reachable_symbols(source);
+        self.warn_unreachable_items(source, &reachable_symbols);
 
         // Finalize frames once, over the merged program (main module plus every
         // imported module whose call graph and frame sizes were merged in during

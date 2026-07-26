@@ -236,13 +236,14 @@ fn dropping_dead_imports_shrinks_the_output() {
 }
 
 // ============================================================================
-// The importing module's own code is not subject to this
+// The importing module's own code
 // ============================================================================
 
 #[test]
-fn an_unused_function_in_the_importing_file_is_still_emitted() {
-    // Elimination applies to imported modules, not to the file being compiled:
-    // its contents are the author's business, and an unused one already warns.
+fn an_unused_function_in_the_importing_file_is_dropped_too() {
+    // Elimination is not special-cased to imported modules: an unreachable
+    // function is dead wherever it was written. The difference is that one
+    // written here also warns.
     let src = format!(
         r#"
         import {{ * }} from "{TOOLKIT}";
@@ -256,9 +257,9 @@ fn an_unused_function_in_the_importing_file_is_still_emitted() {
     "#
     );
     assert!(
-        defined_functions(&compile_success(&src))
+        !defined_functions(&compile_success(&src))
             .iter()
             .any(|f| f == "never_called"),
-        "a dead function in the root module is kept"
+        "an unreachable function in the root module is dropped"
     );
 }

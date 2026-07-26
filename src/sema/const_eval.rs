@@ -168,7 +168,7 @@ fn eval_literal(lit: &Literal) -> Result<ConstValue, SemaError> {
         Literal::String(s) => Ok(ConstValue::String(s.clone())),
         _ => Err(SemaError::Custom {
             message: "literal cannot be evaluated as constant".to_string(),
-            span: crate::ast::Span { start: 0, end: 0 },
+            span: crate::ast::Span::dummy(),
         }),
     }
 }
@@ -551,7 +551,7 @@ mod tests {
     fn make_int(n: i64) -> Spanned<Expr> {
         Spanned {
             node: Expr::Literal(Literal::Integer(n)),
-            span: Span { start: 0, end: 0 },
+            span: Span::dummy(),
         }
     }
 
@@ -562,7 +562,7 @@ mod tests {
                 op,
                 right: Box::new(right),
             },
-            span: Span { start: 0, end: 0 },
+            span: Span::dummy(),
         }
     }
 

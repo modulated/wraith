@@ -537,7 +537,11 @@ impl SemanticAnalyzer {
             span: import.path.span,
         })?;
 
-        let ast = crate::Parser::parse(&tokens).map_err(|e| SemaError::ImportError {
+        // Stamp the module's spans with an id derived from its path, so its
+        // symbol tables can be merged into ours without offsets from two files
+        // colliding on the same map key.
+        let module_file = crate::ast::file_id(&import_path.to_string_lossy());
+        let ast = crate::Parser::parse_in_file(&tokens, module_file).map_err(|e| SemaError::ImportError {
             path: import.path.node.clone(),
             reason: format!("parser error: {:?}", e),
             span: import.path.span,

@@ -1973,13 +1973,17 @@ glob imports are not warned about — bringing in names you may not use is what
 the wildcard asked for — and, per the next section, the ones you don't use cost
 nothing in the output.
 
-### Unused Imports Are Not Emitted
+### Unreachable Code Is Not Emitted
+
+The compiler emits only the functions and data the program can actually reach,
+computed as a transitive closure over calls and references from the program's
+entry points. This applies to imported modules and to the file being compiled
+alike.
 
 Importing a module makes its **whole file** available, not just the symbols
-named: an imported function may call private siblings the importing program can
-never refer to. The compiler therefore emits only the imported items the program
-can actually reach, computed as a transitive closure over calls and references
-from the root module.
+named — an imported function may call private siblings the importing program can
+never refer to — so without this, using one helper from a library dragged in all
+of it:
 
 ```rust
 import { * } from "math.wr";   // ~18 functions
@@ -1994,15 +1998,44 @@ fn main() {
 A glob import and an explicit list of the symbols actually used compile to
 identical assembly, so `*` costs nothing over naming each one.
 
-Reachability is deliberately conservative — keeping too much wastes ROM, while
-dropping something live is a broken jump — so an item is kept when:
+#### What Counts as Reachable
 
-- it is defined in the file being compiled (its own contents are always emitted,
-  dead or not; an unused one warns instead),
-- it is called or referenced, directly or transitively, from a retained item,
-- its address is taken anywhere (it may be reached through a function pointer
-  that no call edge records), or
-- it is named by a `JSR`/`JMP` in an inline `asm` block of a retained function.
+Execution starts, or arrives from outside the call graph, at these **roots**:
+
+- the `#[reset]`, `#[irq]` and `#[nmi]` handlers, which the hardware enters
+  through the vector table, and `main`, the conventional entry point when no
+  `#[reset]` is given;
+- functions pinned by `#[org]` or `#[section]`, since fixing an address is
+  usually how something outside the program is given a way in;
+- functions whose address is taken, reachable through a pointer that no call
+  edge records;
+- names referenced outside any function body, such as in a `static`'s
+  initializer.
+
+From there, an item is kept when it is called or referenced — directly or
+transitively — from something already kept, including by a `JSR`/`JMP` naming it
+inside an inline `asm` block. The walk is deliberately conservative: keeping too
+much only wastes ROM, while dropping something live is a jump into whatever
+follows it.
+
+Unreachable items **in the file being compiled** are reported before being
+dropped, so the warnings name exactly what was removed:
+
+```
+warning: unused function: `never_called`
+warning: unused constant or static: `LOOKUP_TABLE`
+```
+
+Items from imported modules are dropped silently — you did not write them, and a
+library you use part of is not a mistake.
+
+#### Files With No Entry Point
+
+A file with no `#[reset]`, no interrupt handler, no `main` and no placed
+function has no reachable code at all. That means the compiler cannot tell what
+runs, not that everything is dead, so the whole module is emitted and nothing is
+reported as unused. A half-written file still compiles to something you can
+inspect.
 
 ### Module Visibility
 

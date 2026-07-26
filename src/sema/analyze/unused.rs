@@ -137,49 +137,80 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Check for unused functions and generate warnings
-    pub(super) fn check_unused_functions(&mut self) {
-        // Check which declared functions were never called
-        for (func_name, func_span) in &self.declared_functions {
-            if !self.called_functions.contains(func_name) {
-                self.warnings.push(Warning::UnusedFunction {
-                    name: func_name.clone(),
-                    span: *func_span,
-                });
-            }
-        }
-    }
-
-    /// Every symbol the program can actually reach, as a transitive closure over
-    /// `symbol_refs` from the root module.
+    /// Every symbol the program can actually reach, as a transitive closure
+    /// over `symbol_refs` from the program's entry points.
     ///
-    /// Codegen drops imported items outside this set. Importing a module makes
-    /// its *whole* file available — an imported function may call a sibling the
-    /// importing file never named — so the set has to be computed over the merged
-    /// reference graph rather than from the import list.
+    /// Codegen emits only what is in this set. The walk has to span modules:
+    /// importing a module makes its *whole* file available, and an imported
+    /// function may call a sibling the importing file never named, so liveness
+    /// cannot be read off the import list.
     ///
-    /// The roots are everything the root module defines (its own items are always
-    /// emitted, dead or not: a file's contents are its author's business, and an
-    /// unused one already warns), every function whose address is taken (it can
-    /// be reached through a pointer that no static edge records), and anything
-    /// referenced outside a function body, such as a `static`'s initializer.
+    /// The roots are the places execution can begin or arrive from outside the
+    /// call graph:
     ///
-    /// Being wrong in the direction of keeping too much is harmless; dropping a
-    /// live function is a link error. Two things make the walk safe rather than
-    /// optimistic: `record_asm_call_edges` turns a `JSR` inside inline assembly
-    /// into an edge, and taking a function's address counts as a root.
+    /// - the `#[reset]`, `#[irq]` and `#[nmi]` handlers, which the hardware
+    ///   enters through the vector table, and `main`, the conventional entry
+    ///   point when no `#[reset]` is given;
+    /// - functions pinned by `#[org]` or `#[section]`, since the reason to fix
+    ///   an address is usually to let something outside the program call it;
+    /// - functions whose address is taken, reachable through a pointer that no
+    ///   static call edge records;
+    /// - names referenced outside any function body, such as in a `static`'s
+    ///   initializer.
+    ///
+    /// Being wrong in the direction of keeping too much wastes ROM; dropping a
+    /// live function is a jump into whatever follows it. Two things keep the
+    /// walk safe rather than optimistic: `record_asm_call_edges` turns a `JSR`
+    /// inside inline assembly into an edge, and address-taken functions are
+    /// roots.
     pub(super) fn reachable_symbols(
         &self,
         root_module: &crate::ast::SourceFile,
     ) -> HashSet<String> {
+        use crate::ast::{FnAttribute, Item};
+
         let mut worklist: Vec<String> = Vec::new();
 
-        // Root module items are always live.
+        // Types carry no code and are not emitted, so only functions can be
+        // roots here.
         for item in &root_module.items {
-            if let Some(name) = item_name(&item.node) {
-                worklist.push(name);
+            if let Item::Function(f) = &item.node {
+                let name = f.name.node.clone();
+                let is_entry_point = f.attributes.iter().any(|a| {
+                    matches!(
+                        a,
+                        FnAttribute::Reset
+                            | FnAttribute::Irq
+                            | FnAttribute::Nmi
+                            | FnAttribute::Interrupt
+                            | FnAttribute::Org(_)
+                            | FnAttribute::Section(_)
+                    )
+                });
+                if is_entry_point || name == "main" {
+                    worklist.push(name);
+                }
             }
         }
+
+        // A file with no entry point at all is not a program in which
+        // everything is dead — it is one where we cannot know what runs. A
+        // library, or something still being written. Emitting an empty ROM
+        // because `#[reset]` has not been added yet would be a poor answer, so
+        // keep the whole module and let the vector table's absence speak.
+        if worklist.is_empty() {
+            return root_module
+                .items
+                .iter()
+                .filter_map(|item| match &item.node {
+                    Item::Function(f) => Some(f.name.node.clone()),
+                    Item::Static(s) => Some(s.name.node.clone()),
+                    _ => None,
+                })
+                .chain(self.symbol_refs.values().flatten().cloned())
+                .collect();
+        }
+
         // Reached through a function pointer, so no call edge names them.
         worklist.extend(self.address_taken_functions.iter().cloned());
         // Module-level references (static initializers) have no owning item.
@@ -200,17 +231,75 @@ impl SemanticAnalyzer {
         }
         reached
     }
-}
 
-/// The name a top-level item defines, if it defines one.
-fn item_name(item: &crate::ast::Item) -> Option<String> {
-    use crate::ast::Item;
-    match item {
-        Item::Function(f) => Some(f.name.node.clone()),
-        Item::Static(s) => Some(s.name.node.clone()),
-        Item::Struct(s) => Some(s.name.node.clone()),
-        Item::Enum(e) => Some(e.name.node.clone()),
-        Item::Address(a) => Some(a.name.node.clone()),
-        Item::Import(_) => None,
+    /// Warn about every root-module function and static the program cannot
+    /// reach — exactly the set codegen is about to drop, so the warning and the
+    /// output agree.
+    ///
+    /// This replaces a check that only asked whether a function was ever
+    /// *called*, which missed a dead function called by another dead function
+    /// and reported nothing at all about unused constants.
+    pub(super) fn warn_unreachable_items(
+        &mut self,
+        root_module: &crate::ast::SourceFile,
+        reachable: &HashSet<String>,
+    ) {
+        use crate::ast::Item;
+
+        // With no entry point nothing is reachable by definition, and
+        // `reachable_symbols` keeps the whole module rather than emitting an
+        // empty ROM. Warning about every item in that case would be noise.
+        let has_entry_point = root_module.items.iter().any(|item| match &item.node {
+            crate::ast::Item::Function(f) => {
+                f.name.node == "main"
+                    || f.attributes.iter().any(|a| {
+                        matches!(
+                            a,
+                            crate::ast::FnAttribute::Reset
+                                | crate::ast::FnAttribute::Irq
+                                | crate::ast::FnAttribute::Nmi
+                                | crate::ast::FnAttribute::Interrupt
+                                | crate::ast::FnAttribute::Org(_)
+                                | crate::ast::FnAttribute::Section(_)
+                        )
+                    })
+            }
+            _ => false,
+        });
+        if !has_entry_point {
+            return;
+        }
+
+        let mut warnings = Vec::new();
+        for item in &root_module.items {
+            match &item.node {
+                Item::Function(f) => {
+                    let name = &f.name.node;
+                    // Inline functions are expanded at their call sites and
+                    // never emitted on their own, so "unused" does not apply.
+                    let is_inline = self
+                        .function_metadata
+                        .get(name)
+                        .is_some_and(|m| m.is_inline);
+                    if !is_inline && !reachable.contains(name) {
+                        warnings.push(Warning::UnusedFunction {
+                            name: name.clone(),
+                            span: f.name.span,
+                        });
+                    }
+                }
+                Item::Static(st) => {
+                    let name = &st.name.node;
+                    if !reachable.contains(name) {
+                        warnings.push(Warning::UnusedStatic {
+                            name: name.clone(),
+                            span: st.name.span,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.warnings.extend(warnings);
     }
 }

@@ -173,7 +173,7 @@ impl SemanticAnalyzer {
                              the frame save/restore stack is not reentrant",
                             handler, caller
                         ),
-                        span: crate::ast::Span { start: 0, end: 0 },
+                        span: crate::ast::Span::dummy(),
                     });
                 }
             }
@@ -318,14 +318,14 @@ impl SemanticAnalyzer {
 fn frame_base(frames: &HashMap<String, FrameInfo>, func: Option<&str>) -> Result<u8, SemaError> {
     let name = func.ok_or_else(|| SemaError::Custom {
         message: "internal: FrameOffset symbol without a containing function".to_string(),
-        span: crate::ast::Span { start: 0, end: 0 },
+        span: crate::ast::Span::dummy(),
     })?;
     frames
         .get(name)
         .map(|f| f.base)
         .ok_or_else(|| SemaError::Custom {
             message: format!("internal: no frame assigned for function '{}'", name),
-            span: crate::ast::Span { start: 0, end: 0 },
+            span: crate::ast::Span::dummy(),
         })
 }
 
