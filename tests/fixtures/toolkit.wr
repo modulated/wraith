@@ -1,0 +1,50 @@
+// Fixture module for the import tests in tests/e2e/imports.rs.
+//
+// The shape matters: some functions are used by the importing program, some are
+// not, one public function calls a *private* sibling the importer can never name,
+// and one is reached only from inline assembly. That combination is what
+// separates a correct liveness walk from one that either drags in the whole file
+// or drops something still live.
+
+/// Used by the importing programs.
+pub fn double(x: u8) -> u8 {
+    return x + x;
+}
+
+/// Used, and calls a private helper the importer cannot name. Dropping `bump`
+/// because no import mentions it would break this.
+pub fn add_three(x: u8) -> u8 {
+    return bump(bump(bump(x)));
+}
+
+/// Private: reachable only through `add_three`.
+fn bump(x: u8) -> u8 {
+    return x + 1;
+}
+
+/// Public but never called by the importing programs. This is the item that
+/// should not reach the output.
+pub fn unused_helper(x: u8) -> u8 {
+    return x + 100;
+}
+
+/// Also unused, and calls another unused function. Both should go: liveness is
+/// transitive in the dead direction too.
+pub fn unused_caller(x: u8) -> u8 {
+    return unused_leaf(x);
+}
+
+fn unused_leaf(x: u8) -> u8 {
+    return x + 7;
+}
+
+/// Reached only from a `JSR` inside inline assembly, never from a Wraith call.
+/// The liveness walk has to read the assembly to keep this alive.
+pub fn asm_only() -> u8 {
+    return 77;
+}
+
+/// Private, so a glob import must not bring it into scope.
+fn private_helper(x: u8) -> u8 {
+    return x + 200;
+}

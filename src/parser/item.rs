@@ -226,24 +226,46 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse import statement: import {sym1, sym2} from 'path.wr';
+    /// Parse an import statement.
+    ///
+    /// ```text
+    /// import { sym1, sym2 } from "path.wr";   // named
+    /// import { * } from "path.wr";            // glob: every pub item
+    /// import * from "path.wr";                // glob, braces optional
+    /// import { a, * } from "path.wr";         // both (the names are redundant)
+    /// ```
     fn parse_import(&mut self) -> ParseResult<Import> {
         self.expect(&Token::Import)?;
-        self.expect(&Token::LBrace)?;
 
-        // Parse comma-separated list of symbols
         let mut symbols = Vec::with_capacity(4);
-        loop {
-            let sym = self.expect_ident()?;
-            symbols.push(sym);
+        let mut glob = None;
 
-            if !self.check(&Token::Comma) {
-                break;
+        // The braces are optional around a bare `*`, matching how `use foo::*`
+        // reads in Rust without a brace group.
+        if self.check(&Token::Star) {
+            let span = self.current_span();
+            self.advance();
+            glob = Some(span);
+        } else {
+            self.expect(&Token::LBrace)?;
+            loop {
+                if self.check(&Token::Star) {
+                    // Later `*`s are redundant but harmless; keep the first span.
+                    let span = self.current_span();
+                    self.advance();
+                    glob.get_or_insert(span);
+                } else {
+                    symbols.push(self.expect_ident()?);
+                }
+
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance(); // consume comma
             }
-            self.advance(); // consume comma
+            self.expect(&Token::RBrace)?;
         }
 
-        self.expect(&Token::RBrace)?;
         self.expect(&Token::From)?;
 
         // Parse path as string literal
@@ -251,7 +273,11 @@ impl Parser<'_> {
 
         self.expect(&Token::Semi)?;
 
-        Ok(Import { symbols, path })
+        Ok(Import {
+            symbols,
+            glob,
+            path,
+        })
     }
 
     /// Parse an attribute: #[name] or #[name(value)]

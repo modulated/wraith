@@ -487,6 +487,34 @@ fn emit_stdlib_math_functions(
     Ok(())
 }
 
+/// Is this item a non-mutable array `static`, i.e. a const table for the DATA
+/// section?
+fn is_const_array(item: &crate::ast::Spanned<crate::ast::Item>) -> bool {
+    match &item.node {
+        crate::ast::Item::Static(s) => {
+            !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
+        }
+        _ => false,
+    }
+}
+
+/// Should this item from an imported module be emitted?
+///
+/// Importing a module pulls in its entire file — an imported function may call
+/// siblings the importing program never named — so every item arrives here and
+/// liveness decides. `program.reachable_symbols` is the closure of calls and
+/// references from the root module (see `SemanticAnalyzer::reachable_symbols`);
+/// anything outside it cannot be executed and would only pad the ROM.
+///
+/// Type definitions carry no code, and imports are handled by the caller.
+fn is_live_import(item: &crate::ast::Spanned<crate::ast::Item>, program: &ProgramInfo) -> bool {
+    match &item.node {
+        crate::ast::Item::Function(f) => program.reachable_symbols.contains(&f.name.node),
+        crate::ast::Item::Static(s) => program.reachable_symbols.contains(&s.name.node),
+        _ => true,
+    }
+}
+
 pub fn generate(
     ast: &SourceFile,
     program: &ProgramInfo,
@@ -537,13 +565,11 @@ pub fn generate(
 
     // Emit const arrays to DATA section FIRST
     // This separates read-only data from code
-    let has_const_arrays = ast.items.iter().chain(&program.imported_items).any(|item| {
-        if let crate::ast::Item::Static(s) = &item.node {
-            !s.mutable && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
-        } else {
-            false
-        }
-    });
+    let has_const_arrays = ast.items.iter().any(is_const_array)
+        || program
+            .imported_items
+            .iter()
+            .any(|item| is_const_array(item) && is_live_import(item, program));
 
     if has_const_arrays {
         emitter.emit_comment("============================================================");
@@ -560,6 +586,7 @@ pub fn generate(
             if let crate::ast::Item::Static(s) = &item.node
                 && !s.mutable
                 && matches!(s.ty.node, crate::ast::TypeExpr::Array { .. })
+                && is_live_import(item, program)
             {
                 let name = s.name.node.clone();
                 if emitted_items.insert(name) {
@@ -605,7 +632,7 @@ pub fn generate(
             crate::ast::Item::Import(_)
                 | crate::ast::Item::Address(_)
                 | crate::ast::Item::Static(_)
-        )
+        ) && is_live_import(item, program)
     });
 
     if has_imported_code {
@@ -615,6 +642,12 @@ pub fn generate(
     }
 
     for item in &program.imported_items {
+        // Importing a module makes its whole file available, but only the part
+        // the program actually reaches is worth emitting.
+        if !is_live_import(item, program) {
+            continue;
+        }
+
         // Get the item name to check for duplicates
         let item_name = match &item.node {
             crate::ast::Item::Function(f) => Some(f.name.node.clone()),

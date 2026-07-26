@@ -92,6 +92,12 @@ pub struct SemanticAnalyzer {
     /// an indirect caller (which cannot know the callee's colored frame) can
     /// still pass args; their prologue copies staging -> frame params.
     pub(super) address_taken_functions: HashSet<String>,
+    /// Every symbol each function references: calls, constants, statics,
+    /// addresses and inline-asm operands. A superset of `call_edges`, used to
+    /// decide which imported items are live (see `reachable_symbols`).
+    /// References made outside any function body (a `static`'s initializer, for
+    /// instance) are keyed under `None`.
+    pub(super) symbol_refs: HashMap<Option<String>, HashSet<String>>,
 }
 
 impl Default for SemanticAnalyzer {
@@ -138,6 +144,7 @@ impl SemanticAnalyzer {
             function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
             address_taken_functions: HashSet::default(),
+            symbol_refs: HashMap::default(),
         }
     }
 
@@ -178,6 +185,7 @@ impl SemanticAnalyzer {
             function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
             address_taken_functions: HashSet::default(),
+            symbol_refs: HashMap::default(),
         }
     }
 
@@ -250,6 +258,10 @@ impl SemanticAnalyzer {
     pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
         let tail_call_info = self.analyze_module(source)?;
 
+        // Which imported items the output actually needs. Computed here, at the
+        // root, because only the root sees the merged reference graph.
+        let reachable_symbols = self.reachable_symbols(source);
+
         // Finalize frames once, over the merged program (main module plus every
         // imported module whose call graph and frame sizes were merged in during
         // import processing). This assigns concrete zero-page frame bases and
@@ -280,6 +292,7 @@ impl SemanticAnalyzer {
             recursive_call_edges,
             interrupt_save_info,
             address_taken_functions: self.address_taken_functions.clone(),
+            reachable_symbols,
         })
     }
 

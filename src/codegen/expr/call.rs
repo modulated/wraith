@@ -751,6 +751,7 @@ fn generate_inline_call(
             recursive_call_edges: info.recursive_call_edges.clone(),
             interrupt_save_info: info.interrupt_save_info.clone(),
             address_taken_functions: info.address_taken_functions.clone(),
+            reachable_symbols: info.reachable_symbols.clone(),
         };
 
         use crate::codegen::stmt::generate_stmt;

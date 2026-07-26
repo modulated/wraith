@@ -6,7 +6,7 @@
 use rustc_hash::FxHashSet as HashSet;
 use std::path::PathBuf;
 
-use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Spanned};
+use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Span, Spanned};
 use crate::sema::const_eval::{ConstValue, eval_const_expr_with_env};
 use crate::sema::table::{SymbolInfo, SymbolKind, SymbolLocation};
 use crate::sema::type_defs::{EnumDef, FieldInfo, StructDef, VariantData, VariantInfo};
@@ -562,23 +562,46 @@ impl SemanticAnalyzer {
         self.imported_items
             .extend(imported_analyzer.imported_items.clone());
 
-        // Import the requested symbols into our table
+        // Work out which names this import brings in. A glob takes every `pub`
+        // item in the module (private ones stay private, exactly as a named
+        // import of one would be rejected below); named imports take their list.
+        // Both forms can appear together, so dedupe.
+        let mut requested: Vec<(String, Span)> = Vec::new();
+        if let Some(glob_span) = import.glob {
+            for (name, symbol) in imported_analyzer.table.module_symbols() {
+                if symbol.is_pub {
+                    requested.push((name.clone(), glob_span));
+                }
+            }
+        }
         for symbol_name in &import.symbols {
-            let name = &symbol_name.node;
+            if !requested.iter().any(|(n, _)| n == &symbol_name.node) {
+                requested.push((symbol_name.node.clone(), symbol_name.span));
+            }
+        }
+
+        // Import the requested symbols into our table
+        for (name, name_span) in &requested {
+            let name_span = *name_span;
             if let Some(symbol) = imported_analyzer.table.lookup(name) {
                 // Check if the symbol is public
                 if !symbol.is_pub {
                     return Err(SemaError::ImportError {
                         path: import.path.node.clone(),
                         reason: format!("symbol '{}' is private and cannot be imported", name),
-                        span: symbol_name.span,
+                        span: name_span,
                     });
                 }
 
                 self.table.insert(name.clone(), symbol.clone());
 
-                // Track imported symbol for unused import detection
-                self.imported_symbols.push((name.clone(), symbol_name.span));
+                // Track imported symbol for unused import detection. A glob
+                // deliberately brings in names the file may not use, so it is
+                // not reported: that is what the wildcard asked for, and the
+                // unused ones are dropped from the output anyway.
+                if import.glob.is_none() {
+                    self.imported_symbols.push((name.clone(), name_span));
+                }
 
                 // Also import function metadata if this is a function
                 if let Some(metadata) = imported_analyzer.function_metadata.get(name) {
@@ -598,7 +621,7 @@ impl SemanticAnalyzer {
                 return Err(SemaError::ImportError {
                     path: import.path.node.clone(),
                     reason: format!("symbol '{}' not found in imported file", name),
-                    span: symbol_name.span,
+                    span: name_span,
                 });
             }
         }
@@ -679,6 +702,16 @@ impl SemanticAnalyzer {
         }
         self.address_taken_functions
             .extend(imported_analyzer.address_taken_functions.iter().cloned());
+
+        // Merge the imported module's reference graph. Liveness is computed over
+        // the whole program at the root, so an imported function that calls a
+        // sibling keeps that sibling alive without the root ever naming it.
+        for (owner, refs) in &imported_analyzer.symbol_refs {
+            self.symbol_refs
+                .entry(owner.clone())
+                .or_default()
+                .extend(refs.iter().cloned());
+        }
 
         // Merge the imported files set
         self.imported_files.extend(imported_analyzer.imported_files);

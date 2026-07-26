@@ -1956,6 +1956,54 @@ Wraith supports a simple file-based import system for code organization and reus
 import {symbol1, symbol2, symbol3} from "module.wr";
 ```
 
+#### Glob Imports
+
+A `*` imports every `pub` item of a module, so a library can be pulled in
+without listing its API:
+
+```rust
+import { * } from "math.wr";     // every pub item
+import * from "math.wr";         // braces optional around a bare *
+import { min, * } from "math.wr"; // legal; naming min is redundant
+```
+
+A glob respects visibility exactly as a named import does: private items stay
+private, and referring to one is the same error as importing it by name. Unused
+glob imports are not warned about — bringing in names you may not use is what
+the wildcard asked for — and, per the next section, the ones you don't use cost
+nothing in the output.
+
+### Unused Imports Are Not Emitted
+
+Importing a module makes its **whole file** available, not just the symbols
+named: an imported function may call private siblings the importing program can
+never refer to. The compiler therefore emits only the imported items the program
+can actually reach, computed as a transitive closure over calls and references
+from the root module.
+
+```rust
+import { * } from "math.wr";   // ~18 functions
+
+#[reset]
+fn main() {
+    let q: u16 = div16(1000, 7);   // only div16 and its callees are emitted
+    loop {}
+}
+```
+
+A glob import and an explicit list of the symbols actually used compile to
+identical assembly, so `*` costs nothing over naming each one.
+
+Reachability is deliberately conservative — keeping too much wastes ROM, while
+dropping something live is a broken jump — so an item is kept when:
+
+- it is defined in the file being compiled (its own contents are always emitted,
+  dead or not; an unused one warns instead),
+- it is called or referenced, directly or transitively, from a retained item,
+- its address is taken anywhere (it may be reached through a function pointer
+  that no call edge records), or
+- it is named by a `JSR`/`JMP` in an inline `asm` block of a retained function.
+
 ### Module Visibility
 
 **All items are private by default.** Only items marked with `pub` can be imported from other modules.

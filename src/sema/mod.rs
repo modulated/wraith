@@ -844,6 +844,11 @@ pub struct ProgramInfo {
     /// arguments through the fixed indirect-arg staging block and copy them into
     /// their frame in a prologue, so indirect callers can pass args.
     pub address_taken_functions: HashSet<String>,
+    /// Every symbol the program can reach from the root module, as a closure over
+    /// calls and references. Imported items outside this set are dead and are not
+    /// emitted: importing a module exposes its whole file, and without this a
+    /// program that used one helper from a library dragged in all of it.
+    pub reachable_symbols: HashSet<String>,
 }
 
 /// 6502 and 65C02 instruction mnemonics
