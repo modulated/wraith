@@ -154,6 +154,81 @@ pub fn generate_stmt(
                         )?;
                         return Ok(());
                     }
+
+                    // Struct-by-value initialization from a call, e.g.
+                    // `let p: Point = make();`. A struct-returning function
+                    // leaves a pointer to the struct bytes in A:X; copy the
+                    // whole struct into this local's inline storage (frame
+                    // coloring keeps the returned pointer valid until the next
+                    // call, and the copy is the first thing after the call).
+                    if is_struct_type
+                        && matches!(&init.node, crate::ast::Expr::Call { .. })
+                        && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                        && let Some(sdef) = info.type_registry.get_struct(struct_name)
+                    {
+                        let total = sdef.total_size as u8;
+                        emitter.emit_comment(&format!(
+                            "Struct return-by-value: copy {} bytes into ${:02X}",
+                            total, dest
+                        ));
+                        generate_expr(init, emitter, info, string_collector)?;
+                        // A = pointer low, X = pointer high -> $20/$21 vector.
+                        emitter.emit_inst("STA", "$20");
+                        emitter.emit_inst("STX", "$21");
+                        for i in 0..total {
+                            emitter.emit_inst("LDY", &format!("#${:02X}", i));
+                            emitter.emit_inst("LDA", "($20),Y");
+                            emitter.emit_inst("STA", &format!("${:02X}", dest + i));
+                        }
+                        emitter.invalidate_registers();
+                        return Ok(());
+                    }
+                }
+
+                // Slice value: `let s: &[T] = arr[start..end];`. Materialize the
+                // 4-byte fat-pointer descriptor into s's frame slot:
+                //   slot[0..1] = base = arr's data pointer + start*elem_size
+                //   slot[2..3] = len  = (end - start) in elements
+                if let Type::Slice(elem) = &sym.ty
+                    && let crate::ast::Expr::Slice {
+                        object,
+                        start,
+                        end,
+                        inclusive,
+                    } = &init.node
+                    && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                {
+                    generate_slice_materialize(
+                        dest,
+                        elem,
+                        object,
+                        start,
+                        end,
+                        *inclusive,
+                        emitter,
+                        info,
+                        string_collector,
+                    )?;
+                    return Ok(());
+                }
+
+                // Slice returned from a call: the callee left a pointer to its
+                // 4-byte descriptor in A:X; copy the descriptor into this slot.
+                if let Type::Slice(_) = &sym.ty
+                    && matches!(&init.node, crate::ast::Expr::Call { .. })
+                    && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                {
+                    emitter.emit_comment("Slice return-by-value: copy 4-byte descriptor");
+                    generate_expr(init, emitter, info, string_collector)?;
+                    emitter.emit_inst("STA", "$20");
+                    emitter.emit_inst("STX", "$21");
+                    for k in 0..4u8 {
+                        emitter.emit_inst("LDY", &format!("#${:02X}", k));
+                        emitter.emit_inst("LDA", "($20),Y");
+                        emitter.emit_inst("STA", &format!("${:02X}", dest + k));
+                    }
+                    emitter.invalidate_registers();
+                    return Ok(());
                 }
 
                 // Array of structs: stored inline. Runtime-initialize each element
@@ -365,8 +440,38 @@ pub fn generate_stmt(
                         }
                     }
                 } else {
-                    // Normal return with value
-                    generate_expr(e, emitter, info, string_collector)?;
+                    // Slice return-by-value: a slice variable returns a pointer
+                    // to its 4-byte descriptor in A:X (the descriptor lives in the
+                    // callee frame, valid until the caller copies it out right
+                    // after the call). Mirrors struct return-by-value.
+                    let slice_var_return = matches!(
+                        info.resolved_types.get(&e.span),
+                        Some(crate::sema::types::Type::Slice(_))
+                    )
+                    .then(|| {
+                        if let crate::ast::Expr::Variable(vname) = &e.node
+                            && let Some(sym) = info
+                                .resolved_symbols
+                                .get(&e.span)
+                                .or_else(|| info.table.lookup(vname))
+                            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+                        {
+                            Some(addr)
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten();
+
+                    if let Some(addr) = slice_var_return {
+                        emitter.emit_comment("Return slice descriptor pointer (A:X)");
+                        emitter.emit_inst("LDA", &format!("#${:02X}", addr));
+                        emitter.emit_inst("LDX", "#$00");
+                        emitter.mark_a_unknown();
+                    } else {
+                        // Normal return with value
+                        generate_expr(e, emitter, info, string_collector)?;
+                    }
 
                     // A 16-bit return convention is A (low) / Y (high). If the
                     // returned expression is 8-bit (e.g. `return 255;` from a
@@ -426,6 +531,36 @@ pub fn generate_stmt(
             Ok(())
         }
         Stmt::Assign { target, value } => {
+            // Slice reassignment: `s = arr[a..b];` materializes a new descriptor
+            // into the slice variable's slot (same as the `let` form).
+            if let crate::ast::Expr::Variable(target_name) = &target.node
+                && let crate::ast::Expr::Slice {
+                    object,
+                    start,
+                    end,
+                    inclusive,
+                } = &value.node
+                && let Some(sym) = info
+                    .resolved_symbols
+                    .get(&target.span)
+                    .or_else(|| info.table.lookup(target_name))
+                && let crate::sema::types::Type::Slice(elem) = &sym.ty
+                && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+            {
+                generate_slice_materialize(
+                    dest,
+                    elem,
+                    object,
+                    start,
+                    end,
+                    *inclusive,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                return Ok(());
+            }
+
             // Optimization: detect x = x + 1 and x = x - 1 patterns
             // Use INC/DEC instead of LDA/ADC/STA or LDA/SBC/STA
             if let crate::ast::Expr::Variable(target_name) = &target.node
@@ -445,7 +580,25 @@ pub fn generate_stmt(
                             .get(&target.span)
                             .or_else(|| info.table.lookup(target_name));
 
-                        if let Some(sym) = sym {
+                        // INC/DEC operate on a single byte and do not touch the
+                        // carry, so they cannot implement ±1 on a multi-byte
+                        // value: `a = a + 1` on a u16 holding $00FF must carry
+                        // into the high byte, which INC alone never does.
+                        let is_single_byte = sym.is_some_and(|s| {
+                            matches!(
+                                s.ty,
+                                crate::sema::types::Type::Primitive(
+                                    crate::ast::PrimitiveType::U8
+                                        | crate::ast::PrimitiveType::I8
+                                        | crate::ast::PrimitiveType::B8
+                                        | crate::ast::PrimitiveType::Bool
+                                )
+                            )
+                        });
+
+                        if let Some(sym) = sym
+                            && is_single_byte
+                        {
                             match (op, &sym.location) {
                                 (
                                     crate::ast::BinaryOp::Add,
@@ -509,6 +662,32 @@ pub fn generate_stmt(
                         use crate::sema::table::SymbolKind;
                         use crate::sema::types::Type;
 
+                        // Struct-by-value assignment from a call, e.g.
+                        // `p = make();`. The value expression (already generated
+                        // above) left a pointer to the struct bytes in A:X; copy
+                        // the whole struct into the target's inline storage
+                        // rather than storing just the low byte of the pointer.
+                        if matches!(&value.node, crate::ast::Expr::Call { .. })
+                            && let Type::Named(sname) = &sym.ty
+                            && let Some(sdef) = info.type_registry.get_struct(sname)
+                            && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                        {
+                            let total = sdef.total_size as u8;
+                            emitter.emit_comment(&format!(
+                                "Struct return-by-value assign: copy {} bytes into ${:02X}",
+                                total, dest
+                            ));
+                            emitter.emit_inst("STA", "$20");
+                            emitter.emit_inst("STX", "$21");
+                            for i in 0..total {
+                                emitter.emit_inst("LDY", &format!("#${:02X}", i));
+                                emitter.emit_inst("LDA", "($20),Y");
+                                emitter.emit_inst("STA", &format!("${:02X}", dest + i));
+                            }
+                            emitter.invalidate_registers();
+                            return Ok(());
+                        }
+
                         // Check if this is an enum type
                         let is_enum = if let Type::Named(type_name) = &sym.ty {
                             info.type_registry.get_enum(type_name).is_some()
@@ -548,6 +727,10 @@ pub fn generate_stmt(
                                     if is_multibyte {
                                         let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
                                         emitter.emit_inst(hi_inst, &format!("${:04X}", addr + 1));
+                                        // Raw STX/STY overwrites the high byte without
+                                        // updating tracking; forget any register cached
+                                        // to it so a later load isn't wrongly elided.
+                                        emitter.invalidate_abs(addr + 1);
                                     }
                                 }
                             }
@@ -557,6 +740,10 @@ pub fn generate_stmt(
                                 if is_multibyte {
                                     let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
                                     emitter.emit_inst(hi_inst, &format!("${:02X}", addr + 1));
+                                    // Raw STX/STY overwrites the high byte without
+                                    // updating tracking; forget any register cached
+                                    // to it so a later load isn't wrongly elided.
+                                    emitter.invalidate_zp(addr + 1);
                                 }
                             }
                             crate::sema::table::SymbolLocation::None => {
@@ -907,10 +1094,32 @@ pub fn generate_stmt(
             };
 
             let (iterable_base, iterable_ty) = iterable_info;
+            let is_slice = matches!(&iterable_ty, crate::sema::types::Type::Slice(_));
 
             let loop_label = emitter.next_label("fe");
             let continue_label = emitter.next_label("fc");
             let end_label = emitter.next_label("fz");
+
+            // Slices iterate with a 16-bit counter (they can exceed 255 elements),
+            // so they use a dedicated loop that re-reads the descriptor each
+            // iteration and advances an element pointer. Handled separately here.
+            if is_slice {
+                generate_foreach_slice(
+                    iterable,
+                    iterable_base,
+                    &iterable_ty,
+                    var_name,
+                    index_var.as_ref(),
+                    body,
+                    &loop_label,
+                    &continue_label,
+                    &end_label,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                return Ok(());
+            }
 
             // Initialize counter to 0 in X register
             emitter.emit_inst("LDX", "#$00");
@@ -934,13 +1143,20 @@ pub fn generate_stmt(
                 // Store length in temp location for comparison
                 emitter.emit_inst("STA", "$F2");
                 None // Will compare against $F2
+            } else if is_slice {
+                // Slice: length is the low byte of the descriptor at base+2
+                // (iteration is bounded to 255 elements). Compare against $F2.
+                emitter.emit_comment("Slice iteration - load length");
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 2));
+                emitter.emit_inst("STA", "$F2");
+                None
             } else {
                 // For arrays, size is known at compile time
                 match &iterable_ty {
                     crate::sema::types::Type::Array(_, sz) => Some(*sz),
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(
-                            "ForEach requires array or string type".to_string(),
+                            "ForEach requires array, slice, or string type".to_string(),
                         ));
                     }
                 }
@@ -950,8 +1166,8 @@ pub fn generate_stmt(
             emitter.emit_label(&loop_label);
 
             // Check if counter (X) >= length
-            if is_string {
-                // Compare X against string length in $F2
+            if is_string || is_slice {
+                // Compare X against the runtime length parked in $F2
                 emitter.emit_inst("CPX", "$F2");
             } else if let Some(size) = array_size {
                 // Compare X against known array size
@@ -981,19 +1197,23 @@ pub fn generate_stmt(
                 }
             }
 
-            // Whether the array element type is 16-bit (u16/i16/b16). Strings
-            // always iterate u8 characters.
-            let elem_multibyte = matches!(
-                &iterable_ty,
-                crate::sema::types::Type::Array(elem, _) if matches!(
-                    &**elem,
-                    crate::sema::types::Type::Primitive(
+            // Whether the array/slice element type is 16-bit (u16/i16/b16).
+            // Strings always iterate u8 characters.
+            let elem_multibyte = {
+                let elem = match &iterable_ty {
+                    crate::sema::types::Type::Array(elem, _)
+                    | crate::sema::types::Type::Slice(elem) => Some(&**elem),
+                    _ => None,
+                };
+                matches!(
+                    elem,
+                    Some(crate::sema::types::Type::Primitive(
                         crate::ast::PrimitiveType::U16
                             | crate::ast::PrimitiveType::I16
                             | crate::ast::PrimitiveType::B16
-                    )
+                    ))
                 )
-            );
+            };
 
             // Resolve the loop variable's storage up front.
             let loopvar_loc = info
@@ -1180,12 +1400,24 @@ fn generate_index_assignment(
     emitter.emit_comment("Evaluate value to assign");
     generate_expr(value, emitter, info, string_collector)?;
 
-    // Step 3: Save value to temp storage
+    // Step 3: Save the value while the index is evaluated. It cannot live in the
+    // shared $20 temp: evaluating a compound index like `a[i + 2]` uses $20 for
+    // its own operand, overwriting the value, and the store below would then
+    // write the index expression's operand instead. Take a dedicated slot.
     emitter.emit_comment("Save value to temp");
-    emitter.emit_inst("STA", "$20"); // Save low byte
+    let save = emitter.temp_alloc.alloc_high(2);
+    let (save_lo, save_hi) = match save {
+        Some(a) => (a, a + 1),
+        None => (0x20, 0x21),
+    };
+    emitter.emit_inst("STA", &format!("${:02X}", save_lo));
     if is_multibyte {
-        emitter.emit_inst("STY", "$21"); // Save high byte for u16
+        emitter.emit_inst("STY", &format!("${:02X}", save_hi));
     }
+    // The value expression and these raw stores bypass register tracking, so a
+    // belief left from before (e.g. `a = ZeroPage(i)` after `let i = 3`) would
+    // wrongly elide the index load below, indexing by the *value* instead.
+    emitter.invalidate_registers();
 
     // Step 4: Evaluate index expression
     emitter.emit_comment("Evaluate index");
@@ -1203,12 +1435,39 @@ fn generate_index_assignment(
             .or_else(|| info.table.lookup(array_name))
             .ok_or_else(|| CodegenError::SymbolNotFound(array_name.clone()))?;
 
+        // A mutable `static` array lives inline at its own label in RAM, so it is
+        // stored with absolute-indexed addressing (`STA NAME,Y`) rather than the
+        // indirect path used for local arrays, whose slot holds a pointer.
+        if sym.containing_function.is_none()
+            && matches!(sym.location, SymbolLocation::Absolute(_))
+            && matches!(sym.ty, Type::Array(..))
+        {
+            if is_multibyte {
+                emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+                emitter.emit_inst("TYA", "");
+                emitter.emit_inst("ASL", "A");
+                emitter.emit_inst("TAY", "");
+            }
+            emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+            emitter.emit_inst("STA", &format!("{},Y", array_name));
+            if is_multibyte {
+                emitter.emit_inst("INY", "");
+                emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+                emitter.emit_inst("STA", &format!("{},Y", array_name));
+            }
+            emitter.invalidate_registers();
+            if let Some(a) = save {
+                emitter.temp_alloc.free_high(a, 2);
+            }
+            return Ok(());
+        }
+
         match sym.location {
             SymbolLocation::ZeroPage(addr) => {
                 // For u8 arrays: direct indexed addressing
                 if !is_multibyte {
                     // Restore value
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     // Store to array[index]
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
                 } else {
@@ -1219,12 +1478,12 @@ fn generate_index_assignment(
                     emitter.emit_inst("TAY", ""); // Back to Y
 
                     // Restore and store low byte
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
 
                     // Store high byte at next position
                     emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", "$21");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
                 }
             }
@@ -1233,7 +1492,7 @@ fn generate_index_assignment(
                 // For u8 arrays: direct indexed addressing
                 if !is_multibyte {
                     // Restore value
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     // Store to array[index]
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
                 } else {
@@ -1244,12 +1503,12 @@ fn generate_index_assignment(
                     emitter.emit_inst("TAY", ""); // Back to Y
 
                     // Restore and store low byte
-                    emitter.emit_inst("LDA", "$20");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
 
                     // Store high byte at next position
                     emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", "$21");
+                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
                     emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
                 }
             }
@@ -1266,9 +1525,326 @@ fn generate_index_assignment(
         ));
     }
 
+    if let Some(a) = save {
+        emitter.temp_alloc.free_high(a, 2);
+    }
+
     // This path mutates A/X/Y through raw instructions the register tracker does
     // not follow, so drop all cached register beliefs. Otherwise a following read
     // of a variable the tracker thinks is still in A would be wrongly elided.
+    emitter.invalidate_registers();
+
+    Ok(())
+}
+
+/// Materialize a slice descriptor `arr[start..end]` into the 4-byte frame slot
+/// at `dest`: `dest[0..1] = base` (arr's data pointer + start*elem_size),
+/// `dest[2..3] = len` (element count). Bounds must be compile-time constants for
+/// now; the array must be a zero-page local (its slot holds the data pointer).
+#[allow(clippy::too_many_arguments)]
+fn generate_slice_materialize(
+    dest: u8,
+    elem: &crate::sema::types::Type,
+    object: &Spanned<crate::ast::Expr>,
+    start: &Spanned<crate::ast::Expr>,
+    end: &Spanned<crate::ast::Expr>,
+    inclusive: bool,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use crate::sema::const_eval::eval_const_expr_with_env;
+    use crate::sema::table::SymbolLocation;
+
+    let elem_size = elem.size().max(1);
+
+    // Resolve the sliced array variable's zero-page slot (holds the data pointer).
+    let arr_name = if let Expr::Variable(name) = &object.node {
+        name
+    } else {
+        return Err(CodegenError::UnsupportedOperation(
+            "slice source must be an array variable".to_string(),
+        ));
+    };
+    let arr_sym = info
+        .resolved_symbols
+        .get(&object.span)
+        .or_else(|| info.table.lookup(arr_name))
+        .ok_or_else(|| CodegenError::SymbolNotFound(arr_name.clone()))?;
+    let arr_addr = match arr_sym.location {
+        SymbolLocation::ZeroPage(a) => a,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "slice source array '{}' must be a zero-page local",
+                arr_name
+            )));
+        }
+    };
+
+    let env = HashMap::default();
+    let const_s = eval_const_expr_with_env(start, &env)
+        .ok()
+        .and_then(|v| v.as_integer());
+    let const_e = eval_const_expr_with_env(end, &env)
+        .ok()
+        .and_then(|v| v.as_integer());
+
+    if elem_size > 2 {
+        return Err(CodegenError::UnsupportedOperation(
+            "slices of elements larger than 2 bytes are not yet supported".to_string(),
+        ));
+    }
+
+    if let (Some(s), Some(e)) = (const_s, const_e) {
+        // Fast path: both bounds are compile-time constants.
+        let s = s as usize;
+        let actual_end = if inclusive {
+            e as usize + 1
+        } else {
+            e as usize
+        };
+        let len = actual_end.saturating_sub(s);
+        let byte_offset = s * elem_size;
+
+        emitter.emit_comment(&format!(
+            "Slice materialize: base = {}+{}, len = {}",
+            arr_name, byte_offset, len
+        ));
+        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+        emitter.emit_inst("CLC", "");
+        emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest));
+        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+        emitter.emit_inst(
+            "ADC",
+            &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8),
+        );
+        emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
+        emitter.emit_inst("LDA", &format!("#${:02X}", (len & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
+        emitter.emit_inst("LDA", &format!("#${:02X}", ((len >> 8) & 0xFF) as u8));
+        emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
+        emitter.invalidate_registers();
+        return Ok(());
+    }
+
+    // Runtime path: bounds are computed at run time. Only u8-typed runtime
+    // bounds are supported (the arithmetic below is 8-bit); u16 runtime bounds
+    // would need 16-bit handling. Constant u16 bounds took the fast path above.
+    let bound_is_u16 = |sp: &crate::ast::Span| {
+        matches!(
+            info.resolved_types.get(sp),
+            Some(crate::sema::types::Type::Primitive(
+                crate::ast::PrimitiveType::U16 | crate::ast::PrimitiveType::I16
+            ))
+        )
+    };
+    if bound_is_u16(&start.span) || bound_is_u16(&end.span) {
+        return Err(CodegenError::UnsupportedOperation(
+            "runtime 16-bit slice bounds are not yet supported (use constant bounds)".to_string(),
+        ));
+    }
+
+    emitter.emit_comment(&format!(
+        "Slice materialize (runtime bounds) from {}",
+        arr_name
+    ));
+
+    // Evaluate end first and park it at $21, then start at $20 (leaving start in
+    // A). Bounds are expected to be simple (variable/literal) so this does not
+    // clobber $20/$21; complex bounds may.
+    generate_expr(end, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$21");
+    generate_expr(start, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", "$20");
+
+    // len = (end - start) [+ 1 for an inclusive range], as a 16-bit value. The
+    // +1 can carry into the high byte (e.g. `0..=255` is 256 elements).
+    let len_addend = if inclusive { 1 } else { 0 };
+    emitter.emit_inst("LDA", "$21");
+    emitter.emit_inst("SEC", "");
+    emitter.emit_inst("SBC", "$20");
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", &format!("#${:02X}", len_addend));
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 2));
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("ADC", "#$00");
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 3));
+
+    // byte offset = start * elem_size, as a 16-bit value in $22/$23.
+    emitter.emit_inst("LDA", "$20");
+    if elem_size == 2 {
+        emitter.emit_inst("ASL", "A"); // start * 2 (low byte, carry = bit 8)
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("ADC", "#$00"); // capture the carry into the high byte
+        emitter.emit_inst("STA", "$23");
+    } else {
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", "#$00");
+        emitter.emit_inst("STA", "$23");
+    }
+
+    // base = arr pointer + byte offset (16-bit add).
+    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "$22");
+    emitter.emit_inst("STA", &format!("${:02X}", dest));
+    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+    emitter.emit_inst("ADC", "$23");
+    emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
+
+    emitter.invalidate_registers();
+    Ok(())
+}
+
+/// Iterate a slice with a 16-bit counter (slices can exceed 255 elements). The
+/// slice descriptor (`slot[0..1]` = base, `slot[2..3]` = length) is re-read each
+/// iteration, and an element pointer is recomputed into $F0/$F1, so the loop is
+/// correct even for lengths past 255 and across page boundaries. The counter
+/// lives in a hidden frame slot (allocated by sema) so it survives the body.
+#[allow(clippy::too_many_arguments)]
+fn generate_foreach_slice(
+    iterable: &Spanned<crate::ast::Expr>,
+    slot: u8,
+    iterable_ty: &crate::sema::types::Type,
+    var_name: &Spanned<String>,
+    index_var: Option<&Spanned<String>>,
+    body: &Spanned<crate::ast::Stmt>,
+    loop_label: &str,
+    continue_label: &str,
+    end_label: &str,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let elem_multibyte = matches!(
+        iterable_ty,
+        Type::Slice(elem) if matches!(
+            &**elem,
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+        )
+    );
+
+    // Hidden 16-bit counter slot (frame-allocated by sema, keyed on the iterable).
+    let counter = match info
+        .loop_bound_slots
+        .get(&iterable.span)
+        .map(|s| &s.location)
+    {
+        Some(SymbolLocation::ZeroPage(a)) => *a,
+        _ => {
+            return Err(CodegenError::Internal(
+                "slice foreach: 16-bit counter slot was not allocated".to_string(),
+            ));
+        }
+    };
+
+    // Loop-variable storage.
+    let loopvar_addr = match info
+        .resolved_symbols
+        .get(&var_name.span)
+        .map(|s| s.location.clone())
+        .ok_or_else(|| CodegenError::SymbolNotFound(var_name.node.clone()))?
+    {
+        SymbolLocation::ZeroPage(a) => a,
+        SymbolLocation::Absolute(a) if a < 256 => a as u8,
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "ForEach loop variable must be in zero page".to_string(),
+            ));
+        }
+    };
+
+    // Optional index variable (u8: the low byte of the counter).
+    let index_addr = index_var
+        .and_then(|iv| info.resolved_symbols.get(&iv.span))
+        .and_then(|s| match s.location {
+            SymbolLocation::ZeroPage(a) => Some(a),
+            _ => None,
+        });
+
+    emitter.emit_comment("Slice foreach (16-bit counter)");
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("STA", &format!("${:02X}", counter));
+    emitter.emit_inst("STA", &format!("${:02X}", counter + 1));
+
+    emitter.emit_label(loop_label);
+    // The loop head is a branch target (entry and the back-edge), so no register
+    // belief from a previous iteration is valid here.
+    emitter.invalidate_registers();
+
+    // Exit when counter >= length (unsigned 16-bit compare).
+    let body_label = emitter.next_label("fsb");
+    emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
+    emitter.emit_inst("CMP", &format!("${:02X}", slot + 3));
+    emitter.emit_inst("BCC", &body_label); // counter.hi < len.hi
+    emitter.emit_inst("BNE", end_label); // counter.hi > len.hi -> done
+    emitter.emit_inst("LDA", &format!("${:02X}", counter));
+    emitter.emit_inst("CMP", &format!("${:02X}", slot + 2));
+    emitter.emit_inst("BCS", end_label); // counter.lo >= len.lo -> done
+    emitter.emit_label(&body_label);
+
+    emitter.push_loop(continue_label.to_string(), end_label.to_string());
+
+    if let Some(ia) = index_addr {
+        emitter.emit_inst("LDA", &format!("${:02X}", counter));
+        emitter.emit_inst("STA", &format!("${:02X}", ia));
+    }
+
+    // Element pointer = base + counter*elem_size, into $F0/$F1 (byte offset in
+    // $22/$23). Recomputed every iteration, so it survives a body with calls.
+    if elem_multibyte {
+        emitter.emit_inst("LDA", &format!("${:02X}", counter));
+        emitter.emit_inst("ASL", "A");
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
+        emitter.emit_inst("ROL", "A");
+        emitter.emit_inst("STA", "$23");
+    } else {
+        emitter.emit_inst("LDA", &format!("${:02X}", counter));
+        emitter.emit_inst("STA", "$22");
+        emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
+        emitter.emit_inst("STA", "$23");
+    }
+    emitter.emit_inst("LDA", &format!("${:02X}", slot));
+    emitter.emit_inst("CLC", "");
+    emitter.emit_inst("ADC", "$22");
+    emitter.emit_inst("STA", "$F0");
+    emitter.emit_inst("LDA", &format!("${:02X}", slot + 1));
+    emitter.emit_inst("ADC", "$23");
+    emitter.emit_inst("STA", "$F1");
+
+    // Load the element into the loop variable.
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_inst("LDA", "($F0),Y");
+    emitter.emit_inst("STA", &format!("${:02X}", loopvar_addr));
+    if elem_multibyte {
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("LDA", "($F0),Y");
+        emitter.emit_inst("STA", &format!("${:02X}", loopvar_addr + 1));
+    }
+    emitter.invalidate_registers();
+
+    generate_stmt(body, emitter, info, string_collector)?;
+    emitter.pop_loop();
+
+    // continue: counter += 1 (16-bit), then re-test.
+    emitter.emit_label(continue_label);
+    emitter.emit_inst("INC", &format!("${:02X}", counter));
+    let no_carry = emitter.next_label("fsc");
+    emitter.emit_inst("BNE", &no_carry);
+    emitter.emit_inst("INC", &format!("${:02X}", counter + 1));
+    emitter.emit_label(&no_carry);
+    emitter.emit_inst("JMP", loop_label);
+    emitter.emit_label(end_label);
+    // The exit is reached from the compare branches with A holding the counter,
+    // not any tracked value, so drop all beliefs before following code.
     emitter.invalidate_registers();
 
     Ok(())
@@ -1357,17 +1933,56 @@ fn generate_slice_assignment(
             s, actual_end
         ));
 
+        // Determine element width: u16/i16/b16 arrays store two bytes per
+        // element and index by a byte offset (element index * 2), matching
+        // generate_index_assignment. Truncating to one byte and using the raw
+        // element index (as the original code did) silently corrupts u16 arrays.
+        use crate::ast::PrimitiveType;
+        use crate::sema::types::Type;
+        let element_is_multibyte = matches!(
+            info.resolved_types.get(&object.span),
+            Some(Type::Array(elem, _)) if matches!(
+                &**elem,
+                Type::Primitive(PrimitiveType::U16)
+                    | Type::Primitive(PrimitiveType::I16)
+                    | Type::Primitive(PrimitiveType::B16)
+            )
+        );
+        let elem_size = if element_is_multibyte { 2usize } else { 1usize };
+
         // Unroll: generate individual stores for each element
         for (i, val_expr) in values.iter().enumerate() {
-            let target_index = s + i;
+            let byte_offset = (s + i) * elem_size;
+            if byte_offset + elem_size - 1 > 0xFF {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "slice assignment byte offset {} exceeds zero-page indirect range",
+                    byte_offset
+                )));
+            }
 
-            // Generate the value expression
+            // Generate the value expression (A = low byte, Y = high byte for u16)
             generate_expr(val_expr, emitter, info, string_collector)?;
 
-            // Store to array[target_index] using indirect indexed addressing
-            emitter.emit_inst("LDY", &format!("#${:02X}", target_index));
-            emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+            if element_is_multibyte {
+                // Y holds the high byte but we need Y for the store index, so
+                // stash both bytes first, then store low then high.
+                emitter.emit_inst("STA", "$20");
+                emitter.emit_inst("STY", "$21");
+                emitter.emit_inst("LDY", &format!("#${:02X}", byte_offset));
+                emitter.emit_inst("LDA", "$20");
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+                emitter.emit_inst("INY", "");
+                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+            } else {
+                // Store to array[target_index] using indirect indexed addressing
+                emitter.emit_inst("LDY", &format!("#${:02X}", byte_offset));
+                emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
+            }
         }
+
+        // Raw A/Y stores above bypass register tracking; drop cached beliefs.
+        emitter.invalidate_registers();
     } else {
         // Dynamic bounds - not supported yet
         return Err(CodegenError::UnsupportedOperation(
@@ -1426,9 +2041,12 @@ fn generate_field_assignment(
                     field.node, struct_name
                 ))
             })?;
+        // Function-pointer fields are 2-byte code addresses, so they must be
+        // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
         let is_multibyte = matches!(
             &field_info.ty,
             Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+                | Type::Function(..)
         );
         emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
         generate_expr(value, emitter, info, string_collector)?;
@@ -1496,11 +2114,14 @@ fn generate_field_assignment(
         })?;
 
         // Check if field is multi-byte
+        // Function-pointer fields hold a 2-byte code address, so they are stored
+        // as a pair like u16 — a device vtable depends on it.
         let is_multibyte = matches!(
             &field_info.ty,
             Type::Primitive(PrimitiveType::U16)
                 | Type::Primitive(PrimitiveType::I16)
                 | Type::Primitive(PrimitiveType::B16)
+                | Type::Function(..)
         );
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
@@ -1553,6 +2174,12 @@ fn generate_field_assignment(
                 }
             }
         }
+
+        // Both paths above rewrite A/Y through raw instructions (temp saves in the
+        // parameter path, plain stores in the local path) that don't feed register
+        // tracking, so drop all cached beliefs — a following load could otherwise be
+        // wrongly elided. Mirrors generate_index_assignment.
+        emitter.invalidate_registers();
 
         Ok(())
     } else {
@@ -1944,6 +2571,120 @@ fn emit_jump_table(
 /// Generate arm bodies for a match statement
 ///
 /// Shared between sequential and jump table strategies.
+/// Copy an enum variant's payload fields into their pattern bindings' storage.
+///
+/// `ptr_base`/`ptr_base+1` hold the enum pointer (low/high); field data begins
+/// one byte past the tag. Every byte of each field is copied so multi-byte
+/// (u16/i16/b16) payloads keep their high byte. Shared by the match-statement
+/// and match-expression code paths so both extract bindings identically.
+pub(crate) fn extract_enum_bindings(
+    enum_name: &Spanned<String>,
+    variant: &Spanned<String>,
+    bindings: &[crate::ast::PatternBinding],
+    ptr_base: u8,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+
+    // Look up the enum definition to get field information.
+    let enum_def = info
+        .type_registry
+        .get_enum(&enum_name.node)
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(format!(
+                "enum '{}' not found in type registry",
+                enum_name.node
+            ))
+        })?;
+
+    let variant_info = enum_def.get_variant(&variant.node).ok_or_else(|| {
+        CodegenError::UnsupportedOperation(format!(
+            "variant '{}' not found in enum '{}'",
+            variant.node, enum_name.node
+        ))
+    })?;
+
+    // Copy `field_size` bytes from enum data at `offset` into the binding's slot.
+    let copy_field = |offset: u8,
+                      field_size: u8,
+                      binding: &crate::ast::PatternBinding,
+                      emitter: &mut Emitter|
+     -> Result<(), CodegenError> {
+        let loc = info
+            .resolved_symbols
+            .get(&binding.name.span)
+            .map(|sym| sym.location.clone())
+            .ok_or_else(|| CodegenError::SymbolNotFound(binding.name.node.clone()))?;
+        for byte in 0..field_size {
+            emitter.emit_inst("LDY", &format!("#${:02X}", offset + byte));
+            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+            match loc {
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                    emitter.emit_sta_zp(addr + byte);
+                }
+                crate::sema::table::SymbolLocation::Absolute(addr) => {
+                    emitter.emit_sta_abs(addr + byte as u16);
+                }
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "Binding '{}' has unsupported location",
+                        binding.name.node
+                    )));
+                }
+            }
+        }
+        Ok(())
+    };
+
+    match &variant_info.data {
+        crate::sema::type_defs::VariantData::Tuple(field_types) => {
+            // Tuple variant: extract each field by position.
+            if bindings.len() != field_types.len() {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "Pattern binding count mismatch: expected {}, got {}",
+                    field_types.len(),
+                    bindings.len()
+                )));
+            }
+            let mut offset = 1u8; // Start after the tag byte
+            for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
+                let field_size = field_type.size().max(1) as u8;
+                copy_field(offset, field_size, binding, emitter)?;
+                offset += field_size;
+            }
+        }
+        crate::sema::type_defs::VariantData::Struct(struct_fields) => {
+            // Struct variant: each binding name selects a field; offsets are
+            // relative to the variant data, one byte past the tag.
+            for binding in bindings.iter() {
+                let field = struct_fields
+                    .iter()
+                    .find(|f| f.name == binding.name.node)
+                    .ok_or_else(|| {
+                        CodegenError::UnsupportedOperation(format!(
+                            "field '{}' not found in struct variant",
+                            binding.name.node
+                        ))
+                    })?;
+                let field_size = field.ty.size().max(1) as u8;
+                let base_offset = 1 + field.offset as u8; // skip tag
+                copy_field(base_offset, field_size, binding, emitter)?;
+            }
+        }
+        crate::sema::type_defs::VariantData::Unit => {
+            // Unit variant shouldn't have bindings.
+            return Err(CodegenError::UnsupportedOperation(
+                "Unit variant should not have bindings".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn generate_match_arm_bodies(
     arms: &[crate::ast::MatchArm],
     emitter: &mut Emitter,
@@ -1962,97 +2703,9 @@ fn generate_match_arm_bodies(
             variant,
             bindings,
         } = &arm.pattern.node
-            && !bindings.is_empty()
         {
-            // Look up the enum definition to get field information
-            let enum_def = info
-                .type_registry
-                .get_enum(&enum_name.node)
-                .ok_or_else(|| {
-                    CodegenError::UnsupportedOperation(format!(
-                        "enum '{}' not found in type registry",
-                        enum_name.node
-                    ))
-                })?;
-
-            let variant_info = enum_def.get_variant(&variant.node).ok_or_else(|| {
-                CodegenError::UnsupportedOperation(format!(
-                    "variant '{}' not found in enum '{}'",
-                    variant.node, enum_name.node
-                ))
-            })?;
-
-            // Extract field values from enum data
-            // Enum layout in memory: [tag: u8][field0][field1]...
-            // The pointer in pointer ops area points to the tag byte
-            // Field data starts at offset 1
             let ptr_base = emitter.memory_layout.pointer_ops_start;
-
-            match &variant_info.data {
-                crate::sema::type_defs::VariantData::Tuple(field_types) => {
-                    // Tuple variant: extract each field by position
-                    if bindings.len() != field_types.len() {
-                        return Err(CodegenError::UnsupportedOperation(format!(
-                            "Pattern binding count mismatch: expected {}, got {}",
-                            field_types.len(),
-                            bindings.len()
-                        )));
-                    }
-
-                    let mut offset = 1u8; // Start after the tag byte
-                    for (binding, field_type) in bindings.iter().zip(field_types.iter()) {
-                        let field_size = field_type.size().max(1) as u8;
-
-                        // Resolve the binding's storage location once.
-                        let loc = info
-                            .resolved_symbols
-                            .get(&binding.name.span)
-                            .map(|sym| sym.location.clone())
-                            .ok_or_else(|| {
-                                CodegenError::SymbolNotFound(binding.name.node.clone())
-                            })?;
-
-                        // Copy every byte of the field so multi-byte (u16/i16/b16)
-                        // fields keep their high byte instead of being truncated.
-                        for byte in 0..field_size {
-                            emitter.emit_inst("LDY", &format!("#${:02X}", offset + byte));
-                            emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
-                            match loc {
-                                crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                                    emitter.emit_sta_zp(addr + byte);
-                                }
-                                crate::sema::table::SymbolLocation::Absolute(addr) => {
-                                    emitter.emit_sta_abs(addr + byte as u16);
-                                }
-                                _ => {
-                                    return Err(CodegenError::UnsupportedOperation(format!(
-                                        "Binding '{}' has unsupported location",
-                                        binding.name.node
-                                    )));
-                                }
-                            }
-                        }
-
-                        // Move to the next field.
-                        offset += field_size;
-                    }
-                }
-                crate::sema::type_defs::VariantData::Struct(_) => {
-                    // Struct variant: bindings should match field names
-                    // For now, not implemented
-                    return Err(CodegenError::UnsupportedOperation(
-                        "Pattern bindings for struct variants not yet implemented".to_string(),
-                    ));
-                }
-                crate::sema::type_defs::VariantData::Unit => {
-                    // Unit variant shouldn't have bindings
-                    if !bindings.is_empty() {
-                        return Err(CodegenError::UnsupportedOperation(
-                            "Unit variant should not have bindings".to_string(),
-                        ));
-                    }
-                }
-            }
+            extract_enum_bindings(enum_name, variant, bindings, ptr_base, emitter, info)?;
         }
 
         generate_stmt(&arm.body, emitter, info, string_collector)?;
@@ -2818,6 +3471,10 @@ fn expr_references_name(expr: &crate::ast::Expr, name: &str) -> bool {
                 || expr_references_name(&end.node, name)
         }
         E::Call { args, .. } => args.iter().any(|a| expr_references_name(&a.node, name)),
+        // An indirect call's target is unknown to the frame-coloring pass, so
+        // the callee's frame may overlap this function's - treat it as
+        // touching everything (disables the count-down optimization).
+        E::CallIndirect { .. } => true,
         E::StructInit { fields, .. } | E::AnonStructInit { fields } => fields
             .iter()
             .any(|f| expr_references_name(&f.value.node, name)),

@@ -50,7 +50,14 @@ impl SemanticAnalyzer {
             }
             Stmt::Return(expr) => {
                 let expr_ty = if let Some(e) = expr {
-                    self.check_expr(e)?
+                    // Propagate the function's return type as the expected type so
+                    // literals and anonymous struct literals in return position are
+                    // typed by it, exactly as `let x: T = ...` does for its init.
+                    let saved_expected = self.expected_type.take();
+                    self.expected_type = self.current_return_type.clone();
+                    let ty = self.check_expr(e);
+                    self.expected_type = saved_expected;
+                    ty?
                 } else {
                     Type::Void
                 };
@@ -223,7 +230,9 @@ impl SemanticAnalyzer {
                 (self.type_size(elem) * n).min(255)
             }
             Type::Array(_, _) => 2,    // Array pointer
+            Type::String => 2,         // String pointer (16-bit address)
             Type::Function(_, _) => 2, // Function pointer (16-bit code address)
+            Type::Slice(_) => 4,       // Fat pointer: 2-byte base + 2-byte length
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
             | Type::Primitive(PrimitiveType::B16) => 2,
@@ -490,13 +499,14 @@ impl SemanticAnalyzer {
         // Check the iterable expression (should be an array or string)
         let iterable_ty = self.check_expr(iterable)?;
 
-        // Extract element type from array type or string
+        // Extract element type from array, slice, or string
         let element_ty = match &iterable_ty {
             Type::Array(elem_ty, _size) => (**elem_ty).clone(),
+            Type::Slice(elem_ty) => (**elem_ty).clone(),
             Type::String => Type::Primitive(PrimitiveType::U8), // String elements are u8
             _ => {
                 return Err(SemaError::TypeMismatch {
-                    expected: "array or string".to_string(),
+                    expected: "array, slice, or string".to_string(),
                     found: iterable_ty.display_name(),
                     span: iterable.span,
                 });
@@ -538,10 +548,12 @@ impl SemanticAnalyzer {
         }
 
         // Allocate storage for loop variable
-        // u16/i16 types need 2 bytes
+        // u16/i16/b16 types need 2 bytes
         let elem_size = if matches!(
             var_ty,
-            Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16)
+            Type::Primitive(PrimitiveType::U16)
+                | Type::Primitive(PrimitiveType::I16)
+                | Type::Primitive(PrimitiveType::B16)
         ) {
             2
         } else {
@@ -562,6 +574,28 @@ impl SemanticAnalyzer {
         self.table.insert(var_name.node.clone(), info.clone());
         // Add to resolved_symbols so codegen can find it
         self.resolved_symbols.insert(var_name.span, info);
+
+        // Iterating a slice uses a 16-bit loop counter (slices can exceed 255
+        // elements). It must survive the whole body, so give it a hidden frame
+        // slot (colored with the call graph) keyed by the iterable's span, in
+        // the same map the for-range loop uses for non-constant bounds.
+        if matches!(iterable_ty, Type::Slice(_)) {
+            let counter_off = self.frame_alloc(2);
+            self.loop_bound_slots.insert(
+                iterable.span,
+                SymbolInfo {
+                    name: format!("<slice iter counter for {}>", var_name.node),
+                    kind: SymbolKind::Variable,
+                    ty: Type::Primitive(PrimitiveType::U16),
+                    location: SymbolLocation::FrameOffset(counter_off),
+                    mutable: true,
+                    access_mode: None,
+                    is_pub: false,
+                    containing_function: self.current_function.clone(),
+                    is_param: false,
+                },
+            );
+        }
 
         // Analyze body
         self.loop_depth += 1;
@@ -638,38 +672,52 @@ impl SemanticAnalyzer {
                 variant,
                 bindings,
             } => {
-                // Get enum definition to find variant field types. Clone the tuple
-                // field types out first so the type_registry borrow is released
+                // Resolve each binding's type. Tuple variants bind positionally;
+                // struct variants bind by matching the binding name to a field.
+                // Clone the data out first so the type_registry borrow is released
                 // before allocating frame slots (which needs &mut self).
-                let tuple_field_types: Option<Vec<Type>> = self
+                let variant_data = self
                     .type_registry
                     .get_enum(&enum_name.node)
                     .and_then(|enum_def| enum_def.variants.iter().find(|v| v.name == variant.node))
-                    .and_then(|variant_def| match &variant_def.data {
-                        VariantData::Tuple(field_types) => Some(field_types.clone()),
-                        _ => None,
-                    });
+                    .map(|variant_def| variant_def.data.clone());
 
-                if let Some(field_types) = tuple_field_types {
-                    for (i, binding) in bindings.iter().enumerate() {
-                        if let Some(field_ty) = field_types.get(i) {
-                            let field_size = self.type_size(field_ty) as u8;
-                            let off = self.frame_alloc(field_size.max(1));
-                            let info = SymbolInfo {
-                                name: binding.name.node.clone(),
-                                kind: SymbolKind::Variable,
-                                ty: field_ty.clone(),
-                                location: SymbolLocation::FrameOffset(off),
-                                mutable: false,
-                                access_mode: None,
-                                is_pub: false, // Pattern bindings are never public
-                                containing_function: self.current_function.clone(),
-                                is_param: false,
-                            };
-                            self.table.insert(binding.name.node.clone(), info.clone());
-                            // Also add to resolved_symbols so codegen can find it
-                            self.resolved_symbols.insert(binding.name.span, info);
-                        }
+                let binding_types: Vec<Option<Type>> = match &variant_data {
+                    Some(VariantData::Tuple(field_types)) => bindings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| field_types.get(i).cloned())
+                        .collect(),
+                    Some(VariantData::Struct(fields)) => bindings
+                        .iter()
+                        .map(|b| {
+                            fields
+                                .iter()
+                                .find(|f| f.name == b.name.node)
+                                .map(|f| f.ty.clone())
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+
+                for (binding, field_ty) in bindings.iter().zip(binding_types.iter()) {
+                    if let Some(field_ty) = field_ty {
+                        let field_size = self.type_size(field_ty) as u8;
+                        let off = self.frame_alloc(field_size.max(1));
+                        let info = SymbolInfo {
+                            name: binding.name.node.clone(),
+                            kind: SymbolKind::Variable,
+                            ty: field_ty.clone(),
+                            location: SymbolLocation::FrameOffset(off),
+                            mutable: false,
+                            access_mode: None,
+                            is_pub: false, // Pattern bindings are never public
+                            containing_function: self.current_function.clone(),
+                            is_param: false,
+                        };
+                        self.table.insert(binding.name.node.clone(), info.clone());
+                        // Also add to resolved_symbols so codegen can find it
+                        self.resolved_symbols.insert(binding.name.span, info);
                     }
                 }
             }

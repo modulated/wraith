@@ -74,13 +74,29 @@ pub struct SemanticAnalyzer {
     /// their hidden bound slots can share zero-page bytes; nested loops find
     /// the list empty (the outer slot is still held) and allocate fresh.
     pub(super) loop_bound_free: Vec<(u8, u8)>,
+    /// Next free address in the BSS (RAM) section for mutable `static` globals.
+    /// None until the first static is allocated. Unlike frames, BSS is never
+    /// reused or colored: statics live for the whole program.
+    pub(super) bss_cursor: Option<u16>,
+    /// Startup values for mutable statics, in declaration order.
+    pub(super) static_inits: Vec<crate::sema::StaticInit>,
     /// Per-function frame size in bytes (params + locals), the high-water mark of
     /// `frame_cursor` after analyzing each function. Consumed by `finalize_frames`.
     pub(super) frame_sizes: HashMap<String, u8>,
+    /// Signatures (Type::Function) of every function reachable in codegen, keyed
+    /// by name — including functions from imported modules that this module did
+    /// not name explicitly. Codegen consults this to marshal call arguments when
+    /// the symbol table has no entry (e.g. one imported function calling another).
+    pub(super) function_signatures: HashMap<String, Type>,
     /// Call graph edges: caller name -> set of callee names. Built during body
     /// analysis (direct calls and inline calls) and consumed by `finalize_frames`
     /// to color frames and detect recursion.
     pub(super) call_edges: HashMap<String, HashSet<String>>,
+    /// Functions whose address is taken (used as a value / function pointer).
+    /// These receive arguments through the fixed indirect-arg staging block so
+    /// an indirect caller (which cannot know the callee's colored frame) can
+    /// still pass args; their prologue copies staging -> frame params.
+    pub(super) address_taken_functions: HashSet<String>,
 }
 
 impl Default for SemanticAnalyzer {
@@ -122,8 +138,12 @@ impl SemanticAnalyzer {
             current_function: None,
             frame_cursor: 0,
             loop_bound_free: Vec::new(),
+            bss_cursor: None,
+            static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
+            function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
+            address_taken_functions: HashSet::default(),
         }
     }
 
@@ -159,8 +179,12 @@ impl SemanticAnalyzer {
             current_function: None,
             frame_cursor: 0,
             loop_bound_free: Vec::new(),
+            bss_cursor: None,
+            static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
+            function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
+            address_taken_functions: HashSet::default(),
         }
     }
 
@@ -257,8 +281,12 @@ impl SemanticAnalyzer {
             resolved_struct_names: self.resolved_struct_names.clone(),
             string_pool: HashMap::default(), // Will be populated during codegen
             function_frames,
+            static_inits: self.static_inits.clone(),
+            memory_config: self.memory_config.clone(),
+            function_signatures: self.function_signatures.clone(),
             recursive_call_edges,
             interrupt_save_info,
+            address_taken_functions: self.address_taken_functions.clone(),
         })
     }
 

@@ -19,7 +19,8 @@
 //!                      overwritten by a callee's frame.
 //! $D0-$D8 (9 bytes):   Stdlib math working storage (mul16/div16/mod16 scratch)
 //! $D9-$DC (4 bytes):   Math routine call parameters (a.lo, a.hi, b.lo, b.hi)
-//! $DD-$EF (19 bytes):  Reserved (future frame-spill region)
+//! $DD-$DE (2 bytes):   PRNG state/seed (std/math.wr rand/rand16/srand)
+//! $DF-$EF (17 bytes):  Reserved (future frame-spill region)
 //! $F0-$F3 (4 bytes):   Binary op left-operand save (only when the right
 //!                      operand is call-free; see expr/binary.rs)
 //! $F4-$FE (11 bytes):  Function argument evaluation temp
@@ -40,6 +41,14 @@ pub const FRAME_REGION_END: u8 = 0xCF;
 /// adjacent to the $D0-$D8 math working storage.
 pub const MATH_PARAM_BASE: u8 = 0xD9;
 
+/// Fixed staging block for arguments to address-taken functions (function
+/// pointers). Callers (direct or indirect) write args here; the callee's
+/// prologue copies them into its colored frame. Lives in the reserved
+/// $DD-$EF band, disjoint from the indirect-call vector at $EE/$EF.
+pub const INDIRECT_ARG_BASE: u8 = 0xE0;
+/// Maximum total parameter bytes an address-taken function may take.
+pub const INDIRECT_ARG_MAX: u8 = 8;
+
 /// Size in bytes of the software stack ($0200-$02FF, pointer in zero-page $FF)
 /// that Wraith uses to save/restore a callee's frame across a recursive call.
 /// A recursive function pushes its whole frame here on each call, so the safe
@@ -57,6 +66,10 @@ pub struct MemoryLayout {
     pub temp_storage_start: u8,
     /// Pointer operations scratch space (default $30-$3F)
     pub pointer_ops_start: u8,
+    /// Base address of the software stack (one page). Taken from the `STACK`
+    /// section in wraith.toml, so the page is not baked into the compiler; only
+    /// its 256-byte size and the zero-page pointer are fixed.
+    pub software_stack_base: u16,
 }
 
 impl Default for MemoryLayout {
@@ -64,6 +77,7 @@ impl Default for MemoryLayout {
         Self {
             temp_storage_start: 0x20,
             pointer_ops_start: 0x30,
+            software_stack_base: 0x0200,
         }
     }
 }
@@ -86,9 +100,16 @@ impl MemoryLayout {
     }
 
     /// Get the jump table indirect pointer address (2 bytes for JMP indirect)
-    /// Used by match statement jump table dispatch
+    /// Used by match statement jump table dispatch.
+    ///
+    /// This *must not* overlap the enum-pointer triple the match dispatch keeps
+    /// at `pointer_ops_start..pointer_ops_start+2` (pointer low/high plus the
+    /// cached discriminant tag): the arm bodies dereference that pointer to
+    /// extract payload bindings, so a jump vector written over it makes every
+    /// arm read its own code bytes instead of the payload. Hence +4, i.e.
+    /// $34/$35 with the default $30 pointer-ops base.
     pub fn jump_ptr(&self) -> u8 {
-        self.pointer_ops_start // $30 by default
+        self.pointer_ops_start + 4
     }
 }
 

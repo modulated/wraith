@@ -86,6 +86,8 @@ impl SemanticAnalyzer {
             containing_function: None, // Functions are global
             is_param: false,
         };
+        self.function_signatures
+            .insert(name.clone(), info.ty.clone());
         self.table.insert(name.clone(), info);
 
         // Extract org and section attributes if present
@@ -240,20 +242,175 @@ impl SemanticAnalyzer {
             }
         }
 
+        // A mutable `static` needs writable storage, so give it a real address in
+        // the BSS (RAM) section. Immutable consts stay at Absolute(0): they are
+        // emitted as ROM data referenced by label, not by a computed address.
+        let (kind, location) = if stat.mutable {
+            let size = self.type_size(&declared_ty).max(1) as u16;
+            let addr = self.bss_alloc(size, stat.name.span)?;
+            // Record the startup value so the reset handler can write it: RAM
+            // holds garbage at power-on and cannot be pre-loaded from ROM.
+            let bytes = self.static_init_bytes(&stat.init, &declared_ty, size as usize);
+            // A function named in a static's initializer (e.g. a device vtable)
+            // has its address taken, even though the initializer is never
+            // checked as an expression. Record it so codegen gives that function
+            // the indirect-arg staging prologue; otherwise an indirect call
+            // through the table would find its parameters unset.
+            for b in &bytes {
+                if let crate::sema::InitByte::FnLow(f) = b {
+                    self.address_taken_functions.insert(f.clone());
+                    // Installing a function in a vtable is a use of it, even if
+                    // it is never named at a call site; otherwise every driver
+                    // entry point would be reported as unused.
+                    self.called_functions.insert(f.clone());
+                    self.all_used_symbols.insert(f.clone());
+                }
+            }
+            self.static_inits.push(crate::sema::StaticInit {
+                name: name.clone(),
+                addr,
+                bytes,
+            });
+            (SymbolKind::Variable, SymbolLocation::Absolute(addr))
+        } else {
+            (SymbolKind::Constant, SymbolLocation::Absolute(0))
+        };
+
         let info = SymbolInfo {
             name: name.clone(),
-            kind: SymbolKind::Constant,
+            kind,
             ty: declared_ty,
-            location: SymbolLocation::Absolute(0),
+            location,
             mutable: stat.mutable,
             access_mode: None,
             is_pub: stat.is_pub,
-            containing_function: None, // Constants are global
+            containing_function: None, // Globals are not scoped to a function
             is_param: false,
         };
         self.table.insert(name, info);
 
         Ok(())
+    }
+
+    /// Flatten a mutable static's initializer into the exact bytes to write at
+    /// startup. Integers are little-endian across the type's width, arrays and
+    /// fills expand element-wise. Anything not constant-evaluable becomes zeros
+    /// (BSS semantics), which is also the common `= 0` / `[0; N]` case.
+    fn static_init_bytes(
+        &self,
+        init: &Spanned<crate::ast::Expr>,
+        ty: &Type,
+        size: usize,
+    ) -> Vec<crate::sema::InitByte> {
+        use crate::ast::{Expr, Literal};
+        use crate::sema::InitByte;
+
+        let elem_width = match ty {
+            Type::Array(elem, _) => self.type_size(elem).max(1),
+            _ => size,
+        };
+        let push_int = |out: &mut Vec<InitByte>, v: i64, width: usize| {
+            for i in 0..width {
+                out.push(InitByte::Byte(((v >> (i * 8)) & 0xFF) as u8));
+            }
+        };
+        // A bare name whose symbol is a function contributes that function's
+        // address; the label is resolved by the assembler.
+        let fn_ref = |out: &mut Vec<InitByte>, e: &Spanned<Expr>| -> bool {
+            if let Expr::Variable(n) = &e.node
+                && self
+                    .table
+                    .lookup(n)
+                    .is_some_and(|s| matches!(s.ty, Type::Function(..)))
+            {
+                out.push(InitByte::FnLow(n.clone()));
+                out.push(InitByte::FnHigh(n.clone()));
+                return true;
+            }
+            false
+        };
+
+        let mut bytes: Vec<InitByte> = Vec::with_capacity(size);
+        match &init.node {
+            Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, size),
+            Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
+            Expr::Literal(Literal::Array(elems)) => {
+                for e in elems {
+                    match &e.node {
+                        Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, elem_width),
+                        Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
+                        _ if fn_ref(&mut bytes, e) => {}
+                        _ => break,
+                    }
+                }
+            }
+            Expr::Literal(Literal::ArrayFill { value, count }) => {
+                if let Expr::Literal(Literal::Integer(v)) = &value.node {
+                    for _ in 0..*count {
+                        push_int(&mut bytes, *v, elem_width);
+                    }
+                }
+            }
+            // Struct literal: lay fields out in declaration order. Function
+            // fields become label references (a device vtable).
+            Expr::StructInit { name, fields } => {
+                if let Some(def) = self.type_registry.get_struct(&name.node) {
+                    for f in &def.fields {
+                        let Some(init_f) = fields.iter().find(|x| x.name.node == f.name) else {
+                            break;
+                        };
+                        let w = self.type_size(&f.ty).max(1);
+                        match &init_f.value.node {
+                            Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, w),
+                            Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
+                            _ if fn_ref(&mut bytes, &init_f.value) => {}
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            _ if fn_ref(&mut bytes, init) => {}
+            // Fall back to constant folding (e.g. `1 + 2`, a const reference).
+            _ => {
+                if let Ok(val) = eval_const_expr_with_env(init, &self.const_env)
+                    && let Some(v) = val.as_integer()
+                {
+                    push_int(&mut bytes, v, size);
+                }
+            }
+        }
+        bytes.resize(size, InitByte::Byte(0));
+        bytes
+    }
+
+    /// Reserve `size` bytes of BSS (RAM) for a mutable global, returning its
+    /// address. Statics are allocated in declaration order from the start of the
+    /// BSS section; unlike function frames they are never reused or colored,
+    /// because they are live for the whole program and shared with interrupts.
+    fn bss_alloc(&mut self, size: u16, span: crate::ast::Span) -> Result<u16, SemaError> {
+        // Fall back to a built-in RAM range when the project's wraith.toml
+        // predates the BSS section, so existing configs keep working. The
+        // default sits above the zero page, the hardware stack, and the
+        // compiler's software-stack page ($0200).
+        const DEFAULT_BSS: (u16, u16) = (0x0400, 0x07FF);
+        let (start, end) = self
+            .memory_config
+            .get_section("BSS")
+            .map(|s| (s.start, s.end))
+            .unwrap_or(DEFAULT_BSS);
+        let base = self.bss_cursor.unwrap_or(start);
+        let last = base as u32 + size as u32 - 1;
+        if last > end as u32 {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "BSS section overflow: mutable globals exceed ${:04X}-${:04X}",
+                    start, end
+                ),
+                span,
+            });
+        }
+        self.bss_cursor = Some(base + size);
+        Ok(base)
     }
 
     fn register_address(&mut self, addr: &crate::ast::AddressDecl) -> Result<(), SemaError> {
@@ -446,6 +603,28 @@ impl SemanticAnalyzer {
             }
         }
 
+        // Record every function defined in the imported module in a signature
+        // side-table (not the symbol table, to avoid duplicate-symbol collisions
+        // and visibility leaks). An imported function may call sibling functions
+        // in the same module that were never named here (e.g. str_copy calls
+        // memcpy); codegen looks up the callee's signature by name to marshal
+        // arguments, and without it would treat every argument as a single byte
+        // and corrupt the call.
+        for item in ast
+            .items
+            .iter()
+            .chain(imported_analyzer.imported_items.iter())
+        {
+            if let crate::ast::Item::Function(f) = &item.node {
+                let fname = &f.name.node;
+                if let Some(sym) = imported_analyzer.table.lookup(fname) {
+                    self.function_signatures
+                        .entry(fname.clone())
+                        .or_insert_with(|| sym.ty.clone());
+                }
+            }
+        }
+
         // Merge ALL resolved_symbols from the imported module
         // This is necessary because when we emit imported functions during codegen,
         // they reference symbols (variables, constants, addresses) using their original spans
@@ -498,6 +677,8 @@ impl SemanticAnalyzer {
                 .or_default()
                 .extend(callees.iter().cloned());
         }
+        self.address_taken_functions
+            .extend(imported_analyzer.address_taken_functions.iter().cloned());
 
         // Merge the imported files set
         self.imported_files.extend(imported_analyzer.imported_files);

@@ -100,8 +100,7 @@ fn main() {
         uart_putc(0x20);  // space
 
         // Get character
-        ch: u8 = uart_getc();
-
+        let ch: u8 = uart_getc();
         // Echo it
         uart_putc(ch);
         uart_putc(0x20);  // space

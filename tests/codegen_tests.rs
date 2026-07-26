@@ -768,23 +768,25 @@ fn test_codegen_enum_pattern_matching() {
         "Should double tag for address indexing"
     );
     assert!(asm.contains("TAX"), "Should transfer to X for indexing");
+    // The jump vector must land clear of the enum pointer triple at $30-$32,
+    // which the arm bodies dereference to extract payload bindings.
     assert!(
         asm.contains("LDA match_0_jt,X"),
         "Should load jump address low byte"
     );
     assert!(
-        asm.contains("STA $30"),
-        "Should store jump address low byte"
+        asm.contains("STA $34"),
+        "Should store jump address low byte clear of the enum pointer"
     );
     assert!(
         asm.contains("LDA match_0_jt+1,X"),
         "Should load jump address high byte"
     );
     assert!(
-        asm.contains("STA $31"),
-        "Should store jump address high byte"
+        asm.contains("STA $35"),
+        "Should store jump address high byte clear of the enum pointer"
     );
-    assert!(asm.contains("JMP ($30)"), "Should jump indirect");
+    assert!(asm.contains("JMP ($34)"), "Should jump indirect");
 
     // Should have jump table with .WORD entries
     assert!(asm.contains("match_0_jt:"), "Should have jump table label");

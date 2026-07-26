@@ -50,6 +50,41 @@ impl SemanticAnalyzer {
 
             Expr::Call { function, args } => self.check_call(function, args, expr.span)?,
 
+            Expr::CallIndirect { callee, args } => {
+                // The callee must evaluate to a function pointer; check the
+                // arguments against its signature and yield its return type.
+                let callee_ty = self.check_expr(callee)?;
+                let Type::Function(param_types, ret_ty) = callee_ty else {
+                    return Err(SemaError::TypeMismatch {
+                        expected: "function pointer".to_string(),
+                        found: callee_ty.display_name(),
+                        span: callee.span,
+                    });
+                };
+                if args.len() != param_types.len() {
+                    return Err(SemaError::ArityMismatch {
+                        expected: param_types.len(),
+                        found: args.len(),
+                        span: expr.span,
+                    });
+                }
+                for (arg, param_ty) in args.iter().zip(param_types.iter()) {
+                    let saved = self.expected_type.take();
+                    self.expected_type = Some(param_ty.clone());
+                    let arg_ty = self.check_expr(arg);
+                    self.expected_type = saved;
+                    let arg_ty = arg_ty?;
+                    if !arg_ty.is_implicitly_convertible_to(param_ty) {
+                        return Err(SemaError::TypeMismatch {
+                            expected: param_ty.display_name(),
+                            found: arg_ty.display_name(),
+                            span: arg.span,
+                        });
+                    }
+                }
+                (*ret_ty).clone()
+            }
+
             Expr::Unary { op, operand } => self.check_unary(op, operand, expr.span)?,
 
             Expr::Paren(inner) => self.check_expr(inner)?,
@@ -182,14 +217,18 @@ impl SemanticAnalyzer {
                 arms,
             } => {
                 // Check the matched expression
-                self.check_expr(match_expr)?;
+                let match_ty = self.check_expr(match_expr)?;
 
-                // Check each arm's body expression and track their types
+                // Check each arm's body expression and track their types. Each
+                // arm gets its own scope with the pattern's bindings in it, so
+                // variable and enum-payload bindings resolve to real storage
+                // (mirrors the match-statement path).
                 let mut arm_types = Vec::new();
                 for arm in arms {
-                    // Check pattern bindings are available in arm body scope
-                    // TODO: proper scoping for pattern bindings
+                    self.table.enter_scope();
+                    self.add_pattern_bindings(&arm.pattern.node, arm.pattern.span, &match_ty)?;
                     let arm_ty = self.check_expr(&arm.body)?;
+                    self.table.exit_scope();
                     arm_types.push(arm_ty);
                 }
 
@@ -202,9 +241,19 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // For now, just return the type of the first arm
-                // TODO: unify types across arms
-                arm_types.into_iter().next().unwrap()
+                // Unify the arm types into a single common type: each arm must be
+                // implicitly convertible to (or accept) the others, e.g. mixing a
+                // u8 and a u16 arm yields u16.
+                let mut unified = arm_types[0].clone();
+                for ty in arm_types.iter().skip(1) {
+                    unified =
+                        Self::unify_types(&unified, ty).ok_or_else(|| SemaError::TypeMismatch {
+                            expected: unified.display_name(),
+                            found: ty.display_name(),
+                            span: expr.span,
+                        })?;
+                }
+                unified
             }
         };
 
@@ -212,6 +261,21 @@ impl SemanticAnalyzer {
         self.resolved_types.insert(expr.span, result_ty.clone());
 
         Ok(result_ty)
+    }
+
+    /// Find a common type for two arm/branch types: identical types unify to
+    /// themselves; otherwise the narrower widens to the other if implicitly
+    /// convertible (e.g. u8 + u16 -> u16). Returns None if incompatible.
+    fn unify_types(a: &Type, b: &Type) -> Option<Type> {
+        if a == b {
+            Some(a.clone())
+        } else if b.is_implicitly_convertible_to(a) {
+            Some(a.clone())
+        } else if a.is_implicitly_convertible_to(b) {
+            Some(b.clone())
+        } else {
+            None
+        }
     }
 
     fn check_literal(
@@ -278,18 +342,37 @@ impl SemanticAnalyzer {
                 Ok(Type::String)
             }
             crate::ast::Literal::Array(elements) => {
+                // A declared element type is the expected type for every element,
+                // so literals adopt it: `let a: [u16; 3] = [0, 0, 0];` gives u16
+                // elements rather than inferring u8 from the first one and then
+                // failing to match. Same rule as literals in a binary operation —
+                // it types the literal, it does not convert a value.
+                let declared_elem = match &self.expected_type {
+                    Some(Type::Array(elem, _)) => Some((**elem).clone()),
+                    _ => None,
+                };
+
                 if elements.is_empty() {
-                    // Empty array - need type context to determine element type
-                    // For now, default to [u8; 0]
-                    return Ok(Type::Array(Box::new(Type::Primitive(PrimitiveType::U8)), 0));
+                    // An empty array takes its element type from context when
+                    // there is one, else defaults to u8.
+                    let elem = declared_elem.unwrap_or(Type::Primitive(PrimitiveType::U8));
+                    return Ok(Type::Array(Box::new(elem), 0));
                 }
 
-                // Infer element type from first element
-                let element_ty = self.check_expr(&elements[0])?;
+                let saved = self.expected_type.take();
+                self.expected_type = declared_elem.clone();
+                let first = self.check_expr(&elements[0]);
+                self.expected_type = saved.clone();
+                let element_ty = first?;
 
-                // Check that all elements have the same type
+                // Every element must agree; each is checked against the declared
+                // element type so a wider literal is not misread from the first.
                 for elem in &elements[1..] {
-                    let elem_ty = self.check_expr(elem)?;
+                    let saved_inner = self.expected_type.take();
+                    self.expected_type = declared_elem.clone().or(Some(element_ty.clone()));
+                    let checked = self.check_expr(elem);
+                    self.expected_type = saved_inner;
+                    let elem_ty = checked?;
                     if elem_ty != element_ty {
                         return Err(SemaError::TypeMismatch {
                             expected: element_ty.display_name(),
@@ -302,7 +385,16 @@ impl SemanticAnalyzer {
                 Ok(Type::Array(Box::new(element_ty), elements.len()))
             }
             crate::ast::Literal::ArrayFill { value, count } => {
-                let element_ty = self.check_expr(value)?;
+                // `[0; 8]` for a `[u16; 8]` fills u16 elements, same rule.
+                let declared_elem = match &self.expected_type {
+                    Some(Type::Array(elem, _)) => Some((**elem).clone()),
+                    _ => None,
+                };
+                let saved = self.expected_type.take();
+                self.expected_type = declared_elem;
+                let checked = self.check_expr(value);
+                self.expected_type = saved;
+                let element_ty = checked?;
                 Ok(Type::Array(Box::new(element_ty), *count))
             }
         }
@@ -331,12 +423,37 @@ impl SemanticAnalyzer {
 
         self.resolved_symbols.insert(expr.span, info.clone());
 
+        // Using a function's bare name as a value takes its address: record it so
+        // codegen routes its arguments through the fixed indirect-arg staging block.
+        // Taking the address also counts as using the function (it will be reached
+        // through a function pointer), so it is not reported as dead code.
+        if info.kind == SymbolKind::Function {
+            self.address_taken_functions.insert(name.to_string());
+            self.called_functions.insert(name.to_string());
+        }
+
         // Mark variable as used (for unused variable/parameter warnings)
         self.used_variables.insert(name.to_string());
         // Also track in all_used_symbols (for unused import warnings)
         self.all_used_symbols.insert(name.to_string());
 
         Ok(info.ty)
+    }
+
+    /// Is this operand a bare integer literal for width-adaptation purposes?
+    /// Accepts an integer literal, a unary-negated integer literal (`-5`), and
+    /// either wrapped in parentheses.
+    fn is_adaptable_int_literal(expr: &Expr) -> bool {
+        use crate::ast::{Literal, UnaryOp};
+        match expr {
+            Expr::Literal(Literal::Integer(_)) => true,
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => matches!(&operand.node, Expr::Literal(Literal::Integer(_))),
+            Expr::Paren(inner) => Self::is_adaptable_int_literal(&inner.node),
+            _ => false,
+        }
     }
 
     fn check_binary(
@@ -346,19 +463,51 @@ impl SemanticAnalyzer {
         right: &Spanned<Expr>,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
-        let left_ty = self.check_expr(left)?;
-        let right_ty = self.check_expr(right)?;
+        // Literals-only width adaptation: a bare integer literal operand adopts
+        // the other operand's (integer) type, so it participates at the correct
+        // width in any operand position and for any operator — including
+        // comparisons in a condition, where there is no ambient expected type
+        // (e.g. `if a < 5` with `a: u16`). Only literals adapt; two *variables*
+        // of different widths stay an error, because Wraith performs no implicit
+        // type conversions. The literal is type-checked with the sibling's type
+        // as the expected type; if it does not fit, adaptation simply does not
+        // happen and the usual mismatch error is produced. A negated literal
+        // (`-5`) and parenthesized literals count too (check_unary already
+        // honors the expected type for a negated literal).
+        let left_is_int_lit = Self::is_adaptable_int_literal(&left.node);
+        let right_is_int_lit = Self::is_adaptable_int_literal(&right.node);
 
-        // String concatenation: str + str = str
+        let (left_ty, right_ty) = if right_is_int_lit && !left_is_int_lit {
+            let lt = self.check_expr(left)?;
+            let saved = self.expected_type.take();
+            self.expected_type = Some(lt.clone());
+            let rt = self.check_expr(right);
+            self.expected_type = saved;
+            (lt, rt?)
+        } else if left_is_int_lit && !right_is_int_lit {
+            let rt = self.check_expr(right)?;
+            let saved = self.expected_type.take();
+            self.expected_type = Some(rt.clone());
+            let lt = self.check_expr(left);
+            self.expected_type = saved;
+            (lt?, rt)
+        } else {
+            (self.check_expr(left)?, self.check_expr(right)?)
+        };
+
+        // String operators: `+` concatenates (str), `==`/`!=` compare (bool).
         if matches!((&left_ty, &right_ty), (Type::String, Type::String)) {
             match op {
                 BinaryOp::Add => {
                     // Result is also a string type
                     return Ok(Type::String);
                 }
+                BinaryOp::Eq | BinaryOp::Ne => {
+                    return Ok(Type::Primitive(PrimitiveType::Bool));
+                }
                 _ => {
                     return Err(SemaError::InvalidBinaryOp {
-                        op: format!("{:?} (only '+' is supported for strings)", op),
+                        op: format!("{:?} (strings support '+', '==', and '!=')", op),
                         left_ty: left_ty.display_name(),
                         right_ty: right_ty.display_name(),
                         span,
@@ -870,12 +1019,17 @@ impl SemanticAnalyzer {
                 // Return the element type
                 Ok((**element_ty).clone())
             }
+            Type::Slice(element_ty) => {
+                // Slice indexing returns the element type. Length is a runtime
+                // value, so no compile-time bounds check.
+                Ok((**element_ty).clone())
+            }
             Type::String => {
                 // String indexing returns u8 (a single byte)
                 Ok(Type::Primitive(PrimitiveType::U8))
             }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array or string".to_string(),
+                expected: "array, slice, or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),
@@ -890,27 +1044,29 @@ impl SemanticAnalyzer {
         inclusive: bool,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
-        // Type check start bound (must be u8)
+        // Slice bounds are integers. u8/i8 cover the common case; u16/i16 are
+        // accepted so slices longer than 255 elements can be formed (e.g. with
+        // constant bounds). Runtime u16 bounds are rejected later in codegen.
+        let is_int_bound = |t: &Type| {
+            matches!(
+                t,
+                Type::Primitive(
+                    PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::U16 | PrimitiveType::I16
+                )
+            )
+        };
         let start_ty = self.check_expr(start)?;
-        if !matches!(
-            start_ty,
-            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
-        ) {
+        if !is_int_bound(&start_ty) {
             return Err(SemaError::TypeMismatch {
-                expected: "u8 or i8".to_string(),
+                expected: "integer index".to_string(),
                 found: start_ty.display_name(),
                 span: start.span,
             });
         }
-
-        // Type check end bound (must be u8)
         let end_ty = self.check_expr(end)?;
-        if !matches!(
-            end_ty,
-            Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
-        ) {
+        if !is_int_bound(&end_ty) {
             return Err(SemaError::TypeMismatch {
-                expected: "u8 or i8".to_string(),
+                expected: "integer index".to_string(),
                 found: end_ty.display_name(),
                 span: end.span,
             });
@@ -960,8 +1116,14 @@ impl SemanticAnalyzer {
                     }
                 }
 
-                // Slices return the same array type (for assignment compatibility)
-                Ok(object_ty.clone())
+                // As an assignment target (`arr[a..b] = [...]`) the slice keeps
+                // the array type so length/element checks line up. As a value
+                // (`let s: &[u8] = arr[a..b]`) it is a slice of the element type.
+                if self.checking_assignment_target {
+                    Ok(object_ty.clone())
+                } else {
+                    Ok(Type::Slice(_element_ty.clone()))
+                }
             }
             Type::String => {
                 // COMPILE-TIME STRING SLICING
@@ -1062,8 +1224,20 @@ impl SemanticAnalyzer {
                     }
                 }
             }
+            Type::Slice(element_ty) => {
+                // Slicing a slice yields another slice of the same element type.
+                // The length is a runtime value, so bounds are unchecked. As an
+                // assignment target this form is not supported.
+                if self.checking_assignment_target {
+                    return Err(SemaError::Custom {
+                        message: "cannot assign through a slice-of-slice".to_string(),
+                        span,
+                    });
+                }
+                Ok(Type::Slice(element_ty.clone()))
+            }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array or string".to_string(),
+                expected: "array, slice, or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),

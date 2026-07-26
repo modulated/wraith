@@ -308,6 +308,35 @@ fn u16_array_roundtrip() {
     );
 }
 
+#[test]
+fn u16_slice_assignment_stores_both_bytes() {
+    // Slice-assign two u16 elements, then read them back. Before the fix the
+    // unroll stored only the low byte at the unscaled element index, so both
+    // the high bytes and the second element were corrupted.
+    let mut e = run(r#"
+        const A0: addr = 0x0400;
+        const A1: addr = 0x0401;
+        const B0: addr = 0x0402;
+        const B1: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let data: [u16; 4] = [0x1000, 0x2000, 0x3000, 0x4000];
+            data[1..3] = [0x1234, 0xABCD];
+            let i: u8 = 1;
+            let j: u8 = 2;
+            let x: u16 = data[i];
+            let y: u16 = data[j];
+            A0 = x.low;
+            A1 = x.high;
+            B0 = y.low;
+            B1 = y.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0x1234, "data[1] via slice assign");
+    assert_eq!(e.mem16(0x0402), 0xABCD, "data[2] via slice assign");
+}
+
 // ---------------------------------------------------------------------------
 // match / pattern binding correctness
 // ---------------------------------------------------------------------------
@@ -418,6 +447,92 @@ fn match_tuple_variant_u16_field_not_truncated() {
         1000,
         "u16 tuple field should extract as 1000"
     );
+}
+
+// ---------------------------------------------------------------------------
+// match EXPRESSION parity (value-producing match)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_expr_u16_literal_and_variable_binding() {
+    // A u16 match expression: literal arms compare both bytes and the variable
+    // arm binds and yields the full 16-bit scrutinee (not a truncated byte).
+    let src = |v: u16| {
+        format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let x: u16 = {v};
+                let r: u16 = match x {{
+                    256 => 0x0999,
+                    n => n,
+                }};
+                LO = r.low;
+                HI = r.high;
+                loop {{}}
+            }}
+        "#
+        )
+    };
+    assert_eq!(run(&src(256)).mem16(0x0400), 0x0999, "256 arm selected");
+    // 0x0305 hits the variable arm and must come back whole, high byte intact.
+    assert_eq!(
+        run(&src(0x0305)).mem16(0x0400),
+        0x0305,
+        "variable arm keeps u16"
+    );
+}
+
+#[test]
+fn match_expr_range_arm() {
+    // Inclusive range arm in a match expression.
+    let classify = |v: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let y: u8 = {v};
+                let g: u8 = match y {{
+                    0 => 100,
+                    1..=5 => 50,
+                    _ => 9,
+                }};
+                OUT = g;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(classify(0), 100, "0 arm");
+    assert_eq!(classify(3), 50, "1..=5 range arm");
+    assert_eq!(classify(5), 50, "inclusive upper bound");
+    assert_eq!(classify(7), 9, "wildcard arm");
+}
+
+#[test]
+fn match_expr_enum_payload_binding_u16() {
+    // A match expression binding a u16 enum payload must yield both bytes.
+    let mut e = run(r#"
+        enum Msg { Ping, Val(u16) }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let m: Msg = Msg::Val(0x0ABC);
+            let r: u16 = match m {
+                Msg::Ping => 0,
+                Msg::Val(v) => v,
+            };
+            LO = r.low;
+            HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0x0ABC, "u16 enum payload yielded whole");
 }
 
 // ---------------------------------------------------------------------------
@@ -2001,4 +2116,361 @@ fn array_of_struct_runtime_index_write() {
     "#);
     assert_eq!(e.mem(0x0400), 99, "pts[i].x written via runtime index");
     assert_eq!(e.mem(0x0401), 88, "pts[i].y written via runtime index");
+}
+
+// ---------------------------------------------------------------------------
+// Struct-variant enum pattern bindings (Shape::Rect { w, h }).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_struct_variant_bindings() {
+    let mut e = run(r#"
+        enum Shape {
+            Circle { r: u8 },
+            Rect { w: u8, h: u16 },
+        }
+        const W: addr = 0x0400;
+        const HLO: addr = 0x0401;
+        const HHI: addr = 0x0402;
+        #[reset]
+        fn main() {
+            let s: Shape = Shape::Rect { w: 7, h: 0x1234 };
+            match s {
+                Shape::Circle { r } => { W = r; HLO = 0; HHI = 0; }
+                Shape::Rect { w, h } => {
+                    W = w;
+                    HLO = h.low;
+                    HHI = h.high;
+                }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "Rect.w extracted");
+    assert_eq!(e.mem16(0x0401), 0x1234, "Rect.h extracted as full u16");
+}
+
+#[test]
+fn match_struct_variant_selects_circle() {
+    let mut e = run(r#"
+        enum Shape {
+            Circle { r: u8 },
+            Rect { w: u8, h: u16 },
+        }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let s: Shape = Shape::Circle { r: 42 };
+            match s {
+                Shape::Circle { r } => { OUT = r; }
+                Shape::Rect { w, h } => { OUT = w; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        42,
+        "Circle.r extracted and correct arm chosen"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Match-expression type unification: arms of differing widths unify to the
+// wider type (u8 + u16 -> u16), so the result isn't truncated.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_expr_unifies_arm_widths() {
+    // End-to-end: a mixed-width match feeding a u16 add produces correct 16-bit
+    // results — narrow arms are zero-extended and the add carries into the high
+    // byte. (Incompatible-arm rejection is covered by the sema tests.)
+    let pick = |k: u8| {
+        let src = format!(
+            r#"
+            const LO: addr = 0x0400;
+            const HI: addr = 0x0401;
+            #[reset]
+            fn main() {{
+                let k: u8 = {k};
+                let x: u16 = (match k {{
+                    1 => 5,
+                    2 => 300,
+                    _ => 0,
+                }}) + 224;
+                LO = x.low;
+                HI = x.high;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem16(0x0400)
+    };
+    // Narrow arm (5) must be zero-extended, else Y carries garbage into the high byte.
+    assert_eq!(pick(1), 229, "5 + 224 (narrow arm zero-extended)");
+    // Low bytes carry (0x2C + 0xE0 = 0x10C), so a u8 add would drop the carry.
+    assert_eq!(pick(2), 524, "300 + 224 (u16 add carries into high byte)");
+    assert_eq!(pick(9), 224, "0 + 224");
+}
+
+// ---------------------------------------------------------------------------
+// Deeper nested chains: an array-of-struct nested inside a struct (a.b[i].c).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_array_of_struct_read() {
+    let read = |i: u8| {
+        let src = format!(
+            r#"
+            struct Point {{ x: u8, y: u8 }}
+            struct Grid {{ count: u8, pts: [Point; 3] }}
+            const OUT: addr = 0x0400;
+            #[reset]
+            fn main() {{
+                let g: Grid = Grid {{
+                    count: 3,
+                    pts: [ Point {{ x: 10, y: 1 }}, Point {{ x: 20, y: 2 }}, Point {{ x: 30, y: 3 }} ],
+                }};
+                let i: u8 = {i};
+                OUT = g.pts[i].x;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0400)
+    };
+    assert_eq!(read(0), 10, "g.pts[0].x");
+    assert_eq!(read(1), 20, "g.pts[1].x (runtime index into nested array)");
+    assert_eq!(read(2), 30, "g.pts[2].x");
+}
+
+#[test]
+fn nested_array_of_struct_const_and_write() {
+    let mut e = run(r#"
+        struct Point { x: u8, y: u8 }
+        struct Grid { count: u8, pts: [Point; 3] }
+        const OA: addr = 0x0400;
+        const OB: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let g: Grid = Grid {
+                count: 3,
+                pts: [ Point { x: 0, y: 0 }, Point { x: 0, y: 0 }, Point { x: 0, y: 0 } ],
+            };
+            let i: u8 = 1;
+            g.pts[0].x = 7;
+            g.pts[i].y = 8;
+            OA = g.pts[0].x;
+            OB = g.pts[1].y;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 7, "g.pts[0].x written (const index)");
+    assert_eq!(e.mem(0x0401), 8, "g.pts[i].y written (runtime index)");
+}
+
+// ---------------------------------------------------------------------------
+// Function pointers WITH arguments (indirect calls pass args via the staging
+// block; the address-taken callee copies them into its frame in a prologue).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn function_pointer_one_arg() {
+    let mut e = run(r#"
+        fn dbl(n: u8) -> u8 { return n + n; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = dbl;
+            let r: u8 = f(21);
+            OUT = r;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "f(21) via pointer = 42");
+}
+
+#[test]
+fn function_pointer_two_args() {
+    let mut e = run(r#"
+        fn combine(a: u8, b: u8) -> u8 { return a + b; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8, u8) -> u8 = combine;
+            let r: u8 = f(30, 12);
+            OUT = r;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 42, "f(30, 12) = 42");
+}
+
+#[test]
+fn function_pointer_u16_arg() {
+    let mut e = run(r#"
+        fn dbl16(n: u16) -> u16 { return n + n; }
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let f: fn(u16) -> u16 = dbl16;
+            let r: u16 = f(400);
+            LO = r.low;
+            HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        800,
+        "f(400) doubled = 800 (u16 arg + return)"
+    );
+}
+
+#[test]
+fn function_pointer_arg_dispatch() {
+    // Reassign the pointer between calls (jump-table dispatch with an argument).
+    let mut e = run(r#"
+        fn plus1(n: u8) -> u8 { return n + 1; }
+        fn minus1(n: u8) -> u8 { return n - 1; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = plus1;
+            let a: u8 = f(10);
+            f = minus1;
+            let b: u8 = f(10);
+            OUT = a + b;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 20, "plus1(10)=11 + minus1(10)=9 = 20");
+}
+
+#[test]
+fn direct_call_to_address_taken_function() {
+    // A function that is also used as a pointer can still be called directly;
+    // both paths go through the staging block + prologue.
+    let mut e = run(r#"
+        fn sq(n: u8) -> u8 { return n * n; }
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = sq;
+            let viaptr: u8 = f(5);
+            let direct: u8 = sq(6);
+            OUT = viaptr + direct;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 61, "sq(5)=25 + sq(6)=36 = 61");
+}
+
+// ---------------------------------------------------------------------------
+// examples/factorial_tail.wr — tail-recursive factorial with a u16 accumulator.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn factorial_tail_recursion() {
+    // Verbatim from examples/factorial_tail.wr (inline-asm halt ending and all).
+    // Exercises tail-call optimization plus u16 multiply (via the mul16 stdlib);
+    // the results were wrong until the mul16/div16/mod16 stdlib bodies stopped
+    // being deleted by the peephole (see the peephole label-parsing fix).
+    let mut e = run(r#"
+        const RESULT_0_LO: addr = 0x6000;
+        const RESULT_0_HI: addr = 0x6001;
+        const RESULT_1_LO: addr = 0x6002;
+        const RESULT_1_HI: addr = 0x6003;
+        const RESULT_5_LO: addr = 0x6004;
+        const RESULT_5_HI: addr = 0x6005;
+        const RESULT_7_LO: addr = 0x6006;
+        const RESULT_7_HI: addr = 0x6007;
+
+        #[reset]
+        fn main() {
+            let result: u16 = factorial(0, 1);
+            RESULT_0_LO = result.low;
+            RESULT_0_HI = result.high;
+
+            result = factorial(1, 1);
+            RESULT_1_LO = result.low;
+            RESULT_1_HI = result.high;
+
+            result = factorial(5, 1);
+            RESULT_5_LO = result.low;
+            RESULT_5_HI = result.high;
+
+            result = factorial(7, 1);
+            RESULT_7_LO = result.low;
+            RESULT_7_HI = result.high;
+
+            asm {
+                "halt: JMP halt"
+            }
+        }
+
+        fn factorial(n: u8, acc: u16) -> u16 {
+            if n == 0 {
+                return acc;
+            }
+            return factorial(n - 1, acc * (n as u16));
+        }
+    "#);
+    assert_eq!(e.mem16(0x6000), 1, "factorial(0,1) = 1");
+    assert_eq!(e.mem16(0x6002), 1, "factorial(1,1) = 1");
+    assert_eq!(e.mem16(0x6004), 120, "factorial(5,1) = 120");
+    assert_eq!(e.mem16(0x6006), 5040, "factorial(7,1) = 5040");
+}
+
+// ---------------------------------------------------------------------------
+// Register-tracking must be invalidated after raw A/Y mutations, or a following
+// load gets wrongly elided (reads a stale value).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bool_cast_does_not_stale_register() {
+    // After `x as bool`, A holds 0/1 but the tracker still believes A mirrors x.
+    // Reloading x with nothing in between must not elide the load.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        #[reset]
+        fn main() {
+            let x: u8 = 42;
+            let b: bool = x as bool;
+            OUT = x;          // must reload 42, not the bool result in A
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        42,
+        "x must still read as 42 (not the bool 1)"
+    );
+}
+
+#[test]
+fn field_assignment_does_not_stale_register() {
+    // Assigning a u16 field of a by-reference struct param ends with A holding the
+    // high byte, while the tracker still believes A holds the assigned immediate.
+    let mut e = run(r#"
+        struct P { a: u16, b: u8 }
+        const OUT: addr = 0x0400;
+        fn setit(p: P) {
+            p.a = 0x1234;      // raw indirect stores; A ends = 0x12
+            let q: u8 = 0x34;  // must load 0x34, not the stale high byte
+            OUT = q;
+        }
+        #[reset]
+        fn main() {
+            let p: P = P { a: 0, b: 0 };
+            setit(p);
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        0x34,
+        "q must read 0x34 after the u16 field store"
+    );
 }

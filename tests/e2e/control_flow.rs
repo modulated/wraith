@@ -1,272 +1,283 @@
-//! End-to-end tests for control flow constructs
+//! Control-flow tests, verified by execution.
+//!
+//! Control flow decides *which* code runs, so the meaningful assertion is the
+//! value a program arrives at — not that a `BEQ` appears somewhere. A loop that
+//! runs one iteration too many, or a `break` that escapes the wrong loop, emits
+//! perfectly plausible assembly; only running it tells you.
 
-use crate::common::*;
+use crate::common::assert_error_contains;
+use crate::common::exec::run;
+
+/// Run a program body that leaves a u8 in `OUT` ($0900).
+fn eval(body: &str) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {{
+            {body}
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0900)
+}
+
+// ============================================================================
+// Conditionals
+// ============================================================================
 
 #[test]
 fn if_statement() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            if true {
-                let x: u8 = 10;
-            }
-        }
-    "#,
+    assert_eq!(eval("let x: u8 = 10; if x > 5 { OUT = 1; }"), 1);
+    assert_eq!(
+        eval("let x: u8 = 3; if x > 5 { OUT = 1; }"),
+        0,
+        "body must be skipped when the condition is false"
     );
-
-    assert_asm_contains(&asm, "BNE"); // Branch to then when condition is true
 }
 
 #[test]
 fn if_else() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            if false {
-                let x: u8 = 10;
-            } else {
-                let x: u8 = 20;
-            }
-        }
-    "#,
+    assert_eq!(
+        eval("let x: u8 = 10; if x > 5 { OUT = 1; } else { OUT = 2; }"),
+        1
     );
-
-    assert_asm_contains(&asm, "BNE"); // Branch to then when condition is true
-    assert_asm_contains(&asm, "JMP");
+    assert_eq!(
+        eval("let x: u8 = 1; if x > 5 { OUT = 1; } else { OUT = 2; }"),
+        2
+    );
 }
 
 #[test]
-fn while_loop() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            let x: u8 = 0;
-            while x < 10 {
-                x = x + 1;
-            }
-        }
-    "#,
-    );
+fn else_if_chain_picks_first_match() {
+    let grade = |s: u8| {
+        eval(&format!(
+            "let s: u8 = {s};
+             if s >= 90 {{ OUT = 4; }} else if s >= 80 {{ OUT = 3; }}
+             else if s >= 70 {{ OUT = 2; }} else {{ OUT = 1; }}"
+        ))
+    };
+    assert_eq!(grade(95), 4);
+    assert_eq!(grade(85), 3);
+    assert_eq!(grade(70), 2, "boundary is inclusive");
+    assert_eq!(grade(69), 1);
+}
 
-    assert_asm_contains(&asm, "CMP");
-    assert_asm_contains(&asm, "JMP");
+// ============================================================================
+// Loops — the assertion is the iteration count
+// ============================================================================
+
+#[test]
+fn while_loop() {
+    // 0+1+2+3+4: proves the loop runs exactly five times.
+    assert_eq!(
+        eval("let i: u8 = 0; let s: u8 = 0; while i < 5 { s = s + i; i = i + 1; } OUT = s;"),
+        10
+    );
+}
+
+#[test]
+fn while_loop_zero_iterations() {
+    assert_eq!(
+        eval("let i: u8 = 9; let n: u8 = 0; while i < 5 { n = n + 1; i = i + 1; } OUT = n;"),
+        0,
+        "a condition false on entry runs the body zero times"
+    );
 }
 
 #[test]
 fn for_range_loop() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            for i: u8 in 0..10 {
-                let x: u8 = i;
-            }
-        }
-    "#,
+    // 0..5 is half-open: 0+1+2+3+4 = 10, not 15.
+    assert_eq!(
+        eval("let s: u8 = 0; for i in 0..5 { s = s + i; } OUT = s;"),
+        10
     );
-
-    assert_asm_contains(&asm, "INX");
-    assert_asm_contains(&asm, "CPX");
 }
 
-// ============================================================
-// Break and Continue Tests
-// ============================================================
+#[test]
+fn for_range_inclusive() {
+    assert_eq!(
+        eval("let s: u8 = 0; for i in 0..=5 { s = s + i; } OUT = s;"),
+        15
+    );
+}
 
 #[test]
 fn while_loop_with_break() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            let x: u8 = 0;
-            while x < 10 {
-                if x == 5 {
-                    break;
-                }
-                x = x + 1;
-            }
-        }
-    "#,
+    assert_eq!(
+        eval("let i: u8 = 0; while i < 100 { if i == 7 { break; } i = i + 1; } OUT = i;"),
+        7
     );
-
-    // Should have loop labels and JMP for break
-    assert_asm_contains(&asm, "JMP");
-    assert_asm_contains(&asm, "CMP");
 }
 
 #[test]
 fn while_loop_with_continue() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            let x: u8 = 0;
-            while x < 10 {
-                x = x + 1;
-                if x == 5 {
-                    continue;
-                }
-                let y: u8 = x;
-            }
-        }
-    "#,
+    // Count only the even values in 1..=10.
+    assert_eq!(
+        eval(
+            "let i: u8 = 0; let n: u8 = 0;
+             while i < 10 { i = i + 1; if (i & 1) == 1 { continue; } n = n + 1; }
+             OUT = n;"
+        ),
+        5
     );
-
-    // Continue should jump back to loop condition
-    assert_asm_contains(&asm, "JMP");
-    assert_asm_contains(&asm, "CMP");
 }
 
 #[test]
 fn for_loop_with_break() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            for i: u8 in 0..10 {
-                if i == 5 {
-                    break;
-                }
-            }
-        }
-    "#,
+    assert_eq!(
+        eval("let last: u8 = 0; for i in 0..20 { if i == 4 { break; } last = i; } OUT = last;"),
+        3
     );
-
-    // Should exit loop early via JMP
-    assert_asm_contains(&asm, "INX"); // For loop uses X register
-    assert_asm_contains(&asm, "JMP");
-    assert_asm_contains(&asm, "BEQ"); // Conditional branch for if
 }
 
 #[test]
 fn for_loop_with_continue() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            for i: u8 in 0..10 {
-                if i == 5 {
-                    continue;
-                }
-                let x: u8 = i;
-            }
-        }
-    "#,
+    // `continue` must still advance the loop variable, or this never terminates.
+    assert_eq!(
+        eval("let n: u8 = 0; for i in 0..10 { if i < 5 { continue; } n = n + 1; } OUT = n;"),
+        5
     );
-
-    // Continue should jump to loop increment
-    assert_asm_contains(&asm, "INX");
-    assert_asm_contains(&asm, "JMP");
 }
 
 #[test]
-fn nested_loop_break() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            for i: u8 in 0..10 {
-                for j: u8 in 0..10 {
-                    if j == 2 {
-                        break;
-                    }
-                }
-            }
-        }
-    "#,
+fn nested_loop_break_exits_inner_only() {
+    // 3 outer iterations x 2 inner (break at j == 2) = 6.
+    assert_eq!(
+        eval(
+            "let n: u8 = 0;
+             for i in 0..3 { for j in 0..10 { if j == 2 { break; } n = n + 1; } }
+             OUT = n;"
+        ),
+        6
     );
-
-    // Should have distinct loop labels for nested loops
-    assert_asm_contains(&asm, "INX");
-    assert_asm_contains(&asm, "JMP");
 }
 
-// ============================================================
-// Enhanced Match Statement Tests
-// ============================================================
+#[test]
+fn loop_with_break() {
+    assert_eq!(
+        eval("let n: u8 = 0; loop { n = n + 1; if n == 3 { break; } } OUT = n;"),
+        3
+    );
+}
+
+// ============================================================================
+// match
+// ============================================================================
 
 #[test]
 fn match_literal_patterns() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            let x: u8 = 5;
-            match x {
-                0 => { let y: u8 = 10; }
-                5 => { let y: u8 = 20; }
-                _ => { let y: u8 = 30; }
-            }
-        }
-    "#,
-    );
-
-    // Should generate comparisons and branches
-    assert_asm_contains(&asm, "CMP");
-    assert_asm_contains(&asm, "BEQ");
-}
-
-#[test]
-fn match_enum_variants() {
-    let asm = compile_success(
-        r#"
-        enum Direction {
-            North,
-            South,
-            East,
-            West,
-        }
-        fn main() {
-            let d: Direction = Direction::North;
-            match d {
-                Direction::North => { let val: u8 = 1; }
-                Direction::South => { let val: u8 = 2; }
-                Direction::East => { let val: u8 = 3; }
-                Direction::West => { let val: u8 = 4; }
-            }
-        }
-    "#,
-    );
-
-    // With 4 variants, uses jump table dispatch (ASL/TAX/JMP indirect)
-    assert_asm_contains(&asm, "LDA");
-    assert_asm_contains(&asm, "ASL"); // Double tag for address indexing
-    assert_asm_contains(&asm, "TAX"); // Transfer to X for table indexing
-    assert_asm_contains(&asm, "JMP"); // Jump to arm
-}
-
-#[test]
-fn match_expression_bodies() {
-    let asm = compile_success(
-        r#"
-        fn main() {
-            let x: u8 = 2;
-            let y: u8 = 0;
-            match x {
-                1 => { y = 10; }
-                2 => { y = 20; }
-                _ => { y = 30; }
-            }
-        }
-    "#,
-    );
-
-    // Match arms with assignment statements
-    assert_asm_contains(&asm, "CMP");
-    assert_asm_contains(&asm, "BEQ");
+    let pick = |v: u8| {
+        eval(&format!(
+            "let x: u8 = {v};
+             match x {{ 1 => {{ OUT = 10; }} 2 => {{ OUT = 20; }} _ => {{ OUT = 99; }} }}"
+        ))
+    };
+    assert_eq!(pick(1), 10);
+    assert_eq!(pick(2), 20);
+    assert_eq!(pick(7), 99, "wildcard catches the rest");
 }
 
 #[test]
 fn match_multiple_arms() {
-    let asm = compile_success(
+    let pick = |v: u8| {
+        eval(&format!(
+            "let x: u8 = {v};
+             match x {{
+                1 => {{ OUT = 10; }} 2 => {{ OUT = 20; }}
+                3 => {{ OUT = 30; }} _ => {{ OUT = 0; }}
+             }}"
+        ))
+    };
+    assert_eq!(pick(1), 10);
+    assert_eq!(pick(3), 30);
+    assert_eq!(pick(9), 0);
+}
+
+#[test]
+fn match_enum_variants() {
+    let pick = |v: &str| {
+        let src = format!(
+            r#"
+            enum Color {{ Red, Green, Blue }}
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                let c: Color = Color::{v};
+                match c {{
+                    Color::Red   => {{ OUT = 1; }}
+                    Color::Green => {{ OUT = 2; }}
+                    Color::Blue  => {{ OUT = 3; }}
+                }}
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0900)
+    };
+    assert_eq!(pick("Red"), 1);
+    assert_eq!(pick("Green"), 2);
+    assert_eq!(pick("Blue"), 3);
+}
+
+#[test]
+fn match_expression_yields_a_value() {
+    assert_eq!(
+        eval("let x: u8 = 2; let r: u8 = match x { 1 => 10, 2 => 20, _ => 99 }; OUT = r;"),
+        20
+    );
+}
+
+#[test]
+fn match_range_arm() {
+    let pick = |v: u8| {
+        eval(&format!(
+            "let x: u8 = {v};
+             match x {{ 0..=9 => {{ OUT = 1; }} 10..=19 => {{ OUT = 2; }} _ => {{ OUT = 3; }} }}"
+        ))
+    };
+    assert_eq!(pick(5), 1);
+    assert_eq!(pick(15), 2);
+    assert_eq!(pick(50), 3);
+}
+
+// ============================================================================
+// Type errors remain compile-time checks, not runtime behaviour
+// ============================================================================
+
+#[test]
+fn match_expression_incompatible_arms_error() {
+    // Arms with no common type are rejected; previously the first arm's type
+    // won and later arms were ignored.
+    assert_error_contains(
         r#"
         fn main() {
-            let x: u8 = 5;
-            match x {
-                1 => { let y: u8 = 10; }
-                2 => { let y: u8 = 20; }
-                3 => { let y: u8 = 30; }
-                _ => { let y: u8 = 0; }
-            }
+            let k: u8 = 1;
+            let flag: bool = match k { 0 => true, _ => 5 };
         }
     "#,
+        "type mismatch",
     );
+}
 
-    // Should have labels for each arm
-    assert_asm_contains(&asm, "CMP");
-    assert_asm_contains(&asm, "JMP");
+#[test]
+fn match_expression_compatible_arms_unify() {
+    // A u8 arm and a u16 arm unify to u16 — and the wider value survives.
+    assert_eq!(
+        run(r#"
+            const LO: addr = 0x0900;
+            const HI: addr = 0x0901;
+            #[reset]
+            fn main() {
+                let x: u8 = 2;
+                let r: u16 = match x { 1 => 5, _ => 300 };
+                LO = r.low;
+                HI = r.high;
+                loop {}
+            }
+        "#)
+        .mem16(0x0900),
+        300
+    );
 }

@@ -203,3 +203,93 @@ fn addr_size_is_one_byte() {
     // Should NOT contain STY (which would indicate 2-byte storage)
     assert!(!asm.contains("STY $6001"));
 }
+
+// ============================================================================
+// Executed addr behaviour
+//
+// The tests above check the emitted form (`SCREEN = $0400`, `STA SCREEN`) and
+// the access-modifier rules, which are compile-time properties. None of them
+// shows a write actually reaching the address it names, or a read returning
+// what is there. These do.
+// ============================================================================
+
+use crate::common::exec::run;
+
+#[test]
+fn addr_write_lands_at_the_named_address() {
+    let mut e = run(r#"
+        const PORT: addr = 0x0905;
+        #[reset]
+        fn main() {
+            PORT = 0x5A;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0905), 0x5A);
+}
+
+#[test]
+fn addr_read_returns_memory_contents() {
+    // Write through one addr and read it back through another naming the same
+    // location: proves the read is a real load from that address.
+    let mut e = run(r#"
+        const SRC: addr = 0x0905;
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            SRC = 0x33;
+            let v: u8 = SRC;
+            OUT = v + 1;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x34);
+}
+
+#[test]
+fn addr_write_is_one_byte_only() {
+    // An addr names a single byte; writing must not disturb the next location,
+    // which would corrupt the neighbouring register of a real device.
+    let mut e = run(r#"
+        const PORT: addr = 0x0905;
+        const NEXT: addr = 0x0906;
+        #[reset]
+        fn main() {
+            NEXT = 0x11;
+            PORT = 0xFF;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0905), 0xFF);
+    assert_eq!(e.mem(0x0906), 0x11, "the following byte must be untouched");
+}
+
+#[test]
+fn constant_address_expression_resolves() {
+    // A computed base + offset must name the address the arithmetic gives.
+    let mut e = run(r#"
+        const BASE: u16 = 0x0900;
+        const SLOT: addr = BASE + 6;
+        #[reset]
+        fn main() {
+            SLOT = 0x77;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0906), 0x77, "BASE + 6 resolves to $0906");
+}
+
+#[test]
+fn addr_read_modify_write() {
+    // The counter idiom an interrupt handler uses.
+    let mut e = run(r#"
+        const CTR: addr = 0x0905;
+        #[reset]
+        fn main() {
+            CTR = 10;
+            CTR = CTR + 5;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0905), 15);
+}

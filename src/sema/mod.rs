@@ -157,10 +157,26 @@ impl SemaError {
                 right_ty,
                 span,
             } => {
-                let msg = format!(
+                let mut msg = format!(
                     "cannot apply '{}' to types {} and {}",
                     op, left_ty, right_ty
                 );
+                // Wraith performs no implicit conversions, so a mixed-width
+                // integer operation (e.g. u16 + u8) is rejected. Point the user
+                // at the explicit cast, which is the intended way to do it.
+                let is_int = |t: &str| matches!(t, "u8" | "i8" | "u16" | "i16");
+                if left_ty != right_ty && is_int(left_ty) && is_int(right_ty) {
+                    let wider = if matches!(left_ty.as_str(), "u16" | "i16") {
+                        left_ty
+                    } else {
+                        right_ty
+                    };
+                    msg.push_str(&format!(
+                        "\n  = help: Wraith has no implicit conversions; cast one operand, \
+                         e.g. `(x as {})`",
+                        wider
+                    ));
+                }
                 format!(
                     "error: invalid binary operation\n{}",
                     span.format_error_context(source, filename, &msg)
@@ -753,6 +769,28 @@ pub struct InterruptSaveInfo {
     pub shared_frames: Vec<(u8, u8)>,
 }
 
+/// One byte of a mutable global's startup image. Function pointers cannot be
+/// resolved during analysis (code addresses are assigned later, during section
+/// allocation), so they are recorded as label references and emitted as
+/// `#<label` / `#>label` operands for the assembler to resolve.
+#[derive(Debug, Clone)]
+pub enum InitByte {
+    Byte(u8),
+    /// Low byte of a function's address.
+    FnLow(String),
+    /// High byte of a function's address.
+    FnHigh(String),
+}
+
+/// A mutable global's RAM address and the startup image its declaration gives
+/// it. Written into RAM by the reset handler.
+#[derive(Debug, Clone)]
+pub struct StaticInit {
+    pub name: String,
+    pub addr: u16,
+    pub bytes: Vec<InitByte>,
+}
+
 pub struct ProgramInfo {
     // Placeholder for analyzed program data
     pub table: table::SymbolTable,
@@ -782,14 +820,30 @@ pub struct ProgramInfo {
     /// Global string pool for cross-module string deduplication
     /// Maps string content to a unique label (e.g., "Hello" -> "str_0")
     pub string_pool: HashMap<String, String>,
+    /// Initial values for mutable `static` globals, in declaration order. The
+    /// reset handler writes these into RAM at startup, since RAM cannot be
+    /// pre-loaded from ROM on a bare machine.
+    pub static_inits: Vec<StaticInit>,
     /// Per-function zero-page frame assignment (base + size), colored by the
     /// call graph. Populated by `finalize_frames`.
     pub function_frames: HashMap<String, FrameInfo>,
+    /// Memory layout from wraith.toml, so codegen can place the software stack
+    /// and other regions where the board actually has RAM.
+    pub memory_config: crate::config::MemoryConfig,
+    /// Function signatures (Type::Function) keyed by name, covering local and
+    /// imported functions (including imported-module functions this module did
+    /// not name). Codegen falls back to this to marshal call arguments when the
+    /// symbol table has no entry for the callee.
+    pub function_signatures: HashMap<String, types::Type>,
     /// Call-graph edges (caller, callee) that lie within a recursion cycle.
     /// A call across such an edge must save/restore the callee's frame.
     pub recursive_call_edges: HashSet<(String, String)>,
     /// Per-interrupt-handler zero-page save requirements.
     pub interrupt_save_info: HashMap<String, InterruptSaveInfo>,
+    /// Functions whose address is taken (used as function pointers). They pass
+    /// arguments through the fixed indirect-arg staging block and copy them into
+    /// their frame in a prologue, so indirect callers can pass args.
+    pub address_taken_functions: HashSet<String>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

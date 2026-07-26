@@ -35,6 +35,10 @@ pub enum Token {
     Continue,
     #[token("const")]
     Const,
+    /// Mutable global stored in RAM (as opposed to `const`, which is immutable
+    /// ROM data). Shared across functions and interrupt handlers.
+    #[token("static")]
+    Static,
     #[token("let")]
     Let,
     #[token("as")]

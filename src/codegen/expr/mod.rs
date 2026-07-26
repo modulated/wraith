@@ -33,7 +33,9 @@ use unary::generate_unary;
 
 // Re-export for use in other codegen modules
 pub use aggregate::generate_struct_init_runtime;
-pub(crate) use aggregate::{emit_array_struct_field_indexed, resolve_static_struct_lvalue};
+pub(crate) use aggregate::{
+    emit_array_struct_field_indexed, resolve_static_struct_lvalue, type_byte_size,
+};
 pub use call::generate_tail_recursive_update;
 
 pub fn generate_expr(
@@ -128,6 +130,9 @@ pub fn generate_expr(
         Expr::Index { object, index } => {
             generate_index(object, index, emitter, info, string_collector)
         }
+        Expr::CallIndirect { callee, args } => {
+            call::generate_call_indirect(callee, args, emitter, info, string_collector)
+        }
         Expr::Slice { .. } => {
             // Slices are only valid as assignment targets, not as expressions
             Err(CodegenError::UnsupportedOperation(
@@ -184,8 +189,42 @@ pub fn generate_expr(
 
                         Ok(())
                     }
+                    crate::sema::types::Type::Array(_, n) => {
+                        // Array length is a compile-time constant: emit it as a
+                        // u16 immediate (A = low byte, Y = high byte). This makes
+                        // `arr.len` and idioms like `for i in 0..arr.len` work.
+                        let n = *n as u16;
+                        emitter.emit_comment(&format!("Array .len (constant {})", n));
+                        emitter.emit_lda_immediate((n & 0xFF) as i64);
+                        emitter.emit_inst("LDY", &format!("#${:02X}", (n >> 8) & 0xFF));
+                        emitter.mark_a_unknown();
+                        Ok(())
+                    }
+                    crate::sema::types::Type::Slice(_) => {
+                        // A slice's length is the u16 stored at descriptor bytes
+                        // 2..3 (slot[0..1] is the base pointer). Load it into A:Y.
+                        if let Expr::Variable(name) = &object.node
+                            && let Some(sym) = info
+                                .resolved_symbols
+                                .get(&object.span)
+                                .or_else(|| info.table.lookup(name))
+                            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+                        {
+                            emitter.emit_comment("Slice .len (from descriptor)");
+                            emitter.emit_inst("LDA", &format!("${:02X}", addr + 2));
+                            emitter.emit_inst("LDY", &format!("${:02X}", addr + 3));
+                            emitter.mark_a_unknown();
+                            Ok(())
+                        } else {
+                            Err(CodegenError::UnsupportedOperation(
+                                ".len is only supported on slice variables".to_string(),
+                            ))
+                        }
+                    }
                     _ => {
-                        // Other types not yet supported
+                        // Slices are not yet first-class values, so a runtime
+                        // slice length is unreachable here; other types have no
+                        // length.
                         Err(CodegenError::UnsupportedOperation(format!(
                             "Length access (.len) not yet implemented for type: {}",
                             obj_ty.display_name()
@@ -371,7 +410,26 @@ pub fn generate_expr(
         Expr::Match {
             expr: match_expr,
             arms,
-        } => generate_match_expr(match_expr, arms, emitter, info, string_collector),
+        } => {
+            // Whether the unified result type is 16-bit — narrow arm bodies must
+            // then be zero-extended so their high byte in Y is well-defined.
+            let result_is_u16 = matches!(
+                info.resolved_types.get(&expr.span),
+                Some(crate::sema::types::Type::Primitive(
+                    crate::ast::PrimitiveType::U16
+                        | crate::ast::PrimitiveType::I16
+                        | crate::ast::PrimitiveType::B16
+                ))
+            );
+            generate_match_expr(
+                match_expr,
+                arms,
+                result_is_u16,
+                emitter,
+                info,
+                string_collector,
+            )
+        }
     }
 }
 
@@ -380,11 +438,37 @@ pub fn generate_expr(
 fn generate_match_expr(
     match_expr: &Spanned<Expr>,
     arms: &[crate::ast::ExprMatchArm],
+    result_is_u16: bool,
     emitter: &mut Emitter,
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
+
+    // Generate an arm body, then zero-extend its high byte (Y) when the unified
+    // result is 16-bit but this arm produced only an 8-bit value — otherwise Y
+    // would carry a garbage high byte into the u16 result.
+    let gen_body = |body: &Spanned<Expr>,
+                    emitter: &mut Emitter,
+                    info: &ProgramInfo,
+                    sc: &mut StringCollector|
+     -> Result<(), CodegenError> {
+        generate_expr(body, emitter, info, sc)?;
+        if result_is_u16 {
+            let body_is_u16 = matches!(
+                info.resolved_types.get(&body.span),
+                Some(crate::sema::types::Type::Primitive(
+                    crate::ast::PrimitiveType::U16
+                        | crate::ast::PrimitiveType::I16
+                        | crate::ast::PrimitiveType::B16
+                ))
+            );
+            if !body_is_u16 {
+                emitter.emit_inst("LDY", "#$00"); // zero-extend to u16
+            }
+        }
+        Ok(())
+    };
 
     let match_id = emitter.next_match_id();
     let end_label = format!("mx_{}", match_id);
@@ -396,24 +480,48 @@ fn generate_match_expr(
         .iter()
         .any(|arm| matches!(arm.pattern.node, Pattern::EnumVariant { .. }));
 
+    // Whether the scrutinee is 16-bit (low in A/$20, high in Y/$21) and/or
+    // signed — mirrors the match-statement path so literal/range patterns and
+    // variable bindings see the full value with correct comparison semantics.
+    let scrutinee_ty = info.resolved_types.get(&match_expr.span);
+    let scrutinee_is_u16 = matches!(
+        scrutinee_ty,
+        Some(crate::sema::types::Type::Primitive(
+            crate::ast::PrimitiveType::U16
+                | crate::ast::PrimitiveType::I16
+                | crate::ast::PrimitiveType::B16
+        ))
+    );
+    let scrutinee_is_signed = scrutinee_ty.is_some_and(|t| t.is_signed());
+
+    // Enum pointer lives in the pointer-ops area (not $20, which arm bodies use
+    // as scratch); the tag is cached at ptr_base+2. This matches the statement
+    // path and lets extract_enum_bindings read payloads from a stable pointer.
+    let ptr_base = emitter.memory_layout.pointer_ops_start;
+
     // Evaluate the matched expression
     generate_expr(match_expr, emitter, info, string_collector)?;
 
     if is_enum_match {
         // For enum matching, expression returns a pointer in A:X
-        emitter.emit_inst("STA", "$20");
-        emitter.emit_inst("STX", "$21");
+        emitter.emit_inst("STA", &format!("${:02X}", ptr_base));
+        emitter.emit_inst("STX", &format!("${:02X}", ptr_base + 1));
 
         // Load the discriminant tag from the enum (first byte)
         emitter.emit_inst("LDY", "#$00");
-        emitter.emit_inst("LDA", "($20),Y");
-        emitter.emit_inst("STA", "$22"); // Store tag at $22
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_base));
+        emitter.emit_inst("STA", &format!("${:02X}", ptr_base + 2)); // cache tag
     } else {
-        // For simple value matching, store value at $20
+        // For simple value matching, store the low byte at $20 (and the high
+        // byte at $21 for u16 so patterns/bindings see the full value).
         emitter.emit_inst("STA", "$20");
+        if scrutinee_is_u16 {
+            emitter.emit_inst("STY", "$21");
+        }
     }
 
-    // Generate code for each arm
+    // A non-matching arm runs no body (it branches to its skip label before the
+    // body), so the enum pointer / value scratch survives across arms.
     for (i, arm) in arms.iter().enumerate() {
         let next_label = format!("mn_{}_{}", match_id, i);
 
@@ -430,21 +538,17 @@ fn generate_match_expr(
                         .iter()
                         .position(|v| v.name == variant.node)
                 {
-                    // Compare tag
-                    emitter.emit_inst("LDA", "$22");
+                    emitter.emit_inst("LDA", &format!("${:02X}", ptr_base + 2));
                     emitter.emit_inst("CMP", &format!("#${:02X}", tag));
                     emitter.emit_inst("BNE", &next_label);
 
-                    // For bindings, load the payload value into A
-                    // This is a simplified version - assumes single u8 binding
-                    if !bindings.is_empty() {
-                        emitter.emit_inst("LDY", "#$01"); // Offset 1 = first payload byte
-                        emitter.emit_inst("LDA", "($20),Y");
-                        // Value is now in A for the arm body to use
-                    }
+                    // Copy any payload bindings into their storage (every byte,
+                    // so multi-byte payloads keep their high byte).
+                    crate::codegen::stmt::extract_enum_bindings(
+                        enum_name, variant, bindings, ptr_base, emitter, info,
+                    )?;
 
-                    // Generate arm body (expression)
-                    generate_expr(&arm.body, emitter, info, string_collector)?;
+                    gen_body(&arm.body, emitter, info, string_collector)?;
                     emitter.emit_inst("JMP", &end_label);
                 }
                 emitter.emit_label(&next_label);
@@ -452,37 +556,142 @@ fn generate_match_expr(
 
             Pattern::Wildcard => {
                 // Wildcard matches everything - just generate the body
-                generate_expr(&arm.body, emitter, info, string_collector)?;
+                gen_body(&arm.body, emitter, info, string_collector)?;
                 emitter.emit_inst("JMP", &end_label);
             }
 
-            Pattern::Variable(_name) => {
-                // Variable pattern binds the whole value
-                // Value is already in $20, body can use it
-                generate_expr(&arm.body, emitter, info, string_collector)?;
+            Pattern::Variable(name) => {
+                // Variable pattern binds the whole value: copy it (both bytes
+                // for u16) into the binding's storage, recorded by sema under
+                // the pattern span, before running the body.
+                copy_scrutinee_to_binding(
+                    &arm.pattern.span,
+                    name,
+                    scrutinee_is_u16,
+                    emitter,
+                    info,
+                )?;
+                gen_body(&arm.body, emitter, info, string_collector)?;
                 emitter.emit_inst("JMP", &end_label);
             }
 
             Pattern::Literal(lit_expr) => {
-                // Compare against literal
+                // Compare against literal (both bytes when the scrutinee is u16).
                 if let Expr::Literal(crate::ast::Literal::Integer(n)) = &lit_expr.node {
-                    emitter.emit_inst("LDA", "$20");
-                    emitter.emit_inst("CMP", &format!("#${:02X}", *n as u8));
-                    emitter.emit_inst("BNE", &next_label);
-                    generate_expr(&arm.body, emitter, info, string_collector)?;
+                    let val = *n as u16;
+                    if scrutinee_is_u16 {
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", val & 0xFF));
+                        emitter.emit_inst("BNE", &next_label);
+                        emitter.emit_inst("LDA", "$21");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", (val >> 8) & 0xFF));
+                        emitter.emit_inst("BNE", &next_label);
+                    } else {
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", val & 0xFF));
+                        emitter.emit_inst("BNE", &next_label);
+                    }
+                    gen_body(&arm.body, emitter, info, string_collector)?;
                     emitter.emit_inst("JMP", &end_label);
                 }
                 emitter.emit_label(&next_label);
             }
 
-            Pattern::Range { .. } => {
-                return Err(CodegenError::UnsupportedOperation(
-                    "Range patterns not yet supported in match expressions".to_string(),
-                ));
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                // value >= start && value <= end (or < end+1 for inclusive),
+                // over the low byte. Signed ranges use the same folded
+                // (N eor V) sign test as the statement path.
+                if let (
+                    Expr::Literal(crate::ast::Literal::Integer(start_val)),
+                    Expr::Literal(crate::ast::Literal::Integer(end_val)),
+                ) = (&start.node, &end.node)
+                {
+                    let upper_bound = if *inclusive { end_val + 1 } else { *end_val };
+                    if scrutinee_is_signed {
+                        let emit_signed_lt =
+                            |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
+                                emitter.emit_inst("LDA", "$20");
+                                if bound == 0 {
+                                    emitter.emit_inst("BMI", target);
+                                } else {
+                                    let nov = format!("mnr_{}_{}_{}", match_id, i, tag);
+                                    emitter.emit_inst("SEC", "");
+                                    emitter.emit_inst("SBC", &format!("#${:02X}", bound as u8));
+                                    emitter.emit_inst("BVC", &nov);
+                                    emitter.emit_inst("EOR", "#$80");
+                                    emitter.emit_label(&nov);
+                                    emitter.emit_inst("BMI", target);
+                                }
+                            };
+                        // value < start -> skip this arm.
+                        emit_signed_lt(emitter, *start_val, &next_label, "v1");
+                        // value < end+1 -> in range; else fall through to skip.
+                        let body_label = format!("mnrb_{}_{}", match_id, i);
+                        emit_signed_lt(emitter, upper_bound, &body_label, "v2");
+                        emitter.emit_inst("JMP", &next_label);
+                        emitter.emit_label(&body_label);
+                    } else {
+                        emitter.emit_inst("LDA", "$20");
+                        emitter.emit_inst("CMP", &format!("#${:02X}", *start_val as u8));
+                        emitter.emit_inst("BCC", &next_label); // value < start
+                        emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound as u8));
+                        emitter.emit_inst("BCS", &next_label); // value >= end+1
+                    }
+                    gen_body(&arm.body, emitter, info, string_collector)?;
+                    emitter.emit_inst("JMP", &end_label);
+                }
+                emitter.emit_label(&next_label);
             }
         }
     }
 
     emitter.emit_label(&end_label);
+    Ok(())
+}
+
+/// Copy the match scrutinee (held at $20, and $21 when u16) into a variable
+/// pattern's binding storage, which sema records under the pattern span.
+fn copy_scrutinee_to_binding(
+    pattern_span: &crate::ast::Span,
+    name: &str,
+    scrutinee_is_u16: bool,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::sema::table::SymbolLocation;
+    let loc = info
+        .resolved_symbols
+        .get(pattern_span)
+        .map(|sym| sym.location.clone())
+        .ok_or_else(|| CodegenError::SymbolNotFound(name.to_string()))?;
+    match loc {
+        SymbolLocation::ZeroPage(addr) => {
+            emitter.emit_inst("LDA", "$20");
+            emitter.emit_inst("STA", &format!("${:02X}", addr));
+            if scrutinee_is_u16 {
+                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("STA", &format!("${:02X}", addr + 1));
+            }
+        }
+        SymbolLocation::Absolute(addr) => {
+            emitter.emit_inst("LDA", "$20");
+            emitter.emit_inst("STA", &format!("${:04X}", addr));
+            if scrutinee_is_u16 {
+                emitter.emit_inst("LDA", "$21");
+                emitter.emit_inst("STA", &format!("${:04X}", addr + 1));
+            }
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "match binding '{}' has unsupported storage location",
+                name
+            )));
+        }
+    }
+    emitter.invalidate_registers();
     Ok(())
 }

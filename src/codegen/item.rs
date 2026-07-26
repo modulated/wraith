@@ -146,6 +146,8 @@ fn generate_function(
     // First pass: Generate function into temporary emitter to measure size
     let function_size = {
         let mut temp_emitter = Emitter::new(emitter.verbosity);
+        // Same layout as the real emitter, or the measured size would differ.
+        temp_emitter.memory_layout = emitter.memory_layout.clone();
         // Copy register state and label counter to avoid label conflicts
         temp_emitter.reg_state = emitter.reg_state.clone();
         temp_emitter.label_counter = emitter.label_counter;
@@ -163,6 +165,16 @@ fn generate_function(
             emit_interrupt_zp_save(&mut temp_emitter, &interrupt_zp);
         }
 
+        // Include the function-pointer prologue size (must match the real emit).
+        if info.address_taken_functions.contains(name)
+            && let Some(frame) = info.function_frames.get(name)
+        {
+            for _ in 0..frame.param_size {
+                temp_emitter.emit_inst("LDA", "$E0");
+                temp_emitter.emit_inst("STA", "$40");
+            }
+        }
+
         // Generate function body to measure size
         generate_stmt(&func.body, &mut temp_emitter, info, string_collector)?;
 
@@ -176,7 +188,9 @@ fn generate_function(
             temp_emitter.emit_inst("TAX", "");
             temp_emitter.emit_inst("PLA", "");
             temp_emitter.emit_inst("RTI", "");
-        } else if func.return_type.is_none() {
+        } else if !temp_emitter.last_was_terminal() {
+            // Mirror the real epilogue (see below): RTS unless the body already
+            // ended terminal, so the measured size matches the emitted size.
             temp_emitter.emit_inst("RTS", "");
         }
 
@@ -321,7 +335,10 @@ fn generate_function(
         emitter.emit_comment("Initialize software stack pointer for parameter preservation");
         emitter.emit_inst("LDA", "#$00");
         emitter.emit_inst("STA", "$FF"); // Stack pointer at $FF, stack at $0200-$02FF
-        emitter.emit_inst("STA", "$FF"); // Stack pointer at $FF, stack at $0200-$02FF
+
+        // Mutable statics live in RAM, which holds garbage at power-on, so their
+        // declared initial values must be written here before any user code runs.
+        emit_static_inits(emitter, info);
     }
 
     // Set current function context for tail call detection and inline asm scoping
@@ -362,6 +379,28 @@ fn generate_function(
         emit_interrupt_zp_save(emitter, &interrupt_zp);
     }
 
+    // Address-taken function prologue: copy arguments from the fixed indirect-arg
+    // staging block into this function's colored frame parameter slots. Every
+    // caller (direct or indirect) writes args to the staging block, so this runs
+    // on every entry. The params occupy [frame.base, frame.base + param_size).
+    if info.address_taken_functions.contains(name)
+        && let Some(frame) = info.function_frames.get(name)
+        && frame.param_size > 0
+    {
+        emitter.emit_comment("Function-pointer prologue: copy staged args into frame");
+        for i in 0..frame.param_size {
+            emitter.emit_inst(
+                "LDA",
+                &format!(
+                    "${:02X}",
+                    crate::codegen::memory_layout::INDIRECT_ARG_BASE + i
+                ),
+            );
+            emitter.emit_inst("STA", &format!("${:02X}", frame.base + i));
+        }
+        emitter.invalidate_registers();
+    }
+
     // Body
     generate_stmt(&func.body, emitter, info, string_collector)?;
 
@@ -382,15 +421,80 @@ fn generate_function(
         emitter.emit_inst("PLA", "");
         emitter.emit_inst("RTI", "");
     } else {
-        // Emit RTS for functions without explicit return (void functions)
-        // Only emit if the last instruction wasn't already a terminal instruction (RTS, RTI, or JMP)
-        // This avoids duplicate RTS when the function body ends with a return statement
-        if func.return_type.is_none() && !emitter.last_was_terminal() {
+        // Emit a trailing RTS whenever the body does not already end in a
+        // terminal instruction (RTS, RTI, or JMP). This covers void functions
+        // that fall off the end AND value-returning functions whose body ends in
+        // an `asm { }` block that leaves the result in registers without an
+        // explicit `return` (e.g. the stdlib math routines) — those would
+        // otherwise fall through into the next function. `last_was_terminal`
+        // already prevents a duplicate RTS after an explicit `return`.
+        if !emitter.last_was_terminal() {
             emitter.emit_inst("RTS", "");
         }
     }
 
     Ok(())
+}
+
+/// Write each mutable static's declared initial value into its RAM location.
+/// Emitted at the top of the reset handler. An all-zero region (the common
+/// `= 0` / `[0; N]` case) becomes a compact fill loop; other values are written
+/// byte by byte, coalescing runs that share a value so `A` is reloaded rarely.
+fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
+    use crate::sema::InitByte;
+
+    if info.static_inits.is_empty() {
+        return;
+    }
+    emitter.emit_comment("Initialize mutable statics (RAM is undefined at reset)");
+    for init in &info.static_inits {
+        let len = init.bytes.len();
+        if len == 0 {
+            continue;
+        }
+        // Large all-zero blocks: fill with a loop instead of `len` stores.
+        if len > 8 && init.bytes.iter().all(|b| matches!(b, InitByte::Byte(0))) {
+            let loop_label = emitter.next_label("bssz");
+            emitter.emit_comment(&format!("{}: zero {} bytes", init.name, len));
+            emitter.emit_inst("LDA", "#$00");
+            emitter.emit_inst("LDX", "#$00");
+            emitter.emit_label(&loop_label);
+            for page in 0..len.div_ceil(256) {
+                let base = init.addr as usize + page * 256;
+                emitter.emit_inst("STA", &format!("${:04X},X", base));
+            }
+            emitter.emit_inst("INX", "");
+            let count = if len >= 256 { 0u8 } else { len as u8 };
+            emitter.emit_inst("CPX", &format!("#${:02X}", count));
+            emitter.emit_inst("BNE", &loop_label);
+            emitter.invalidate_registers();
+            continue;
+        }
+        emitter.emit_comment(&format!("{} = {} byte(s)", init.name, len));
+        // Track the last value loaded into A so runs of equal bytes reload rarely.
+        let mut last: Option<u8> = None;
+        for (i, b) in init.bytes.iter().enumerate() {
+            match b {
+                InitByte::Byte(v) => {
+                    if last != Some(*v) {
+                        emitter.emit_inst("LDA", &format!("#${:02X}", v));
+                        last = Some(*v);
+                    }
+                }
+                // Function addresses are only known to the assembler.
+                InitByte::FnLow(f) => {
+                    emitter.emit_inst("LDA", &format!("#<{}", f));
+                    last = None;
+                }
+                InitByte::FnHigh(f) => {
+                    emitter.emit_inst("LDA", &format!("#>{}", f));
+                    last = None;
+                }
+            }
+            emitter.emit_inst("STA", &format!("${:04X}", init.addr as usize + i));
+        }
+        emitter.invalidate_registers();
+    }
 }
 
 fn generate_static(
@@ -427,79 +531,28 @@ fn generate_static(
         return Ok(());
     }
 
-    // Generate storage for mutable statics only
+    // A mutable `static` lives in RAM (the BSS section), not ROM. Sema assigned
+    // it a concrete address, so emit only an assembler equate here — no bytes.
+    // Its initial value is written by the reset handler (see emit_static_init),
+    // because ROM data cannot be pre-loaded into RAM on a bare machine.
     let name = &stat.name.node;
-
-    // Emit label for the static variable
-    emitter.emit_label(name);
-
-    // Look up the symbol to get its type and size
     let sym = info
         .table
         .lookup(name)
         .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
-
-    let type_size = sym.ty.size();
-
-    // Emit initial value as data
-    match &stat.init.node {
-        crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) => {
-            emitter.emit_comment(&format!("static {}: {} (size: {})", name, val, type_size));
-
-            // Emit value as bytes (little-endian for multi-byte values)
-            let value = *val as u64; // Convert to u64 for bit manipulation
-            match type_size {
-                1 => {
-                    // Single byte (u8 or i8)
-                    emitter.emit_byte((value & 0xFF) as u8);
-                }
-                2 => {
-                    // Two bytes (u16 or i16) - little-endian
-                    emitter.emit_byte((value & 0xFF) as u8); // Low byte
-                    emitter.emit_byte((value & 0xFF) as u8); // Low byte
-                    emitter.emit_byte(((value >> 8) & 0xFF) as u8); // High byte
-                }
-                _ => {
-                    // For larger types, emit as many bytes as needed
-                    for i in 0..type_size {
-                        emitter.emit_byte(((value >> (i * 8)) & 0xFF) as u8);
-                    }
-                }
-            }
-        }
-        crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) => {
-            emitter.emit_comment(&format!(
-                "static {} (array of {} elements)",
-                name,
-                elements.len()
-            ));
-            emitter.emit_comment(&format!(
-                "static {} (array of {} elements)",
-                name,
-                elements.len()
-            ));
-
-            // Emit each element as a byte
-            for elem in elements {
-                if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(val)) = &elem.node {
-                    emitter.emit_byte(*val as u8);
-                } else {
-                    return Err(CodegenError::UnsupportedOperation(
-                        "Only integer literals supported in static array initialization"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-        crate::ast::Expr::Literal(crate::ast::Literal::Bool(b)) => {
-            emitter.emit_comment(&format!("static {} (bool)", name));
-            emitter.emit_byte(if *b { 1 } else { 0 });
-        }
-        _ => {
-            return Err(CodegenError::UnsupportedOperation(
-                "Only constant literal expressions supported in static initialization".to_string(),
-            ));
-        }
+    if let crate::sema::table::SymbolLocation::Absolute(addr) = sym.location {
+        emitter.emit_comment(&format!(
+            "static {} @ ${:04X} ({} bytes, RAM)",
+            name,
+            addr,
+            crate::codegen::expr::type_byte_size(&sym.ty, info).max(1)
+        ));
+        emitter.emit_raw(&format!("{} = ${:04X}", name, addr));
+    } else {
+        return Err(CodegenError::Internal(format!(
+            "mutable static '{}' was not assigned a RAM address",
+            name
+        )));
     }
 
     Ok(())

@@ -17,7 +17,7 @@ A simple monitor/debugger for a 6502 homebrew computer, written in Wraith. This 
 
 ### UART Configuration
 
--   **Baud Rate**: 9600 (configurable in `hardware.wr`)
+-   **Baud Rate**: 9600 (configurable in `via.wr`)
 -   **Format**: 8N1 (8 data bits, no parity, 1 stop bit)
 -   **Crystal**: 1.8432 MHz (standard for UART timing)
 
@@ -116,9 +116,9 @@ Jump to 0300
 
 ```
 monitor/
-├── hardware.wr    # Hardware definitions and memory map
+├── via.wr         # 6522 VIA register map and helpers
 ├── uart.wr        # UART driver (TL16C550B)
-├── monitor.wr     # Main monitor/command interpreter
+├── monitor_standalone.wr  # Self-contained monitor (no imports)
 ├── vectors.wr     # Interrupt vectors and startup
 └── README.md      # This file
 ```
@@ -226,20 +226,20 @@ Type 'H' for help
 
 ### Adding New Commands
 
-1. Add command handler function in `monitor.wr`
+1. Add command handler function in `monitor_standalone.wr`
 2. Add case in `process_command()` dispatcher
 3. Update `print_help()` with new command
 
 ### Adding Peripherals
 
-1. Define addresses in `hardware.wr`
+1. Define addresses in `via.wr`
 2. Create driver module (e.g., `via.wr` for 6522)
 3. Import and use in monitor or user programs
 
 ### Example: Adding a "Fill Memory" Command
 
 ```wraith
-// In monitor.wr
+// In monitor_standalone.wr
 
 fn cmd_fill() {
     // Fill memory range with byte value

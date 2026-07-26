@@ -333,6 +333,161 @@ pub fn swap_nibbles(value: u8) -> u8 {
 }
 
 // ============================================================================
+// Widening / combined arithmetic
+// ============================================================================
+
+/// Widening multiply: u8 * u8 -> u16 (full 16-bit product, never truncates).
+/// The plain `*` on two u8 values yields a u8 (low byte only); use this when
+/// the product can exceed 255.
+/// Algorithm: 8-iteration shift-and-add. Uses zero page $20-$24 as scratch.
+/// Returns: a * b as a full u16 (A = low, Y = high).
+pub fn mul_wide(a: u8, b: u8) -> u16 {
+    asm {
+        "LDA #$00",
+        "STA $20",        // product low
+        "STA $21",        // product high
+        "LDA {a}",
+        "STA $22",        // multiplicand low
+        "LDA #$00",
+        "STA $23",        // multiplicand high (a is 8-bit)
+        "LDA {b}",
+        "STA $24",        // multiplier
+        "LDX #$08",
+        "mulwide_loop:",
+        "LSR $24",        // multiplier >>= 1, LSB -> carry
+        "BCC mulwide_skip",
+        "CLC",
+        "LDA $20",
+        "ADC $22",
+        "STA $20",
+        "LDA $21",
+        "ADC $23",
+        "STA $21",
+        "mulwide_skip:",
+        "ASL $22",        // multiplicand <<= 1
+        "ROL $23",
+        "DEX",
+        "BNE mulwide_loop",
+        "LDA $20",        // low byte -> A
+        "LDY $21",        // high byte -> Y
+    }
+}
+
+/// Combined division and remainder for u8 operands, computed in a single pass.
+/// Returns both results packed into a u16: the **quotient** in the low byte
+/// (`.low`) and the **remainder** in the high byte (`.high`). This avoids
+/// computing `a / b` and `a % b` separately (each a full division).
+///
+/// Division by zero returns 0xFFFF (quotient 0xFF, remainder 0xFF), matching
+/// the div16 convention.
+///
+/// Example:
+/// ```
+/// let qr: u16 = divmod(23, 5);
+/// let q: u8 = qr.low;   // 4
+/// let r: u8 = qr.high;  // 3
+/// ```
+pub fn divmod(a: u8, b: u8) -> u16 {
+    asm {
+        "LDA {b}",
+        "BNE divmod_ok",
+        "LDA #$FF",       // divide by zero -> 0xFFFF
+        "TAY",
+        "JMP divmod_done",
+        "divmod_ok:",
+        "LDA {a}",
+        "STA $20",        // dividend, becomes quotient
+        "LDA #$00",
+        "STA $21",        // remainder
+        "LDX #$08",
+        "divmod_loop:",
+        "ASL $20",        // shift dividend left, MSB -> carry
+        "ROL $21",        // carry into remainder
+        "LDA $21",
+        "SEC",
+        "SBC {b}",
+        "BCC divmod_no",  // remainder < divisor: don't subtract
+        "STA $21",        // remainder -= divisor
+        "INC $20",        // set quotient bit 0
+        "divmod_no:",
+        "DEX",
+        "BNE divmod_loop",
+        "LDA $20",        // quotient -> A (low)
+        "LDY $21",        // remainder -> Y (high)
+        "divmod_done:",
+    }
+}
+
+// ============================================================================
+// Pseudo-random number generator (16-bit Galois LFSR)
+// ============================================================================
+//
+// State is a 16-bit seed held at zero page $DD-$DE (reserved for the PRNG in the
+// compiler memory map). The generator is a maximal-period (65535) Galois LFSR
+// with tap mask $B400. It self-seeds to a fixed nonzero value on first use, so
+// rand() works without an explicit srand(); call srand() for a chosen sequence.
+
+/// Advance the PRNG and return the next pseudo-random byte (0..=255).
+pub fn rand() -> u8 {
+    asm {
+        "LDA $DD",
+        "ORA $DE",
+        "BNE rand_step",  // state != 0: use it
+        "LDA #$E1",       // first use: self-seed to $ACE1
+        "STA $DD",
+        "LDA #$AC",
+        "STA $DE",
+        "rand_step:",
+        "LSR $DE",        // 16-bit right shift: high first...
+        "ROR $DD",        // ...then low; carry = bit shifted out (the LSB)
+        "BCC rand_noxor",
+        "LDA $DE",
+        "EOR #$B4",       // feedback tap $B400 (low byte is 0)
+        "STA $DE",
+        "rand_noxor:",
+        "LDA $DD",        // return low byte of new state
+    }
+}
+
+/// Advance the PRNG and return the next pseudo-random 16-bit value.
+pub fn rand16() -> u16 {
+    asm {
+        "LDA $DD",
+        "ORA $DE",
+        "BNE rand16_step",
+        "LDA #$E1",
+        "STA $DD",
+        "LDA #$AC",
+        "STA $DE",
+        "rand16_step:",
+        "LSR $DE",
+        "ROR $DD",
+        "BCC rand16_noxor",
+        "LDA $DE",
+        "EOR #$B4",
+        "STA $DE",
+        "rand16_noxor:",
+        "LDA $DD",        // low -> A
+        "LDY $DE",        // high -> Y
+    }
+}
+
+/// Seed the PRNG. A zero seed is replaced with 1 so the LFSR never gets stuck.
+pub fn srand(seed: u16) {
+    asm {
+        "LDA {seed}",
+        "STA $DD",
+        "LDA {seed}+1",
+        "STA $DE",
+        "ORA $DD",        // seed == 0?
+        "BNE srand_done",
+        "LDA #$01",
+        "STA $DD",
+        "srand_done:",
+    }
+}
+
+// ============================================================================
 // 16-bit Arithmetic Operations
 // ============================================================================
 
@@ -428,80 +583,74 @@ pub fn mul16(a: u16, b: u16) -> u16 {
 /// $27: temp for division by zero check
 pub fn div16(a: u16, b: u16) -> u16 {
     asm {
-        // Check for division by zero (b == 0)
-        "LDA {b}",      // b.low
-        "ORA {b}+1",    // OR with b.high
+        // Divide by zero -> 0xFFFF (documented sentinel).
+        "LDA {b}",
+        "ORA {b}+1",
         "BNE div16_not_zero",
-        // Return 0xFFFF for division by zero
         "LDA #$FF",
         "TAY",
         "JMP div16_done",
 
         "div16_not_zero:",
-        // Initialize quotient to 0
+        // Restoring long division. $20/$21 starts as the dividend and is
+        // shifted left 16 times, each bit moving into the remainder at
+        // $24/$25; the vacated low bit becomes the quotient bit, so $20/$21
+        // holds the quotient once the loop finishes.
+        //   $20/$21: dividend -> quotient
+        //   $22/$23: divisor
+        //   $24/$25: remainder (starts at 0)
+        //   $26:     loop counter
+        "LDA {a}",
+        "STA $20",
+        "LDA {a}+1",
+        "STA $21",
+        "LDA {b}",
+        "STA $22",
+        "LDA {b}+1",
+        "STA $23",
         "LDA #$00",
         "STA $24",
         "STA $25",
-
-        // Load dividend from parameter a into $20-$21
-        "LDA {a}",      // a.low
-        "STA $20",
-        "LDA {a}+1",    // a.high
-        "STA $21",
-
-        // Load divisor from parameter b into $22-$23
-        "LDA {b}",      // b.low
-        "STA $22",
-        "LDA {b}+1",    // b.high
-        "STA $23",
-
-        // Initialize loop counter to 16
         "LDX #$10",
         "STX $26",
 
         "div16_loop:",
-        // Shift quotient left by 1 (make room for new bit)
-        "ASL $24",
-        "ROL $25",
-
-        // Shift remainder left by 1
+        // Shift the dividend left; its MSB falls out into the carry...
         "ASL $20",
         "ROL $21",
+        // ...and rotates into the remainder.
+        "ROL $24",
+        "ROL $25",
 
-        // Compare remainder with divisor
-        // First compare high bytes
-        "LDA $21",
+        // remainder >= divisor ?
+        "LDA $25",
         "CMP $23",
-        "BCC div16_skip_sub",  // remainder.high < divisor.high, skip
-        "BNE div16_do_sub",    // remainder.high > divisor.high, do subtract
-
-        // High bytes equal, compare low bytes
-        "LDA $20",
+        "BCC div16_skip_sub",
+        "BNE div16_do_sub",
+        "LDA $24",
         "CMP $22",
-        "BCC div16_skip_sub",  // remainder.low < divisor.low, skip
+        "BCC div16_skip_sub",
 
         "div16_do_sub:",
-        // Subtract divisor from remainder
         "SEC",
-        "LDA $20",
+        "LDA $24",
         "SBC $22",
-        "STA $20",
-        "LDA $21",
+        "STA $24",
+        "LDA $25",
         "SBC $23",
-        "STA $21",
-
-        // Set bit 0 of quotient
-        "INC $24",
+        "STA $25",
+        // The bit shifted out of the dividend is free: use it for the quotient.
+        "INC $20",
 
         "div16_skip_sub:",
-        // Decrement counter and loop if not zero
         "DEC $26",
         "BNE div16_loop",
 
-        // Load quotient into A (low) and Y (high) per u16 return convention
-        "LDA $24",
-        "LDY $25",
+        // Quotient in A (low) / Y (high), per the u16 return convention.
+        "LDA $20",
+        "LDY $21",
 
         "div16_done:",
     }
 }
+

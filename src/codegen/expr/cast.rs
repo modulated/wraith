@@ -212,5 +212,9 @@ pub(super) fn generate_type_cast(
         }
     }
 
+    // Casts rewrite A via raw instructions (the bool conversion, the enum-pointer
+    // dereference) that don't update register tracking, so drop cached beliefs —
+    // otherwise a following load of the cast's source could be wrongly elided.
+    emitter.mark_a_unknown();
     Ok(())
 }

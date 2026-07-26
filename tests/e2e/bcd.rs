@@ -232,3 +232,87 @@ fn bcd_equality_test() {
     assert!(!asm.contains("SED"));
     assert_asm_contains(&asm, "CMP");
 }
+
+// ============================================================
+// Executed BCD arithmetic
+//
+// The tests above check that decimal mode is entered (SED/CLD) and that the
+// type rules hold. Neither shows the arithmetic is *decimal*: 0x19 + 0x01 is
+// 0x1A in binary but must be 0x20 in BCD. These run it.
+// ============================================================
+
+use crate::common::exec::run;
+
+/// Evaluate a b8 expression, returning the raw BCD byte.
+fn eval_b8(body: &str) -> u8 {
+    let src = format!(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {{
+            {body}
+            loop {{}}
+        }}
+    "#
+    );
+    run(&src).mem(0x0900)
+}
+
+#[test]
+fn b8_addition_carries_decimally() {
+    // 19 + 1 = 20 in BCD ($19 + $01 = $20), not $1A.
+    assert_eq!(
+        eval_b8("let a: b8 = 19 as b8; let b: b8 = 1 as b8; OUT = (a + b) as u8;"),
+        0x20
+    );
+}
+
+#[test]
+fn b8_addition_within_a_digit() {
+    // No carry between digits: 12 + 3 = 15 ($12 + $03 = $15).
+    assert_eq!(
+        eval_b8("let a: b8 = 12 as b8; let b: b8 = 3 as b8; OUT = (a + b) as u8;"),
+        0x15
+    );
+}
+
+#[test]
+fn b8_addition_carries_into_upper_digit() {
+    // 45 + 27 = 72 ($45 + $27 = $72); binary addition would give $6C.
+    assert_eq!(
+        eval_b8("let a: b8 = 45 as b8; let b: b8 = 27 as b8; OUT = (a + b) as u8;"),
+        0x72
+    );
+}
+
+#[test]
+fn b8_subtraction_borrows_decimally() {
+    // 20 - 1 = 19 ($20 - $01 = $19); binary subtraction would give $1F.
+    assert_eq!(
+        eval_b8("let a: b8 = 20 as b8; let b: b8 = 1 as b8; OUT = (a - b) as u8;"),
+        0x19
+    );
+}
+
+#[test]
+fn b8_subtraction_across_digits() {
+    // 50 - 23 = 27 ($50 - $23 = $27).
+    assert_eq!(
+        eval_b8("let a: b8 = 50 as b8; let b: b8 = 23 as b8; OUT = (a - b) as u8;"),
+        0x27
+    );
+}
+
+#[test]
+fn decimal_mode_is_cleared_afterwards() {
+    // A stray SED would corrupt every later binary add. Do BCD arithmetic, then
+    // ordinary binary arithmetic, and check the binary result is not decimal.
+    assert_eq!(
+        eval_b8(
+            "let a: b8 = 19 as b8; let b: b8 = 1 as b8; let c: b8 = a + b;
+             let x: u8 = 0x19; let y: u8 = 0x01; OUT = x + y;"
+        ),
+        0x1A,
+        "binary addition after BCD must stay binary ($19 + $01 = $1A)"
+    );
+}

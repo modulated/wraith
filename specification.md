@@ -220,6 +220,61 @@ Constants are checked for overflow at compile time:
 const INVALID: u8 = 256;  // ERROR: constant overflow (256 doesn't fit in u8)
 ```
 
+### Mutable Globals (`static`)
+
+`const` declares immutable data that lives in ROM. Use `static` for state that
+must be **written at runtime and shared across functions** — including interrupt
+handlers:
+
+```rust
+static RX_HEAD: u8 = 0;
+static RX_BUF: [u8; 64] = [0; 64];
+static TICKS: u16 = 0;
+
+#[irq]
+fn on_irq() {
+    TICKS = TICKS + 1;      // handler updates shared state
+}
+
+#[reset]
+fn main() {
+    RX_BUF[RX_HEAD] = 0x41;
+    loop {}
+}
+```
+
+This is the only way to share state between an interrupt handler and the main
+program: local variables are allocated in per-function frames that the compiler
+*colors* by the call graph, so a handler cannot see another function's locals.
+
+**Characteristics:**
+- Stored in the `BSS` section (RAM), allocated in declaration order
+- Initial values are written by the reset handler, because RAM contents are
+  undefined at power-on (large all-zero blocks use a compact fill loop)
+- Arrays and structs are supported; arrays are indexed with absolute-indexed
+  addressing
+- `addr` may not be declared `static` — an `addr` names a fixed hardware
+  location, so it stays `const`
+- Statics shared with interrupt handlers are **not** protected: guard multi-byte
+  updates with a `SEI`/`CLI` critical section
+
+**Configuring RAM.** The `BSS` region defaults to `$0400-$07FF` (1 KB of user
+RAM, clear of the zero page, the hardware stack at `$0100-$01FF`, and the
+compiler's software-stack page at `$0200-$02FF`). Override it in `wraith.toml`
+to match your board:
+
+```toml
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals"
+```
+
+The compiler warns if an `addr` declaration falls inside the `BSS` range, since
+it would collide with allocated globals, and errors if the globals overflow the
+configured region.
+
 ### Memory-Mapped Addresses
 
 Use the `addr` keyword to declare memory-mapped I/O addresses:
@@ -609,6 +664,63 @@ fn main() {
 
 Because parameters live in the callee's own frame rather than shared fixed registers or a fixed address range, a caller's own parameters and locals are never at risk of being overwritten by a call it makes - see [Zero Page Allocation](#zero-page-allocation) for how frames are placed to guarantee this, and [Appendix C](#appendix-c-calling-convention) for the full call sequence.
 
+### Function Pointers
+
+A function's bare name used as a value is its address. The type is written
+`fn(params) -> ret` (the `-> ret` is omitted for a function returning nothing):
+
+```rust
+fn double(x: u8) -> u8 { return x + x; }
+
+fn main() {
+    let f: fn(u8) -> u8 = double;
+    let y: u8 = f(21);      // 42
+}
+```
+
+A function pointer is a 2-byte code address. Calls through one go via an
+indirect trampoline rather than a direct `JSR`, so they cost a few extra cycles.
+
+**Indirect arguments.** A function whose address is taken receives its arguments
+through a fixed staging block and copies them into its frame in a prologue, so
+direct and indirect callers agree on where arguments live. Only scalar
+(1- and 2-byte) parameters may be passed to an indirect call.
+
+### Vtables and Dynamic Dispatch
+
+Function pointers can be stored in struct fields and called through them. This
+is how a driver or device interface is expressed: the calling code names only the
+struct, not the implementation.
+
+```rust
+struct Device {
+    read:  fn(u8) -> u8,
+    write: fn(u8),
+}
+
+fn uart_read(reg: u8) -> u8  { return UART_BASE; }
+fn uart_write(v: u8)         { UART_TX = v; }
+fn via_read(reg: u8) -> u8   { return VIA_PORTA; }
+
+static DEV: Device = Device { read: uart_read, write: uart_write };
+
+fn main() {
+    // Bind a different driver at runtime; callers are unaffected.
+    DEV.read = via_read;
+
+    let status: u8 = DEV.read(5);   // dispatched through the vtable
+    DEV.write(0x41);
+}
+```
+
+Any expression whose type is a function pointer may be called, so a field, a
+variable, or a returned pointer all work. A bare `name(...)` still compiles to a
+direct `JSR`; only computed callees pay the indirect cost.
+
+`read` and `write` are *contextual* keywords: they act as access modifiers only
+in `const NAME: read addr = ...`, and are ordinary identifiers everywhere else,
+so `struct Device { read, write }` and `dev.write(v)` are legal.
+
 ### Completion Status
 
 All items completed.
@@ -730,6 +842,23 @@ fn move_point(p: Point, dx: u8, dy: u8) -> Point {
 // Large struct - typically passed by reference in real usage
 fn update_entity(e: Entity) {
     e.health = e.health - 1;
+}
+```
+
+### Returning Structs by Value
+
+A function may return a struct by value. The result is copied into the
+destination variable's storage, so returning and binding a struct is a true
+copy:
+
+```rust
+fn make() -> Point {
+    return Point { x: 7, y: 9 };
+}
+
+fn main() {
+    let p: Point = make();   // full struct copied into p
+    p = make();              // reassignment copies too
 }
 ```
 
@@ -1033,28 +1162,65 @@ if i < 5 {
 
 ### Slice Operations
 
-Slices are references to array data with tracked length:
+Slices are references to a sub-range of an array, carrying a base pointer and a
+runtime length. A slice value is produced by slicing an array with `arr[a..b]`
+(or `arr[a..=b]`) and bound to a `&[T]` variable:
 
 ```rust
-// Function taking slice
-fn sum_values(values: [u8]) -> u16 {
-    let total: u16 = 0;
-    for v in values {
-        total = total + (v as u16);
+let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+let s: &[u8] = a[1..5];   // elements a[1]..a[4]
+
+let n: u16 = s.len;       // runtime length (here 4)
+let first: u8 = s[0];     // s[0] == a[1]
+for i in 0..s.len {
+    // iterate a slice by index
+}
+```
+
+Bounds may be constants or computed at run time (`a[i..j]`), and slices of
+`u8` and `u16` element arrays are supported (the index is scaled by the element
+width). A slice can be passed to a function, which reads its length and
+elements through the descriptor:
+
+```rust
+fn sum(s: &[u8]) -> u8 {
+    let acc: u8 = 0;
+    for i in 0..s.len {
+        acc = acc + s[i as u8];
     }
-    return total;
+    return acc;
 }
 
-// Arrays automatically coerce to slices
-let data: [u8; 5] = [10, 20, 30, 40, 50];
-let result: u16 = sum_values(data);  // Passes as slice
+let s: &[u8] = a[1..5];
+let total: u8 = sum(s);
+```
+
+Slices support the full set of view operations:
+
+```rust
+let s: &[u8] = a[1..5];
+let s2: &[u8] = s[1..3];       // re-slice a slice (offsets compose)
+s = a[2..6];                   // reassign to a new view
+for x in s { /* iterate elements */ }
+
+fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
 ```
 
 **Slice Characteristics:**
 - Size: 4 bytes (2-byte base address + 2-byte length)
-- Read-only view of array data
-- Length tracked at runtime
-- No slice syntax (e.g., `arr[1..3]`) - pass whole array only
+- View into array data; length tracked at runtime
+- Created with `arr[a..b]` (constant or runtime bounds)
+- `.len`, indexing `s[i]`, and `for x in s` iteration
+- Re-sliceable (`s[a..b]`), reassignable, and passed to / returned from
+  functions by value
+
+Bounds may be `u8`/`i8` or `u16`/`i16` (the latter lets constant-bounds slices
+exceed 255 elements), inclusive ranges accept a runtime end, and `for x in s`
+iterates the full length with a 16-bit counter.
+
+Current limits: element widths above 2 bytes are not yet supported, runtime
+(non-constant) slice bounds must be `u8`, and there is no runtime bounds
+checking.
 
 ### Slice Memory Representation
 
@@ -1182,6 +1348,19 @@ const PATH: str = "data/" + "level" + ".txt";
 - Both operands must be compile-time constant strings
 - Result must not exceed 255 bytes
 - Evaluated entirely at compile time (zero runtime cost)
+
+### String Comparison
+
+Compare two strings for equality with `==` / `!=` (result is `bool`). The
+comparison runs at runtime: the length bytes are compared first, then each
+character.
+
+```rust
+let a: str = "hello";
+let b: str = "hello";
+if a == b { /* equal */ }
+if a != "world" { /* differs */ }
+```
 
 ### String Slicing
 
@@ -1457,6 +1636,45 @@ let addr: u16 = 0x1000;
 
 **No implicit conversions** - all casts must be explicit.
 **No error checking** - casts that are invalid will overflow/underflow.
+
+### Integer Literals in Binary Operations
+
+A binary operation requires both operands to have the same type; two **variables**
+of different widths (e.g. `u16 + u8`) are a type error and must be reconciled with
+an explicit cast:
+
+```rust
+let a: u16 = 300;
+let b: u8 = 5;
+let c: u16 = a + (b as u16);   // explicit widening required
+```
+
+The single exception is a bare **integer literal** operand: it adopts the other
+operand's integer type when its value fits, in any operand position and for any
+operator (arithmetic *and* comparison). This is a compile-time typing of the
+literal, not a runtime conversion, so the no-implicit-conversion rule is
+preserved. A negated literal (`-5`) counts as a literal.
+
+The same rule applies wherever a target type is known, notably array elements:
+
+```rust
+let a: [u16; 3] = [1, 2, 300];   // elements are u16, from the declaration
+let b: [u16; 4] = [0; 4];        // fill value is u16
+let c: [i16; 2] = [-100, -200];  // signed elements
+let d: [u8; 2]  = [1, 300];      // error: 300 does not fit a u8 element
+```
+
+```rust
+let a: u16 = 300;
+if a < 5 { ... }               // ok: `5` adopts u16
+let d: u16 = 1 + a;            // ok: `1` adopts u16
+
+let s: i16 = -300;
+if s < -5 { ... }              // ok: `-5` adopts i16 (signed compare)
+
+let e: u8 = 5;
+let f: u16 = e + 300;          // error: `e` is u8 and 300 does not fit u8
+```
 
 ### Valid Cast Combinations
 
@@ -3155,7 +3373,11 @@ Applied roughly in this order during compilation:
 | $40-$CF | 144 bytes | Frame region (all function parameters and locals) |
 | $D0-$D8 | 9 bytes | `mul16`/`div16`/`mod16` working storage |
 | $D9-$DC | 4 bytes | `mul16`/`div16`/`mod16` call parameters |
-| $DD-$EF | 19 bytes | Reserved (future frame-spill region) |
+| $DD-$DE | 2 bytes | PRNG state (`rand`/`rand16`/`srand` in `std/math.wr`) |
+| $DF | 1 byte | Reserved |
+| $E0-$E7 | 8 bytes | Argument staging for address-taken functions (indirect calls) |
+| $E8-$ED | 6 bytes | Reserved |
+| $EE-$EF | 2 bytes | Indirect-call vector (function-pointer trampoline) |
 | $F0-$F3 | 4 bytes | Binary operation left-operand save |
 | $F4-$FE | 11 bytes | Function-call argument staging |
 | $FF | 1 byte | Software stack pointer |
@@ -3165,14 +3387,83 @@ Applied roughly in this order during compilation:
 | Range | Purpose |
 |-------|---------|
 | $0100-$01FF | Hardware stack (JSR/RTS, interrupt register save) |
-| $0200-$02FF | Software stack (recursion frame save/restore, operand spill) |
+| $0200-$02FF | Default `STACK` section — software stack (recursion frame save/restore, operand spill) |
+| $0400-$07FF | Default `BSS` section (1KB) — **RAM** for mutable globals (`static`) |
 | $8000-$BFFF | Default `CODE` section (16KB) |
 | $D000-$EFFF | Default `DATA` section (8KB) |
 | $FFFA-$FFFF | 6502 hardware vectors (NMI, RESET, IRQ) |
 
+Only `BSS` is written at runtime; `CODE` and `DATA` are read-only on a ROM-based
+machine. See [Mutable Globals](#mutable-globals-static) for how `static` storage
+is allocated and initialized, and the configuration notes below for choosing the
+range.
+
 #### Section Placement
 
 Code and data are placed into named **sections**, either the default `CODE`/`DATA` sections above or sections you define in `wraith.toml` (see the `#[section]` and `#[org]` function attributes under [Function Attributes](#function-attributes)). A function with no placement attribute goes into the configured default section; `#[section("NAME")]` places it in a named section; `#[org(address)]` places it at an exact address, overriding section placement entirely.
+
+#### Configuring RAM (`BSS`)
+
+The `BSS` section is where every `static` is allocated, in declaration order.
+It is the one region the program writes to at runtime, so it must name real RAM:
+
+```toml
+[[sections]]
+name = "BSS"
+start = 0x0400
+end = 0x07FF
+description = "User RAM for mutable globals"
+```
+
+Constraints to observe when choosing the range:
+
+- **Avoid the reserved low pages.** The zero page holds codegen scratch and
+  function frames, `$0100-$01FF` is the hardware stack (fixed by the processor),
+  and the `STACK` section holds the software stack. The default starts at `$0400`
+  to clear all three.
+- **Avoid memory-mapped I/O.** The compiler warns when an `addr` declaration
+  falls inside `BSS`, because a `static` placed there would collide with the
+  device register.
+- **Budget the space.** Exceeding the region is a compile error naming the range.
+  Large buffers dominate: an 80×25 text framebuffer is 2000 bytes, well beyond
+  the 1 KB default, so either enlarge `BSS`, choose a smaller geometry, or place
+  video memory outside `BSS` and reach it with `addr`.
+- A configuration that omits `BSS` falls back to `$0400-$07FF`.
+
+Because statics are allocated in declaration order and never reused, moving a
+`static` in the source changes the addresses of the ones after it — relevant only
+if you depend on fixed addresses from a debugger or external tooling.
+
+#### Configuring the software stack (`STACK`)
+
+The `STACK` section is one page of RAM used to save a callee's frame across a
+recursive call and to spill operands across call-bearing sub-expressions:
+
+```toml
+[[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+```
+
+Its size is fixed at 256 bytes (the stack pointer is a single zero-page byte),
+but the page itself is configurable. It must be RAM and must not overlap `BSS`
+or memory-mapped I/O. It is distinct from the 6502 **hardware** stack at
+`$0100-$01FF`, which the processor mandates for `JSR`/`RTS` and interrupt entry
+and which cannot be relocated.
+
+#### What the compiler fixes
+
+Only what the hardware or the zero-page addressing modes require:
+
+| Region | Why it is fixed |
+|--------|-----------------|
+| `$0000-$00FF` | Zero page — codegen scratch, function frames, pointers; zero-page and indirect addressing modes only reach this page |
+| `$0100-$01FF` | 6502 hardware stack (`JSR`/`RTS`, interrupt entry) |
+| `$FFFA-$FFFF` | NMI / RESET / IRQ vectors |
+
+Everything else — code, constant data, the software stack and mutable-global
+RAM — is placed by `wraith.toml` and can be moved to match the board.
 
 #### Custom Memory Layout Example
 

@@ -13,7 +13,7 @@
 
 use mos6502::cpu::CPU;
 use mos6502::instruction::Nmos6502;
-use mos6502::memory::{Bus, Memory};
+use mos6502::memory::Bus;
 use std::collections::HashMap;
 
 use super::compile_success;
@@ -252,12 +252,19 @@ fn is_branch(mnem: &str) -> bool {
 /// Parse a mnemonic's operand string into an addressing mode + value.
 fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
     let po = |mode, value| ParsedOperand { mode, value };
+    // A bare shift/rotate (no operand) is accumulator mode in 6502 assembly
+    // (ca65 accepts `LSR` as `LSR A`); everything else with no operand is implied.
+    let bare_mode = if matches!(mnem, "ASL" | "LSR" | "ROL" | "ROR") {
+        Mode::Acc
+    } else {
+        Mode::Imp
+    };
     let Some(op) = operand else {
-        return po(Mode::Imp, ValueExpr::None);
+        return po(bare_mode, ValueExpr::None);
     };
     let op = op.trim();
     if op.is_empty() {
-        return po(Mode::Imp, ValueExpr::None);
+        return po(bare_mode, ValueExpr::None);
     }
     if op == "A" {
         return po(Mode::Acc, ValueExpr::None);
@@ -306,10 +313,10 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
 
     // Indexed: ",X" / ",Y"
     if let Some(base) = op.strip_suffix(",X") {
-        return index_operand(base, true);
+        return index_operand(base, true, mnem);
     }
     if let Some(base) = op.strip_suffix(",Y") {
-        return index_operand(base, false);
+        return index_operand(base, false, mnem);
     }
 
     // Branches take a relative label target.
@@ -337,15 +344,26 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> ParsedOperand {
     po(Mode::Abs, ValueExpr::Label(l, off))
 }
 
-fn index_operand(base: &str, x: bool) -> ParsedOperand {
+fn index_operand(base: &str, x: bool, mnem: &str) -> ParsedOperand {
     let base = base.trim();
     if let Some(v) = parse_num(base) {
         // A `$XXXX` operand (4+ hex digits) forces absolute indexing even for
         // low addresses — matching how real assemblers select abs,Y when the
         // mnemonic has no zp,Y form (e.g. LDA $0040,Y).
         let force_abs = base.strip_prefix('$').is_some_and(|h| h.len() >= 4);
+        // On the 6502 only LDX/STX have a zero-page,Y form; every other mnemonic
+        // (LDA, STA, CMP, ...) must use absolute,Y for a low address. Real
+        // assemblers promote `LDA $40,Y` to `LDA $0040,Y` automatically — mirror
+        // that so stdlib routines using the `{param},Y` idiom assemble.
+        let zp_y_ok = matches!(mnem, "LDX" | "STX");
         let mode = if v <= 0xFF && !force_abs {
-            if x { Mode::ZpX } else { Mode::ZpY }
+            if x {
+                Mode::ZpX
+            } else if zp_y_ok {
+                Mode::ZpY
+            } else {
+                Mode::AbsY
+            }
         } else if x {
             Mode::AbsX
         } else {
@@ -370,6 +388,24 @@ fn clean_line(line: &str) -> &str {
     no_comment.trim()
 }
 
+/// Split an optional leading `label:` off an instruction line, returning the
+/// label (if any) and the remaining instruction text. Handles both a bare
+/// `foo:` label and an inline-asm `foo: JMP foo` (label and instruction on one
+/// line, as emitted from `asm { }` blocks). A `NAME = VALUE` symbol definition
+/// has no colon and is left untouched.
+fn split_leading_label(line: &str) -> (Option<&str>, &str) {
+    if !line.contains('=')
+        && let Some(idx) = line.find(':')
+    {
+        let label = line[..idx].trim();
+        let rest = line[idx + 1..].trim();
+        if !label.is_empty() && !label.contains(char::is_whitespace) {
+            return (Some(label), rest);
+        }
+    }
+    (None, line)
+}
+
 /// Assemble the compiler's asm text into a flat 64 KB image.
 pub fn assemble(asm: &str) -> [u8; 65536] {
     // ---- Pass 1: collect label addresses ----
@@ -386,8 +422,13 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
             labels.insert(name.trim().to_string(), value);
             continue;
         }
-        if let Some(label) = line.strip_suffix(':') {
-            labels.insert(label.trim().to_string(), addr);
+        // A leading `label:` (possibly followed by an instruction on the same
+        // line, as inline asm emits) records the label at the current address.
+        let (label, line) = split_leading_label(line);
+        if let Some(l) = label {
+            labels.insert(l.to_string(), addr);
+        }
+        if line.is_empty() {
             continue;
         }
         let mut parts = line.splitn(2, char::is_whitespace);
@@ -449,8 +490,14 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
 
     for raw in asm.lines() {
         let line = clean_line(raw);
-        if line.is_empty() || line.ends_with(':') || line.contains('=') {
-            // blank, label definition, or `NAME = VALUE` (recorded in pass 1)
+        if line.is_empty() || line.contains('=') {
+            // blank or `NAME = VALUE` (recorded in pass 1)
+            continue;
+        }
+        // Drop any leading `label:` (recorded in pass 1); emit the instruction
+        // that may follow it on the same line.
+        let (_label, line) = split_leading_label(line);
+        if line.is_empty() {
             continue;
         }
         let mut parts = line.splitn(2, char::is_whitespace);
@@ -524,14 +571,106 @@ pub fn assemble(asm: &str) -> [u8; 65536] {
 // Execution harness
 // ============================================================================
 
+/// A flat 64 KB RAM bus with software-controllable IRQ/NMI lines. The crate's
+/// default `Memory` bus never asserts an interrupt, so tests that exercise
+/// `#[irq]`/`#[nmi]` handlers use this to pulse the lines under their control.
+pub struct TestBus {
+    ram: Vec<u8>,
+    irq: bool,
+    nmi: bool,
+    /// Memory-mapped devices. Addresses they claim bypass RAM entirely, so a
+    /// read can have side effects (consuming a FIFO byte, clearing a flag).
+    pub devices: super::devices::Devices,
+}
+
+impl TestBus {
+    fn new() -> Self {
+        Self {
+            ram: vec![0u8; 65536],
+            irq: false,
+            nmi: false,
+            devices: super::devices::Devices::default(),
+        }
+    }
+}
+
+impl Bus for TestBus {
+    fn get_byte(&mut self, address: u16) -> u8 {
+        match self.devices.read(address) {
+            Some(v) => v,
+            None => self.ram[address as usize],
+        }
+    }
+    fn set_byte(&mut self, address: u16, value: u8) {
+        if !self.devices.write(address, value) {
+            self.ram[address as usize] = value;
+        }
+    }
+    fn irq_pending(&mut self) -> bool {
+        // Either the harness pulsed the line, or a device is asserting it.
+        self.irq || self.devices.irq_asserted()
+    }
+    fn nmi_pending(&mut self) -> bool {
+        self.nmi
+    }
+}
+
 /// Result of running a compiled Wraith program on the emulator.
 pub struct Exec {
-    cpu: CPU<Memory, Nmos6502>,
+    cpu: CPU<TestBus, Nmos6502>,
+    /// Address of the terminating `loop {}` (JMP-to-self) the program settled
+    /// into. Interrupt pulses run the handler and return control here.
+    idle_pc: u16,
     pub steps: usize,
     pub halted: bool,
 }
 
 impl Exec {
+    /// The attached devices, for feeding input and inspecting captured output.
+    pub fn devices(&mut self) -> &mut super::devices::Devices {
+        &mut self.cpu.memory.devices
+    }
+
+    /// Bytes the program transmitted through the UART, as a string.
+    pub fn uart_output(&mut self) -> String {
+        let tx = &self
+            .cpu
+            .memory
+            .devices
+            .uart
+            .as_ref()
+            .expect("no UART attached")
+            .tx;
+        String::from_utf8_lossy(tx).to_string()
+    }
+
+    /// Queue bytes for the program to receive on the UART.
+    pub fn uart_feed(&mut self, bytes: &[u8]) {
+        self.cpu
+            .memory
+            .devices
+            .uart
+            .as_mut()
+            .expect("no UART attached")
+            .feed(bytes);
+    }
+
+    /// Run up to `max_steps` more instructions, stopping early if the program
+    /// settles back into a JMP-to-self idle loop. Used after feeding a device so
+    /// the driver can observe the new state.
+    pub fn resume(&mut self, max_steps: usize) {
+        for _ in 0..max_steps {
+            let pc_before = self.cpu.registers.program_counter;
+            if !self.cpu.single_step() {
+                break;
+            }
+            if self.cpu.registers.program_counter == pc_before {
+                self.idle_pc = pc_before;
+                break;
+            }
+        }
+    }
+
     /// Read a byte of memory after execution.
     pub fn mem(&mut self, addr: u16) -> u8 {
         self.cpu.memory.get_byte(addr)
@@ -551,6 +690,75 @@ impl Exec {
     pub fn y(&self) -> u8 {
         self.cpu.registers.index_y
     }
+
+    /// Assert the IRQ line for exactly one servicing: with the program paused in
+    /// its idle loop, take the interrupt, run the handler, and resume at idle.
+    /// The program must have enabled IRQs (e.g. `asm { "CLI" }`) for this to fire.
+    pub fn pulse_irq(&mut self) {
+        self.pulse(true);
+    }
+
+    /// Assert the NMI line for one edge-triggered servicing.
+    pub fn pulse_nmi(&mut self) {
+        self.pulse(false);
+    }
+
+    /// Hold the IRQ line asserted for a while and report whether it stayed
+    /// masked (the CPU never left the idle loop). Used to verify the I-flag
+    /// blocks IRQs. Deasserts the line before returning.
+    pub fn irq_stays_masked(&mut self) -> bool {
+        let idle = self.idle_pc;
+        self.cpu.memory.irq = true;
+        let mut masked = true;
+        for _ in 0..2000 {
+            self.cpu.single_step();
+            if self.cpu.registers.program_counter != idle {
+                masked = false;
+                break;
+            }
+        }
+        self.cpu.memory.irq = false;
+        masked
+    }
+
+    fn pulse(&mut self, irq: bool) {
+        let idle = self.idle_pc;
+        let mut budget = 200_000usize;
+
+        // Assert the line and step until the interrupt is taken (PC leaves the
+        // idle loop). NMI is non-maskable; IRQ needs the I-flag clear.
+        if irq {
+            self.cpu.memory.irq = true;
+        } else {
+            self.cpu.memory.nmi = true;
+        }
+        while self.cpu.registers.program_counter == idle && budget > 0 {
+            self.cpu.single_step();
+            budget -= 1;
+        }
+        assert!(
+            self.cpu.registers.program_counter != idle,
+            "interrupt was never serviced (IRQ needs `CLI`, or no handler is installed)"
+        );
+
+        // Deassert so a level-triggered IRQ fires exactly once, and an NMI edge
+        // can re-arm for the next pulse.
+        if irq {
+            self.cpu.memory.irq = false;
+        } else {
+            self.cpu.memory.nmi = false;
+        }
+
+        // Run the handler to completion (RTI returns to the idle loop).
+        while self.cpu.registers.program_counter != idle && budget > 0 {
+            self.cpu.single_step();
+            budget -= 1;
+        }
+        assert!(
+            budget > 0,
+            "interrupt handler did not return to the idle loop"
+        );
+    }
 }
 
 /// Compile, assemble, and run a Wraith program to completion.
@@ -560,17 +768,33 @@ impl Exec {
 /// the program counter no longer advancing) or a step budget is exhausted.
 /// Panics if the program does not halt within the budget.
 pub fn run(source: &str) -> Exec {
+    run_with_devices(source, super::devices::Devices::default())
+}
+
+/// Compile and run a program against a machine with the given memory-mapped
+/// devices attached. Device reads/writes have real side effects (FIFOs drain,
+/// flags clear, timers count), so drivers can be exercised end to end.
+///
+/// Unlike [`run`], execution stops as soon as the program reaches its idle
+/// `loop {}` *or* the step budget runs out — a driver that spins waiting on a
+/// device the test has not fed would otherwise never halt. Inspect
+/// [`Exec::halted`] when that distinction matters.
+pub fn run_with_devices(source: &str, devices: super::devices::Devices) -> Exec {
     let asm = compile_success(source);
     let image = assemble(&asm);
 
-    let mut memory = Memory::new();
-    memory.set_bytes(0x0000, &image);
-    let mut cpu = CPU::new(memory, Nmos6502);
+    let mut bus = TestBus::new();
+    bus.devices = devices;
+    // Load the full 64 KB image directly: the default Bus::set_bytes truncates
+    // its length to u16 (65536 -> 0), so it would copy nothing.
+    bus.ram.copy_from_slice(&image);
+    let mut cpu = CPU::new(bus, Nmos6502);
     cpu.reset();
 
     const BUDGET: usize = 20_000_000;
     let mut steps = 0usize;
     let mut halted = false;
+    let mut idle_pc = 0u16;
     while steps < BUDGET {
         let pc_before = cpu.registers.program_counter;
         let executed = cpu.single_step();
@@ -578,19 +802,26 @@ pub fn run(source: &str) -> Exec {
         if !executed {
             // Couldn't decode an instruction (bad opcode) or a wait state.
             halted = true;
+            idle_pc = cpu.registers.program_counter;
             break;
         }
         if cpu.registers.program_counter == pc_before {
             // JMP-to-self: the program's terminating `loop {}`.
             halted = true;
+            idle_pc = pc_before;
             break;
         }
     }
     assert!(
-        halted,
+        halted || cpu.memory.devices.uart.is_some() || cpu.memory.devices.via.is_some(),
         "program did not halt within {} steps (possible infinite loop or missing `loop {{}}`)",
         BUDGET
     );
 
-    Exec { cpu, steps, halted }
+    Exec {
+        cpu,
+        idle_pc,
+        steps,
+        halted,
+    }
 }

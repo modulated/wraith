@@ -156,6 +156,45 @@ impl Parser<'_> {
                 }
             }
 
+            // Mutable global in RAM: static NAME: T = init;
+            // Unlike `const` (immutable ROM data), a static is writable and is
+            // shared between functions and interrupt handlers.
+            Some(Token::Static) => {
+                self.expect(&Token::Static)?;
+                let name = self.expect_ident()?;
+                self.expect(&Token::Colon)?;
+                let ty = self.parse_type()?;
+                self.expect(&Token::Eq)?;
+                let init = self.parse_expr()?;
+                self.expect(&Token::Semi)?;
+                let span = start.merge(self.previous_span());
+
+                // `addr` denotes a fixed hardware location, not storage we
+                // allocate; it must be declared with `const`.
+                if matches!(
+                    ty.node,
+                    TypeExpr::Primitive(crate::ast::PrimitiveType::Addr)
+                ) {
+                    return Err(ParseError::custom_detailed(
+                        ty.span,
+                        "'static' cannot have type 'addr'",
+                        Some("Note: an addr names a fixed memory-mapped location".to_string()),
+                        Some("Help: declare it with 'const NAME: addr = 0x...;'".to_string()),
+                    ));
+                }
+
+                Ok(Spanned::new(
+                    Item::Static(Static {
+                        name,
+                        ty,
+                        init,
+                        mutable: true,
+                        is_pub,
+                    }),
+                    span,
+                ))
+            }
+
             // Detect 'let' at global scope and provide helpful error message
             Some(Token::Let) => {
                 let err_span = self.current_span();

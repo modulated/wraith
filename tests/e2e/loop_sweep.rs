@@ -457,3 +457,34 @@ fn inline_asm_data_directive_forces_far_branch() {
         ".BYTE-heavy body must still loop correctly"
     );
 }
+
+#[test]
+fn indirect_call_in_body_disables_countdown() {
+    // An indirect call's target is invisible to frame coloring, so the callee
+    // could overlap this frame; the counter must not live in a frame slot the
+    // body can't be proven to preserve. The AST walk treats CallIndirect as
+    // referencing everything, forcing the counting shape - and the loop must
+    // still produce the right count.
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        const SINK: addr = 0x0401;
+        fn tick() -> u8 { return 7; }
+        #[reset]
+        fn main() {
+            let h: fn() -> u8 = tick;
+            let n: u8 = 0;
+            for i in 0..10 {
+                SINK = h();
+                n = n + 1;
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0400),
+        10,
+        "loop with indirect call must count right"
+    );
+    assert_eq!(e.mem(0x0401), 7, "indirect call result must be stored");
+}
