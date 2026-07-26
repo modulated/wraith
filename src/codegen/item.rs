@@ -50,14 +50,20 @@ pub fn generate_item(
     item: &Spanned<Item>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    placement: &crate::codegen::placement::Placement,
     section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     match &item.node {
-        Item::Function(func) => {
-            generate_function(func, emitter, info, section_alloc, string_collector)
-        }
-        Item::Static(stat) => generate_static(stat, emitter, info, string_collector),
+        Item::Function(func) => generate_function(
+            func,
+            emitter,
+            info,
+            placement,
+            section_alloc,
+            string_collector,
+        ),
+        Item::Static(stat) => generate_static(stat, emitter, info, section_alloc, string_collector),
         Item::Address(addr) => generate_address(addr, emitter, info),
         _ => Ok(()),
     }
@@ -69,7 +75,7 @@ pub fn generate_item(
 /// handler can preempt main code mid-expression, it must preserve the shared
 /// codegen scratch/pools/math region plus the frame span its own call graph
 /// touches (frames overlap main frames under unified coloring).
-fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
+pub(super) fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
     let mut addrs = Vec::new();
     if let Some(si) = info.interrupt_save_info.get(name) {
         if si.save_scratch {
@@ -88,7 +94,7 @@ fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
     addrs
 }
 
-fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
+pub(super) fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
     if addrs.is_empty() {
         return;
     }
@@ -99,7 +105,7 @@ fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
     }
 }
 
-fn emit_interrupt_zp_restore(emitter: &mut Emitter, addrs: &[u8]) {
+pub(super) fn emit_interrupt_zp_restore(emitter: &mut Emitter, addrs: &[u8]) {
     if addrs.is_empty() {
         return;
     }
@@ -114,6 +120,7 @@ fn generate_function(
     func: &Function,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    placement: &crate::codegen::placement::Placement,
     section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
@@ -143,121 +150,29 @@ fn generate_function(
         Vec::new()
     };
 
-    // First pass: Generate function into temporary emitter to measure size
-    let function_size = {
-        let mut temp_emitter = Emitter::new(emitter.verbosity);
-        // Same layout as the real emitter, or the measured size would differ.
-        temp_emitter.memory_layout = emitter.memory_layout.clone();
-        // Copy register state and label counter to avoid label conflicts
-        temp_emitter.reg_state = emitter.reg_state.clone();
-        temp_emitter.label_counter = emitter.label_counter;
-        temp_emitter.match_counter = emitter.match_counter;
-        // Set current function for inline asm variable scoping
-        temp_emitter.set_current_function(name.clone());
-
-        // Include interrupt prologue size if needed (5 instructions = 10 bytes)
-        if is_interrupt {
-            temp_emitter.emit_inst("PHA", "");
-            temp_emitter.emit_inst("TXA", "");
-            temp_emitter.emit_inst("PHA", "");
-            temp_emitter.emit_inst("TYA", "");
-            temp_emitter.emit_inst("PHA", "");
-            emit_interrupt_zp_save(&mut temp_emitter, &interrupt_zp);
+    // Where this function goes was decided before anything was emitted, so
+    // that ranges pinned by #[org] could be reserved before the allocator
+    // handed out the addresses around them (see `codegen::placement`).
+    let placed = placement
+        .get(name)
+        .ok_or_else(|| CodegenError::Internal(format!("function '{}' was never placed", name)))?;
+    let function_addr = placed.addr;
+    let function_size = placed.size;
+    let allocation_source = match placed.source {
+        crate::codegen::placement::AllocationSourceKind::ExplicitOrg => {
+            AllocationSource::ExplicitOrg
         }
-
-        // Include the function-pointer prologue size (must match the real emit).
-        if info.address_taken_functions.contains(name)
-            && let Some(frame) = info.function_frames.get(name)
-        {
-            for _ in 0..frame.param_size {
-                temp_emitter.emit_inst("LDA", "$E0");
-                temp_emitter.emit_inst("STA", "$40");
-            }
+        crate::codegen::placement::AllocationSourceKind::Section => AllocationSource::Section(
+            info.function_metadata
+                .get(name)
+                .and_then(|m| m.section.clone())
+                .unwrap_or_else(|| "CODE".to_string()),
+        ),
+        crate::codegen::placement::AllocationSourceKind::AutoAllocated => {
+            AllocationSource::AutoAllocated
         }
-
-        // Generate function body to measure size
-        generate_stmt(&func.body, &mut temp_emitter, info, string_collector)?;
-
-        // Include epilogue size
-        if is_interrupt {
-            emit_interrupt_zp_restore(&mut temp_emitter, &interrupt_zp);
-            // 6 instructions for epilogue
-            temp_emitter.emit_inst("PLA", "");
-            temp_emitter.emit_inst("TAY", "");
-            temp_emitter.emit_inst("PLA", "");
-            temp_emitter.emit_inst("TAX", "");
-            temp_emitter.emit_inst("PLA", "");
-            temp_emitter.emit_inst("RTI", "");
-        } else if !temp_emitter.last_was_terminal() {
-            // Mirror the real epilogue (see below): RTS unless the body already
-            // ended terminal, so the measured size matches the emitted size.
-            temp_emitter.emit_inst("RTS", "");
-        }
-
-        // Get the actual size + 10 bytes padding for safety
-        temp_emitter.byte_count() + 10
     };
-
-    // Determine function address
-    // Priority: explicit org > section attribute > default section
-    let (_function_addr, _allocation_source) =
-        if let Some(metadata) = info.function_metadata.get(name) {
-            if let Some(org_addr) = metadata.org_address {
-                // Explicit org address takes precedence
-                emitter.emit_org(org_addr);
-                (org_addr, AllocationSource::ExplicitOrg)
-            } else if let Some(section_name) = &metadata.section {
-                // Allocate in specified section using actual measured size
-                let addr = section_alloc
-                    .allocate(section_name, function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::Section(section_name.clone()))
-            } else {
-                // Use default section (CODE)
-                let addr = section_alloc
-                    .allocate_default(function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::AutoAllocated)
-            }
-        } else {
-            // No metadata - use default section
-            let addr = section_alloc
-                .allocate_default(function_size)
-                .map_err(CodegenError::SectionError)?;
-            emitter.emit_org(addr);
-            (addr, AllocationSource::AutoAllocated)
-        };
-    let (function_addr, allocation_source) =
-        if let Some(metadata) = info.function_metadata.get(name) {
-            if let Some(org_addr) = metadata.org_address {
-                // Explicit org address takes precedence
-                emitter.emit_org(org_addr);
-                (org_addr, AllocationSource::ExplicitOrg)
-            } else if let Some(section_name) = &metadata.section {
-                // Allocate in specified section using actual measured size
-                let addr = section_alloc
-                    .allocate(section_name, function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::Section(section_name.clone()))
-            } else {
-                // Use default section (CODE)
-                let addr = section_alloc
-                    .allocate_default(function_size)
-                    .map_err(CodegenError::SectionError)?;
-                emitter.emit_org(addr);
-                (addr, AllocationSource::AutoAllocated)
-            }
-        } else {
-            // No metadata - use default section
-            let addr = section_alloc
-                .allocate_default(function_size)
-                .map_err(CodegenError::SectionError)?;
-            emitter.emit_org(addr);
-            (addr, AllocationSource::AutoAllocated)
-        };
+    emitter.emit_org(function_addr);
 
     // Record this allocation for conflict detection
     section_alloc.record_allocation(
@@ -265,6 +180,7 @@ fn generate_function(
         function_addr,
         function_size,
         allocation_source,
+        Some(func.name.span),
     );
 
     // Emit function header comment with signature and location
@@ -323,10 +239,6 @@ fn generate_function(
     emitter.emit_label(name);
 
     // Initialize software stack pointer for reset handler
-    let _is_reset = func
-        .attributes
-        .iter()
-        .any(|attr| matches!(attr, FnAttribute::Reset));
     let is_reset = func
         .attributes
         .iter()
@@ -443,11 +355,19 @@ fn generate_function(
 fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
     use crate::sema::InitByte;
 
-    if info.static_inits.is_empty() {
+    // Only statics that survived dead-code elimination are declared in the
+    // output; initializing a dropped one would write to an address no label
+    // names.
+    let live: Vec<&crate::sema::StaticInit> = info
+        .static_inits
+        .iter()
+        .filter(|init| info.reachable_symbols.contains(&init.name))
+        .collect();
+    if live.is_empty() {
         return;
     }
     emitter.emit_comment("Initialize mutable statics (RAM is undefined at reset)");
-    for init in &info.static_inits {
+    for init in live {
         let len = init.bytes.len();
         if len == 0 {
             continue;
@@ -501,13 +421,14 @@ fn generate_static(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     // Handle const declarations specially - they may need to emit data
     if !stat.mutable {
         // Check if this is a const array - if so, emit it to data section
         if matches!(stat.ty.node, TypeExpr::Array { .. }) {
-            return emit_const_array(stat, emitter, info, string_collector);
+            return emit_const_array(stat, emitter, info, section_alloc, string_collector);
         }
 
         // Handle const strings - register folded constants with string collector
@@ -541,13 +462,21 @@ fn generate_static(
         .lookup(name)
         .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
     if let crate::sema::table::SymbolLocation::Absolute(addr) = sym.location {
+        let size = crate::codegen::expr::type_byte_size(&sym.ty, info).max(1);
         emitter.emit_comment(&format!(
             "static {} @ ${:04X} ({} bytes, RAM)",
-            name,
-            addr,
-            crate::codegen::expr::type_byte_size(&sym.ty, info).max(1)
+            name, addr, size
         ));
         emitter.emit_raw(&format!("{} = ${:04X}", name, addr));
+        // Statics occupy RAM for the whole program, so an #[org] placed over
+        // one is a conflict even though no bytes are emitted here.
+        section_alloc.record_allocation(
+            name.clone(),
+            addr,
+            size as u16,
+            AllocationSource::Section("BSS".to_string()),
+            Some(stat.name.span),
+        );
     } else {
         return Err(CodegenError::Internal(format!(
             "mutable static '{}' was not assigned a RAM address",
@@ -590,14 +519,10 @@ fn emit_const_array(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    section_alloc: &mut SectionAllocator,
     _string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     let name = &stat.name.node;
-
-    emitter.emit_comment(&format!("Const array: {}", name));
-
-    // Emit data label
-    emitter.emit_data_label(name);
 
     // Element width so u16/i16/b16 arrays emit two little-endian bytes each.
     let elem_size = match &stat.ty.node {
@@ -607,6 +532,31 @@ fn emit_const_array(
         },
         _ => 1,
     };
+
+    let elem_count = match &stat.ty.node {
+        crate::ast::TypeExpr::Array { size, .. } => *size,
+        _ => 0,
+    };
+    let byte_size = (elem_count * elem_size) as u16;
+
+    // Take an address from the DATA section rather than emitting at a fixed
+    // .ORG. Every const array used to be written at $C000, so two of them
+    // overlapped, the address ignored whatever the memory map said, and none of
+    // them were visible to the #[org] conflict check.
+    let addr = section_alloc
+        .allocate("DATA", byte_size)
+        .map_err(CodegenError::SectionError)?;
+    section_alloc.record_allocation(
+        name.clone(),
+        addr,
+        byte_size,
+        AllocationSource::Section("DATA".to_string()),
+        Some(stat.name.span),
+    );
+
+    emitter.emit_comment(&format!("Const array: {} ({} bytes)", name, byte_size));
+    emitter.emit_data_org(addr);
+    emitter.emit_data_label(name);
 
     // Emit array data based on initialization expression
     match &stat.init.node {

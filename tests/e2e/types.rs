@@ -394,7 +394,10 @@ fn global_u16_array_data_is_little_endian() {
         r#"
         const TABLE: [u16; 3] = [0x1111, 0x2222, 0x3333];
         const FILL: [u16; 3] = [0x00AB; 3];
-        fn main() {}
+        // Read both so they survive dead-code elimination; this test is about
+        // the bytes they emit, not about whether unused tables are kept. The
+        // index is a variable because a constant one is folded away.
+        fn main() { let i: u8 = 0; let a: u16 = TABLE[i]; let b: u16 = FILL[i]; }
     "#,
     );
     assert_asm_contains(&asm, ".BYTE $11, $11, $22, $22, $33, $33");

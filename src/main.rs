@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use wraith::{Parser, codegen, lex};
@@ -12,12 +12,20 @@ const RED: &str = "\x1b[91m";
 const YELLOW: &str = "\x1b[93m";
 const RESET: &str = "\x1b[0m";
 
+// Shell completion scripts, shipped in completions/ so packagers can install
+// them directly and `--completions <shell>` can print them without the two
+// copies drifting apart.
+const COMPLETION_BASH: &str = include_str!("../completions/wraith.bash");
+const COMPLETION_ZSH: &str = include_str!("../completions/_wraith");
+const COMPLETION_FISH: &str = include_str!("../completions/wraith.fish");
+
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
 
     // Parse arguments
     let mut verbosity = codegen::CommentVerbosity::Normal;
     let mut input_file: Option<String> = None;
+    let mut out_dir: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -29,6 +37,33 @@ fn main() {
             "--help" | "-h" => {
                 print_usage(&args[0]);
                 return;
+            }
+            "--completions" => {
+                let Some(shell) = args.get(i + 1) else {
+                    eprintln!("{}Error:{} --completions requires a shell name", RED, RESET);
+                    eprintln!("       valid options: bash, zsh, fish");
+                    std::process::exit(1);
+                };
+                match shell.as_str() {
+                    "bash" => print!("{}", COMPLETION_BASH),
+                    "zsh" => print!("{}", COMPLETION_ZSH),
+                    "fish" => print!("{}", COMPLETION_FISH),
+                    other => {
+                        eprintln!("{}Error:{} unsupported shell: {}", RED, RESET, other);
+                        eprintln!("       valid options: bash, zsh, fish");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            "--out" | "-o" => {
+                if i + 1 < args.len() {
+                    out_dir = Some(PathBuf::from(&args[i + 1]));
+                    i += 2;
+                } else {
+                    eprintln!("{}Error:{} --out requires a directory", RED, RESET);
+                    std::process::exit(1);
+                }
             }
             "--comments" | "-c" => {
                 if i + 1 < args.len() {
@@ -135,15 +170,33 @@ fn main() {
     let (code, section_alloc) = match codegen::generate(&ast, &program_info, verbosity) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("{}Error:{} {}", RED, RESET, e);
+            eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));
             std::process::exit(1);
         }
     };
 
     // Write output
-    let out_file = file.replace(".wr", ".asm");
+    let out_file = output_path(&file, out_dir.as_deref());
+    if let Some(dir) = out_file.parent().filter(|d| !d.as_os_str().is_empty())
+        && let Err(e) = fs::create_dir_all(dir)
+    {
+        eprintln!(
+            "{}Error:{} could not create {}: {}",
+            RED,
+            RESET,
+            dir.display(),
+            e
+        );
+        std::process::exit(1);
+    }
     if let Err(e) = fs::write(&out_file, &code) {
-        eprintln!("error: could not write to {}: {}", out_file, e);
+        eprintln!(
+            "{}Error:{} could not write to {}: {}",
+            RED,
+            RESET,
+            out_file.display(),
+            e
+        );
         std::process::exit(1);
     }
 
@@ -152,7 +205,11 @@ fn main() {
 
     println!(
         "{}{:>12}{} {} in {:.2}ms",
-        GREEN, "Finished", RESET, out_file, elapsed_ms
+        GREEN,
+        "Finished",
+        RESET,
+        out_file.display(),
+        elapsed_ms
     );
 
     // Print section statistics
@@ -170,6 +227,27 @@ fn main() {
     }
 }
 
+/// Work out where the generated assembly goes.
+///
+/// Without `--out` the `.asm` sits next to its source. With `--out` only the
+/// file name is kept and the directory is replaced, so `--out build` puts
+/// `src/game/main.wr` at `build/main.asm`.
+///
+/// The extension is swapped via `Path`, not by substring replacement: a path
+/// like `.wraith/main.wr` contains `.wr` twice, and rewriting every occurrence
+/// would produce `.asmaith/main.asm` — a directory that does not exist.
+fn output_path(input: &str, out_dir: Option<&Path>) -> PathBuf {
+    let input = Path::new(input);
+    let with_ext = input.with_extension("asm");
+    match out_dir {
+        Some(dir) => {
+            let name = with_ext.file_name().unwrap_or(with_ext.as_os_str());
+            dir.join(name)
+        }
+        None => with_ext,
+    }
+}
+
 fn print_usage(program: &str) {
     eprintln!("Usage: {} [OPTIONS] <input.wr>", program);
     eprintln!();
@@ -178,4 +256,82 @@ fn print_usage(program: &str) {
     eprintln!("  -v, --version           Print version information");
     eprintln!("  -c, --comments LEVEL    Set comment verbosity in generated assembly");
     eprintln!("                          LEVEL: minimal, normal (default), verbose");
+    eprintln!("  -o, --out DIR           Write the .asm output to DIR instead of");
+    eprintln!("                          alongside the source. DIR is created if needed.");
+    eprintln!("      --completions SHELL Print a shell completion script and exit");
+    eprintln!("                          SHELL: bash, zsh, fish");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_sits_beside_the_source_without_out() {
+        assert_eq!(output_path("main.wr", None), PathBuf::from("main.asm"));
+        assert_eq!(
+            output_path("src/game/main.wr", None),
+            PathBuf::from("src/game/main.asm")
+        );
+    }
+
+    #[test]
+    fn out_dir_replaces_the_directory_and_keeps_the_file_name() {
+        assert_eq!(
+            output_path("src/game/main.wr", Some(Path::new("build"))),
+            PathBuf::from("build/main.asm")
+        );
+        assert_eq!(
+            output_path("main.wr", Some(Path::new("/tmp/out"))),
+            PathBuf::from("/tmp/out/main.asm")
+        );
+    }
+
+    #[test]
+    fn only_the_extension_is_rewritten() {
+        // Substring replacement would turn this into `.asmaith/main.asm`.
+        assert_eq!(
+            output_path(".wraith/main.wr", None),
+            PathBuf::from(".wraith/main.asm")
+        );
+        // A stem containing the extension text must survive intact.
+        assert_eq!(
+            output_path("rewrite.wr", None),
+            PathBuf::from("rewrite.asm")
+        );
+    }
+
+    #[test]
+    fn a_source_without_the_wr_extension_still_gets_one() {
+        assert_eq!(output_path("main", None), PathBuf::from("main.asm"));
+        assert_eq!(
+            output_path("main", Some(Path::new("build"))),
+            PathBuf::from("build/main.asm")
+        );
+    }
+
+    #[test]
+    fn completion_scripts_are_present_for_every_advertised_shell() {
+        assert!(COMPLETION_BASH.contains("complete -o filenames -F _wraith wraith"));
+        assert!(COMPLETION_ZSH.contains("#compdef wraith"));
+        assert!(COMPLETION_FISH.contains("complete -c wraith"));
+
+        // Every flag the usage text advertises should be completable. fish
+        // declares long options unprefixed (`-l out`), the others spell them out.
+        for flag in ["help", "version", "comments", "out", "completions"] {
+            let long = format!("--{flag}");
+            assert!(COMPLETION_BASH.contains(&long), "bash is missing {long}");
+            assert!(COMPLETION_ZSH.contains(&long), "zsh is missing {long}");
+            assert!(
+                COMPLETION_FISH.contains(&format!("-l {flag}")),
+                "fish is missing {long}"
+            );
+        }
+
+        // Argument values must be offered, not just the flags themselves.
+        for script in [COMPLETION_BASH, COMPLETION_ZSH, COMPLETION_FISH] {
+            assert!(script.contains("minimal normal verbose"));
+            assert!(script.contains("bash zsh fish"));
+        }
+    }
 }

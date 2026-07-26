@@ -1,0 +1,19 @@
+#compdef wraith
+#
+# zsh completion for the Wraith compiler.
+#
+# Install by copying this file as `_wraith` into a directory on your $fpath
+# (e.g. ~/.zsh/completions) and ensuring `autoload -Uz compinit && compinit`
+# runs in ~/.zshrc. It can also be regenerated with `wraith --completions zsh`.
+
+_wraith() {
+    _arguments -s -S \
+        '(- *)'{-h,--help}'[Print help information]' \
+        '(- *)'{-v,--version}'[Print version information]' \
+        '(-c --comments)'{-c,--comments}'[Comment verbosity in generated assembly]:level:(minimal normal verbose)' \
+        '(-o --out)'{-o,--out}'[Write the .asm output to this directory]:directory:_files -/' \
+        '(- *)--completions[Print a shell completion script]:shell:(bash zsh fish)' \
+        '1:source file:_files -g "*.wr"'
+}
+
+_wraith "$@"

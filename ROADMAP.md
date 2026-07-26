@@ -1,253 +1,232 @@
 # Wraith Compiler - Development Roadmap
 
-_Updated: January 2026_
+_Updated: July 2026_
 
-This roadmap contains **unimplemented features only**. For a complete list of current features, see the [Language Specification](specification.md).
+This roadmap contains **unimplemented work only**. For what the language already
+does, see the [Language Specification](specification.md). For 65C02 instruction
+selection and the historical bug log, see [TODO.md](TODO.md).
+
+The near-term goal driving most of this list is a small operating system for a
+6502 homebrew machine: UART serial, keyboard input, a monochrome text display,
+and a device protocol over a 6522 VIA. Language work is ordered by what that
+needs.
+
+---
+
+## 🔴 BLOCKING THE OS
+
+### 1. Address-of (`&x`)
+
+`&x` does not parse. A driver cannot be handed a caller's buffer, so anything
+that fills a buffer must either own it as a `static` or take an address as a
+bare `u16` the compiler cannot check.
+
+```rust
+let buf: [u8; 64] = [0; 64];
+uart_read_line(&buf, 64);   // parse error: expected expression, found '&'
+```
+
+**Action items**:
+- Parse `&expr` and `&mut expr` as a unary operator
+- Type it as a pointer to the operand (or reuse `Type::Slice` where a length is
+  also wanted)
+- Reject taking the address of a frame-allocated local that outlives its frame —
+  frames are colored and reused, so the pointer would dangle
+
+**Complexity**: Medium. Interacts with frame coloring, which is where the
+soundness risk sits.
+
+---
+
+### 2. Console and keyboard drivers
+
+The device models exist (see *What the emulator can simulate* below) but no
+driver is written against them.
+
+- Keyboard: scancode in via a VIA port with a CA1 strobe raising IRQ, decoded to
+  ASCII, queued in a `static` ring buffer
+- Text console: memory-mapped framebuffer, cursor, line wrap, scroll (reuse
+  `memcpy16` from `std/mem.wr`), clear-screen
+- Monitor command loop: `peek` / `poke` / `dump` / `load` / `run` / `help` over
+  the modelled UART
+
+Benefits from (1) for buffer passing.
+
+**Complexity**: Medium — mostly Wraith code rather than compiler work.
 
 ---
 
 ## 🟡 HIGH PRIORITY
 
-### 1. Standard Library Expansion
+### 3. Standard library gaps
 
-**Missing Functions**:
-- `mul16(a: u16, b: u16) -> u16` - 16-bit multiplication
-- `div16(a: u16, b: u16) -> u16` - 16-bit division
-- `strlen(s: *u8) -> u8` - Null-terminated string length
-- `strcmp(a: *u8, b: *u8) -> i8` - String comparison
-- `abs(x: i8) -> i8` and `abs16(x: i16) -> i16` - Absolute value
+Present: `mul16`, `div16`, `divmod`, `mul_wide`, `memcpy`/`memcpy16`,
+`memset`/`memset16`, `memcmp`, `str_copy`, PRNG (`rand`, `rand16`, `srand`), bit
+helpers, saturating arithmetic.
 
-**Complexity**: Low-Medium (implementation work)
+Still missing:
+- `abs(x: i8) -> i8` and `abs16(x: i16) -> i16`
+- `strlen` / `strcmp` for the length-prefixed `str` representation
+- `bcd_to_string(value: b8) -> str`, `bcd16_to_string(value: b16) -> str`, and
+  `string_to_bcd` — needed to display BCD counters on the console
 
----
-
-### 2. Tagged Enum Pattern Matching
-
-**Current State**:
-- Tuple variant creation works: `Option::Some(42)`
-- Pattern matching code exists but is **minimally tested**
-- Struct variant pattern matching explicitly **not implemented**
-
-**Improvements Needed**:
-
-#### 4.1 Complete Testing for Tuple Variant Pattern Matching
-
-**What Works** (but needs testing):
-```rust
-enum Option {
-    None,
-    Some(u8),
-}
-
-match opt {
-    Option::Some(value) => {  // Code exists, needs tests
-        // Extract 'value' from enum
-    }
-    Option::None => { }
-}
-```
-
-**Status**: Code generation exists in `src/codegen/stmt.rs:1188-1226` and semantic analysis in `src/sema/analyze/stmt.rs:524-572`, but **zero tests verify this works correctly**. High risk of bugs.
-
-**Action Items**:
-- Write comprehensive tests for single-field tuple variants
-- Test multi-field tuple variants (e.g., `RGB(u8, u8, u8)`)
-- Test with u16 fields (multi-byte data)
-- Test nested pattern matching
-- Test edge cases (zero fields, mismatched binding counts)
-
-**Complexity**: Low (testing only, implementation exists)
-
-#### 4.2 Implement Struct Variant Pattern Matching
-
-**Currently Fails**:
-```rust
-enum Message {
-    Move { x: u8, y: u8 },
-}
-
-match msg {
-    Message::Move { x, y } => {  // ❌ Error: not implemented
-        // Would extract x and y
-    }
-}
-```
-
-**Action Items**:
-- Implement codegen for struct variant field extraction
-- Add semantic analysis for named field bindings
-- Handle field order independence
-- Write comprehensive tests
-
-**Complexity**: Medium (requires new codegen logic)
-
----
-
-### 3. BCD Enhancements
-
-#### 4.1 Peephole Optimization for SED/CLD
-
-**Current State**: Each BCD operation generates individual SED/CLD pairs
-**Improvement**: Combine consecutive BCD operations into one SED...CLD block
-**Benefit**: Reduced code size and faster execution
-**Complexity**: Low (add peephole pattern to optimizer)
-
-**Example**:
-```asm
-; Current:
-SED
-ADC ...
-CLD
-SED        ; Redundant!
-ADC ...
-CLD
-
-; After optimization:
-SED
-ADC ...
-ADC ...
-CLD
-```
-
-#### 4.2 BCD String Conversion Helpers
-
-**Missing Functions**:
-- `bcd_to_string(value: b8) -> str` - Convert BCD to decimal string
-- `string_to_bcd(s: *u8) -> b8` - Parse decimal string to BCD
-- `bcd16_to_string(value: b16) -> str` - 16-bit version
-
-**Benefit**: Display and parse BCD numbers for user interfaces
-**Complexity**: Medium (string manipulation in 6502)
+**Complexity**: Low for `abs`; Medium for the string conversions (6502 string
+building).
 
 ---
 
 ## 🟢 MEDIUM PRIORITY
 
-### 4. Bitfield Access Syntax
+### 4. Bitfield access syntax
 
-**Current State**: Manual bit manipulation with shifts and masks
-**Improvement**: Add `.bit(n)` accessor and bitfield syntax
-**Benefit**: Cleaner code, fewer errors, better optimization
-**Complexity**: Medium (parser + codegen)
+Manual shifts and masks today. Device registers are almost entirely bitfields, so
+this is the ergonomic gap the OS work runs into most often.
 
-**Syntax**:
-```wraith
-status.bit(7)              // Read bit 7
-status.set_bit(7)          // Set bit 7
-status.clear_bit(7)        // Clear bit 7
-flags.bits[7:4]            // Access bits 7-4 (nibble)
+```rust
+status.bit(7)              // read bit 7
+status.set_bit(7)          // set bit 7
+status.clear_bit(7)        // clear bit 7
+flags.bits[7:4]            // the high nibble
 ```
+
+On a 65C02 target these lower to `BBR`/`BBS`/`SMB`/`RMB` directly (see
+[TODO.md](TODO.md)).
+
+**Complexity**: Medium (parser + codegen).
 
 ---
 
-### 5. Branch Optimization Intelligence
+### 5. Branch optimization intelligence
 
-**Current State**: Status flags discarded after comparisons
-**Improvement**: Track flag state and reuse for multiple conditionals
-**Benefit**: Eliminate redundant CMP instructions
-**Complexity**: High (complex dataflow analysis)
+Status flags are discarded after every comparison, so a repeated test re-emits
+the `CMP`.
 
-**Example**:
-```wraith
-if x > 5 {           // CMP x, #5
-    foo();
-}
-if x > 5 {           // Could skip second CMP if x unchanged
-    bar();
-}
+```rust
+if x > 5 { foo(); }
+if x > 5 { bar(); }   // the second CMP is redundant if x is unchanged
 ```
+
+Note the hazard: the register-state tracker that would underpin this has already
+produced several silent miscompiles by outliving a label. Any flag tracking must
+invalidate at labels and calls from the outset (`Emitter::emit_label` already
+does this for registers).
+
+**Complexity**: High (dataflow analysis, with a demonstrated correctness risk).
 
 ---
 
-### 6. Disassembly Output Mode
+### 6. Disassembly output mode
 
-**Current State**: Only assembly source output
-**Improvement**: Generate annotated listing with addresses and cycle counts
-**Benefit**: Performance analysis and debugging
-**Complexity**: Medium (need to track addresses during codegen)
+Emit an annotated listing with resolved addresses and cycle counts, for
+performance work and for reading what the peephole actually did.
 
-**Example Output**:
 ```
-9000: A9 00     LDA #$00        ; [2 cycles] Load zero into A
-9002: 85 40     STA $40         ; [3 cycles] Store to variable x
+9000: A9 00     LDA #$00        ; [2 cycles] load zero into A
+9002: 85 40     STA $40         ; [3 cycles] store to x
 ```
+
+The emulator harness already assembles Wraith output to a byte image
+(`tests/common/exec.rs`), so address resolution is largely solved; the cycle
+table is new.
+
+**Complexity**: Medium.
 
 ---
 
 ## 🔵 LOWER PRIORITY
 
-### 7. Inline Data Directive
+### 7. Inline data directive
 
-**Current State**: Data must be in static variables or string literals
-**Improvement**: Allow inline data in functions
-**Benefit**: Lookup tables, sprite data colocated with code
-**Complexity**: Low (codegen addition)
+Lookup tables and sprite data colocated with the code that uses them, rather than
+hoisted to a `static`.
 
-**Syntax**:
-```wraith
-data lookup_table: [u8; 16] = [
-    0x00, 0x01, 0x04, 0x09, 0x10, 0x19, ...  // Squares 0-15
-];
+```rust
+data lookup_table: [u8; 16] = [0x00, 0x01, 0x04, 0x09, /* … */];
 ```
 
----
-
-### 8. PRNG (Pseudo-Random Number Generator)
-
-**Add to stdlib**:
-- `rand_init(seed: u16)` - Initialize generator
-- `rand_u8() -> u8` - Get random byte
-- `rand_range(min: u8, max: u8) -> u8` - Random in range
-
-**Complexity**: Low (algorithm implementation)
+**Complexity**: Low. Const arrays and string literals already allocate from
+`DATA` through `SectionAllocator`; inline data should do the same, so that it
+stays visible to `#[org]` conflict detection.
 
 ---
 
-## PRIORITIZED PHASES
+### 8. Reclaim BSS from dropped statics
 
-### Phase 1: Core Language & Safety
-**Focus**: Essential language features and compile-time safety
+Unreachable statics are no longer emitted, but sema assigns their RAM addresses
+before liveness is known, so the space stays reserved. Ordering BSS allocation
+after the liveness walk would recover it.
 
-1. **Tagged enum pattern matching** (tuple variant testing + struct variant implementation)
-
-**Expected Impact**: Fewer runtime bugs, complete enum functionality
-
----
-
-### Phase 2: Performance & Optimization
-**Focus**: Code generation improvements
-
-1. BCD SED/CLD peephole optimization
-2. Branch optimization intelligence
-3. Standard library expansion (mul16, div16, abs, string functions)
-
-**Expected Impact**: Faster code, more complete stdlib, better optimization
+**Complexity**: Low.
 
 ---
 
-### Phase 3: Developer Experience
-**Focus**: Ergonomics and tooling
+## What the emulator can simulate
 
-1. Bitfield access syntax
-2. Disassembly output mode
-3. BCD string conversion helpers
-4. Inline data directives
-5. PRNG functions
+Device models and the execution harness are done; this is the substrate the OS
+work builds on, listed here so it is not re-planned.
 
-**Expected Impact**: Cleaner code, better debugging, complete feature set
+| File | Purpose |
+| --- | --- |
+| `tests/common/exec.rs` | Two-pass assembler, `TestBus`, `run()` / `run_with_devices()`, memory and register inspection |
+| `tests/common/devices.rs` | TL16C550 UART (RBR/THR, IER, IIR, LCR+DLAB, LSR, divisor latches, RX FIFO, IRQ) and 6522 VIA (PORTA/B, DDRA/B, T1 counting CPU cycles, IFR/IER, CA1 strobe) |
+| `tests/e2e/devices.rs` | 7 tests: polled TX/RX, FIFO drain, baud divisor through DLAB, IRQ-driven RX into a ring buffer, VIA port I/O, timer IRQ flag, timer IRQ reaching a handler |
+| `tests/e2e/statics.rs` | 8 tests: mutable globals, reset-time initialization, IRQ/main sharing, non-overlap, u16 statics, static arrays, configurable stack page |
+| `tests/e2e/vtable.rs` | 5 tests: calls through struct fields, runtime driver selection, multi-method vtables |
+| `tests/e2e/interrupts_exec.rs` | 5 tests: IRQ handler execution, register preservation, main-state integrity, NMI edges, masking |
+| `tests/e2e/frames.rs` | 14 tests: call-graph frame coloring, recursion, deep chains |
+
+`examples/monitor/` holds an earlier monitor sketch. `simple_monitor.wr` does not
+compile (an unresolved `uart_putc`), and the set should be treated as reference
+material to be rewritten as part of item (2) rather than as working examples.
+`examples/uart.wr` compiles again now that `#[org]` reserves its range.
 
 ---
 
 ## Recently Completed ✅
 
-For reference, these major features were completed in January 2026:
-- Constant array optimization (const arrays emit to DATA section with .RES)
-- Tail call optimization (recursive functions use JMP instead of JSR)
-- Multi-dimensional array indexing (full support for `arr[i][j]` syntax)
-- Comprehensive warning system (9 warning types implemented)
-- **Compile-time array bounds checking** (errors on constant out-of-bounds access)
-- **BCD literal validation** (compile-time range checking for b8/b16 casts)
-- **Address overlap warning** (warns when addr overlaps CODE/DATA sections)
-- **Module visibility system** (pub keyword for explicit exports, private by default)
+**OS enablement (2026)**
+- Mutable globals (`static`) allocated in a configurable BSS/RAM section
+- Indirect calls through computed callees, enabling device vtables of function
+  pointers
+- Fully configurable memory map — only zero page, the hardware stack and the
+  vectors are fixed; `CODE`/`DATA`/`STACK`/`BSS` all come from `wraith.toml`
+- Emulator device framework (TL16C550 UART, 6522 VIA) with IRQ delivery
 
-See [Language Specification](specification.md) for complete documentation of all implemented features.
+**Language**
+- Glob imports (`import { * } from "m.wr"`), with unreferenced imported items
+  dropped from the output
+- First-class slices: creation, `.len`, indexing, re-slicing, passing, returning,
+  inclusive ranges, iteration past 255 elements
+- Runtime string `==` / `!=`
+- Array literals adopt their declared element type (`let a: [u16; 3] = [0,0,0]`)
+- Static frame allocation with call-graph coloring
+
+**Enums** (both items from the previous roadmap)
+- Tuple variant pattern matching — now covered by 13 execution tests, which found
+  and fixed a jump-table dispatch bug that clobbered the payload pointer
+- Struct variant pattern matching (`Message::Move { x, y }`) works and is tested
+
+**Standard library**
+- `mul16`, `div16`, `divmod`, `mul_wide`, `memcpy16`/`memset16`, PRNG
+  (`rand`/`rand16`/`srand`)
+
+**Diagnostics and correctness**
+- Two-phase function placement: sizes are measured, `#[org]` ranges reserved,
+  and everything else allocated into the gaps, so pinned and auto-allocated
+  functions can coexist
+- Dead code elimination across the whole program, the file being compiled
+  included, with warnings naming exactly what is dropped
+- Const arrays allocate from the configured `DATA` section instead of a
+  hardcoded `$C000` outside the memory map
+- Spans carry a file id, so two modules can no longer collide on one map key
+- `#[org]` collisions are compile errors, against functions, data, statics and
+  the interrupt vector table, with source excerpts
+- BCD `SED`/`CLD` peephole consolidation
+- Inline-asm `{param}` substitution inside `#[inline]` functions (the whole
+  `min`/`max`/`clamp` section of `std/math.wr` was uncallable)
+
+**Tooling**
+- `--out <dir>` and shell completion for bash, zsh and fish
+
+See the [Language Specification](specification.md) for full documentation of
+everything implemented.

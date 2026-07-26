@@ -1956,6 +1956,87 @@ Wraith supports a simple file-based import system for code organization and reus
 import {symbol1, symbol2, symbol3} from "module.wr";
 ```
 
+#### Glob Imports
+
+A `*` imports every `pub` item of a module, so a library can be pulled in
+without listing its API:
+
+```rust
+import { * } from "math.wr";     // every pub item
+import * from "math.wr";         // braces optional around a bare *
+import { min, * } from "math.wr"; // legal; naming min is redundant
+```
+
+A glob respects visibility exactly as a named import does: private items stay
+private, and referring to one is the same error as importing it by name. Unused
+glob imports are not warned about — bringing in names you may not use is what
+the wildcard asked for — and, per the next section, the ones you don't use cost
+nothing in the output.
+
+### Unreachable Code Is Not Emitted
+
+The compiler emits only the functions and data the program can actually reach,
+computed as a transitive closure over calls and references from the program's
+entry points. This applies to imported modules and to the file being compiled
+alike.
+
+Importing a module makes its **whole file** available, not just the symbols
+named — an imported function may call private siblings the importing program can
+never refer to — so without this, using one helper from a library dragged in all
+of it:
+
+```rust
+import { * } from "math.wr";   // ~18 functions
+
+#[reset]
+fn main() {
+    let q: u16 = div16(1000, 7);   // only div16 and its callees are emitted
+    loop {}
+}
+```
+
+A glob import and an explicit list of the symbols actually used compile to
+identical assembly, so `*` costs nothing over naming each one.
+
+#### What Counts as Reachable
+
+Execution starts, or arrives from outside the call graph, at these **roots**:
+
+- the `#[reset]`, `#[irq]` and `#[nmi]` handlers, which the hardware enters
+  through the vector table, and `main`, the conventional entry point when no
+  `#[reset]` is given;
+- functions pinned by `#[org]` or `#[section]`, since fixing an address is
+  usually how something outside the program is given a way in;
+- functions whose address is taken, reachable through a pointer that no call
+  edge records;
+- names referenced outside any function body, such as in a `static`'s
+  initializer.
+
+From there, an item is kept when it is called or referenced — directly or
+transitively — from something already kept, including by a `JSR`/`JMP` naming it
+inside an inline `asm` block. The walk is deliberately conservative: keeping too
+much only wastes ROM, while dropping something live is a jump into whatever
+follows it.
+
+Unreachable items **in the file being compiled** are reported before being
+dropped, so the warnings name exactly what was removed:
+
+```
+warning: unused function: `never_called`
+warning: unused constant or static: `LOOKUP_TABLE`
+```
+
+Items from imported modules are dropped silently — you did not write them, and a
+library you use part of is not a mistake.
+
+#### Files With No Entry Point
+
+A file with no `#[reset]`, no interrupt handler, no `main` and no placed
+function has no reachable code at all. That means the compiler cannot tell what
+runs, not that everything is dead, so the whole module is emitted and nothing is
+reported as unused. A half-written file still compiles to something you can
+inspect.
+
 ### Module Visibility
 
 **All items are private by default.** Only items marked with `pub` can be imported from other modules.
@@ -3401,6 +3482,62 @@ range.
 #### Section Placement
 
 Code and data are placed into named **sections**, either the default `CODE`/`DATA` sections above or sections you define in `wraith.toml` (see the `#[section]` and `#[org]` function attributes under [Function Attributes](#function-attributes)). A function with no placement attribute goes into the configured default section; `#[section("NAME")]` places it in a named section; `#[org(address)]` places it at an exact address, overriding section placement entirely.
+
+#### How Placement Works
+
+Addresses are decided before any code is emitted, in three steps: every function
+is measured, the ranges claimed by `#[org]` are reserved, and everything else is
+allocated into what is left. A pinned function therefore does not have to sit
+out of the way of the rest of the program — the allocator routes around it, and
+`#[org]` can be used at a section's base address:
+
+```rust
+#[org(0x8000)]          // the base of CODE
+#[reset]
+fn main() { … }
+
+fn helper() { … }       // allocated after main, not on top of it
+```
+
+Data placed in a section works the same way: a function pinned into `DATA` is
+stepped over by the string table and const arrays that share it.
+
+Auto-allocated functions are placed in declaration order, so the same source
+always produces the same layout.
+
+#### `#[org]` Placement Errors
+
+A pinned address cannot be moved, so where two of them cannot both be satisfied
+the compiler reports it rather than choosing. Every case where a placement
+cannot work is a compile error, reported against the function with a source
+excerpt:
+
+- **Overlapping another pinned function.** Two `#[org]` ranges that intersect
+  cannot both be honoured. The size used is the measured size of the generated
+  code, so a function that merely *grows* into its pinned neighbour is caught
+  too. (An `#[org]` overlapping something the allocator placed is not an error:
+  the allocator moves that other thing instead.)
+- **Overlapping the interrupt vector table.** `$FFFA-$FFFF` holds the NMI, RESET
+  and IRQ vectors that the 6502 fetches in hardware. Code placed there replaces
+  the reset vector, so the machine never starts — reported specifically rather
+  than as a generic overlap.
+- **Outside every configured section.** An address covered by no section is not
+  accounted for by capacity checks and, in a ROM image, may hold nothing at run
+  time. The error lists the configured sections so the address can be moved or a
+  section added.
+- **Overrunning the end of its section.** The whole range must fit, not just the
+  start address.
+
+Two functions whose ranges merely touch — one ending exactly where the next
+begins — do not conflict.
+
+```rust
+#[org(0xFFF8)]
+fn boot() { }        // error: places 'boot' over the interrupt vector table
+
+#[org(0x0100)]
+fn helper() { }      // error: $0100 is not inside any configured section
+```
 
 #### Configuring RAM (`BSS`)
 

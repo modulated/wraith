@@ -1,6 +1,6 @@
 //! Top-level item AST nodes for the Wraith language
 
-use super::span::Spanned;
+use super::span::{Span, Spanned};
 use super::stmt::Stmt;
 use super::types::TypeExpr;
 
@@ -140,7 +140,12 @@ pub struct Static {
 /// Import declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct Import {
+    /// Symbols named explicitly: `import { a, b } from "m.wr";`
     pub symbols: Vec<Spanned<String>>,
+    /// Span of the `*` in a glob import (`import { * } from "m.wr";`), which
+    /// brings every `pub` item of the module into scope. `None` for a plain
+    /// named import. The span is kept so a diagnostic can point at the `*`.
+    pub glob: Option<Span>,
     pub path: Spanned<String>,
 }
 

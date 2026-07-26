@@ -588,6 +588,9 @@ pub enum Warning {
     /// Unused function
     UnusedFunction { name: String, span: Span },
 
+    /// Unused `static` or `const` that nothing reaches
+    UnusedStatic { name: String, span: Span },
+
     /// Non-exhaustive match (missing enum variants)
     NonExhaustiveMatch {
         missing_patterns: Vec<String>,
@@ -640,6 +643,9 @@ impl Warning {
             }
             Warning::UnusedFunction { name, span } => {
                 (format!("unused function: `{}`", name), span)
+            }
+            Warning::UnusedStatic { name, span } => {
+                (format!("unused constant or static: `{}`", name), span)
             }
             Warning::NonExhaustiveMatch {
                 missing_patterns,
@@ -844,6 +850,11 @@ pub struct ProgramInfo {
     /// arguments through the fixed indirect-arg staging block and copy them into
     /// their frame in a prologue, so indirect callers can pass args.
     pub address_taken_functions: HashSet<String>,
+    /// Every symbol the program can reach from the root module, as a closure over
+    /// calls and references. Imported items outside this set are dead and are not
+    /// emitted: importing a module exposes its whole file, and without this a
+    /// program that used one helper from a library dragged in all of it.
+    pub reachable_symbols: HashSet<String>,
 }
 
 /// 6502 and 65C02 instruction mnemonics

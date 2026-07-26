@@ -434,6 +434,9 @@ impl SemanticAnalyzer {
         self.used_variables.insert(name.to_string());
         // Also track in all_used_symbols (for unused import warnings)
         self.all_used_symbols.insert(name.to_string());
+        // And as a liveness edge, so an imported item referenced only from
+        // here is not dropped from the output.
+        self.record_symbol_ref(name);
 
         Ok(info.ty)
     }
@@ -626,6 +629,7 @@ impl SemanticAnalyzer {
         // Mark function as used (for unused variable/import warnings)
         self.used_variables.insert(function.node.clone());
         self.all_used_symbols.insert(function.node.clone());
+        self.record_symbol_ref(&function.node);
 
         // Track function call for unused function detection
         self.called_functions.insert(function.node.clone());

@@ -28,7 +28,7 @@ pub enum SymbolLocation {
     FrameOffset(u8),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SymbolInfo {
     pub name: String,
     pub kind: SymbolKind,
@@ -91,6 +91,21 @@ impl SymbolTable {
         } else {
             false
         }
+    }
+
+    /// Every symbol in the outermost (module) scope, sorted by name.
+    ///
+    /// Used by glob imports (`import { * } from "m.wr"`), which need to
+    /// enumerate a module's items rather than look up known names. Sorted so
+    /// the resulting import order — and therefore code layout and any
+    /// diagnostics — does not depend on hash iteration order.
+    pub fn module_symbols(&self) -> Vec<(&String, &SymbolInfo)> {
+        let mut symbols: Vec<(&String, &SymbolInfo)> = match self.scopes.first() {
+            Some(scope) => scope.iter().collect(),
+            None => Vec::new(),
+        };
+        symbols.sort_by(|a, b| a.0.cmp(b.0));
+        symbols
     }
 }
 

@@ -18,21 +18,37 @@ pub struct Parser<'a> {
     pos: usize,
     /// Collected parse errors for multi-error reporting
     errors: Vec<ParseError>,
+    /// File these tokens came from, stamped into every span produced. Byte
+    /// offsets alone repeat across modules, and spans are used as map keys.
+    file: u32,
 }
 
 impl<'a> Parser<'a> {
-    /// Create a new parser
+    /// Create a new parser for the file being compiled
     pub fn new(tokens: &'a [SpannedToken]) -> Self {
+        Self::new_in_file(tokens, crate::ast::ROOT_FILE)
+    }
+
+    /// Create a parser whose spans are stamped with `file`
+    pub fn new_in_file(tokens: &'a [SpannedToken], file: u32) -> Self {
         Self {
             tokens,
             pos: 0,
             errors: Vec::with_capacity(tokens.len() / 20),
+            file,
         }
     }
 
     /// Parse a complete source file
     pub fn parse(tokens: &'a [SpannedToken]) -> ParseResult<SourceFile> {
         let mut parser = Parser::new(tokens);
+        parser.parse_source_file()
+    }
+
+    /// Parse a module whose spans belong to `file` rather than to the file
+    /// being compiled.
+    pub fn parse_in_file(tokens: &'a [SpannedToken], file: u32) -> ParseResult<SourceFile> {
+        let mut parser = Parser::new_in_file(tokens, file);
         parser.parse_source_file()
     }
 
@@ -114,12 +130,12 @@ impl<'a> Parser<'a> {
     fn current_span(&self) -> Span {
         self.tokens
             .get(self.pos)
-            .map(|t| Span::new(t.span.start, t.span.end))
+            .map(|t| Span::in_file(t.span.start, t.span.end, self.file))
             .unwrap_or_else(|| {
                 // EOF span - use end of last token or 0
                 self.tokens
                     .last()
-                    .map(|t| Span::new(t.span.end, t.span.end))
+                    .map(|t| Span::in_file(t.span.end, t.span.end, self.file))
                     .unwrap_or_default()
             })
     }
@@ -128,7 +144,7 @@ impl<'a> Parser<'a> {
     fn previous_span(&self) -> Span {
         if self.pos > 0 {
             let t = &self.tokens[self.pos - 1];
-            Span::new(t.span.start, t.span.end)
+            Span::in_file(t.span.start, t.span.end, self.file)
         } else {
             Span::default()
         }
