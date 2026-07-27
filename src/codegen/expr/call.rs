@@ -908,6 +908,7 @@ fn store_inline_arg(
 fn format_type_name(ty: &Type) -> String {
     match ty {
         Type::Slice(_) => "slice".to_string(),
+        Type::Pointer(p) => format!("&{}", p.display_name()),
         Type::Array(_, _) => "array".to_string(),
         Type::Named(n) => n.clone(),
         other => format!("{:?}", other),

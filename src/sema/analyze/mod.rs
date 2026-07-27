@@ -227,6 +227,7 @@ impl SemanticAnalyzer {
             Type::Primitive(prim) => prim.size_bytes(),
             Type::Array(element_ty, len) => self.type_size(element_ty) * len,
             Type::Slice(_) => 4, // Fat pointer: 2 bytes base address + 2 bytes length
+            Type::Pointer(_) => 2, // 16-bit address; never recurse into the pointee
             Type::String => 2,   // String is represented as a pointer
             Type::Function(_, _) => 2, // Function pointer is 16-bit
             Type::Void => 0,
@@ -554,6 +555,13 @@ impl SemanticAnalyzer {
                 // Slice is a fat pointer with base address and length
                 let element_type = self.resolve_type(&element.node)?;
                 Ok(Type::Slice(Box::new(element_type)))
+            }
+            TypeExpr::Pointer { pointee } => {
+                // Recursing on the *type expression* is fine even for a
+                // self-referential struct: an unknown name resolves to
+                // `Type::Named` without a registry lookup, and `size()` stops
+                // at the pointer.
+                Ok(Type::Pointer(Box::new(self.resolve_type(&pointee.node)?)))
             }
             TypeExpr::Function { params, ret } => {
                 let mut param_types = Vec::with_capacity(params.len());

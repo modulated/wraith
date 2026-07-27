@@ -1234,3 +1234,25 @@ fn generate_enum_variant_runtime(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod pointer_size_tests {
+    use crate::ast::PrimitiveType;
+    use crate::sema::types::Type;
+
+    /// `type_byte_size` reaches `Type::Pointer` through its `other => other.size()`
+    /// fallback rather than an arm of its own, which is easy to break by adding
+    /// a more specific arm above it. Two bytes is the whole calling convention:
+    /// get it wrong and arguments are marshalled at the wrong width.
+    #[test]
+    fn a_pointer_is_two_bytes_here_too() {
+        assert_eq!(
+            Type::Pointer(Box::new(Type::Primitive(PrimitiveType::U8))).size(),
+            2
+        );
+        assert_eq!(
+            Type::Pointer(Box::new(Type::Named("Device".into()))).size(),
+            2
+        );
+    }
+}

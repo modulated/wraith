@@ -233,6 +233,7 @@ impl SemanticAnalyzer {
             Type::String => 2,      // String pointer (16-bit address)
             Type::Function(_, _) => 2, // Function pointer (16-bit code address)
             Type::Slice(_) => 4,    // Fat pointer: 2-byte base + 2-byte length
+            Type::Pointer(_) => 2,  // 16-bit address
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
             | Type::Primitive(PrimitiveType::B16) => 2,

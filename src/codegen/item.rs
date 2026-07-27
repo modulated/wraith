@@ -31,6 +31,7 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
                 format!("&[{}]", format_type(element))
             }
         }
+        TypeExpr::Pointer { pointee } => format!("&{}", format_type(pointee)),
         TypeExpr::Named(name) => name.clone(),
         TypeExpr::Function { params, ret } => {
             let params = params
