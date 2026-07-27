@@ -155,3 +155,23 @@ fn logical_and_still_parses() {
          let c: bool = a && b; loop {} }",
     );
 }
+
+#[test]
+fn address_of_binds_tighter_than_as() {
+    // `&x as u16` is `(&x) as u16` — the address as a number — matching C and
+    // Rust. `as` is the one postfix suffix the `&` arm leaves to its caller;
+    // taking it would give the address of a cast, which is a temporary and
+    // therefore has no address at all. `specification.md` has documented this
+    // spelling since before it parsed.
+    assert_compiles(
+        "static SLOT: u8 = 0; \
+         #[reset] fn main() { let n: u16 = &SLOT as u16; let p: &u8 = n as &u8; *p = 1; loop {} }",
+    );
+}
+
+#[test]
+fn deref_binds_tighter_than_as() {
+    assert_compiles(
+        "#[reset] fn main() { let x: u8 = 1; let p: &u8 = &x; let n: u16 = *p as u16; loop {} }",
+    );
+}

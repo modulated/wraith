@@ -94,10 +94,12 @@ impl SemanticAnalyzer {
                 target_type,
             } => {
                 // Check that the inner expression is valid
-                self.check_expr(inner)?;
+                let source_ty = self.check_expr(inner)?;
 
                 // Validate BCD casts for constant expressions
                 let target_ty = self.resolve_type(&target_type.node)?;
+
+                Self::check_pointer_cast(&source_ty, &target_ty, expr.span)?;
                 if let Type::Primitive(prim) = &target_ty
                     && matches!(
                         prim,
@@ -698,6 +700,69 @@ impl SemanticAnalyzer {
         }
         self.expected_type = saved_expected;
         Ok(*ret_type)
+    }
+
+    /// The legality matrix for casts that involve a pointer on either side.
+    ///
+    /// Casts are otherwise unchecked in this language — a cast is how you say
+    /// "I know what I am doing". A pointer is the one place where being wrong
+    /// is silent rather than merely surprising, so both directions are pinned
+    /// down:
+    ///
+    /// - `p as u16` and `p as &U` keep all 16 bits. Anything narrower would
+    ///   throw away the page and leave a plausible-looking zero-page address.
+    /// - `n as &T` accepts an integer of any width (an 8-bit one names a
+    ///   zero-page byte), but nothing else. `true as &u8` or `s as &u8` have no
+    ///   meaning, and letting them through would produce a pointer to whatever
+    ///   the representation happened to be.
+    fn check_pointer_cast(
+        source: &Type,
+        target: &Type,
+        span: crate::ast::Span,
+    ) -> Result<(), SemaError> {
+        let integer = |t: &Type| {
+            matches!(
+                t,
+                Type::Primitive(
+                    PrimitiveType::U8
+                        | PrimitiveType::I8
+                        | PrimitiveType::U16
+                        | PrimitiveType::I16
+                        | PrimitiveType::Addr
+                )
+            )
+        };
+
+        if matches!(source, Type::Pointer(_))
+            && !matches!(
+                target,
+                Type::Pointer(_) | Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16)
+            )
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "cannot cast a pointer to {}; an address is 16 bits, so only \
+                     `as u16`, `as i16` or another pointer type keeps it whole",
+                    target.display_name()
+                ),
+                span,
+            });
+        }
+
+        if matches!(target, Type::Pointer(_))
+            && !matches!(source, Type::Pointer(_))
+            && !integer(source)
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "cannot cast {} to a pointer; only an integer address can be",
+                    source.display_name()
+                ),
+                span,
+            });
+        }
+
+        Ok(())
     }
 
     /// Type-check `&operand`.

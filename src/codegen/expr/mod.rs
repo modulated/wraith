@@ -59,6 +59,12 @@ pub fn generate_expr(
                     )
                 });
 
+                // A folded pointer — `0xD012 as &u8` — is still two bytes, but
+                // its high byte belongs in X, not Y. Loading only the low byte
+                // leaves whatever X happened to hold, which in a zeroed
+                // emulator reads as a plausible zero-page address.
+                let is_pointer = matches!(expr_type, Some(crate::sema::types::Type::Pointer(_)));
+
                 // Load the constant value
                 let val = *n as u64;
                 emitter.emit_inst("LDA", &format!("#${:02X}", val & 0xFF));
@@ -66,6 +72,8 @@ pub fn generate_expr(
                 if is_16bit {
                     // For 16-bit types, also load high byte into Y
                     emitter.emit_inst("LDY", &format!("#${:02X}", (val >> 8) & 0xFF));
+                } else if is_pointer {
+                    emitter.emit_inst("LDX", &format!("#${:02X}", (val >> 8) & 0xFF));
                 }
 
                 return Ok(());

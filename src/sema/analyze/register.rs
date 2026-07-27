@@ -269,7 +269,7 @@ impl SemanticAnalyzer {
             let addr = self.bss_alloc(size, stat.name.span)?;
             // Record the startup value so the reset handler can write it: RAM
             // holds garbage at power-on and cannot be pre-loaded from ROM.
-            let bytes = self.static_init_bytes(&stat.init, &declared_ty, size as usize);
+            let bytes = self.static_init_bytes(&stat.init, &declared_ty, size as usize)?;
             // A function named in a static's initializer (e.g. a device vtable)
             // has its address taken, even though the initializer is never
             // checked as an expression. Record it so codegen gives that function
@@ -283,6 +283,28 @@ impl SemanticAnalyzer {
                     // entry point would be reported as unused.
                     self.called_functions.insert(f.clone());
                     self.all_used_symbols.insert(f.clone());
+                }
+            }
+            // `static P: &T = &OTHER;` is a use of OTHER, even though a
+            // static's initializer is never checked as an expression. Record
+            // the edge so dead-code elimination keeps OTHER's own startup
+            // write; without it the pointer would be correct and the bytes it
+            // names would never be initialised.
+            if let crate::ast::Expr::Unary {
+                op: crate::ast::UnaryOp::AddrOf,
+                operand,
+            } = &stat.init.node
+            {
+                let mut target = &**operand;
+                while let crate::ast::Expr::Paren(inner) = &target.node {
+                    target = inner;
+                }
+                if let crate::ast::Expr::Variable(referent) = &target.node {
+                    self.symbol_refs
+                        .entry(Some(name.clone()))
+                        .or_default()
+                        .insert(referent.clone());
+                    self.all_used_symbols.insert(referent.clone());
                 }
             }
             self.static_inits.push(crate::sema::StaticInit {
@@ -320,7 +342,7 @@ impl SemanticAnalyzer {
         init: &Spanned<crate::ast::Expr>,
         ty: &Type,
         size: usize,
-    ) -> Vec<crate::sema::InitByte> {
+    ) -> Result<Vec<crate::sema::InitByte>, SemaError> {
         use crate::ast::{Expr, Literal};
         use crate::sema::InitByte;
 
@@ -388,6 +410,16 @@ impl SemanticAnalyzer {
                     }
                 }
             }
+            // `static P: &T = &OTHER;` — the address of another static. A
+            // static's BSS address is known during analysis, so this needs no
+            // label indirection, unlike a function reference.
+            Expr::Unary {
+                op: crate::ast::UnaryOp::AddrOf,
+                operand,
+            } => {
+                let addr = self.static_address_for_init(operand)?;
+                push_int(&mut bytes, addr as i64, 2);
+            }
             _ if fn_ref(&mut bytes, init) => {}
             // Fall back to constant folding (e.g. `1 + 2`, a const reference).
             _ => {
@@ -399,7 +431,65 @@ impl SemanticAnalyzer {
             }
         }
         bytes.resize(size, InitByte::Byte(0));
-        bytes
+        Ok(bytes)
+    }
+
+    /// Resolve `&NAME` in a static's initializer to a fixed address.
+    ///
+    /// Statics are allocated in declaration order, so a name that has not been
+    /// allocated yet is not merely unknown — it is a *forward reference*, and
+    /// silently falling back to zeros would leave a null pointer that only
+    /// misbehaves at run time. Say which case it is.
+    fn static_address_for_init(
+        &self,
+        operand: &Spanned<crate::ast::Expr>,
+    ) -> Result<u16, SemaError> {
+        use crate::ast::Expr;
+
+        let operand = match &operand.node {
+            Expr::Paren(inner) => inner,
+            _ => operand,
+        };
+        let Expr::Variable(name) = &operand.node else {
+            return Err(SemaError::Custom {
+                message: "a static's initializer can only take the address of another static"
+                    .to_string(),
+                span: operand.span,
+            });
+        };
+
+        match self.table.lookup(name) {
+            // An immutable const lives in ROM and is referenced by label, so
+            // `Absolute(0)` is a sentinel rather than an address — the same
+            // reason `&CONST` is rejected in ordinary code.
+            Some(sym) if sym.kind == SymbolKind::Constant => Err(SemaError::Custom {
+                message: format!(
+                    "cannot take the address of the constant '{}'; constants live in ROM \
+                     and are referenced by label, not by address",
+                    name
+                ),
+                span: operand.span,
+            }),
+            Some(sym) => match sym.location {
+                SymbolLocation::Absolute(addr) => Ok(addr),
+                _ => Err(SemaError::Custom {
+                    message: format!(
+                        "cannot take the address of '{}' here; only a static has a fixed \
+                         address at startup",
+                        name
+                    ),
+                    span: operand.span,
+                }),
+            },
+            None => Err(SemaError::Custom {
+                message: format!(
+                    "'{}' is not declared yet; statics are laid out in declaration order, \
+                     so a static's initializer can only name one declared above it",
+                    name
+                ),
+                span: operand.span,
+            }),
+        }
     }
 
     /// Reserve `size` bytes of BSS (RAM) for a mutable global, returning its

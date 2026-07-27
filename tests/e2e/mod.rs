@@ -27,6 +27,7 @@ mod memory;
 mod operators;
 mod org_conflicts;
 mod placement;
+mod pointer_casts;
 mod pointer_escape;
 mod pointer_syntax;
 mod pointers;

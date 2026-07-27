@@ -545,6 +545,20 @@ fn apply_type_cast(
                 }
             }
         },
+        // A pointer is a 16-bit address, so `0xD012 as &u8` folds to the number
+        // itself. This is how a fixed hardware location is named without an
+        // `addr` declaration, and it is what lets a pointer `static` carry a
+        // real initial value rather than silently starting at $0000.
+        TypeExpr::Pointer { .. } => {
+            if let Some(n) = value.as_integer() {
+                Ok(ConstValue::Integer((n as u16) as i64))
+            } else {
+                Err(SemaError::Custom {
+                    message: "only an integer can be cast to a pointer".to_string(),
+                    span,
+                })
+            }
+        }
         _ => Err(SemaError::Custom {
             message: "unsupported type cast in constant expression".to_string(),
             span,

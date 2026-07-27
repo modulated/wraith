@@ -15,6 +15,24 @@ use crate::sema::ProgramInfo;
 // Import generate_expr from parent module for recursive calls
 use super::generate_expr;
 
+/// Move the high byte from X to Y (pointer convention -> u16 convention).
+///
+/// The 6502 has no `TXY`, and going through A (`PHA/TXA/TAY/PLA`) is four
+/// instructions and 11 cycles because A is holding the low byte. A round trip
+/// through a zero-page scratch byte is two instructions and 6 cycles.
+fn move_x_to_y(emitter: &mut Emitter) {
+    let tmp = emitter.memory_layout.loop_end_temp();
+    emitter.emit_inst("STX", &format!("${:02X}", tmp));
+    emitter.emit_inst("LDY", &format!("${:02X}", tmp));
+}
+
+/// Move the high byte from Y to X (u16 convention -> pointer convention).
+fn move_y_to_x(emitter: &mut Emitter) {
+    let tmp = emitter.memory_layout.loop_end_temp();
+    emitter.emit_inst("STY", &format!("${:02X}", tmp));
+    emitter.emit_inst("LDX", &format!("${:02X}", tmp));
+}
+
 /// Generate code for type casting expressions
 ///
 /// Handles all primitive type conversions:
@@ -43,6 +61,11 @@ pub(super) fn generate_type_cast(
         }
     });
 
+    // A pointer arrives in A:X; a 16-bit scalar in A:Y. Casting between them is
+    // therefore a register shuffle, not a value change — and the 6502 has no
+    // X↔Y transfer, so it has to go through memory.
+    let source_is_pointer = matches!(source_type, Some(crate::sema::types::Type::Pointer(_)));
+
     // Evaluate the source expression
     generate_expr(expr, emitter, info, string_collector)?;
 
@@ -64,6 +87,14 @@ pub(super) fn generate_type_cast(
         TypeExpr::Primitive(target_prim) => {
             match target_prim {
                 PrimitiveType::U16 | PrimitiveType::I16 => {
+                    // `p as u16`: the bytes are already right, but the high one
+                    // is in X and a u16 wants it in Y.
+                    if source_is_pointer {
+                        emitter.emit_comment(&format!("Cast pointer to {:?}", target_prim));
+                        move_x_to_y(emitter);
+                        return Ok(());
+                    }
+
                     // Check if source is already 16-bit
                     let source_is_16bit = source_type.is_some_and(|ty| {
                         matches!(
@@ -200,6 +231,30 @@ pub(super) fn generate_type_cast(
                         emitter.emit_comment("Result: A=low_byte (high byte discarded)");
                     }
                 }
+            }
+        }
+        // `n as &T` — reinterpret an address as a pointer. Only the register
+        // convention changes: a pointer's high byte lives in X.
+        TypeExpr::Pointer { .. } => {
+            if source_is_pointer {
+                // `p as &U` is a pure retype; the bytes are already in A:X.
+                emitter.emit_comment("Cast between pointer types (no change)");
+                return Ok(());
+            }
+            let source_is_16bit = source_type.is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::sema::types::Type::Primitive(
+                        PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16
+                    )
+                )
+            });
+            emitter.emit_comment("Cast to pointer");
+            if source_is_16bit {
+                move_y_to_x(emitter);
+            } else {
+                // An 8-bit source addresses zero page, so the high byte is $00.
+                emitter.emit_inst("LDX", "#$00");
             }
         }
         _ => {
