@@ -25,6 +25,14 @@ pub(super) fn generate_unary(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    // Address-of and dereference have to intercept before the operand is
+    // evaluated: `&x` wants the operand's *location*, not its value.
+    match op {
+        UnaryOp::AddrOf => return generate_addr_of(operand, emitter, info),
+        UnaryOp::Deref => return generate_deref(operand, emitter, info, string_collector),
+        _ => {}
+    }
+
     // Evaluate operand first
     generate_expr(operand, emitter, info, string_collector)?;
 
@@ -40,11 +48,7 @@ pub(super) fn generate_unary(
 
     // Apply unary operation to A (low) / Y (high for u16)
     match op {
-        UnaryOp::AddrOf | UnaryOp::Deref => {
-            return Err(CodegenError::UnsupportedOperation(
-                "pointer operations are not supported yet".to_string(),
-            ));
-        }
+        UnaryOp::AddrOf | UnaryOp::Deref => unreachable!("handled above"),
         UnaryOp::Neg => {
             if is_u16 {
                 // 16-bit two's complement: ~value + 1 across both bytes, carrying
@@ -104,5 +108,275 @@ pub(super) fn generate_unary(
     // Unary ops rewrite A (and Y for u16) via raw instructions the tracker does
     // not follow; drop cached register beliefs.
     emitter.mark_a_unknown();
+    Ok(())
+}
+
+/// Emit `&operand` — the operand's address, in A (low) : X (high).
+///
+/// A:X rather than A:Y because that is what every other pointer-like value in
+/// this compiler already uses: arrays, strings, enums and struct-init results.
+fn generate_addr_of(
+    operand: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    // Unwrap parentheses and `&*p`, both of which sema already accepted.
+    let operand = match &operand.node {
+        Expr::Paren(inner) => &**inner,
+        _ => operand,
+    };
+
+    // `&arr[i]` — the element's address, i.e. the array's base plus a scaled
+    // offset. Only a constant index for now; a runtime one needs the general
+    // pointer arithmetic that comes with `p[i]`.
+    if let Expr::Index { object, index } = &operand.node {
+        return generate_addr_of_element(object, index, emitter, info);
+    }
+
+    // `&s.field` — the struct's base plus the field's offset.
+    if let Expr::Field { object, field } = &operand.node {
+        return generate_addr_of_field(object, field, emitter, info);
+    }
+
+    let sym = info.resolved_symbols.get(&operand.span).ok_or_else(|| {
+        CodegenError::Internal("address-of operand has no resolved symbol".to_string())
+    })?;
+
+    // An array variable's slot already *holds* the pointer to its data, so
+    // taking its address means loading the slot, not the slot's address.
+    let is_indirect_slot = matches!(sym.ty, Type::Array(..));
+
+    match sym.location {
+        SymbolLocation::ZeroPage(addr) if is_indirect_slot => {
+            emitter.emit_comment("Address of array data (the slot holds the pointer)");
+            emitter.emit_inst("LDA", &format!("${:02X}", addr));
+            emitter.emit_inst("LDX", &format!("${:02X}", addr + 1));
+        }
+        SymbolLocation::ZeroPage(addr) => {
+            // Every local lives in zero page, so the high byte is always $00.
+            emitter.emit_comment(&format!("Address of local '{}'", sym.name));
+            emitter.emit_inst("LDA", &format!("#${:02X}", addr));
+            emitter.emit_inst("LDX", "#$00");
+        }
+        SymbolLocation::Absolute(addr) => {
+            emitter.emit_comment(&format!("Address of '{}'", sym.name));
+            emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
+            emitter.emit_inst("LDX", &format!("#${:02X}", addr >> 8));
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "cannot take the address of '{}'",
+                sym.name
+            )));
+        }
+    }
+    emitter.reg_state.modify_a();
+    Ok(())
+}
+
+/// Emit `*operand` — read through a pointer.
+fn generate_deref(
+    operand: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::{Expr, PrimitiveType};
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let pointee_is_multibyte = matches!(
+        info.resolved_types.get(&operand.span),
+        Some(Type::Pointer(inner))
+            if matches!(
+                **inner,
+                Type::Primitive(PrimitiveType::U16)
+                    | Type::Primitive(PrimitiveType::I16)
+                    | Type::Primitive(PrimitiveType::B16)
+            )
+    );
+
+    // Fast path: the pointer is a zero-page variable, so `(zp),Y` can read
+    // through it directly.
+    if let Expr::Variable(_) = &operand.node
+        && let Some(sym) = info.resolved_symbols.get(&operand.span)
+        && let SymbolLocation::ZeroPage(addr) = sym.location
+    {
+        emitter.emit_comment("Dereference pointer");
+        crate::codegen::expr::aggregate::emit_deref_load(emitter, addr, 0, pointee_is_multibyte);
+        return Ok(());
+    }
+
+    // General path: evaluate the pointer into A:X and stage it in zero page,
+    // because `(zp),Y` needs the pointer itself to be there.
+    generate_expr(operand, emitter, info, string_collector)?;
+    let ptr = emitter.memory_layout.deref_ptr();
+    emitter.emit_comment("Dereference pointer (staged)");
+    emitter.emit_inst("STA", &format!("${:02X}", ptr));
+    emitter.emit_inst("STX", &format!("${:02X}", ptr + 1));
+    crate::codegen::expr::aggregate::emit_deref_load(emitter, ptr, 0, pointee_is_multibyte);
+    Ok(())
+}
+
+/// Emit `&object[index]` for a constant index: the array's base plus
+/// `index * element size`.
+fn generate_addr_of_element(
+    object: &Spanned<crate::ast::Expr>,
+    index: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let idx = crate::sema::const_eval::eval_const_expr(index)
+        .ok()
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(
+                "the address of an array element needs a constant index for now".to_string(),
+            )
+        })?;
+
+    let sym = info.resolved_symbols.get(&object.span).ok_or_else(|| {
+        CodegenError::Internal("address-of element has no resolved symbol".to_string())
+    })?;
+    let elem_size = match &sym.ty {
+        Type::Array(elem, _) | Type::Slice(elem) => {
+            crate::codegen::expr::type_byte_size(elem, info).max(1)
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "cannot take the address of an element of this type".to_string(),
+            ));
+        }
+    };
+    let offset = (idx as usize * elem_size) as u16;
+
+    match sym.location {
+        // A global array lives at its own label, so the element address is a
+        // compile-time constant.
+        SymbolLocation::Absolute(base) => {
+            let addr = base.wrapping_add(offset);
+            emitter.emit_comment(&format!("Address of {}[{}]", sym.name, idx));
+            emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
+            emitter.emit_inst("LDX", &format!("#${:02X}", addr >> 8));
+        }
+        // A local array's slot holds a pointer to its data, so the offset has
+        // to be added at run time.
+        SymbolLocation::ZeroPage(slot) => {
+            emitter.emit_comment(&format!("Address of {}[{}]", sym.name, idx));
+            if offset == 0 {
+                emitter.emit_inst("LDA", &format!("${:02X}", slot));
+                emitter.emit_inst("LDX", &format!("${:02X}", slot + 1));
+            } else {
+                let tmp = emitter.memory_layout.loop_end_temp();
+                emitter.emit_inst("LDA", &format!("${:02X}", slot));
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("ADC", &format!("#${:02X}", offset & 0xFF));
+                emitter.emit_inst("STA", &format!("${:02X}", tmp));
+                emitter.emit_inst("LDA", &format!("${:02X}", slot + 1));
+                emitter.emit_inst("ADC", &format!("#${:02X}", offset >> 8));
+                emitter.emit_inst("TAX", "");
+                emitter.emit_inst("LDA", &format!("${:02X}", tmp));
+            }
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "cannot take the address of an element of '{}'",
+                sym.name
+            )));
+        }
+    }
+    emitter.reg_state.modify_a();
+    Ok(())
+}
+
+/// Emit `&object.field` — the struct's base plus the field's offset.
+fn generate_addr_of_field(
+    object: &Spanned<crate::ast::Expr>,
+    field: &Spanned<String>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let sym = info.resolved_symbols.get(&object.span).ok_or_else(|| {
+        CodegenError::Internal("address-of field has no resolved symbol".to_string())
+    })?;
+
+    // A pointer to a struct behaves exactly like a struct parameter: both hold
+    // a 2-byte address rather than the bytes themselves.
+    let struct_name = match &sym.ty {
+        Type::Named(n) => n.clone(),
+        Type::Pointer(inner) => match &**inner {
+            Type::Named(n) => n.clone(),
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    "cannot take the address of a field of this type".to_string(),
+                ));
+            }
+        },
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "cannot take the address of a field of this type".to_string(),
+            ));
+        }
+    };
+    let sdef = info
+        .type_registry
+        .get_struct(&struct_name)
+        .ok_or_else(|| CodegenError::SymbolNotFound(struct_name.clone()))?;
+    let offset = sdef
+        .get_field(&field.node)
+        .ok_or_else(|| CodegenError::SymbolNotFound(field.node.clone()))?
+        .offset as u16;
+
+    // Held by value (a local struct, stored inline) or by reference (a
+    // parameter, or a pointer)?
+    let by_reference = sym.is_param || matches!(sym.ty, Type::Pointer(_));
+
+    emitter.emit_comment(&format!("Address of {}.{}", sym.name, field.node));
+    match sym.location {
+        SymbolLocation::ZeroPage(slot) if !by_reference => {
+            // Inline in the frame, so the field's address is a zero-page byte.
+            emitter.emit_inst("LDA", &format!("#${:02X}", slot as u16 + offset));
+            emitter.emit_inst("LDX", "#$00");
+        }
+        SymbolLocation::ZeroPage(slot) => {
+            // The slot holds a pointer; add the offset to it.
+            if offset == 0 {
+                emitter.emit_inst("LDA", &format!("${:02X}", slot));
+                emitter.emit_inst("LDX", &format!("${:02X}", slot + 1));
+            } else {
+                let tmp = emitter.memory_layout.loop_end_temp();
+                emitter.emit_inst("LDA", &format!("${:02X}", slot));
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("ADC", &format!("#${:02X}", offset & 0xFF));
+                emitter.emit_inst("STA", &format!("${:02X}", tmp));
+                emitter.emit_inst("LDA", &format!("${:02X}", slot + 1));
+                emitter.emit_inst("ADC", &format!("#${:02X}", offset >> 8));
+                emitter.emit_inst("TAX", "");
+                emitter.emit_inst("LDA", &format!("${:02X}", tmp));
+            }
+        }
+        SymbolLocation::Absolute(base) => {
+            let addr = base.wrapping_add(offset);
+            emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
+            emitter.emit_inst("LDX", &format!("#${:02X}", addr >> 8));
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "cannot take the address of a field of '{}'",
+                sym.name
+            )));
+        }
+    }
+    emitter.reg_state.modify_a();
     Ok(())
 }

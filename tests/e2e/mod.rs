@@ -28,6 +28,7 @@ mod operators;
 mod org_conflicts;
 mod placement;
 mod pointer_syntax;
+mod pointers;
 mod statics;
 mod stdlib;
 mod strings_slices;

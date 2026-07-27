@@ -700,20 +700,159 @@ impl SemanticAnalyzer {
         Ok(*ret_type)
     }
 
+    /// Type-check `&operand`.
+    ///
+    /// Only a few expression forms have an address to take. A literal, a call
+    /// result or an arithmetic result lives in a register or a scratch byte
+    /// that is about to be reused, so `&` on one would hand back an address
+    /// with nothing behind it.
+    ///
+    /// Several *named* things are rejected too, each for its own reason:
+    ///
+    /// - an immutable `const` is recorded at the sentinel address `Absolute(0)`
+    ///   and referenced by ROM label, so `&CONST` would silently mean `$0000`;
+    /// - an `addr` declaration carries a read/write access mode that is checked
+    ///   at the symbol, and a pointer would launder that check away;
+    /// - a function name already *is* its address;
+    /// - a string, slice or enum variable is already a pointer.
+    fn check_addr_of(
+        &mut self,
+        operand: &Spanned<Expr>,
+        span: crate::ast::Span,
+    ) -> Result<Type, SemaError> {
+        let reject = |what: &str, hint: &str| {
+            Err(SemaError::Custom {
+                message: if hint.is_empty() {
+                    format!("cannot take the address of {}", what)
+                } else {
+                    format!("cannot take the address of {}; {}", what, hint)
+                },
+                span,
+            })
+        };
+
+        match &operand.node {
+            Expr::Paren(inner) => self.check_addr_of(inner, span),
+
+            Expr::Variable(name) => {
+                let sym = match self.table.lookup(name) {
+                    Some(s) => s.clone(),
+                    None => {
+                        return Err(SemaError::UndefinedSymbol {
+                            name: name.clone(),
+                            span: operand.span,
+                        });
+                    }
+                };
+                match sym.kind {
+                    SymbolKind::Constant => {
+                        return reject(
+                            &format!("the constant '{}'", name),
+                            "constants live in ROM and are referenced by label, not by address",
+                        );
+                    }
+                    SymbolKind::Address => {
+                        return reject(
+                            &format!("the address declaration '{}'", name),
+                            "its read/write access mode is checked at the name; \
+                             write `0x1234 as &u8` if that is really what you want",
+                        );
+                    }
+                    SymbolKind::Function => {
+                        return reject(
+                            &format!("the function '{}'", name),
+                            "a function name is already its address",
+                        );
+                    }
+                    _ => {}
+                }
+                // Run the ordinary variable check so the symbol is resolved,
+                // marked used, and recorded as a liveness edge.
+                let ty = self.check_expr(operand)?;
+                match ty {
+                    // An array decays to a pointer to its first element: the
+                    // variable's slot already holds exactly that pointer.
+                    Type::Array(elem, _) => Ok(Type::Pointer(elem)),
+                    Type::String | Type::Slice(_) => reject(
+                        &format!("'{}'", name),
+                        "it is already a reference; pass it directly",
+                    ),
+                    Type::Named(ref n) if self.type_registry.get_enum(n).is_some() => reject(
+                        &format!("'{}'", name),
+                        "an enum value is already a pointer; pass it directly",
+                    ),
+                    other => Ok(Type::Pointer(Box::new(other))),
+                }
+            }
+
+            Expr::Index { .. } => {
+                let elem_ty = self.check_expr(operand)?;
+                Ok(Type::Pointer(Box::new(elem_ty)))
+            }
+
+            Expr::Field { .. } => {
+                let field_ty = self.check_expr(operand)?;
+                Ok(Type::Pointer(Box::new(field_ty)))
+            }
+
+            // `&*p` is just `p`.
+            Expr::Unary {
+                op: crate::ast::UnaryOp::Deref,
+                operand: inner,
+            } => self.check_expr(inner),
+
+            _ => reject(
+                "a temporary",
+                "only a variable, an element or a field has an address",
+            ),
+        }
+    }
+
     fn check_unary(
         &mut self,
         op: &crate::ast::UnaryOp,
         operand: &Spanned<Expr>,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
+        // `&x` inspects the operand's *form* before checking it, because only a
+        // few forms have an address at all.
+        if matches!(op, crate::ast::UnaryOp::AddrOf) {
+            return self.check_addr_of(operand, span);
+        }
+
         let operand_ty = self.check_expr(operand)?;
 
         // Check type compatibility with the operator
         match op {
-            crate::ast::UnaryOp::AddrOf | crate::ast::UnaryOp::Deref => Err(SemaError::Custom {
-                message: "pointer operations are not supported yet".to_string(),
-                span,
-            }),
+            crate::ast::UnaryOp::AddrOf => unreachable!("handled above"),
+            crate::ast::UnaryOp::Deref => match operand_ty {
+                Type::Pointer(inner) => match *inner {
+                    // A struct or enum pointee has no by-value form to produce:
+                    // this language has no aggregate temporaries, so a field is
+                    // the unit of access.
+                    Type::Named(ref n) => Err(SemaError::Custom {
+                        message: format!(
+                            "cannot dereference a pointer to '{}' as a value; read a field \
+                             instead, as `p.field`",
+                            n
+                        ),
+                        span,
+                    }),
+                    Type::Array(..) | Type::Slice(_) | Type::String | Type::Void => {
+                        Err(SemaError::Custom {
+                            message: "cannot dereference a pointer to this type as a value"
+                                .to_string(),
+                            span,
+                        })
+                    }
+                    scalar => Ok(scalar),
+                },
+                other => Err(SemaError::InvalidUnaryOp {
+                    op: "*".to_string(),
+                    operand_ty: other.display_name(),
+                    span,
+                }),
+            },
             crate::ast::UnaryOp::Neg => {
                 // Negation works on numeric types and always yields a signed
                 // result: `-5` is i8, not u8. `5` on its own infers as u8, so

@@ -28,19 +28,14 @@ fn assert_parses(src: &str) {
     }
 }
 
-/// Assert `src` parses but is rejected later, i.e. the syntax is accepted and
-/// only the unimplemented semantics stop it.
-fn assert_parses_but_is_unsupported(src: &str) {
+/// Assert `src` parses *and* compiles. These forms are now implemented; the
+/// point of testing them here is the shape of the tree, which
+/// `tests/e2e/pointers.rs` then checks the behaviour of.
+fn assert_compiles(src: &str) {
     assert_parses(src);
     match compile(src) {
-        CompileResult::SemaError(e) | CompileResult::CodegenError(e) => {
-            assert!(
-                e.contains("pointer operations are not supported yet"),
-                "expected the not-yet-implemented rejection, got: {e}"
-            );
-        }
-        CompileResult::ParseError(e) => panic!("should have parsed: {e}"),
-        other => panic!("expected pointers to be rejected for now, got {other:?}"),
+        CompileResult::Success(..) => {}
+        other => panic!("expected this to compile, got {other:?}"),
     }
 }
 
@@ -91,10 +86,8 @@ fn a_self_referential_struct_parses_and_sizes() {
 
 #[test]
 fn address_of_and_deref_parse() {
-    assert_parses_but_is_unsupported(
-        "#[reset] fn main() { let x: u8 = 1; let p: &u8 = &x; loop {} }",
-    );
-    assert_parses_but_is_unsupported(
+    assert_compiles("#[reset] fn main() { let x: u8 = 1; let p: &u8 = &x; loop {} }");
+    assert_compiles(
         "#[reset] fn main() { let x: u8 = 1; let p: &u8 = &x; let v: u8 = *p; loop {} }",
     );
 }
@@ -103,9 +96,7 @@ fn address_of_and_deref_parse() {
 fn a_deref_assignment_parses() {
     // `*p = v;` reaches the statement parser through the ordinary
     // expression-or-assignment path, so it needs no separate handling.
-    assert_parses_but_is_unsupported(
-        "#[reset] fn main() { let x: u8 = 1; let p: &u8 = &x; *p = 9; loop {} }",
-    );
+    assert_compiles("#[reset] fn main() { let x: u8 = 1; let p: &u8 = &x; *p = 9; loop {} }");
 }
 
 #[test]
@@ -113,14 +104,12 @@ fn address_of_binds_looser_than_indexing() {
     // `&x[0]` must be the address of the element, not `(&x)[0]`. If it parsed
     // the other way this would be an index applied to a pointer-to-array, and
     // the error would come from somewhere else entirely.
-    assert_parses_but_is_unsupported(
-        "#[reset] fn main() { let a: [u8; 4] = [0; 4]; let p: &u8 = &a[0]; loop {} }",
-    );
+    assert_compiles("#[reset] fn main() { let a: [u8; 4] = [0; 4]; let p: &u8 = &a[0]; loop {} }");
 }
 
 #[test]
 fn address_of_binds_looser_than_field_access() {
-    assert_parses_but_is_unsupported(
+    assert_compiles(
         "struct S { x: u8 } \
          #[reset] fn main() { let s: S = S { x: 1 }; let p: &u8 = &s.x; loop {} }",
     );

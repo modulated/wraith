@@ -32,6 +32,26 @@ pub(crate) fn type_byte_size(ty: &crate::sema::types::Type, info: &ProgramInfo) 
     }
 }
 
+/// Load a value through a zero-page pointer at `ptr`, `offset` bytes in.
+///
+/// `LDY #offset / LDA (ptr),Y`, plus the `PHA/INY/LDA/TAY/PLA` dance for a
+/// 16-bit value so it ends up in the A:Y convention. This is the one sequence
+/// that had been written out three times — for the enum discriminant, for a
+/// struct parameter's field, and for the slice descriptor copy — and is now
+/// shared by `*p` and `p.field` too.
+pub(crate) fn emit_deref_load(emitter: &mut Emitter, ptr: u8, offset: u8, is_multibyte: bool) {
+    emitter.emit_inst("LDY", &format!("#${:02X}", offset));
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
+    if is_multibyte {
+        emitter.emit_inst("PHA", "");
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
+        emitter.emit_inst("TAY", "");
+        emitter.emit_inst("PLA", "");
+    }
+    emitter.reg_state.modify_a();
+}
+
 /// Emit an indirect-indexed array element load through a zero-page pointer at
 /// `ptr`. For u8 elements this is `LDA (ptr),Y`; for u16 elements the index is
 /// scaled ×2 and both bytes are loaded, ending with the low byte in A and the

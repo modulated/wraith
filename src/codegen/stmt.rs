@@ -383,16 +383,20 @@ pub fn generate_stmt(
                     sym.ty,
                     Type::Array(_, _)
                         | Type::String
+                        | Type::Pointer(_)
                         | Type::Function(_, _)
                         | Type::Primitive(crate::ast::PrimitiveType::U16)
                         | Type::Primitive(crate::ast::PrimitiveType::I16)
                         | Type::Primitive(crate::ast::PrimitiveType::B16)
                 ) || is_enum;
 
-                // Arrays, enums, and strings store address in A (low) and X (high)
-                // Other u16 types store in A (low) and Y (high)
+                // Arrays, enums, strings and pointers carry an address in
+                // A (low) and X (high); other 16-bit values use A (low) and
+                // Y (high). Storing only A leaves the high byte as whatever was
+                // in the slot, which reads as a pointer into an arbitrary page.
                 let is_array_or_enum =
-                    matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
+                    matches!(sym.ty, Type::Array(_, _) | Type::String | Type::Pointer(_))
+                        || is_enum;
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::FrameOffset(_) => {
@@ -689,6 +693,17 @@ pub fn generate_stmt(
                 }
             }
 
+            // `*p = v` — write through a pointer. Handled before the value is
+            // evaluated below, because the pointer has to be staged first and
+            // the generic path assumes the target is a name.
+            if let crate::ast::Expr::Unary {
+                op: crate::ast::UnaryOp::Deref,
+                operand,
+            } = &target.node
+            {
+                return generate_deref_assignment(operand, value, emitter, info, string_collector);
+            }
+
             // 1. Generate code for value (result in A)
             generate_expr(value, emitter, info, string_collector)?;
 
@@ -744,15 +759,17 @@ pub fn generate_stmt(
                         let is_multibyte = matches!(
                             sym.ty,
                             Type::Array(_, _)
+                                | Type::Pointer(_)
                                 | Type::Function(_, _)
                                 | Type::Primitive(crate::ast::PrimitiveType::U16)
                                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                                 | Type::Primitive(crate::ast::PrimitiveType::B16)
                         ) || is_enum;
 
-                        // Arrays and enums store address in A (low) and X (high)
-                        // Other u16 types store in A (low) and Y (high)
-                        let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
+                        // Arrays, enums and pointers carry an address in
+                        // A (low) and X (high); other 16-bit values use A:Y.
+                        let is_array_or_enum =
+                            matches!(sym.ty, Type::Array(_, _) | Type::Pointer(_)) || is_enum;
 
                         match sym.location {
                             crate::sema::table::SymbolLocation::FrameOffset(_) => {
@@ -2761,6 +2778,77 @@ fn generate_match_arm_bodies(
         }
     }
 
+    Ok(())
+}
+
+/// Emit `*p = value`.
+///
+/// The pointer is staged first and the value parked in the high pool, mirroring
+/// `generate_index_assignment`: evaluating the value can clobber whatever is in
+/// zero page, so the two cannot simply be produced in order.
+fn generate_deref_assignment(
+    ptr_expr: &Spanned<crate::ast::Expr>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let is_multibyte = matches!(
+        info.resolved_types.get(&ptr_expr.span),
+        Some(Type::Pointer(inner))
+            if matches!(
+                **inner,
+                Type::Primitive(PrimitiveType::U16)
+                    | Type::Primitive(PrimitiveType::I16)
+                    | Type::Primitive(PrimitiveType::B16)
+            )
+    );
+    let width: u8 = if is_multibyte { 2 } else { 1 };
+
+    // Park the value while the pointer is set up. Not $20/$21 — those are
+    // hardcoded by several other paths — but the high pool, as the indexed
+    // store does.
+    let save = emitter
+        .temp_alloc
+        .alloc_high(width)
+        .ok_or_else(|| CodegenError::Internal("no temp space for a pointer store".to_string()))?;
+
+    emitter.emit_comment("Store through pointer");
+    generate_expr(value, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", &format!("${:02X}", save));
+    if is_multibyte {
+        // A 16-bit value arrives as A:Y.
+        emitter.emit_inst("STY", &format!("${:02X}", save + 1));
+    }
+
+    // Resolve the pointer into a zero-page pair we can use with `(zp),Y`.
+    let ptr = if let crate::ast::Expr::Variable(_) = &ptr_expr.node
+        && let Some(sym) = info.resolved_symbols.get(&ptr_expr.span)
+        && let SymbolLocation::ZeroPage(addr) = sym.location
+    {
+        addr
+    } else {
+        generate_expr(ptr_expr, emitter, info, string_collector)?;
+        let staged = emitter.memory_layout.deref_ptr();
+        emitter.emit_inst("STA", &format!("${:02X}", staged));
+        emitter.emit_inst("STX", &format!("${:02X}", staged + 1));
+        staged
+    };
+
+    for k in 0..width {
+        emitter.emit_inst("LDY", &format!("#${:02X}", k));
+        emitter.emit_inst("LDA", &format!("${:02X}", save + k));
+        emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+    }
+
+    emitter.temp_alloc.free_high(save, width);
+    // An indirect store can land anywhere; no cached belief about zero page
+    // survives it.
+    emitter.invalidate_registers();
     Ok(())
 }
 
