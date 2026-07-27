@@ -209,3 +209,67 @@ fn rand_is_deterministic_and_varies() {
     assert_eq!(e2.mem(0x0400), seq[0], "deterministic first draw");
     assert_eq!(e2.mem(0x0401), seq[1], "deterministic second draw");
 }
+
+#[test]
+fn memcmp_compares_the_buffers_not_the_pointers() {
+    // memcmp used to substitute `{a}` — the *frame slot* holding the pointer —
+    // straight into `LDA {a},Y`, so it compared two zero-page frame bytes and
+    // never touched the buffers at all. Equal buffers that differ only in their
+    // last byte are the case that exposes it: a comparison that never reads
+    // them returns the same answer either way.
+    let cmp = |b3: u8| {
+        run(&format!(
+            r#"
+            import {{ memcmp }} from "std/mem.wr";
+            const A0: addr = 0x0500;
+            const A1: addr = 0x0501;
+            const A2: addr = 0x0502;
+            const A3: addr = 0x0503;
+            const B0: addr = 0x0600;
+            const B1: addr = 0x0601;
+            const B2: addr = 0x0602;
+            const B3: addr = 0x0603;
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                A0 = 0x11; A1 = 0x22; A2 = 0x33; A3 = 0x44;
+                B0 = 0x11; B1 = 0x22; B2 = 0x33; B3 = {b3};
+                OUT = memcmp(0x0500, 0x0600, 4);
+                loop {{}}
+            }}
+        "#
+        ))
+        .mem(0x0900)
+    };
+    assert_eq!(cmp(0x44), 1, "identical buffers compare equal");
+    assert_eq!(cmp(0x99), 0, "a difference in the last byte is found");
+}
+
+#[test]
+fn memcmp_finds_a_difference_in_the_first_byte() {
+    let mut e = run(r#"
+        import { memcmp } from "std/mem.wr";
+        const A0: addr = 0x0500;
+        const B0: addr = 0x0600;
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            A0 = 0x11;
+            B0 = 0x22;
+            OUT = memcmp(0x0500, 0x0600, 1);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0);
+}
+
+#[test]
+fn memcmp_of_zero_length_is_equal() {
+    let mut e = run(r#"
+        import { memcmp } from "std/mem.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { OUT = memcmp(0x0500, 0x0600, 0); loop {} }
+    "#);
+    assert_eq!(e.mem(0x0900), 1, "nothing to compare, so equal");
+}

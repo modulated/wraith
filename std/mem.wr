@@ -152,11 +152,25 @@ pub fn memcmp(a: u16, b: u16, len: u8) -> u8 {
 
         let byte_a: u8 = 0;
         let byte_b: u8 = 0;
+        // `{a}` substitutes the *frame slot* holding the pointer, so `LDA {a},Y`
+        // reads zero page rather than the buffer. Both pointers have to be
+        // staged into a zero-page vector and read with `(zp),Y`, the way memcpy
+        // does above. The staging is repeated each iteration on purpose: $F0-$F3
+        // is also the compiler's binary-operation save pool, and the comparisons
+        // in this loop body may use it.
         asm {
+            "LDA {a}",
+            "STA $F0",
+            "LDA {a}+1",
+            "STA $F1",
+            "LDA {b}",
+            "STA $F2",
+            "LDA {b}+1",
+            "STA $F3",
             "LDY {i}",
-            "LDA {a},Y",
+            "LDA ($F0),Y",
             "STA {byte_a}",
-            "LDA {b},Y",
+            "LDA ($F2),Y",
             "STA {byte_b}"
         }
 
