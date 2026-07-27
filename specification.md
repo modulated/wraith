@@ -1375,9 +1375,17 @@ struct Node { value: u8, next: &Node }   // 3 bytes
 `p[i]` has no bounds check: a pointer carries no length. When the length
 matters, use a slice (`&[T]`), which carries one.
 
-Arithmetic is deliberately limited to indexing. There is no `p + n`; write
-`&p[n]` or index at the point of use. Nor is there `&mut` — the language has
-one pointer kind, and no `mut` keyword to distinguish a second.
+No binary operator applies to a pointer. Arithmetic is indexing — `p[i]`,
+scaled by the element width, rather than `p + n` on a raw byte offset — and
+comparison goes through `as u16`, which is also the null check a linked list
+needs:
+
+```rust
+if p as u16 == 0 { ... }
+```
+
+Nor is there `&mut`: the language has one pointer kind, and no `mut` keyword to
+distinguish a second.
 
 ### What is rejected
 

@@ -737,3 +737,124 @@ fn indexing_a_pointer_uses_indirect_indexed_addressing() {
         "expected an indirect-indexed load:\n{asm}"
     );
 }
+
+// ============================================================================
+// No arithmetic on pointers
+// ============================================================================
+
+#[test]
+fn adding_two_pointers_is_rejected() {
+    // This has to be checked explicitly. `check_binary`'s compatibility gate is
+    // `left_ty == right_ty`, so two `&u8`s pass it and a 16-bit add is emitted
+    // using the A:Y convention on values that arrived in A:X — a wrong answer
+    // with no diagnostic anywhere.
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        static A: u8 = 0;
+        static B: u8 = 0;
+        #[reset]
+        fn main() { let p: &u8 = &A; let q: &u8 = &B; let r: &u8 = p + q; R0 = *r; loop {} }
+    "#,
+    );
+    assert!(
+        err.contains("p[i]"),
+        "the alternative should be named: {err}"
+    );
+}
+
+#[test]
+fn adding_an_integer_to_a_pointer_is_rejected() {
+    // `p + 1` is the C spelling and the one most likely to be reached for.
+    // Indexing is the supported form because it scales by the element width,
+    // which a raw byte offset does not.
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        static A: u8 = 0;
+        #[reset]
+        fn main() { let p: &u8 = &A; let q: &u8 = p + 1; R0 = *q; loop {} }
+    "#,
+    );
+    assert!(err.contains("p[i]"), "{err}");
+}
+
+#[test]
+fn comparing_pointers_directly_is_rejected_but_their_addresses_compare() {
+    // Deferred rather than forbidden: the 16-bit compare paths expect A:Y, and
+    // a pointer arrives in A:X. Going through `as u16` puts it in the right
+    // register pair, which is also the null check a linked list needs.
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        static A: u8 = 0;
+        #[reset]
+        fn main() { let p: &u8 = &A; let q: &u8 = &A; if p == q { R0 = 1; } loop {} }
+    "#,
+    );
+    assert!(err.contains("as u16"), "{err}");
+
+    assert_eq!(
+        run(r#"
+            const R0: addr = 0x0900;
+            static A: u8 = 0;
+            static B: u8 = 0;
+            #[reset]
+            fn main() {
+                let p: &u8 = &A;
+                let q: &u8 = &A;
+                let r: &u8 = &B;
+                let same: u8 = 0;
+                let diff: u8 = 0;
+                if p as u16 == q as u16 { same = 1; }
+                if p as u16 == r as u16 { diff = 1; }
+                R0 = same * 2 + diff;
+                loop {}
+            }
+        "#)
+        .mem(0x0900),
+        2
+    );
+}
+
+#[test]
+fn a_read_after_an_indirect_store_is_not_elided() {
+    // An indirect store is opaque: `STA ($36),Y` can land on any zero-page
+    // byte, so it invalidates every cached register belief. Without that, the
+    // second read of `x` would be optimised away as "already in A" and report
+    // the value from before the write.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let x: u8 = 5;
+            let p: &u8 = &x;
+            R0 = x;
+            *p = 9;
+            R1 = x;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 9));
+}
+
+#[test]
+fn a_read_after_an_indirect_indexed_store_is_not_elided() {
+    // The same for `p[i] = v`, which goes through the same opaque store.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let buf: [u8; 2] = [0; 2];
+            buf[0] = 3;
+            let p: &u8 = &buf;
+            R0 = buf[0];
+            p[0] = 8;
+            R1 = buf[0];
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (3, 8));
+}

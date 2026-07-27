@@ -498,6 +498,36 @@ impl SemanticAnalyzer {
             (self.check_expr(left)?, self.check_expr(right)?)
         };
 
+        // No binary operator applies to a pointer. This has to be said
+        // explicitly: the compatibility gate further down is `left_ty ==
+        // right_ty`, so `p + q` on two `&u8`s passes it and emits a 16-bit add
+        // using the A:Y convention on values that arrived in A:X — a wrong
+        // answer with no diagnostic anywhere.
+        //
+        // Arithmetic is `p[i]`, scaled by the element width. Comparison goes
+        // through `as u16`, which puts the address in the register pair the
+        // 16-bit compare paths expect.
+        if matches!(left_ty, Type::Pointer(_)) || matches!(right_ty, Type::Pointer(_)) {
+            let hint = match op {
+                BinaryOp::Add | BinaryOp::Sub => {
+                    "index instead, as `p[i]`, which scales by the element width"
+                }
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => "compare the addresses, as `p as u16 == q as u16`",
+                _ => "cast to `u16` first if you mean to operate on the address",
+            };
+            return Err(SemaError::InvalidBinaryOp {
+                op: format!("{:?} ({})", op, hint),
+                left_ty: left_ty.display_name(),
+                right_ty: right_ty.display_name(),
+                span,
+            });
+        }
+
         // String operators: `+` concatenates (str), `==`/`!=` compare (bool).
         if matches!((&left_ty, &right_ty), (Type::String, Type::String)) {
             match op {
