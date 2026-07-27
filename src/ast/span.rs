@@ -120,13 +120,24 @@ impl Span {
         filename: Option<&str>,
         message: &str,
     ) -> String {
-        // `source` is the file being compiled. A span from an imported module
-        // indexes a different text, so resolving it here would print a real
-        // line of the wrong file with a caret in an arbitrary place — worse
-        // than printing no excerpt at all. This is reachable: an imported
-        // function taking part in an address conflict is reported by span.
-        if self.file != ROOT_FILE {
-            return format!("  = note: {} (in an imported module)", message);
+        self.format_error_context_of(source, filename, message, ROOT_FILE)
+    }
+
+    /// Render against `source`, which is the text of file `source_file`.
+    ///
+    /// A span only indexes the file it came from, so quoting it against another
+    /// file's text would print a real line of the wrong file with the caret in
+    /// an arbitrary place. When they do not match, say where the problem is
+    /// instead of showing a misleading excerpt.
+    pub fn format_error_context_of(
+        &self,
+        source: &str,
+        filename: Option<&str>,
+        message: &str,
+        source_file: u32,
+    ) -> String {
+        if self.file != source_file {
+            return format!("  = note: {} (in another module)", message);
         }
 
         let pos = self.to_line_col(source);
@@ -275,11 +286,23 @@ mod tests {
     }
 
     #[test]
-    fn an_imported_span_does_not_render_an_excerpt_of_the_wrong_file() {
+    fn a_span_is_never_quoted_against_another_files_source() {
         let source = "fn main() {\n    let x: u8 = 1;\n}\n";
-        let imported = Span::in_file(5, 9, 42);
-        let rendered = imported.format_error_context(source, Some("main.wr"), "some problem");
+        let elsewhere = Span::in_file(5, 9, 42);
+        let rendered = elsewhere.format_error_context(source, Some("main.wr"), "some problem");
         assert!(!rendered.contains("let x"), "must not quote the wrong file");
-        assert!(rendered.contains("imported module"));
+        assert!(rendered.contains("another module"));
+    }
+
+    #[test]
+    fn a_span_renders_against_the_source_of_its_own_file() {
+        // What makes an imported module's error readable: given that module's
+        // text, the excerpt and caret land where they should.
+        let module = "pub fn broken() -> u8 {\n    return \"oops\";\n}\n";
+        let span = Span::in_file(35, 41, 42);
+        let rendered = span.format_error_context_of(module, Some("dev/uart.wr"), "expected u8", 42);
+        assert!(rendered.contains("dev/uart.wr:2:12"), "{rendered}");
+        assert!(rendered.contains("return \"oops\""), "{rendered}");
+        assert!(rendered.contains("^^^^^^ expected u8"), "{rendered}");
     }
 }

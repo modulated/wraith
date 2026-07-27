@@ -94,6 +94,20 @@ impl ParseError {
 
     /// Format error with source code context and filename
     pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
+        self.format_with_source_of_file(source, filename, crate::ast::ROOT_FILE)
+    }
+
+    /// Render against the text of a specific file.
+    ///
+    /// A module parsed during an import carries that module's spans, so its
+    /// errors have to be rendered against that module's source rather than the
+    /// root's — which is all the driver has, and would quote the wrong lines.
+    pub fn format_with_source_of_file(
+        &self,
+        source: &str,
+        filename: Option<&str>,
+        file: u32,
+    ) -> String {
         match &self.kind {
             ParseErrorKind::CustomDetailed {
                 prefix,
@@ -108,7 +122,11 @@ impl ParseError {
                     result.push('\n');
                 }
 
-                result.push_str(&self.span.format_error_context(source, filename, message));
+                result.push_str(
+                    &self
+                        .span
+                        .format_error_context_of(source, filename, message, file),
+                );
 
                 if let Some(suf) = suffix {
                     result.push('\n');
@@ -124,7 +142,7 @@ impl ParseError {
                     if i > 0 {
                         result.push_str("\n\n");
                     }
-                    result.push_str(&err.format_with_source_and_file(source, filename));
+                    result.push_str(&err.format_with_source_of_file(source, filename, file));
                 }
                 result
             }
@@ -157,7 +175,8 @@ impl ParseError {
                     "{}: {}\n{}",
                     error_type,
                     message,
-                    self.span.format_error_context(source, filename, &message)
+                    self.span
+                        .format_error_context_of(source, filename, &message, file)
                 )
             }
         }

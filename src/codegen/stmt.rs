@@ -56,6 +56,21 @@ fn determine_match_strategy(arms: &[crate::ast::MatchArm], info: &ProgramInfo) -
     // This avoids the BEQ branch distance limitation for large match bodies
     if !enum_tags.is_empty() && arms.len() >= 3 {
         let max_tag = enum_tags.iter().copied().max().unwrap_or(0);
+
+        // Dispatch doubles the tag into an 8-bit index (`ASL; TAX`), so a tag
+        // above 127 wraps and selects the wrong entry. The table is also dense,
+        // one word per tag from 0 upward, so sparse explicit discriminants
+        // would spend hundreds of ROM bytes to describe a handful of arms.
+        // Either way the sequential comparison chain is the better answer;
+        // enums with explicit values are usually few-armed anyway.
+        let index_would_overflow = max_tag > 127;
+        let table_entries = max_tag as usize + 1;
+        let too_sparse = table_entries > 4 * enum_tags.len().max(1);
+
+        if index_would_overflow || too_sparse {
+            return MatchStrategy::Sequential;
+        }
+
         MatchStrategy::JumpTable {
             max_tag,
             wildcard_arm_index,

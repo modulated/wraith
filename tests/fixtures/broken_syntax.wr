@@ -1,0 +1,10 @@
+// Fixture for the import-diagnostics tests: a module that does not parse.
+// The stray semicolon after the function body is the failure; its line and
+// column are what the diagnostic must point at.
+pub fn ok() -> u8 {
+    return 1;
+}
+
+pub fn broken() -> u8 {
+    return 2;
+};

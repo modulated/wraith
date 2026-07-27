@@ -1,0 +1,7 @@
+// Fixture for the import-diagnostics tests: a module whose own import fails,
+// so the error is two levels down and the chain has an intermediate hop.
+import * from "broken_types.wr";
+
+pub fn wrap() {
+    set_direction(Direction::OUTPUT);
+}

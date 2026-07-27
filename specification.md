@@ -883,6 +883,41 @@ enum Direction {
 let dir: Direction = Direction::North;
 ```
 
+#### Discriminants
+
+Each variant has a one-byte discriminant. Writing `= N` sets it; omitting it
+continues from the previous variant, starting at 0:
+
+```rust
+enum Code { A = 10, B, C = 20, D }   // 10, 11, 20, 21
+```
+
+Because a discriminant is one byte, three things are compile errors rather than
+silent surprises: a value outside `0-255`, two variants sharing a value (the
+second would be unreachable, since dispatch selects on the tag), and a variant
+following `= 0xFF`, which has no number left to take.
+
+#### Casting to an Integer
+
+A unit variant's discriminant *is* its runtime value, so `as` yields exactly the
+number written in the declaration. This is how an enum naming hardware states is
+written to a register:
+
+```rust
+pub enum Direction {
+    OUTPUT = 0xFF,
+    INPUT  = 0x00,
+}
+
+pub fn set_port_a_direction(direction: Direction) {
+    DDRA = direction as u8;      // stores $FF or $00
+}
+```
+
+The cast must be written out. There is no implicit conversion, in keeping with
+the rest of the language, so assigning a `Direction` straight to a `u8` is an
+error that names both types.
+
 ### Enums with Data (Tagged Unions)
 
 Wraith supports enum variants that carry data, allowing you to create tagged unions (also known as sum types or discriminated unions). There are two forms: tuple variants and struct variants.
