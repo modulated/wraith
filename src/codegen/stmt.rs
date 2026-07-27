@@ -2066,7 +2066,6 @@ fn generate_field_assignment(
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
-    use crate::ast::PrimitiveType;
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
@@ -2107,24 +2106,20 @@ fn generate_field_assignment(
             })?;
         // Function-pointer fields are 2-byte code addresses, so they must be
         // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
-        let is_multibyte = matches!(
-            &field_info.ty,
-            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
-                | Type::Function(..)
-        );
+        let is_multibyte = crate::codegen::expr::field_is_two_bytes(&field_info.ty);
+        // Sema rejects assigning through a `const`, so a read-only base here
+        // would mean a store quietly aimed at ROM.
+        if base.is_read_only() {
+            return Err(CodegenError::UnsupportedOperation(
+                "cannot write to constant data".to_string(),
+            ));
+        }
         emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
         generate_expr(value, emitter, info, string_collector)?;
-        let field_addr = base + field_info.offset as u16;
-        if field_addr < 0x100 {
-            emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-            if is_multibyte {
-                emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
-            }
-        } else {
-            emitter.emit_inst("STA", &format!("${:04X}", field_addr));
-            if is_multibyte {
-                emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
-            }
+        let at = base.plus(field_info.offset as u16);
+        emitter.emit_inst("STA", &at.operand(0));
+        if is_multibyte {
+            emitter.emit_inst(store_high(&field_info.ty), &at.operand(1));
         }
         return Ok(());
     }
@@ -2194,13 +2189,7 @@ fn generate_field_assignment(
         // Check if field is multi-byte
         // Function-pointer fields hold a 2-byte code address, so they are stored
         // as a pair like u16 — a device vtable depends on it.
-        let is_multibyte = matches!(
-            &field_info.ty,
-            Type::Primitive(PrimitiveType::U16)
-                | Type::Primitive(PrimitiveType::I16)
-                | Type::Primitive(PrimitiveType::B16)
-                | Type::Function(..)
-        );
+        let is_multibyte = crate::codegen::expr::field_is_two_bytes(&field_info.ty);
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
 
@@ -2222,7 +2211,7 @@ fn generate_field_assignment(
             // Save value to temp
             emitter.emit_inst("STA", "$20"); // Save low byte
             if is_multibyte {
-                emitter.emit_inst("STY", "$21"); // Save high byte
+                emitter.emit_inst(store_high(&field_info.ty), "$21"); // Save high byte
             }
 
             // Set Y to field offset and store via indirect
@@ -2240,15 +2229,16 @@ fn generate_field_assignment(
             // Local struct - direct access
             let field_addr = base_addr + field_info.offset as u16;
 
+            let hi = store_high(&field_info.ty);
             if field_addr < 0x100 {
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
                 if is_multibyte {
-                    emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+                    emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
                 }
             } else {
                 emitter.emit_inst("STA", &format!("${:04X}", field_addr));
                 if is_multibyte {
-                    emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
+                    emitter.emit_inst(hi, &format!("${:04X}", field_addr + 1));
                 }
             }
         }
@@ -2264,6 +2254,17 @@ fn generate_field_assignment(
         Err(CodegenError::UnsupportedOperation(
             "Field assignment only supported on variables (not expressions)".to_string(),
         ))
+    }
+}
+
+/// Which register holds the high byte of a value about to be stored into a
+/// struct field. A `&T` arrives in A:X like every other pointer-like value;
+/// a u16 or a function pointer arrives in A:Y.
+fn store_high(ty: &crate::sema::types::Type) -> &'static str {
+    if crate::codegen::expr::field_high_byte_in_x(ty) {
+        "STX"
+    } else {
+        "STY"
     }
 }
 

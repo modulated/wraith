@@ -34,7 +34,8 @@ use unary::generate_unary;
 // Re-export for use in other codegen modules
 pub use aggregate::generate_struct_init_runtime;
 pub(crate) use aggregate::{
-    emit_array_struct_field_indexed, resolve_static_struct_lvalue, type_byte_size,
+    emit_array_struct_field_indexed, field_high_byte_in_x, field_is_two_bytes,
+    resolve_static_struct_lvalue, type_byte_size,
 };
 pub use call::generate_tail_recursive_update;
 

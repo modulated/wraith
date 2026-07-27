@@ -365,6 +365,32 @@ impl SemanticAnalyzer {
             }
         }
 
+        // An element or field assignment writes to whatever the chain is rooted
+        // at, so the root is what has to be mutable. Without this, `LUT[i] = v`
+        // on a `const` compiled and emitted a store into ROM — a no-op on real
+        // hardware, and invisible under the emulator's flat memory. Deref is
+        // deliberately *not* followed: `*p = v` writes to the pointee, not to
+        // `p`, exactly as `const char *p` does in C.
+        if !matches!(target.node, Expr::Variable(_))
+            && let Some(root) = self.lvalue_root(target)
+            && let Some(info) = self.table.lookup(root)
+            && !info.mutable
+        {
+            let what = if info.kind == SymbolKind::Constant {
+                format!(
+                    "cannot assign to '{}': a const lives in ROM, so the store would \
+                     silently do nothing on real hardware",
+                    root
+                )
+            } else {
+                format!("cannot assign through '{}': it is immutable", root)
+            };
+            return Err(SemaError::Custom {
+                message: what,
+                span: target.span,
+            });
+        }
+
         // Check mutability and access mode
         if let Expr::Variable(name) = &target.node
             && let Some(info) = self.table.lookup(name)
@@ -388,6 +414,45 @@ impl SemanticAnalyzer {
         }
 
         Ok(())
+    }
+
+    /// The variable an lvalue chain is rooted at, if the write lands in that
+    /// variable's own storage.
+    ///
+    /// Peels indexing and field access, but stops the moment the chain passes
+    /// through a *reference*, because the write then lands somewhere else
+    /// entirely and the name in hand says nothing about it. Two things count as
+    /// a reference: a pointer, however spelled (`*p`, `p[i]`, `p.field`), and a
+    /// parameter, since this language has always passed aggregates by address.
+    /// `const char *p` does not make `*p` const in C either.
+    ///
+    /// Returns None in those cases, leaving the write unconstrained. Nothing is
+    /// lost by that: the check exists to catch a `const` root, and a `const` is
+    /// never a parameter.
+    fn lvalue_root<'a>(&self, expr: &'a Spanned<Expr>) -> Option<&'a String> {
+        let mut cur = expr;
+        loop {
+            match &cur.node {
+                Expr::Variable(name) => return Some(name),
+                Expr::Index { object, .. } | Expr::Field { object, .. } => {
+                    if self.denotes_a_reference(object) {
+                        return None;
+                    }
+                    cur = object;
+                }
+                Expr::Paren(inner) => cur = inner,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether this expression holds an address rather than the bytes themselves.
+    fn denotes_a_reference(&self, expr: &Spanned<Expr>) -> bool {
+        if matches!(self.resolved_types.get(&expr.span), Some(Type::Pointer(_))) {
+            return true;
+        }
+        matches!(&expr.node, Expr::Variable(n)
+            if self.table.lookup(n).is_some_and(|s| s.is_param))
     }
 
     fn analyze_for_loop(

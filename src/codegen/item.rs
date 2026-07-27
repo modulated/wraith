@@ -515,7 +515,7 @@ fn generate_address(
     Ok(())
 }
 
-/// Emit a const array to the data section
+/// Emit a const array to the data section.
 fn emit_const_array(
     stat: &crate::ast::Static,
     emitter: &mut Emitter,
@@ -525,32 +525,31 @@ fn emit_const_array(
 ) -> Result<(), CodegenError> {
     let name = &stat.name.node;
 
-    // Element width so u16/i16/b16 arrays emit two little-endian bytes each.
-    let elem_size = match &stat.ty.node {
-        crate::ast::TypeExpr::Array { element, .. } => match &element.node {
-            crate::ast::TypeExpr::Primitive(p) => p.size_bytes(),
-            _ => 1,
-        },
-        _ => 1,
-    };
+    // Take the resolved type from the symbol table rather than re-deriving a
+    // width from the syntax. The old reading looked only for a primitive
+    // element and fell back to 1 byte, so `[Entry; 4]` reserved four bytes for
+    // four structs — the data ran off the end of its own allocation and into
+    // whatever the DATA section handed out next.
+    let ty = info
+        .resolved_symbols
+        .get(&stat.name.span)
+        .or_else(|| info.table.lookup(name))
+        .map(|sym| sym.ty.clone())
+        .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
 
-    let elem_count = match &stat.ty.node {
-        crate::ast::TypeExpr::Array { size, .. } => *size,
-        _ => 0,
-    };
-    let byte_size = (elem_count * elem_size) as u16;
+    let byte_size = crate::sema::init::size_of(&ty, &info.type_registry);
 
     // Take an address from the DATA section rather than emitting at a fixed
     // .ORG. Every const array used to be written at $C000, so two of them
     // overlapped, the address ignored whatever the memory map said, and none of
     // them were visible to the #[org] conflict check.
     let addr = section_alloc
-        .allocate("DATA", byte_size)
+        .allocate("DATA", byte_size as u16)
         .map_err(CodegenError::SectionError)?;
     section_alloc.record_allocation(
         name.clone(),
         addr,
-        byte_size,
+        byte_size as u16,
         AllocationSource::Section("DATA".to_string()),
         Some(stat.name.span),
     );
@@ -559,123 +558,150 @@ fn emit_const_array(
     emitter.emit_data_org(addr);
     emitter.emit_data_label(name);
 
-    // Emit array data based on initialization expression
-    match &stat.init.node {
-        crate::ast::Expr::Literal(crate::ast::Literal::ArrayFill { value, count }) => {
-            emit_array_fill_data(value, *count, elem_size, emitter, info)?;
-        }
-        crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) => {
-            emit_array_literal_data(elements, elem_size, emitter, info)?;
-        }
-        _ => {
-            return Err(CodegenError::UnsupportedOperation(
-                "Const arrays must have literal initializers".to_string(),
-            ));
-        }
-    }
+    // A const lives in ROM, so unlike a `static` there is no "undefined until
+    // the reset handler runs" excuse for a value the compiler cannot work out.
+    let bytes = crate::sema::init::flatten_top(&stat.init, &ty, info, false).map_err(|e| {
+        CodegenError::UnsupportedOperation(format!("in const '{}': {}", name, e.message))
+    })?;
 
+    emit_init_bytes(&bytes, emitter);
     Ok(())
 }
 
-/// Emit data for an array fill literal ([value; count])
-fn emit_array_fill_data(
-    value: &Spanned<crate::ast::Expr>,
-    count: usize,
-    elem_size: usize,
-    emitter: &mut Emitter,
-    info: &ProgramInfo,
-) -> Result<(), CodegenError> {
-    // Evaluate the fill value as a constant
-    let val = if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &value.node {
-        *n
-    } else if let Some(const_val) = info.folded_constants.get(&value.span) {
-        if let crate::sema::const_eval::ConstValue::Integer(n) = const_val {
-            *n
-        } else {
-            return Err(CodegenError::UnsupportedOperation(
-                "Array fill value must be an integer".to_string(),
-            ));
-        }
-    } else {
-        return Err(CodegenError::UnsupportedOperation(
-            "Array fill value must be a constant".to_string(),
-        ));
-    };
-
-    let total_bytes = count * elem_size.max(1);
-
-    // Zero-fill optimization: use .RES directive for zeros
-    if val == 0 && total_bytes >= 16 {
-        emitter.emit_comment(&format!(
-            "Zero-filled array optimized: {} bytes",
-            total_bytes
-        ));
-        emitter.emit_data_directive(&format!(".RES {}", total_bytes));
-    } else {
-        // Emit each element as `elem_size` little-endian bytes, `count` times.
-        let mut bytes = Vec::with_capacity(total_bytes);
-        for _ in 0..count {
-            push_le_bytes(&mut bytes, val, elem_size);
-        }
-        emit_byte_directives(&bytes, emitter);
+/// How codegen resolves the names inside a `const` initializer.
+///
+/// Semantic analysis folded every constant expression already and left the
+/// results keyed by span, so this is a lookup rather than an evaluation.
+impl crate::sema::init::InitContext for ProgramInfo {
+    fn registry(&self) -> &crate::sema::type_defs::TypeRegistry {
+        &self.type_registry
     }
 
-    Ok(())
-}
+    fn integer(&self, expr: &Spanned<crate::ast::Expr>) -> Option<i64> {
+        if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &expr.node {
+            return Some(*n);
+        }
+        match self.folded_constants.get(&expr.span) {
+            Some(crate::sema::const_eval::ConstValue::Integer(n)) => Some(*n),
+            _ => None,
+        }
+    }
 
-/// Emit data for an array literal ([1, 2, 3, ...])
-fn emit_array_literal_data(
-    elements: &[Spanned<crate::ast::Expr>],
-    elem_size: usize,
-    emitter: &mut Emitter,
-    info: &ProgramInfo,
-) -> Result<(), CodegenError> {
-    let mut bytes = Vec::new();
-
-    // Collect each element as `elem_size` little-endian bytes so u16/i16/b16
-    // arrays keep their high byte instead of being truncated.
-    for elem in elements {
-        let val = if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &elem.node {
-            *n
-        } else if let Some(const_val) = info.folded_constants.get(&elem.span) {
-            if let crate::sema::const_eval::ConstValue::Integer(n) = const_val {
-                *n
-            } else {
-                return Err(CodegenError::UnsupportedOperation(
-                    "Array elements must be integers".to_string(),
-                ));
-            }
-        } else {
-            return Err(CodegenError::UnsupportedOperation(
-                "Array elements must be constants".to_string(),
-            ));
+    fn function_name(&self, expr: &Spanned<crate::ast::Expr>) -> Option<String> {
+        let crate::ast::Expr::Variable(n) = &expr.node else {
+            return None;
         };
-        push_le_bytes(&mut bytes, val, elem_size);
+        self.table
+            .lookup(n)
+            .filter(|s| matches!(s.ty, crate::sema::types::Type::Function(..)))
+            .map(|_| n.clone())
     }
 
-    // Emit as .BYTE directives (max 16 per line for readability)
-    for chunk in bytes.chunks(16) {
-        let byte_str = chunk
-            .iter()
-            .map(|b| format!("${:02X}", b))
-            .collect::<Vec<_>>()
-            .join(", ");
-        emitter.emit_data_directive(&format!(".BYTE {}", byte_str));
+    fn address_of(
+        &self,
+        operand: &Spanned<crate::ast::Expr>,
+    ) -> Result<u16, crate::sema::init::InitError> {
+        let mut operand = operand;
+        while let crate::ast::Expr::Paren(inner) = &operand.node {
+            operand = inner;
+        }
+        let crate::ast::Expr::Variable(n) = &operand.node else {
+            return Err(crate::sema::init::InitError {
+                message: "only the address of a static can appear in constant data".to_string(),
+                span: operand.span,
+                fatal: true,
+            });
+        };
+        match self
+            .table
+            .lookup(n)
+            .map(|s| (s.kind.clone(), s.location.clone()))
+        {
+            Some((
+                crate::sema::table::SymbolKind::Variable,
+                crate::sema::table::SymbolLocation::Absolute(a),
+            )) => Ok(a),
+            _ => Err(crate::sema::init::InitError {
+                message: format!(
+                    "cannot take the address of '{}' in constant data; only a static has a \
+                     fixed address",
+                    n
+                ),
+                span: operand.span,
+                fatal: true,
+            }),
+        }
     }
-
-    Ok(())
 }
 
-/// Append `size` little-endian bytes of `value` (1 for u8/bool, 2 for u16).
-fn push_le_bytes(bytes: &mut Vec<u8>, value: i64, size: usize) {
-    let bits = value as u64;
-    for i in 0..size.max(1) {
-        bytes.push(((bits >> (i * 8)) & 0xFF) as u8);
+/// Emit flattened initializer bytes as assembler data.
+///
+/// A function reference occupies two bytes that only the assembler can fill in,
+/// so an `FnLow`/`FnHigh` pair collapses back into a single `.WORD label` — the
+/// same thing the interrupt vector table emits.
+fn emit_init_bytes(bytes: &[crate::sema::InitByte], emitter: &mut Emitter) {
+    use crate::sema::InitByte;
+
+    let mut run: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match &bytes[i] {
+            InitByte::Byte(v) => {
+                run.push(*v);
+                i += 1;
+            }
+            InitByte::FnLow(f) => {
+                emit_byte_directives(&run, emitter);
+                run.clear();
+                emitter.emit_data_directive(&format!(".WORD {}", f));
+                // Skip the matching FnHigh; the .WORD covers both bytes.
+                i += if matches!(bytes.get(i + 1), Some(InitByte::FnHigh(_))) {
+                    2
+                } else {
+                    1
+                };
+            }
+            InitByte::FnHigh(f) => {
+                // Only reachable if a pair was split, which the flattener never
+                // does; emit the high byte alone rather than losing it.
+                emit_byte_directives(&run, emitter);
+                run.clear();
+                emitter.emit_data_directive(&format!(".BYTE >{}", f));
+                i += 1;
+            }
+        }
     }
+    emit_byte_directives(&run, emitter);
 }
 
-/// Emit a byte slice as `.BYTE` directives, max 16 per line for readability.
+/// Emit a byte slice as `.BYTE` directives, collapsing long runs of zeros.
+///
+/// `.RES n` only advances the assembler's address, and the image starts zeroed,
+/// so a run of zeros costs one line instead of `n/16`. This matters for the
+/// padding a partly-written table leaves behind as much as for `[0; 256]`.
 fn emit_byte_directives(bytes: &[u8], emitter: &mut Emitter) {
+    const MIN_RUN: usize = 16;
+
+    let mut i = 0;
+    let mut pending: Vec<u8> = Vec::new();
+    while i < bytes.len() {
+        if bytes[i] == 0 {
+            let run = bytes[i..].iter().take_while(|b| **b == 0).count();
+            if run >= MIN_RUN {
+                flush_byte_lines(&pending, emitter);
+                pending.clear();
+                emitter.emit_data_directive(&format!(".RES {}", run));
+                i += run;
+                continue;
+            }
+        }
+        pending.push(bytes[i]);
+        i += 1;
+    }
+    flush_byte_lines(&pending, emitter);
+}
+
+fn flush_byte_lines(bytes: &[u8], emitter: &mut Emitter) {
     for chunk in bytes.chunks(16) {
         let byte_str = chunk
             .iter()

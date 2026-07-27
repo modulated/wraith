@@ -2,6 +2,7 @@
 //!
 //! Tests complete language features from source to assembly output
 
+mod aggregate_init;
 mod bcd;
 mod bcd_validation;
 mod complex_features;

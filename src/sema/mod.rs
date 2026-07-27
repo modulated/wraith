@@ -8,6 +8,7 @@
 
 pub mod analyze;
 pub mod const_eval;
+pub mod init;
 pub mod table;
 pub mod type_defs;
 pub mod types;

@@ -228,6 +228,13 @@ impl SemanticAnalyzer {
         // Resolve the type first so we can check bounds
         let declared_ty = self.resolve_type(&stat.ty.node)?;
 
+        // A static's initializer is never checked as an expression, so nothing
+        // else records the names inside it. A function in a dispatch table and
+        // a `&OTHER` pointer are both uses, and dead-code elimination drops
+        // what it cannot see — for a `const` table that means the assembler
+        // meets a `.WORD` naming a label nobody emitted.
+        self.record_initializer_refs(&name, &stat.init);
+
         // If it's a non-mutable static (const), evaluate it and add to const_env
         if !stat.mutable {
             match eval_const_expr_with_env(&stat.init, &self.const_env) {
@@ -269,44 +276,7 @@ impl SemanticAnalyzer {
             let addr = self.bss_alloc(size, stat.name.span)?;
             // Record the startup value so the reset handler can write it: RAM
             // holds garbage at power-on and cannot be pre-loaded from ROM.
-            let bytes = self.static_init_bytes(&stat.init, &declared_ty, size as usize)?;
-            // A function named in a static's initializer (e.g. a device vtable)
-            // has its address taken, even though the initializer is never
-            // checked as an expression. Record it so codegen gives that function
-            // the indirect-arg staging prologue; otherwise an indirect call
-            // through the table would find its parameters unset.
-            for b in &bytes {
-                if let crate::sema::InitByte::FnLow(f) = b {
-                    self.address_taken_functions.insert(f.clone());
-                    // Installing a function in a vtable is a use of it, even if
-                    // it is never named at a call site; otherwise every driver
-                    // entry point would be reported as unused.
-                    self.called_functions.insert(f.clone());
-                    self.all_used_symbols.insert(f.clone());
-                }
-            }
-            // `static P: &T = &OTHER;` is a use of OTHER, even though a
-            // static's initializer is never checked as an expression. Record
-            // the edge so dead-code elimination keeps OTHER's own startup
-            // write; without it the pointer would be correct and the bytes it
-            // names would never be initialised.
-            if let crate::ast::Expr::Unary {
-                op: crate::ast::UnaryOp::AddrOf,
-                operand,
-            } = &stat.init.node
-            {
-                let mut target = &**operand;
-                while let crate::ast::Expr::Paren(inner) = &target.node {
-                    target = inner;
-                }
-                if let crate::ast::Expr::Variable(referent) = &target.node {
-                    self.symbol_refs
-                        .entry(Some(name.clone()))
-                        .or_default()
-                        .insert(referent.clone());
-                    self.all_used_symbols.insert(referent.clone());
-                }
-            }
+            let bytes = self.static_init_bytes(&stat.init, &declared_ty)?;
             self.static_inits.push(crate::sema::StaticInit {
                 name: name.clone(),
                 addr,
@@ -333,105 +303,50 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
+    /// Record every symbol a static's initializer names, so dead-code
+    /// elimination and the address-taken set can see through it.
+    fn record_initializer_refs(&mut self, owner: &str, init: &Spanned<crate::ast::Expr>) {
+        let mut names: Vec<String> = Vec::new();
+        collect_variable_names(init, &mut names);
+        for n in names {
+            let is_function = self
+                .table
+                .lookup(&n)
+                .is_some_and(|s| matches!(s.ty, Type::Function(..)));
+            if is_function {
+                // Installed in a table rather than called by name: it needs the
+                // indirect-argument staging prologue, and it is a *use*, or
+                // every driver entry point would be reported as unused.
+                self.address_taken_functions.insert(n.clone());
+                self.called_functions.insert(n.clone());
+            }
+            self.symbol_refs
+                .entry(Some(owner.to_string()))
+                .or_default()
+                .insert(n.clone());
+            self.all_used_symbols.insert(n);
+        }
+    }
+
     /// Flatten a mutable static's initializer into the exact bytes to write at
-    /// startup. Integers are little-endian across the type's width, arrays and
-    /// fills expand element-wise. Anything not constant-evaluable becomes zeros
-    /// (BSS semantics), which is also the common `= 0` / `[0; N]` case.
+    /// startup.
+    ///
+    /// The walk itself lives in `sema::init`, shared with the `const` array
+    /// path in codegen — they used to be two shallow copies that both stopped
+    /// at one level of nesting.
     fn static_init_bytes(
         &self,
         init: &Spanned<crate::ast::Expr>,
         ty: &Type,
-        size: usize,
     ) -> Result<Vec<crate::sema::InitByte>, SemaError> {
-        use crate::ast::{Expr, Literal};
-        use crate::sema::InitByte;
-
-        let elem_width = match ty {
-            Type::Array(elem, _) => self.type_size(elem).max(1),
-            _ => size,
-        };
-        let push_int = |out: &mut Vec<InitByte>, v: i64, width: usize| {
-            for i in 0..width {
-                out.push(InitByte::Byte(((v >> (i * 8)) & 0xFF) as u8));
-            }
-        };
-        // A bare name whose symbol is a function contributes that function's
-        // address; the label is resolved by the assembler.
-        let fn_ref = |out: &mut Vec<InitByte>, e: &Spanned<Expr>| -> bool {
-            if let Expr::Variable(n) = &e.node
-                && self
-                    .table
-                    .lookup(n)
-                    .is_some_and(|s| matches!(s.ty, Type::Function(..)))
-            {
-                out.push(InitByte::FnLow(n.clone()));
-                out.push(InitByte::FnHigh(n.clone()));
-                return true;
-            }
-            false
-        };
-
-        let mut bytes: Vec<InitByte> = Vec::with_capacity(size);
-        match &init.node {
-            Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, size),
-            Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
-            Expr::Literal(Literal::Array(elems)) => {
-                for e in elems {
-                    match &e.node {
-                        Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, elem_width),
-                        Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
-                        _ if fn_ref(&mut bytes, e) => {}
-                        _ => break,
-                    }
-                }
-            }
-            Expr::Literal(Literal::ArrayFill { value, count }) => {
-                if let Expr::Literal(Literal::Integer(v)) = &value.node {
-                    for _ in 0..*count {
-                        push_int(&mut bytes, *v, elem_width);
-                    }
-                }
-            }
-            // Struct literal: lay fields out in declaration order. Function
-            // fields become label references (a device vtable).
-            Expr::StructInit { name, fields } => {
-                if let Some(def) = self.type_registry.get_struct(&name.node) {
-                    for f in &def.fields {
-                        let Some(init_f) = fields.iter().find(|x| x.name.node == f.name) else {
-                            break;
-                        };
-                        let w = self.type_size(&f.ty).max(1);
-                        match &init_f.value.node {
-                            Expr::Literal(Literal::Integer(v)) => push_int(&mut bytes, *v, w),
-                            Expr::Literal(Literal::Bool(b)) => bytes.push(InitByte::Byte(*b as u8)),
-                            _ if fn_ref(&mut bytes, &init_f.value) => {}
-                            _ => break,
-                        }
-                    }
-                }
-            }
-            // `static P: &T = &OTHER;` — the address of another static. A
-            // static's BSS address is known during analysis, so this needs no
-            // label indirection, unlike a function reference.
-            Expr::Unary {
-                op: crate::ast::UnaryOp::AddrOf,
-                operand,
-            } => {
-                let addr = self.static_address_for_init(operand)?;
-                push_int(&mut bytes, addr as i64, 2);
-            }
-            _ if fn_ref(&mut bytes, init) => {}
-            // Fall back to constant folding (e.g. `1 + 2`, a const reference).
-            _ => {
-                if let Ok(val) = eval_const_expr_with_env(init, &self.const_env)
-                    && let Some(v) = val.as_integer()
-                {
-                    push_int(&mut bytes, v, size);
-                }
-            }
-        }
-        bytes.resize(size, InitByte::Byte(0));
-        Ok(bytes)
+        // A scalar the compiler cannot evaluate simply starts at zero: RAM is
+        // undefined at power-on and that is what BSS means. An aggregate is not
+        // tolerated, because writing out a table and silently getting zeros back
+        // is the bug this shares its implementation to avoid.
+        crate::sema::init::flatten_top(init, ty, self, true).map_err(|e| SemaError::Custom {
+            message: e.message,
+            span: e.span,
+        })
     }
 
     /// Resolve `&NAME` in a static's initializer to a fixed address.
@@ -443,52 +358,56 @@ impl SemanticAnalyzer {
     fn static_address_for_init(
         &self,
         operand: &Spanned<crate::ast::Expr>,
-    ) -> Result<u16, SemaError> {
+    ) -> Result<u16, crate::sema::init::InitError> {
         use crate::ast::Expr;
-
-        let operand = match &operand.node {
-            Expr::Paren(inner) => inner,
-            _ => operand,
+        let err = |message: String, span| crate::sema::init::InitError {
+            message,
+            span,
+            fatal: true,
         };
+
+        let mut operand = operand;
+        while let Expr::Paren(inner) = &operand.node {
+            operand = inner;
+        }
         let Expr::Variable(name) = &operand.node else {
-            return Err(SemaError::Custom {
-                message: "a static's initializer can only take the address of another static"
-                    .to_string(),
-                span: operand.span,
-            });
+            return Err(err(
+                "a static's initializer can only take the address of another static".to_string(),
+                operand.span,
+            ));
         };
 
         match self.table.lookup(name) {
             // An immutable const lives in ROM and is referenced by label, so
             // `Absolute(0)` is a sentinel rather than an address — the same
             // reason `&CONST` is rejected in ordinary code.
-            Some(sym) if sym.kind == SymbolKind::Constant => Err(SemaError::Custom {
-                message: format!(
+            Some(sym) if sym.kind == SymbolKind::Constant => Err(err(
+                format!(
                     "cannot take the address of the constant '{}'; constants live in ROM \
                      and are referenced by label, not by address",
                     name
                 ),
-                span: operand.span,
-            }),
+                operand.span,
+            )),
             Some(sym) => match sym.location {
                 SymbolLocation::Absolute(addr) => Ok(addr),
-                _ => Err(SemaError::Custom {
-                    message: format!(
+                _ => Err(err(
+                    format!(
                         "cannot take the address of '{}' here; only a static has a fixed \
                          address at startup",
                         name
                     ),
-                    span: operand.span,
-                }),
+                    operand.span,
+                )),
             },
-            None => Err(SemaError::Custom {
-                message: format!(
+            None => Err(err(
+                format!(
                     "'{}' is not declared yet; statics are laid out in declaration order, \
                      so a static's initializer can only name one declared above it",
                     name
                 ),
-                span: operand.span,
-            }),
+                operand.span,
+            )),
         }
     }
 
@@ -1177,5 +1096,67 @@ impl SemanticAnalyzer {
         );
 
         Ok(())
+    }
+}
+
+/// How semantic analysis resolves the names inside a static's initializer.
+impl crate::sema::init::InitContext for SemanticAnalyzer {
+    fn registry(&self) -> &crate::sema::type_defs::TypeRegistry {
+        &self.type_registry
+    }
+
+    fn integer(&self, expr: &Spanned<crate::ast::Expr>) -> Option<i64> {
+        eval_const_expr_with_env(expr, &self.const_env)
+            .ok()
+            .and_then(|v| v.as_integer())
+    }
+
+    fn function_name(&self, expr: &Spanned<crate::ast::Expr>) -> Option<String> {
+        let crate::ast::Expr::Variable(n) = &expr.node else {
+            return None;
+        };
+        self.table
+            .lookup(n)
+            .filter(|s| matches!(s.ty, Type::Function(..)))
+            .map(|_| n.clone())
+    }
+
+    fn address_of(
+        &self,
+        operand: &Spanned<crate::ast::Expr>,
+    ) -> Result<u16, crate::sema::init::InitError> {
+        self.static_address_for_init(operand)
+    }
+}
+
+/// Every bare name appearing anywhere in an expression.
+fn collect_variable_names(e: &Spanned<crate::ast::Expr>, out: &mut Vec<String>) {
+    use crate::ast::{Expr, Literal};
+    match &e.node {
+        Expr::Variable(n) => out.push(n.clone()),
+        Expr::Paren(i) => collect_variable_names(i, out),
+        Expr::Unary { operand, .. } => collect_variable_names(operand, out),
+        Expr::Cast { expr, .. } => collect_variable_names(expr, out),
+        Expr::Binary { left, right, .. } => {
+            collect_variable_names(left, out);
+            collect_variable_names(right, out);
+        }
+        Expr::Field { object, .. } => collect_variable_names(object, out),
+        Expr::Index { object, index } => {
+            collect_variable_names(object, out);
+            collect_variable_names(index, out);
+        }
+        Expr::Literal(Literal::Array(elems)) => {
+            for x in elems {
+                collect_variable_names(x, out);
+            }
+        }
+        Expr::Literal(Literal::ArrayFill { value, .. }) => collect_variable_names(value, out),
+        Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+            for f in fields {
+                collect_variable_names(&f.value, out);
+            }
+        }
+        _ => {}
     }
 }
