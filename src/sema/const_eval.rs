@@ -317,6 +317,15 @@ fn eval_unary_with_env(
     let val = eval_const_expr_with_env(operand, env)?;
 
     match op {
+        // An address is a link-time property, not a constant expression, and a
+        // dereference is a runtime read. Folding either would be worse than
+        // useless: `check_expr` folds *before* dispatching, so a folded `&x`
+        // would replace the address with whatever the operand happened to
+        // evaluate to.
+        UnaryOp::AddrOf | UnaryOp::Deref => Err(SemaError::Custom {
+            message: "pointer operations are not constant expressions".to_string(),
+            span,
+        }),
         UnaryOp::Neg => {
             if let Some(n) = val.as_integer() {
                 // `n.checked_neg()` already yields -n; a leading `-` here would

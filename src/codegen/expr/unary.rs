@@ -40,6 +40,11 @@ pub(super) fn generate_unary(
 
     // Apply unary operation to A (low) / Y (high for u16)
     match op {
+        UnaryOp::AddrOf | UnaryOp::Deref => {
+            return Err(CodegenError::UnsupportedOperation(
+                "pointer operations are not supported yet".to_string(),
+            ));
+        }
         UnaryOp::Neg => {
             if is_u16 {
                 // 16-bit two's complement: ~value + 1 across both bytes, carrying

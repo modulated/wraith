@@ -710,6 +710,10 @@ impl SemanticAnalyzer {
 
         // Check type compatibility with the operator
         match op {
+            crate::ast::UnaryOp::AddrOf | crate::ast::UnaryOp::Deref => Err(SemaError::Custom {
+                message: "pointer operations are not supported yet".to_string(),
+                span,
+            }),
             crate::ast::UnaryOp::Neg => {
                 // Negation works on numeric types and always yields a signed
                 // result: `-5` is i8, not u8. `5` on its own infers as u8, so

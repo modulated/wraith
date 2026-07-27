@@ -174,6 +174,36 @@ impl Parser<'_> {
                 Ok(Spanned::new(Expr::unary(UnaryOp::BitNot, operand), span))
             }
 
+            // `&x` and `*p`. Unlike the arms above, the operand takes its
+            // postfix suffixes first, so `&x[0]` is the address of the element
+            // and `*p.next` dereferences the field — matching C and Rust. The
+            // arms above do not (`-x.f` parses as `(-x).f`), which is a
+            // separate pre-existing bug; copying it here would make `&x[0]`
+            // mean `(&x)[0]`, which is meaningless.
+            Some(Token::Amp) => {
+                self.advance();
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix(inner)?;
+                let span = start.merge(operand.span);
+                Ok(Spanned::new(Expr::unary(UnaryOp::AddrOf, operand), span))
+            }
+            Some(Token::Star) => {
+                self.advance();
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix(inner)?;
+                let span = start.merge(operand.span);
+                Ok(Spanned::new(Expr::unary(UnaryOp::Deref, operand), span))
+            }
+            // `&&x` is one token; take the address twice.
+            Some(Token::AndAnd) => {
+                self.advance();
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix(inner)?;
+                let span = start.merge(operand.span);
+                let once = Spanned::new(Expr::unary(UnaryOp::AddrOf, operand), span);
+                Ok(Spanned::new(Expr::unary(UnaryOp::AddrOf, once), span))
+            }
+
             // Parenthesized expression
             Some(Token::LParen) => {
                 self.advance();
@@ -535,15 +565,33 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Slice type: &[T] (all slices are mutable)
+            // `&[T]` is a slice, `&T` a pointer. Both spell "reference to"; a
+            // slice additionally carries a length.
             Some(Token::Amp) => {
                 self.advance();
-                self.expect(&Token::LBracket)?;
-                let element = self.parse_type()?;
-                self.expect(&Token::RBracket)?;
+                if self.check(&Token::LBracket) {
+                    self.advance();
+                    let element = self.parse_type()?;
+                    self.expect(&Token::RBracket)?;
+                    let span = start.merge(self.previous_span());
+                    // All slices are mutable (no mut keyword in language)
+                    Ok(Spanned::new(TypeExpr::slice(element, true), span))
+                } else {
+                    let pointee = self.parse_type()?;
+                    let span = start.merge(self.previous_span());
+                    Ok(Spanned::new(TypeExpr::pointer(pointee), span))
+                }
+            }
+
+            // `&&T` lexes as a single `&&` token, so a pointer to a pointer
+            // never reaches the arm above. Split it here rather than making the
+            // user write `&(&T)`.
+            Some(Token::AndAnd) => {
+                self.advance();
+                let inner = self.parse_type()?;
                 let span = start.merge(self.previous_span());
-                // All slices are mutable (no mut keyword in language)
-                Ok(Spanned::new(TypeExpr::slice(element, true), span))
+                let once = Spanned::new(TypeExpr::pointer(inner), span);
+                Ok(Spanned::new(TypeExpr::pointer(once), span))
             }
 
             // Array type: [T; N]
