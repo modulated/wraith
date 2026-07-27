@@ -1,0 +1,79 @@
+// Pointers: handing a driver the caller's buffer.
+//
+// This is the shape that address-of exists for. Before `&T` a routine that
+// filled a buffer had to own it as a `static` — one buffer for the whole
+// program — or take a bare `u16` and reach it with inline assembly. An earlier
+// version of this very routine did the latter, and got it wrong:
+//
+//     asm { "LDA {ch}", "LDX {pos}", "STA ({buffer_addr},X)" }
+//
+// `({addr},X)` is indexed-*indirect*: it adds X to the zero-page address and
+// reads a pointer from there. `{buffer_addr}` substitutes the parameter's frame
+// slot, so that walks the frame and stores through whatever it finds. The
+// spelling that was meant is `(zp),Y`, indirect-*indexed*. Neither the compiler
+// nor the reader had anything to check it against, because a `u16` says nothing
+// about being an address.
+//
+// Written with a pointer, the loop below is ordinary code and the compiler
+// checks it.
+
+import {memset, memcmp} from "../std/mem.wr";
+
+const OUT: addr = 0x0900;
+const MATCHED: addr = 0x0901;
+
+// The line reader: `buf` is the caller's storage, and `max` bounds the write.
+// A pointer carries no length, which is why `max` is a separate parameter —
+// when the length must travel with the data, use a slice instead.
+fn read_line(buf: &u8, max: u8, source: &u8, count: u8) -> u8 {
+    let pos: u8 = 0;
+    while pos < max && pos < count {
+        let ch: u8 = source[pos];
+        if ch == 0x0D {
+            break;
+        }
+        buf[pos] = ch;
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+// A device handle passed by reference. `p.field` reads through the pointer
+// without needing `(*p).field`; a struct parameter has been passed this way all
+// along, and a `&Struct` is in exactly the same shape.
+struct Port {
+    base: u16,
+    errors: u8,
+}
+
+fn note_error(p: &Port) {
+    p.errors = p.errors + 1;
+}
+
+// Input the reader consumes. It is a `static` rather than a `const` because a
+// const lives in ROM and is referenced by label, not by address, so `&CONST` is
+// rejected.
+static INPUT: [u8; 8] = [72, 69, 76, 76, 79, 13, 0, 0];
+
+#[reset]
+fn main() {
+    // A local array now lives in RAM, so writing through a pointer to it
+    // actually lands.
+    let line: [u8; 16] = [0; 16];
+    memset(&line, 0, 16);
+
+    // `&line` decays to a pointer to the first element — not a pointer to the
+    // array — which is what makes it interchangeable with `&u8`.
+    let n: u8 = read_line(&line, 16, &INPUT, 8);
+
+    let port: Port = Port { base: 0xD010, errors: 0 };
+    if n == 0 {
+        note_error(&port);
+    }
+
+    // memcmp takes `&u8` too, so a local buffer can be compared directly.
+    MATCHED = memcmp(&line, &INPUT, n);
+    OUT = n + port.errors;
+
+    loop {}
+}

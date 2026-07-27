@@ -14,6 +14,7 @@
 //! Sema and codegen still reject these, so the tests check the *parse* by
 //! confirming the failure comes from the later stage rather than the parser.
 
+use crate::common::exec::run;
 use crate::common::harness::{CompileResult, compile, compile_to_ast};
 
 /// Parse only. Returns the parse error, or `None` if it parsed.
@@ -76,8 +77,33 @@ fn a_pointer_to_a_named_type_parses() {
 #[test]
 fn a_self_referential_struct_parses_and_sizes() {
     // The reason all four size tables stop at the pointer: following the
-    // pointee here would run away.
+    // pointee here would run away. The size has to be 3 — one byte for the
+    // value and two for the address.
     assert_parses("struct Node { value: u8, next: &Node } #[reset] fn main() { loop {} }");
+
+    // Checked by behaviour rather than by reading a comment: two Node locals
+    // sit side by side in the frame, so if the pointer field were sized 0 or 1
+    // the second would overlap the first's `next`, and writing `a.next` would
+    // land on top of `b.value`.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Node { value: u8, next: &Node }
+        #[reset]
+        fn main() {
+            let a: Node = Node { value: 1, next: 0 as &Node };
+            let b: Node = Node { value: 2, next: 0 as &Node };
+            a.next = &b;
+            R0 = a.value;
+            R1 = b.value;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (1, 2),
+        "the locals do not overlap"
+    );
 }
 
 // ============================================================================

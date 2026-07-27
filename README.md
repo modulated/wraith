@@ -14,6 +14,7 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 - **Mutable Globals** - `static` state in RAM, shareable between interrupt handlers and main code
 - **Function Pointers & Vtables** - Call through struct fields (`device.read(reg)`) for driver-style dispatch
 - **Slices** - `&[T]` views over arrays with runtime length, passable to and returnable from functions
+- **Pointers** - `&x`, `*p`, `p[i]`, `p.field`, with an escape analysis that rejects a pointer outliving what it names
 
 ## Quick Setup
 

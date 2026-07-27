@@ -15,30 +15,7 @@ needs.
 
 ## 🔴 BLOCKING THE OS
 
-### 1. Address-of (`&x`)
-
-`&x` does not parse. A driver cannot be handed a caller's buffer, so anything
-that fills a buffer must either own it as a `static` or take an address as a
-bare `u16` the compiler cannot check.
-
-```rust
-let buf: [u8; 64] = [0; 64];
-uart_read_line(&buf, 64);   // parse error: expected expression, found '&'
-```
-
-**Action items**:
-- Parse `&expr` and `&mut expr` as a unary operator
-- Type it as a pointer to the operand (or reuse `Type::Slice` where a length is
-  also wanted)
-- Reject taking the address of a frame-allocated local that outlives its frame —
-  frames are colored and reused, so the pointer would dangle
-
-**Complexity**: Medium. Interacts with frame coloring, which is where the
-soundness risk sits.
-
----
-
-### 2. Console and keyboard drivers
+### 1. Console and keyboard drivers
 
 The device models exist (see *What the emulator can simulate* below) but no
 driver is written against them.
@@ -50,7 +27,7 @@ driver is written against them.
 - Monitor command loop: `peek` / `poke` / `dump` / `load` / `run` / `help` over
   the modelled UART
 
-Benefits from (1) for buffer passing.
+Pointers are in place now, so a driver can be handed a caller's buffer.
 
 **Complexity**: Medium — mostly Wraith code rather than compiler work.
 
@@ -58,7 +35,7 @@ Benefits from (1) for buffer passing.
 
 ## 🟡 HIGH PRIORITY
 
-### 3. Standard library gaps
+### 2. Standard library gaps
 
 Present: `mul16`, `div16`, `divmod`, `mul_wide`, `memcpy`/`memcpy16`,
 `memset`/`memset16`, `memcmp`, `str_copy`, PRNG (`rand`, `rand16`, `srand`), bit
@@ -77,7 +54,7 @@ building).
 
 ## 🟢 MEDIUM PRIORITY
 
-### 4. Bitfield access syntax
+### 3. Bitfield access syntax
 
 Manual shifts and masks today. Device registers are almost entirely bitfields, so
 this is the ergonomic gap the OS work runs into most often.
@@ -96,7 +73,7 @@ On a 65C02 target these lower to `BBR`/`BBS`/`SMB`/`RMB` directly (see
 
 ---
 
-### 5. Branch optimization intelligence
+### 4. Branch optimization intelligence
 
 Status flags are discarded after every comparison, so a repeated test re-emits
 the `CMP`.
@@ -115,7 +92,7 @@ does this for registers).
 
 ---
 
-### 6. Disassembly output mode
+### 5. Disassembly output mode
 
 Emit an annotated listing with resolved addresses and cycle counts, for
 performance work and for reading what the peephole actually did.
@@ -135,7 +112,7 @@ table is new.
 
 ## 🔵 LOWER PRIORITY
 
-### 7. Inline data directive
+### 6. Inline data directive
 
 Lookup tables and sprite data colocated with the code that uses them, rather than
 hoisted to a `static`.
@@ -150,7 +127,7 @@ stays visible to `#[org]` conflict detection.
 
 ---
 
-### 8. Reclaim BSS from dropped statics
+### 7. Reclaim BSS from dropped statics
 
 Unreachable statics are no longer emitted, but sema assigns their RAM addresses
 before liveness is known, so the space stays reserved. Ordering BSS allocation
@@ -175,16 +152,24 @@ work builds on, listed here so it is not re-planned.
 | `tests/e2e/interrupts_exec.rs` | 5 tests: IRQ handler execution, register preservation, main-state integrity, NMI edges, masking |
 | `tests/e2e/frames.rs` | 14 tests: call-graph frame coloring, recursion, deep chains |
 
-`examples/monitor/` holds an earlier monitor sketch. `simple_monitor.wr` does not
-compile (an unresolved `uart_putc`), and the set should be treated as reference
-material to be rewritten as part of item (2) rather than as working examples.
-`examples/uart.wr` compiles again now that `#[org]` reserves its range.
+`examples/monitor/` holds an earlier monitor sketch. Neither
+`simple_monitor.wr` nor `monitor_standalone.wr` compiles, and the set should be
+treated as reference material to be rewritten as part of item (1) rather than
+as working examples. `examples/pointers.wr` shows the buffer-passing shape they
+will need.
 
 ---
 
 ## Recently Completed ✅
 
 **OS enablement (2026)**
+- Pointers and address-of: `&T`, `&x`, `*p`, `p[i]`, `p.field`, casts to and
+  from `u16`, pointer-valued statics, and an escape analysis that rejects a
+  pointer outliving the frame it names. `std/mem.wr` takes `&u8`, so a driver
+  can be handed a caller's buffer (`examples/pointers.wr`)
+- Local array data moved from the `CODE` section into RAM — writing to a local
+  array was a silent no-op on a real board, invisible under the emulator's flat
+  memory
 - Mutable globals (`static`) allocated in a configurable BSS/RAM section
 - Indirect calls through computed callees, enabling device vtables of function
   pointers

@@ -11,6 +11,7 @@ A systems programming language designed specifically for the 6502 processor, tak
 - [Structs](#structs)
 - [Enums](#enums)
 - [Arrays and Slices](#arrays-and-slices)
+- [Pointers](#pointers)
 - [Strings](#strings)
 - [Control Flow](#control-flow)
 - [Type Casting](#type-casting)
@@ -1313,12 +1314,157 @@ source[0] = 10;  // dest is unchanged (independent copy)
 ```rust
 let source: [u8; 100] = [...];
 let dest: [u8; 100];
-memcpy(&dest as u16, &source as u16, 100);
+memcpy(&dest, &source, 100);
 ```
+
+`&array` gives a pointer to its first element — see [Pointers](#pointers).
 
 ### Completion Status
 
 All items completed.
+
+---
+
+## Pointers
+
+A pointer is the address of a value. It is written `&T`, taken with `&x`, and
+read through with `*p`.
+
+```rust
+let x: u8 = 41;
+let p: &u8 = &x;
+*p = *p + 1;        // x is now 42
+```
+
+Pointers exist so that a function can be handed a *caller's* buffer or device
+struct. Without them a driver has to own its buffer as a `static`, or take a
+bare `u16` the compiler cannot check.
+
+```rust
+fn uart_getline(buf: &u8, max: u8) -> u8 { ... }
+
+let line: [u8; 64] = [0; 64];
+let n: u8 = uart_getline(&line, 64);
+```
+
+### Representation
+
+Two bytes, little-endian — the same 16-bit address the hardware uses. A pointer
+occupies 2 bytes wherever it is stored, and `&Node` inside `struct Node` is
+therefore fine: the size of a pointer never depends on the size of what it
+points at.
+
+```rust
+struct Node { value: u8, next: &Node }   // 3 bytes
+```
+
+### What you can do with one
+
+| Form | Meaning |
+| --- | --- |
+| `&x` | the address of a variable, element, or field |
+| `*p` | read or write the value it points at |
+| `p[i]` | the *i*-th element from `p`, scaled by the element width |
+| `p.field` | a field of the struct it points at — no `(*p).field` needed |
+| `p as u16` | the address as a number |
+| `n as &T` | a number as an address |
+
+`&arr` on an array gives `&T`, a pointer to the first element — not
+`&[T; N]`. That is what `memcpy(&dst, &src, n)` relies on.
+
+`p[i]` has no bounds check: a pointer carries no length. When the length
+matters, use a slice (`&[T]`), which carries one.
+
+Arithmetic is deliberately limited to indexing. There is no `p + n`; write
+`&p[n]` or index at the point of use. Nor is there `&mut` — the language has
+one pointer kind, and no `mut` keyword to distinguish a second.
+
+### What is rejected
+
+`&` needs something with an address that outlives the expression, so these do
+not compile:
+
+```rust
+&5              // a literal has no address
+&f()            // nor does a call result
+&(a + b)        // nor an arithmetic result
+&SOME_CONST     // a const lives in ROM, referenced by label, not by address
+&SOME_ADDR      // an `addr` declaration; its read/write mode is checked at
+                // the name, and a pointer would launder that check away
+&some_function  // a function name is already its address
+```
+
+A `str`, a slice and an enum value are already references, so `&` on them is
+rejected too — pass them directly.
+
+Casts are checked in both directions. An address is 16 bits, so only `as u16`,
+`as i16` or another pointer type keeps it whole; and only an integer can become
+a pointer.
+
+```rust
+let n: u8 = p as u8;      // rejected: discards the page
+let q: &u8 = true as &u8; // rejected: a bool is not an address
+```
+
+### Lifetimes
+
+There is no borrow checker. There is a narrower check that rejects the shapes
+that actually dangle.
+
+Locals live in zero-page frames allocated by colouring the call graph: a
+callee's frame never overlaps a live caller's. That is why passing `&local`
+*down* is always safe — and it is not a new guarantee, since struct arguments
+have been passed by reference all along. What is not safe is a pointer going
+the other way. Once a function returns, an unrelated function may occupy those
+bytes.
+
+So these are errors:
+
+```rust
+fn leak() -> &u8 { let x: u8 = 1; return &x; }   // returning a local's address
+static SAVED: &u8 = 0x0400 as &u8;
+fn stash() { let x: u8 = 1; SAVED = &x; }         // storing it past the frame
+```
+
+Taking `&local` inside a recursive function is rejected as well. A recursive
+call copies the frame to the software stack and copies it back, so the same
+bytes serve every depth and a pointer taken at one depth names a different
+invocation's variable at the next. Hoist the value to a `static`.
+
+The subtle case is laundering through a parameter. A pointer *parameter* has
+unknown provenance — the callee cannot see where it came from — so storing one
+in a global has to be allowed, or a registration function could not be written
+at all. The caller is checked instead:
+
+```rust
+fn keep(d: &u8) { SAVED = d; }    // fine on its own
+
+keep(&COUNT);                      // fine: a static outlives everything
+let x: u8 = 1; keep(&x);           // rejected here, at the call site
+```
+
+The analysis is flow-insensitive: a variable's provenance is the meet of every
+value assigned to it anywhere in the function. `let p = &GLOBAL; p = &x;`
+makes `p` local throughout.
+
+A pointer passed to an **indirect** call must point at a global. A call through
+a function pointer records no call edge, so the callee's frame is uncoloured
+with respect to the caller's and the usual guarantee does not hold.
+
+### Pointers in statics
+
+A `static` can hold a pointer, initialised either from a literal address or
+from another static's address:
+
+```rust
+static COUNT: u8 = 0;
+static P: &u8 = &COUNT;
+static UART: &u8 = 0xD012 as &u8;
+```
+
+Statics are laid out in declaration order, so a static's initializer can only
+name one declared above it; a forward reference is an error rather than a
+silent zero.
 
 ---
 
@@ -2324,7 +2470,7 @@ import {memset} from "mem.wr";  // stdlib import
 const SCREEN: addr = 0x0400;
 
 fn init_graphics() {
-    memset(SCREEN as u16, 0x20, 255);
+    memset(0x0400 as &u8, 0x20, 255);
 }
 
 fn draw_sprite(x: u8, y: u8, sprite_id: u8) {
@@ -2608,12 +2754,12 @@ import { memcpy, memset, memcmp, mem_read, mem_write } from "mem.wr";
 
 #### Memory Block Operations
 
-##### `memcpy(dest: u16, src: u16, len: u8)`
+##### `memcpy(dest: &u8, src: &u8, len: u8)`
 
 Copy `len` bytes from source address to destination address.
 
 ```rust
-fn memcpy(dest: u16, src: u16, len: u8)
+fn memcpy(dest: &u8, src: &u8, len: u8)
 ```
 
 **Parameters:**
@@ -2625,18 +2771,20 @@ fn memcpy(dest: u16, src: u16, len: u8)
 
 **Example:**
 ```rust
-const SOURCE_DATA: [u8; 5] = [1, 2, 3, 4, 5];
-let SCREEN_BUFFER: addr = 0x0400;
+static SOURCE_DATA: [u8; 5] = [1, 2, 3, 4, 5];
 
-memcpy(SCREEN_BUFFER as u16, &SOURCE_DATA as u16, 5);
+memcpy(0x0400 as &u8, &SOURCE_DATA, 5);
 ```
 
-##### `memset(dest: u16, value: u8, len: u8)`
+`SOURCE_DATA` is a `static` rather than a `const` because a `const` lives in
+ROM and is referenced by label, not by address — `&CONST` is rejected.
+
+##### `memset(dest: &u8, value: u8, len: u8)`
 
 Fill `len` bytes at destination with a constant value.
 
 ```rust
-fn memset(dest: u16, value: u8, len: u8)
+fn memset(dest: &u8, value: u8, len: u8)
 ```
 
 **Parameters:**
@@ -2651,18 +2799,20 @@ fn memset(dest: u16, value: u8, len: u8)
 
 **Example:**
 ```rust
-let SCREEN: addr = 0x0400;
-
 // Clear screen with spaces (0x20)
-memset(SCREEN as u16, 0x20, 255);
+memset(0x0400 as &u8, 0x20, 255);
 ```
 
-##### `memcmp(a: u16, b: u16, len: u8) -> u8`
+Note that an `addr` declaration in rvalue position is a *load* from that
+address, not the address itself, so `SCREEN as u16` would pass the byte
+currently stored there. Write the address, or take `&` of a static.
+
+##### `memcmp(a: &u8, b: &u8, len: u8) -> u8`
 
 Compare two memory regions for equality.
 
 ```rust
-fn memcmp(a: u16, b: u16, len: u8) -> u8
+fn memcmp(a: &u8, b: &u8, len: u8) -> u8
 ```
 
 **Parameters:**
@@ -2676,10 +2826,9 @@ fn memcmp(a: u16, b: u16, len: u8) -> u8
 
 **Example:**
 ```rust
-const EXPECTED: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
-let TEST_DATA: addr = 0x6000;
+static EXPECTED: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
 
-if memcmp(&EXPECTED as u16, TEST_DATA as u16, 4) == 1 {
+if memcmp(&EXPECTED, 0x6000 as &u8, 4) == 1 {
     // Memory matches
 }
 ```
