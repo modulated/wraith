@@ -200,6 +200,35 @@ pub fn generate_stmt(
                     }
                 }
 
+                // Local array: the data lives in RAM (see `LocalArray`), not
+                // inline in the code stream where it used to be emitted and
+                // where writes would have gone to ROM on a real board. Fill the
+                // block from the initializer, then put its address in the
+                // frame slot — every downstream path still reads the slot as a
+                // 2-byte pointer, so indexing is unchanged.
+                if let Some(arr) = info.local_arrays.get(&name.span)
+                    && let crate::sema::table::SymbolLocation::ZeroPage(slot) = sym.location
+                {
+                    let elem_size = match &sym.ty {
+                        Type::Array(elem, _) => {
+                            crate::codegen::expr::type_byte_size(elem, info).max(1)
+                        }
+                        _ => 1,
+                    };
+                    emitter.emit_comment(&format!(
+                        "local array {} @ ${:04X} ({} bytes, RAM)",
+                        name.node, arr.addr, arr.size
+                    ));
+                    generate_local_array_init(arr.addr, arr.size, elem_size, init, emitter, info)?;
+                    // Point the frame slot at the block.
+                    emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr & 0xFF));
+                    emitter.emit_inst("STA", &format!("${:02X}", slot));
+                    emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr >> 8));
+                    emitter.emit_inst("STA", &format!("${:02X}", slot + 1));
+                    emitter.invalidate_registers();
+                    return Ok(());
+                }
+
                 // Slice value: `let s: &[T] = arr[start..end];`. Materialize the
                 // 4-byte fat-pointer descriptor into s's frame slot:
                 //   slot[0..1] = base = arr's data pointer + start*elem_size
@@ -2732,6 +2761,98 @@ fn generate_match_arm_bodies(
         }
     }
 
+    Ok(())
+}
+
+/// Fill a local array's RAM block from its initializer.
+///
+/// The data used to be emitted once, as bytes in the code stream. Now it lives
+/// in RAM and has to be written at run time, on every call — an unavoidable cost
+/// of the array being writable at all. A uniform fill becomes a loop when it is
+/// worth one; explicit elements are stored individually.
+fn generate_local_array_init(
+    addr: u16,
+    size: u16,
+    elem_size: usize,
+    init: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::ast::{Expr, Literal};
+    use crate::sema::const_eval::eval_const_expr;
+
+    /// A constant initializer element, or None if it is not compile-time known.
+    fn const_of(e: &Spanned<Expr>) -> Option<i64> {
+        match &e.node {
+            Expr::Literal(Literal::Integer(v)) => Some(*v),
+            Expr::Literal(Literal::Bool(b)) => Some(i64::from(*b)),
+            _ => eval_const_expr(e).ok().and_then(|c| c.as_integer()),
+        }
+    }
+
+    /// Store `value` as `elem_size` little-endian bytes at `addr + offset`.
+    fn store_elem(emitter: &mut Emitter, addr: u16, offset: u16, value: i64, elem_size: usize) {
+        for b in 0..elem_size {
+            let byte = ((value >> (8 * b)) & 0xFF) as u8;
+            emitter.emit_inst("LDA", &format!("#${:02X}", byte));
+            emitter.emit_inst("STA", &format!("${:04X}", addr + offset + b as u16));
+        }
+    }
+
+    match &init.node {
+        // `[v; n]` — every element the same. A byte-wide zero (or any uniform
+        // byte) over a block worth looping for becomes a loop; otherwise the
+        // stores are cheaper than the loop overhead.
+        Expr::Literal(Literal::ArrayFill { value, count }) => {
+            let v = const_of(value).ok_or_else(|| {
+                CodegenError::UnsupportedOperation(
+                    "array fill value must be a constant expression".to_string(),
+                )
+            })?;
+            let uniform_byte = (0..elem_size).all(|b| ((v >> (8 * b)) & 0xFF) == (v & 0xFF));
+            if uniform_byte && size > 8 {
+                emitter.emit_inst("LDA", &format!("#${:02X}", (v & 0xFF) as u8));
+                // Absolute,X reaches 256 bytes, so a larger block needs one loop
+                // per chunk. X counts down and the branch fires on the wrap from
+                // $00 to $FF, which is what covers index 0.
+                let mut done = 0u16;
+                while done < size {
+                    let chunk = (size - done).min(256);
+                    let loop_label = emitter.next_label("ai");
+                    emitter.emit_inst("LDX", &format!("#${:02X}", (chunk - 1) as u8));
+                    emitter.emit_label(&loop_label);
+                    emitter.emit_inst("STA", &format!("${:04X},X", addr + done));
+                    emitter.emit_inst("DEX", "");
+                    emitter.emit_inst("CPX", "#$FF");
+                    emitter.emit_inst("BNE", &loop_label);
+                    done += chunk;
+                }
+                emitter.invalidate_registers();
+            } else {
+                for i in 0..*count as u16 {
+                    store_elem(emitter, addr, i * elem_size as u16, v, elem_size);
+                }
+            }
+        }
+        // `[a, b, c]` — element by element.
+        Expr::Literal(Literal::Array(elements)) => {
+            for (i, e) in elements.iter().enumerate() {
+                let v = const_of(e).ok_or_else(|| {
+                    CodegenError::UnsupportedOperation(
+                        "array elements must be constant expressions".to_string(),
+                    )
+                })?;
+                store_elem(emitter, addr, i as u16 * elem_size as u16, v, elem_size);
+            }
+        }
+        _ => {
+            let _ = info;
+            return Err(CodegenError::UnsupportedOperation(
+                "a local array must be initialized with an array literal".to_string(),
+            ));
+        }
+    }
+    emitter.invalidate_registers();
     Ok(())
 }
 

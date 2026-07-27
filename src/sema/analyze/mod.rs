@@ -33,6 +33,17 @@ pub struct SemanticAnalyzer {
     /// loops, scratch-using expressions, and calls in the body cannot clobber
     /// a live bound.
     pub(super) loop_bound_slots: HashMap<Span, SymbolInfo>,
+    /// Where each local array's *data* lives, keyed by the declaration's name
+    /// span. During analysis this holds an offset within the declaring
+    /// function's array block; `finalize_frames` rewrites it to an absolute RAM
+    /// address once the blocks have been laid out.
+    pub(super) local_arrays: HashMap<Span, crate::sema::LocalArray>,
+    /// Bytes of local-array data each function needs, consumed by
+    /// `finalize_frames` to lay the blocks out in RAM.
+    pub(super) array_block_sizes: HashMap<String, u16>,
+    /// Bump cursor for the current function's array block, reset per function
+    /// alongside `frame_cursor`.
+    pub(super) array_cursor: u16,
     pub(super) resolved_types: HashMap<Span, Type>,
     pub(super) type_registry: TypeRegistry,
     pub(super) imported_items: Vec<Spanned<Item>>,
@@ -122,6 +133,9 @@ impl SemanticAnalyzer {
             function_metadata: HashMap::default(),
             folded_constants: HashMap::default(),
             loop_bound_slots: HashMap::default(),
+            local_arrays: HashMap::default(),
+            array_block_sizes: HashMap::default(),
+            array_cursor: 0,
             resolved_types: HashMap::default(),
             type_registry: TypeRegistry::new(),
             imported_items: Vec::with_capacity(8),
@@ -164,6 +178,9 @@ impl SemanticAnalyzer {
             function_metadata: HashMap::default(),
             folded_constants: HashMap::default(),
             loop_bound_slots: HashMap::default(),
+            local_arrays: HashMap::default(),
+            array_block_sizes: HashMap::default(),
+            array_cursor: 0,
             resolved_types: HashMap::default(),
             type_registry: TypeRegistry::new(),
             imported_items: Vec::with_capacity(8),
@@ -289,6 +306,7 @@ impl SemanticAnalyzer {
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
+            local_arrays: self.local_arrays.clone(),
             type_registry: self.type_registry.clone(),
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),
@@ -344,6 +362,9 @@ impl SemanticAnalyzer {
             // Each function gets a fresh frame; params then locals allocate upward
             // from offset 0. finalize_frames assigns the concrete base later.
             self.frame_cursor = 0;
+            // Local-array data blocks restart per function too; `finalize_frames`
+            // colours them against the call graph the same way frames are.
+            self.array_cursor = 0;
             self.loop_bound_free.clear();
 
             // Check if this is an inline function

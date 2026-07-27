@@ -323,9 +323,15 @@ fn test_array_literal() {
         }
         "#,
     );
-    assert_asm_contains(&asm, ".BYTE $01");
-    assert_asm_contains(&asm, ".BYTE $02");
-    assert_asm_contains(&asm, ".BYTE $03");
+    // A local array's data lives in RAM and is written at run time, so the
+    // elements appear as stores rather than as `.BYTE` data in the code stream.
+    assert_asm_contains(&asm, "LDA #$01");
+    assert_asm_contains(&asm, "LDA #$02");
+    assert_asm_contains(&asm, "LDA #$03");
+    assert!(
+        !asm.contains(".BYTE $01"),
+        "local array data must not be emitted into the code stream"
+    );
 }
 
 #[test]
@@ -337,8 +343,10 @@ fn test_array_fill() {
         }
         "#,
     );
-    // Should have 5 zero bytes
-    assert_eq!(count_pattern(&asm, ".BYTE $00"), 5);
+    // Five elements, filled at run time in RAM. Below the loop threshold, so
+    // this is five individual stores rather than a loop.
+    assert_asm_contains(&asm, "LDA #$00");
+    assert_eq!(count_pattern(&asm, "STA $04"), 5, "one store per element");
 }
 
 // ============================================================================

@@ -229,10 +229,10 @@ impl SemanticAnalyzer {
             Type::Array(elem, n) if matches!(&**elem, Type::Named(t) if self.type_registry.get_struct(t).is_some()) => {
                 (self.type_size(elem) * n).min(255)
             }
-            Type::Array(_, _) => 2,    // Array pointer
-            Type::String => 2,         // String pointer (16-bit address)
+            Type::Array(_, _) => 2, // Array pointer (data lives in RAM, below)
+            Type::String => 2,      // String pointer (16-bit address)
             Type::Function(_, _) => 2, // Function pointer (16-bit code address)
-            Type::Slice(_) => 4,       // Fat pointer: 2-byte base + 2-byte length
+            Type::Slice(_) => 4,    // Fat pointer: 2-byte base + 2-byte length
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
             | Type::Primitive(PrimitiveType::B16) => 2,
@@ -250,6 +250,32 @@ impl SemanticAnalyzer {
         };
         let offset = self.frame_alloc(alloc_size as u8);
         let location = SymbolLocation::FrameOffset(offset);
+
+        // A non-struct-element array's frame slot holds a *pointer*; the data
+        // itself needs storage. It used to be emitted inline in the CODE
+        // section, which is ROM on a real board, so writing to a local array
+        // did nothing. Reserve a block in RAM instead, as an offset within this
+        // function's block — `finalize_frames` lays the blocks out and rebases
+        // these to absolute addresses once the call graph is known.
+        if let Type::Array(elem, n) = &declared_ty
+            && !matches!(&**elem, Type::Named(t) if self.type_registry.get_struct(t).is_some())
+        {
+            let bytes = (self.type_size(elem) * n) as u16;
+            if let Some(f) = self.current_function.clone() {
+                let at = self.array_cursor;
+                self.array_cursor += bytes;
+                self.local_arrays.insert(
+                    name.span,
+                    crate::sema::LocalArray {
+                        addr: at,
+                        size: bytes,
+                        function: f.clone(),
+                    },
+                );
+                let entry = self.array_block_sizes.entry(f).or_insert(0);
+                *entry = (*entry).max(self.array_cursor);
+            }
+        }
 
         let info = SymbolInfo {
             name: name.node.clone(),

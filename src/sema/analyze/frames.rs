@@ -146,18 +146,19 @@ impl SemanticAnalyzer {
             }
         }
 
-        // Interrupt-handler zero-page safety. A handler can preempt main code at
-        // any point, so it must preserve every zero-page location the interrupted
-        // code might be using. We save the shared codegen scratch/pools/math region
-        // plus the contiguous frame span the handler's own call graph touches (its
-        // frames overlap main frames under unified coloring). The handler prologue
-        // (item.rs) emits the save/restore on the hardware stack.
         let handlers: Vec<String> = self
             .function_metadata
             .iter()
             .filter(|(name, m)| m.is_interrupt_handler && self.frame_sizes.contains_key(*name))
             .map(|(name, _)| name.clone())
             .collect();
+
+        // Interrupt-handler zero-page safety. A handler can preempt main code at
+        // any point, so it must preserve every zero-page location the interrupted
+        // code might be using. We save the shared codegen scratch/pools/math region
+        // plus the contiguous frame span the handler's own call graph touches (its
+        // frames overlap main frames under unified coloring). The handler prologue
+        // (item.rs) emits the save/restore on the hardware stack.
 
         let mut interrupt_save_info: HashMap<String, InterruptSaveInfo> = HashMap::default();
         for handler in &handlers {
@@ -202,6 +203,18 @@ impl SemanticAnalyzer {
                 },
             );
         }
+
+        // Local-array data blocks. Same colouring rule as frames, but in RAM
+        // rather than zero page, and with one extra constraint: an interrupt
+        // handler is not a callee of `main`, so colouring alone would let their
+        // blocks share addresses. Zero page solves that by saving the handler's
+        // span on the hardware stack; a RAM block is far too large for that, so
+        // the interrupt-reachable set is laid out above everything else instead.
+        let mut irq_reachable: HashSet<String> = HashSet::default();
+        for handler in &handlers {
+            irq_reachable.extend(reachable_from(handler, &adj));
+        }
+        self.layout_array_blocks(&sccs, &scc_preds, &topo, &irq_reachable)?;
 
         self.warn_deep_recursion(&recursive_call_edges, &function_frames);
 
@@ -276,6 +289,114 @@ impl SemanticAnalyzer {
 
     /// Rewrite every `FrameOffset(off)` into `ZeroPage(base + off)` across all
     /// stored symbol locations, and rebase the offset-valued metadata maps.
+    /// Lay out each function's local-array data block in the BSS section.
+    ///
+    /// The rule is the frame-colouring rule: an SCC starts above the end of
+    /// every predecessor (caller) SCC, so a callee's arrays never overlap a live
+    /// caller's. Unrelated functions share addresses, which is what keeps a
+    /// 1 KB BSS viable.
+    ///
+    /// Interrupt-reachable functions are laid out above the main-thread
+    /// high-water mark. A handler is not a callee of `main`, so colouring alone
+    /// would let their blocks overlap; zero-page frames survive that by having
+    /// the handler save the span it touches, but a RAM block is far too large to
+    /// push onto the hardware stack.
+    fn layout_array_blocks(
+        &mut self,
+        sccs: &[Vec<String>],
+        scc_preds: &[HashSet<usize>],
+        topo: &[usize],
+        irq_reachable: &HashSet<String>,
+    ) -> Result<(), SemaError> {
+        if self.array_block_sizes.is_empty() {
+            return Ok(());
+        }
+
+        const DEFAULT_BSS: (u16, u16) = (0x0400, 0x07FF);
+        let (bss_start, bss_end) = self
+            .memory_config
+            .get_section("BSS")
+            .map(|s| (s.start, s.end))
+            .unwrap_or(DEFAULT_BSS);
+        // Statics were allocated first and are never reused, so blocks begin
+        // above whatever they consumed.
+        let base_start = self.bss_cursor.unwrap_or(bss_start);
+
+        let size_of = |f: &String| self.array_block_sizes.get(f).copied().unwrap_or(0);
+        let scc_size: Vec<u16> = sccs.iter().map(|c| c.iter().map(&size_of).sum()).collect();
+        let scc_is_irq: Vec<bool> = sccs
+            .iter()
+            .map(|c| c.iter().any(|f| irq_reachable.contains(f)))
+            .collect();
+
+        // Pass A: main-thread SCCs.
+        let mut scc_base: Vec<u16> = vec![base_start; sccs.len()];
+        let mut main_hwm = base_start;
+        for &i in topo {
+            if scc_is_irq[i] {
+                continue;
+            }
+            let mut base = base_start;
+            for &p in &scc_preds[i] {
+                if !scc_is_irq[p] {
+                    base = base.max(scc_base[p] + scc_size[p]);
+                }
+            }
+            scc_base[i] = base;
+            main_hwm = main_hwm.max(base + scc_size[i]);
+        }
+
+        // Pass B: interrupt-reachable SCCs, above everything the main thread
+        // can be holding when a handler fires.
+        for &i in topo {
+            if !scc_is_irq[i] {
+                continue;
+            }
+            let mut base = main_hwm;
+            for &p in &scc_preds[i] {
+                base = base.max(scc_base[p] + scc_size[p]);
+            }
+            scc_base[i] = base;
+        }
+
+        // Members are laid out sequentially inside their SCC block: mutually
+        // recursive functions are simultaneously live, so they cannot share.
+        let mut function_base: HashMap<String, u16> = HashMap::default();
+        for (i, comp) in sccs.iter().enumerate() {
+            let mut members = comp.clone();
+            members.sort(); // deterministic layout
+            let mut cursor = scc_base[i];
+            for f in &members {
+                let size = size_of(f);
+                if size > 0 && (cursor as u32 + size as u32 - 1) > bss_end as u32 {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "BSS section overflow: local array data for '{}' does not fit in \
+                             ${:04X}-${:04X}. Arrays are colored by the call graph, so this is \
+                             the deepest chain, not the total; move a large buffer to a `static` \
+                             or enlarge the BSS section in wraith.toml",
+                            f, bss_start, bss_end
+                        ),
+                        span: crate::ast::Span::dummy(),
+                    });
+                }
+                function_base.insert(f.clone(), cursor);
+                cursor += size;
+            }
+        }
+
+        // Rebase every declaration's offset to an absolute address.
+        for arr in self.local_arrays.values_mut() {
+            let base = function_base
+                .get(&arr.function)
+                .copied()
+                .unwrap_or(base_start);
+            arr.addr += base;
+        }
+
+        Ok(())
+    }
+
     fn rewrite_frame_offsets(
         &mut self,
         frames: &HashMap<String, FrameInfo>,

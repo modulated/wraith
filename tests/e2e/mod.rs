@@ -20,6 +20,7 @@ mod inline;
 mod interrupts;
 mod interrupts_exec;
 mod language_features;
+mod local_arrays;
 mod loop_sweep;
 mod math16;
 mod memory;

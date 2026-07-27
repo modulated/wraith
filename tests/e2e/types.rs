@@ -410,7 +410,9 @@ fn shorthand_array_size_one_does_not_expand() {
     // must not go through the fill expansion.
     let asm = compile_success("fn main() { let single: [u8; 1] = [42]; }");
     assert!(!asm.contains("Expanding [value]"));
-    assert_asm_contains(&asm, ".BYTE $2A");
+    // A local array is written to RAM at run time, so the element shows up as a
+    // store rather than as data in the code stream.
+    assert_asm_contains(&asm, "LDA #$2A");
 }
 
 // ============================================================================

@@ -773,6 +773,7 @@ fn generate_inline_call(
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
+            local_arrays: info.local_arrays.clone(),
             type_registry: info.type_registry.clone(),
             resolved_types: info.resolved_types.clone(),
             imported_items: info.imported_items.clone(),
