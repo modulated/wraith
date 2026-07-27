@@ -21,7 +21,7 @@ fn memcpy_copies_bytes_indirect() {
         #[reset]
         fn main() {
             S0 = 0x11; S1 = 0x22; S2 = 0x33; S3 = 0x44;
-            memcpy(0x0600, 0x0500, 4);
+            memcpy(0x0600 as &u8, 0x0500 as &u8, 4);
             loop {}
         }
     "#);
@@ -44,7 +44,7 @@ fn memcpy16_copies_across_page_boundary() {
         #[reset]
         fn main() {
             P0 = 0xDE; P1 = 0xAD; P2 = 0xBE; P3 = 0xEF;
-            memcpy16(0x06FE, 0x05FE, 4);
+            memcpy16(0x06FE as &u8, 0x05FE as &u8, 4);
             loop {}
         }
     "#);
@@ -60,7 +60,7 @@ fn memset_fills_region() {
         import { memset } from "std/mem.wr";
         #[reset]
         fn main() {
-            memset(0x0600, 0x5A, 5);
+            memset(0x0600 as &u8, 0x5A, 5);
             loop {}
         }
     "#);
@@ -77,7 +77,7 @@ fn memset16_fills_across_page_boundary() {
         import { memset16 } from "std/mem.wr";
         #[reset]
         fn main() {
-            memset16(0x05FE, 0x99, 4);
+            memset16(0x05FE as &u8, 0x99, 4);
             loop {}
         }
     "#);
@@ -98,7 +98,7 @@ fn str_copy_writes_string_bytes_to_buffer() {
         #[reset]
         fn main() {
             let s: str = "ABC";
-            let n: u16 = str_copy(0x0600, 0x0010, s);
+            let n: u16 = str_copy(0x0600 as &u8, 0x0010, s);
             N = n.low;
             loop {}
         }
@@ -107,6 +107,71 @@ fn str_copy_writes_string_bytes_to_buffer() {
     assert_eq!(e.mem(0x0601), 0x42, "'B' at dest[1]");
     assert_eq!(e.mem(0x0602), 0x43, "'C' at dest[2]");
     assert_eq!(e.mem(0x0410), 3, "returned copied count = 3");
+}
+
+#[test]
+fn memcpy_accepts_a_local_buffer_by_reference() {
+    // The point of the `&u8` signatures. Before this, a caller with a local
+    // buffer had nothing to hand memcpy: an array variable is not a `u16`, so
+    // the buffer had to be a `static` or the address had to be smuggled
+    // through as a bare number the compiler could not check.
+    let mut e = run(r#"
+        import { memcpy } from "std/mem.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let src: [u8; 4] = [0; 4];
+            let dst: [u8; 4] = [0; 4];
+            src[0] = 0x11; src[1] = 0x22; src[2] = 0x33;
+            memcpy(&dst, &src, 3);
+            R0 = dst[0];
+            R1 = dst[2];
+            R2 = dst[3];
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x11, 0x33));
+    assert_eq!(e.mem(0x0902), 0x00, "the fourth byte was not copied");
+}
+
+#[test]
+fn memset_accepts_a_local_buffer_by_reference() {
+    let mut e = run(r#"
+        import { memset } from "std/mem.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let buf: [u8; 4] = [0; 4];
+            memset(&buf, 0x7E, 2);
+            R0 = buf[1];
+            R1 = buf[2];
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x7E, 0x00));
+}
+
+#[test]
+fn str_copy_writes_into_a_local_buffer() {
+    let mut e = run(r#"
+        import { str_copy } from "std/mem.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let buf: [u8; 8] = [0; 8];
+            let s: str = "Hi";
+            let n: u16 = str_copy(&buf, 0x0008, s);
+            R0 = buf[0];
+            R1 = n.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x48, "'H'");
+    assert_eq!(e.mem(0x0901), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +299,7 @@ fn memcmp_compares_the_buffers_not_the_pointers() {
             fn main() {{
                 A0 = 0x11; A1 = 0x22; A2 = 0x33; A3 = 0x44;
                 B0 = 0x11; B1 = 0x22; B2 = 0x33; B3 = {b3};
-                OUT = memcmp(0x0500, 0x0600, 4);
+                OUT = memcmp(0x0500 as &u8, 0x0600 as &u8, 4);
                 loop {{}}
             }}
         "#
@@ -256,7 +321,7 @@ fn memcmp_finds_a_difference_in_the_first_byte() {
         fn main() {
             A0 = 0x11;
             B0 = 0x22;
-            OUT = memcmp(0x0500, 0x0600, 1);
+            OUT = memcmp(0x0500 as &u8, 0x0600 as &u8, 1);
             loop {}
         }
     "#);
@@ -269,7 +334,7 @@ fn memcmp_of_zero_length_is_equal() {
         import { memcmp } from "std/mem.wr";
         const OUT: addr = 0x0900;
         #[reset]
-        fn main() { OUT = memcmp(0x0500, 0x0600, 0); loop {} }
+        fn main() { OUT = memcmp(0x0500 as &u8, 0x0600 as &u8, 0); loop {} }
     "#);
     assert_eq!(e.mem(0x0900), 1, "nothing to compare, so equal");
 }
