@@ -454,3 +454,286 @@ fn a_runtime_index_into_address_of_is_rejected_for_now() {
     );
     assert!(err.contains("constant index"), "{err}");
 }
+
+// ============================================================================
+// `p[i]` — indexing through a pointer
+// ============================================================================
+
+#[test]
+fn indexing_a_pointer_reads_the_element() {
+    // `&buf` decays to a pointer at the first element, so `p[2]` and `buf[2]`
+    // must name the same byte. The pointer carries no length; that is the whole
+    // difference from a slice.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let buf: [u8; 4] = [0; 4];
+            buf[0] = 10;
+            buf[2] = 30;
+            let p: &u8 = &buf;
+            R0 = p[0];
+            R1 = p[2];
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (10, 30));
+}
+
+#[test]
+fn indexing_a_pointer_with_a_runtime_index_works() {
+    // The index is an ordinary expression evaluated into Y — this is the shape
+    // `&buf[i]` could not express, and the reason `p + n` is not needed.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let buf: [u8; 4] = [0; 4];
+            buf[3] = 77;
+            let p: &u8 = &buf;
+            let i: u8 = 3;
+            R0 = p[i];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 77);
+}
+
+#[test]
+fn writing_through_a_pointer_index_lands_in_the_array() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let buf: [u8; 4] = [0; 4];
+            let p: &u8 = &buf;
+            p[1] = 0xAB;
+            R0 = buf[0];
+            R1 = buf[1];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (0, 0xAB),
+        "only element 1 changed"
+    );
+}
+
+#[test]
+fn a_u16_pointer_index_is_scaled_by_the_element_size() {
+    // `p[2]` on a `&u16` is base + 4. Forgetting to scale writes over element 1
+    // and still looks plausible in a hex dump.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let w: [u16; 4] = [0; 4];
+            let p: &u16 = &w;
+            p[2] = 0xBEEF;
+            R0 = w[1].low;
+            R1 = w[2].low;
+            R2 = w[2].high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x00, "element 1 is untouched");
+    assert_eq!((e.mem(0x0901), e.mem(0x0902)), (0xEF, 0xBE));
+}
+
+#[test]
+fn a_callee_can_fill_a_buffer_it_was_handed() {
+    // The shape the whole feature exists for: a driver writing into a caller's
+    // buffer. Before pointers this had to own a `static` or take a bare `u16`
+    // the compiler could not check.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        fn fill(dest: &u8, n: u8, v: u8) {
+            let i: u8 = 0;
+            while i < n {
+                dest[i] = v;
+                i = i + 1;
+            }
+        }
+        #[reset]
+        fn main() {
+            let buf: [u8; 8] = [0; 8];
+            fill(&buf, 3, 0x5A);
+            R0 = buf[0];
+            R1 = buf[2];
+            R2 = buf[3];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x5A);
+    assert_eq!(e.mem(0x0901), 0x5A);
+    assert_eq!(e.mem(0x0902), 0x00, "the fill stopped at n");
+}
+
+#[test]
+fn a_pointer_into_a_static_array_indexes_correctly() {
+    // A `static` array lives inline at its own label, so `&ARR` is a
+    // compile-time constant rather than a slot to load.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        static ARR: [u8; 4] = [0; 4];
+        #[reset]
+        fn main() {
+            let p: &u8 = &ARR;
+            p[2] = 0x11;
+            R0 = ARR[2];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x11);
+}
+
+// ============================================================================
+// `p.field` — auto-deref on a pointer to a struct
+// ============================================================================
+
+#[test]
+fn a_field_can_be_read_through_a_pointer() {
+    // A struct *parameter* already holds an address in its slot, so `&Struct`
+    // takes exactly the same indirect path. Making them differ would be
+    // gratuitous, which is why `p.field` auto-derefs rather than needing
+    // `(*p).field`.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Dev { status: u8, count: u16 }
+        #[reset]
+        fn main() {
+            let d: Dev = Dev { status: 7, count: 0x1234 };
+            let p: &Dev = &d;
+            R0 = p.status;
+            R1 = p.count.high;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (7, 0x12));
+}
+
+#[test]
+fn a_field_can_be_written_through_a_pointer() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Dev { status: u8, count: u16 }
+        #[reset]
+        fn main() {
+            let d: Dev = Dev { status: 0, count: 0 };
+            let p: &Dev = &d;
+            p.status = 9;
+            p.count = 0xBEEF;
+            R0 = d.status;
+            R1 = d.count.high;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (9, 0xBE));
+}
+
+#[test]
+fn a_struct_pointer_survives_being_passed_down() {
+    // The frame-colouring invariant again, this time for a pointer to an
+    // aggregate: the callee's frame cannot overlap the caller's local.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Dev { status: u8 }
+        fn bump(p: &Dev) { p.status = p.status + 1; }
+        #[reset]
+        fn main() {
+            let d: Dev = Dev { status: 40 };
+            bump(&d);
+            bump(&d);
+            R0 = d.status;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 42);
+}
+
+#[test]
+fn a_pointer_to_a_static_struct_reads_and_writes_the_static() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Dev { status: u8 }
+        static D: Dev = Dev { status: 3 };
+        #[reset]
+        fn main() {
+            let p: &Dev = &D;
+            p.status = p.status + 4;
+            R0 = D.status;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 7);
+}
+
+#[test]
+fn taking_the_address_of_a_field_through_a_pointer_still_works() {
+    // `&p.field` composes: the pointer is the base, the offset is added to it.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Dev { status: u8, flag: u8 }
+        fn set_flag(d: &Dev) { let f: &u8 = &d.flag; *f = 1; }
+        #[reset]
+        fn main() {
+            let d: Dev = Dev { status: 0, flag: 0 };
+            set_flag(&d);
+            R0 = d.flag;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 1);
+}
+
+#[test]
+fn a_chained_field_access_through_a_pointer_is_rejected() {
+    // One level of auto-deref only. `resolve_static_struct_lvalue` computes a
+    // compile-time address, and there is no compile-time address behind a
+    // pointer — so this has to name the pointer and say what to do instead,
+    // rather than fall through to the generic "only supported on variables".
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        struct Inner { v: u8 }
+        struct Outer { inner: Inner }
+        fn peek(p: &Outer) -> u8 { return p.inner.v; }
+        #[reset]
+        fn main() { let o: Outer = Outer { inner: Inner { v: 1 } }; R0 = peek(&o); loop {} }
+    "#,
+    );
+    assert!(err.contains("'p'"), "the pointer should be named: {err}");
+    assert!(err.contains("bind an intermediate"), "{err}");
+}
+
+// ============================================================================
+// Codegen shape
+// ============================================================================
+
+#[test]
+fn indexing_a_pointer_uses_indirect_indexed_addressing() {
+    // The load-bearing detail: `p[i]` must go through `(zp),Y` on the *slot*,
+    // reading the pointer it holds. Absolute-indexed on the slot's address
+    // would read the pointer bytes themselves as data.
+    let asm = compile_success(
+        r#"
+        const R0: addr = 0x0900;
+        fn fetch(p: &u8, i: u8) -> u8 { return p[i]; }
+        #[reset]
+        fn main() { let b: [u8; 2] = [0; 2]; R0 = fetch(&b, 1); loop {} }
+    "#,
+    );
+    assert!(
+        asm.contains("),Y"),
+        "expected an indirect-indexed load:\n{asm}"
+    );
+}

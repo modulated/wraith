@@ -68,11 +68,15 @@ fn emit_indexed_load(
     use crate::ast::PrimitiveType;
     use crate::sema::types::Type;
 
-    // Determine whether the element type occupies two bytes (arrays and slices
-    // share the indirect-indexed load path; a slice's slot holds the base
-    // pointer just like an array variable's slot).
+    // Determine whether the element type occupies two bytes (arrays, slices and
+    // pointers share the indirect-indexed load path; each of their slots holds
+    // a base pointer rather than the data). `p[i]` on a pointer is the i-th
+    // element from it, scaled by the element width — a pointer carries no
+    // length, so there is nothing to bounds-check.
     let elem_ty = match info.resolved_types.get(&object.span) {
-        Some(Type::Array(elem, _)) | Some(Type::Slice(elem)) => Some(&**elem),
+        Some(Type::Array(elem, _)) | Some(Type::Slice(elem)) | Some(Type::Pointer(elem)) => {
+            Some(&**elem)
+        }
         _ => None,
     };
     let is_multibyte = matches!(
@@ -765,6 +769,36 @@ fn emit_static_field_load(
     Ok(())
 }
 
+/// If `expr` is a field/index chain whose root is a pointer variable, return
+/// that variable's name.
+///
+/// `p.field` auto-derefs because a pointer's slot holds an address exactly as a
+/// struct parameter's does. `p.a.b` does not: `resolve_static_struct_lvalue`
+/// computes a compile-time address, and there is no compile-time address behind
+/// a pointer. Naming the pointer makes the fix obvious rather than leaving the
+/// generic "only supported on variables" message to be puzzled over.
+fn pointer_rooted_chain_base(
+    expr: &Spanned<crate::ast::Expr>,
+    info: &ProgramInfo,
+) -> Option<String> {
+    use crate::ast::Expr;
+    let mut cur = expr;
+    loop {
+        match &cur.node {
+            Expr::Field { object, .. } | Expr::Index { object, .. } => cur = object,
+            Expr::Paren(inner) => cur = inner,
+            Expr::Variable(name) => {
+                let is_ptr = matches!(
+                    info.resolved_types.get(&cur.span),
+                    Some(crate::sema::types::Type::Pointer(_))
+                );
+                return if is_ptr { Some(name.clone()) } else { None };
+            }
+            _ => return None,
+        }
+    }
+}
+
 pub(super) fn generate_field_access(
     object: &Spanned<crate::ast::Expr>,
     field: &Spanned<String>,
@@ -798,6 +832,13 @@ pub(super) fn generate_field_access(
         {
             return Ok(());
         }
+        if let Some(base) = pointer_rooted_chain_base(object, info) {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "cannot follow a field chain through the pointer '{}'; bind an intermediate, \
+                 as `let inner: &T = &{}.<field>;`",
+                base, base
+            )));
+        }
         return Err(CodegenError::UnsupportedOperation(
             "Field access only supported on variables and local struct/array chains".to_string(),
         ));
@@ -826,19 +867,33 @@ pub(super) fn generate_field_access(
             // Parameters are pass-by-reference (the slot holds a pointer); locals
             // hold the struct inline. Distinguish via the explicit is_param flag
             // (frames put params and locals in the same region, so an address
-            // range test no longer works).
-            let sym_is_param = sym.is_param;
+            // range test no longer works). A `&Struct` is in exactly the same
+            // shape as a struct parameter — a 2-byte address in the slot — so
+            // `p.field` takes the same path, which is why it auto-derefs.
+            let sym_is_param =
+                sym.is_param || matches!(sym.ty, crate::sema::types::Type::Pointer(_));
 
             emitter.emit_comment(&format!("Field access: {}.{}", var_name, field.node));
 
-            // Get the struct type name from the symbol's type
-            let struct_name = if let crate::sema::types::Type::Named(name) = &sym.ty {
-                name
-            } else {
-                return Err(CodegenError::UnsupportedOperation(format!(
-                    "variable '{}' is not a struct type",
-                    var_name
-                )));
+            // Get the struct type name from the symbol's type, looking through
+            // one level of pointer.
+            let struct_name = match &sym.ty {
+                crate::sema::types::Type::Named(name) => name,
+                crate::sema::types::Type::Pointer(inner) => match &**inner {
+                    crate::sema::types::Type::Named(name) => name,
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(format!(
+                            "variable '{}' is not a pointer to a struct",
+                            var_name
+                        )));
+                    }
+                },
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "variable '{}' is not a struct type",
+                        var_name
+                    )));
+                }
             };
 
             // Look up the struct definition

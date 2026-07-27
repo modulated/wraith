@@ -1441,11 +1441,14 @@ fn generate_index_assignment(
         CodegenError::UnsupportedOperation("Type information not found".to_string())
     })?;
 
+    // A pointer's slot holds a base address just as a local array's does, so
+    // `p[i] = v` is the same indirect store scaled by the element width. The
+    // pointer carries no length, so there is nothing to bounds-check.
     let element_type = match object_type {
-        Type::Array(elem_ty, _size) => elem_ty,
+        Type::Array(elem_ty, ..) | Type::Pointer(elem_ty) => elem_ty,
         _ => {
             return Err(CodegenError::UnsupportedOperation(
-                "Can only index arrays".to_string(),
+                "Can only index arrays and pointers".to_string(),
             ));
         }
     };
@@ -1575,7 +1578,7 @@ fn generate_index_assignment(
             }
             _ => {
                 return Err(CodegenError::UnsupportedOperation(format!(
-                    "Array '{}' must be in zero page for indexed assignment",
+                    "'{}' must be in zero page for indexed assignment",
                     array_name
                 )));
             }
@@ -2135,8 +2138,11 @@ fn generate_field_assignment(
             .or_else(|| info.table.lookup(var_name))
             .ok_or_else(|| CodegenError::SymbolNotFound(var_name.clone()))?;
 
-        // Get the base address of the struct
-        let sym_is_param = sym.is_param;
+        // Get the base address of the struct. A `&Struct` holds a 2-byte
+        // address in its slot exactly as a struct parameter does, so it takes
+        // the same indirect store path — that is what makes `p.field = v`
+        // auto-deref.
+        let sym_is_param = sym.is_param || matches!(sym.ty, Type::Pointer(_));
         let base_addr = match sym.location {
             SymbolLocation::ZeroPage(addr) => addr as u16,
             SymbolLocation::Absolute(addr) => addr,
@@ -2148,14 +2154,25 @@ fn generate_field_assignment(
             }
         };
 
-        // Get the struct type name from the symbol's type
-        let struct_name = if let Type::Named(name) = &sym.ty {
-            name
-        } else {
-            return Err(CodegenError::UnsupportedOperation(format!(
-                "variable '{}' is not a struct type",
-                var_name
-            )));
+        // Get the struct type name from the symbol's type, looking through one
+        // level of pointer.
+        let struct_name = match &sym.ty {
+            Type::Named(name) => name,
+            Type::Pointer(inner) => match &**inner {
+                Type::Named(name) => name,
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "variable '{}' is not a pointer to a struct",
+                        var_name
+                    )));
+                }
+            },
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "variable '{}' is not a struct type",
+                    var_name
+                )));
+            }
         };
 
         // Look up the struct definition

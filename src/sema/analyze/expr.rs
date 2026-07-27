@@ -1075,6 +1075,16 @@ impl SemanticAnalyzer {
         // Get the type of the object
         let object_ty = self.check_expr(object)?;
 
+        // One level of pointer is looked through, so `p.field` means
+        // `(*p).field`. A struct *parameter* is already a pointer under the
+        // hood and `s.field` works on it, so making `&Struct` behave
+        // differently would be gratuitous. Only one level: a pointer to a
+        // pointer to a struct has to be dereferenced explicitly.
+        let object_ty = match &object_ty {
+            Type::Pointer(inner) if matches!(**inner, Type::Named(_)) => (**inner).clone(),
+            _ => object_ty,
+        };
+
         // Extract struct name from the type
         let struct_name = match &object_ty {
             Type::Named(name) => name,
@@ -1169,12 +1179,18 @@ impl SemanticAnalyzer {
                 // value, so no compile-time bounds check.
                 Ok((**element_ty).clone())
             }
+            Type::Pointer(element_ty) => {
+                // `p[i]` is the i-th element from the pointer, scaled by the
+                // element width. A pointer carries no length, so there is
+                // nothing to bounds-check against; that is what slices are for.
+                Ok((**element_ty).clone())
+            }
             Type::String => {
                 // String indexing returns u8 (a single byte)
                 Ok(Type::Primitive(PrimitiveType::U8))
             }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array, slice, or string".to_string(),
+                expected: "array, slice, pointer, or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),
