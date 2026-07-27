@@ -83,6 +83,9 @@ pub enum SemaError {
         span: Span,
     },
 
+    /// A pointer that would outlive the storage it names.
+    EscapingPointer { reason: String, span: Span },
+
     /// Import error
     ImportError {
         path: String,
@@ -307,6 +310,12 @@ impl SemaError {
                     "error: {}\n{}",
                     msg,
                     span.format_error_context_of(source, filename, &msg, file)
+                )
+            }
+            SemaError::EscapingPointer { reason, span } => {
+                format!(
+                    "error: pointer escapes its frame\n{}",
+                    span.format_error_context_of(source, filename, reason, file)
                 )
             }
             SemaError::ImportError { path, reason, span } => {
@@ -542,6 +551,13 @@ impl std::fmt::Display for SemaError {
                     f,
                     "field '{}' not found in struct '{}' at {}..{}",
                     field_name, struct_name, span.start, span.end
+                )
+            }
+            SemaError::EscapingPointer { reason, span } => {
+                write!(
+                    f,
+                    "pointer escapes its frame at {}..{}: {}",
+                    span.start, span.end, reason
                 )
             }
             SemaError::InModule { path, rendered, .. } => {

@@ -2,6 +2,7 @@
 //!
 //! Traverses the AST to populate the symbol table and perform type checking.
 
+mod escape;
 mod expr;
 mod frames;
 mod register;
@@ -299,6 +300,11 @@ impl SemanticAnalyzer {
         let finalized = self.finalize_frames()?;
         let function_frames = finalized.frames;
         let recursive_call_edges = finalized.recursive_call_edges;
+
+        // Pointer escape rules. After `finalize_frames`, which is what supplies
+        // the recursion cycles, and over the whole program because two of the
+        // rules need information no single body has.
+        self.check_pointer_escapes(source, &recursive_call_edges)?;
         let interrupt_save_info = finalized.interrupt_save_info;
 
         Ok(ProgramInfo {
