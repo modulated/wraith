@@ -15,6 +15,25 @@ use crate::sema::{FunctionMetadata, SemaError, Warning};
 
 use super::SemanticAnalyzer;
 
+/// The tag an implicit enum variant takes, or an error when the range is spent.
+///
+/// Discriminants are one byte: they are what a value carries at runtime and what
+/// the match jump table indexes by. Following an explicit `= 0xFF` with another
+/// variant leaves nothing to assign, which used to wrap to 0 and collide.
+fn next_tag_or_err(
+    next_tag: u16,
+    enum_name: &str,
+    variant: &Spanned<String>,
+) -> Result<u8, SemaError> {
+    u8::try_from(next_tag).map_err(|_| SemaError::Custom {
+        message: format!(
+            "enum '{}' has run out of discriminants at '{}': the previous variant used 255",
+            enum_name, variant.node
+        ),
+        span: variant.span,
+    })
+}
+
 /// Check if a name is all uppercase (allowing underscores and digits)
 /// Used to enforce constant naming conventions
 pub(super) fn is_uppercase_name(name: &str) -> bool {
@@ -527,25 +546,47 @@ impl SemanticAnalyzer {
         // Load and parse the imported file
         let source = std::fs::read_to_string(&import_path).map_err(|e| SemaError::ImportError {
             path: import.path.node.clone(),
-            reason: format!("failed to import '{}': {}", import.path.node, e),
+            // The formatter already prefixes "failed to import '<path>':".
+            reason: e.to_string(),
             span: import.path.span,
         })?;
 
-        let tokens = crate::lex(&source).map_err(|e| SemaError::ImportError {
-            path: import.path.node.clone(),
-            reason: format!("lexer error: {:?}", e),
-            span: import.path.span,
+        // Everything that can go wrong from here on is a fault *in the imported
+        // module*, and its spans index that module's text — which the driver
+        // never reads. Render each against the source we are holding right now,
+        // and carry the finished diagnostic upward rather than a `{:?}` dump of
+        // the error struct.
+        let module_path = import_path.to_string_lossy().to_string();
+        let module_file = crate::ast::file_id(&module_path);
+
+        let tokens = crate::lex(&source).map_err(|e| {
+            let where_ = crate::ast::Span::in_file(e.span.start, e.span.end, module_file);
+            SemaError::InModule {
+                path: module_path.clone(),
+                rendered: format!(
+                    "error: {}\n{}",
+                    e.message,
+                    where_.format_error_context_of(
+                        &source,
+                        Some(&module_path),
+                        &e.message,
+                        module_file,
+                    )
+                ),
+                trail: Vec::new(),
+                import_span: import.path.span,
+            }
         })?;
 
         // Stamp the module's spans with an id derived from its path, so its
         // symbol tables can be merged into ours without offsets from two files
         // colliding on the same map key.
-        let module_file = crate::ast::file_id(&import_path.to_string_lossy());
         let ast = crate::Parser::parse_in_file(&tokens, module_file).map_err(|e| {
-            SemaError::ImportError {
-                path: import.path.node.clone(),
-                reason: format!("parser error: {:?}", e),
-                span: import.path.span,
+            SemaError::InModule {
+                path: module_path.clone(),
+                rendered: e.format_with_source_of_file(&source, Some(&module_path), module_file),
+                trail: Vec::new(),
+                import_span: import.path.span,
             }
         })?;
 
@@ -557,7 +598,46 @@ impl SemanticAnalyzer {
         // collision where a child allocator also started at $40).
         let mut imported_analyzer = SemanticAnalyzer::with_base_path(import_path.clone());
         imported_analyzer.imported_files = self.imported_files.clone();
-        imported_analyzer.analyze_module(&ast)?;
+        imported_analyzer
+            .analyze_module(&ast)
+            .map_err(|e| match e {
+                // The failure is deeper in the chain. Its diagnostic is already
+                // rendered; what this level can add is the hop *through* this
+                // module, because we are the ones holding its source.
+                SemaError::InModule {
+                    path,
+                    rendered,
+                    mut trail,
+                    import_span: inner_span,
+                } => {
+                    trail.push(format!(
+                        "note: imported by '{}'\n{}",
+                        module_path,
+                        inner_span.format_error_context_of(
+                            &source,
+                            Some(&module_path),
+                            "",
+                            module_file,
+                        )
+                    ));
+                    SemaError::InModule {
+                        path,
+                        rendered,
+                        trail,
+                        import_span: import.path.span,
+                    }
+                }
+                e => SemaError::InModule {
+                    path: module_path.clone(),
+                    rendered: e.format_with_source_of_file(
+                        &source,
+                        Some(&module_path),
+                        module_file,
+                    ),
+                    trail: Vec::new(),
+                    import_span: import.path.span,
+                },
+            })?;
 
         // Collect all items from the imported file for codegen
         // We collect ALL items, not just the imported symbols, because functions
@@ -834,8 +914,16 @@ impl SemanticAnalyzer {
         }
 
         let mut variants = Vec::new();
-        let mut next_tag: u8 = 0;
+        // The tag an implicit variant would take. Held as u16 so running off the
+        // end of the range is detectable rather than wrapping: `A = 0xFF, B`
+        // would otherwise give B the tag 0, silently colliding with whatever
+        // already holds it.
+        let mut next_tag: u16 = 0;
         let mut seen_variants = HashSet::default();
+        // Discriminant -> variant name, to reject duplicates. A tag identifies a
+        // variant at runtime and indexes the match jump table, so two variants
+        // sharing one makes the second unreachable.
+        let mut tags_used: Vec<(u8, String)> = Vec::new();
 
         // Process each variant
         for variant in &enum_def.variants {
@@ -844,8 +932,17 @@ impl SemanticAnalyzer {
                     name: var_name,
                     value,
                 } => {
-                    let tag = value.map(|v| v as u8).unwrap_or(next_tag);
-                    next_tag = tag + 1;
+                    let tag = match value {
+                        Some(v) => u8::try_from(*v).map_err(|_| SemaError::Custom {
+                            message: format!(
+                                "enum discriminant {} is out of range for '{}::{}' (0-255)",
+                                v, name, var_name.node
+                            ),
+                            span: var_name.span,
+                        })?,
+                        None => next_tag_or_err(next_tag, &name, var_name)?,
+                    };
+                    next_tag = tag as u16 + 1;
                     (var_name.node.clone(), VariantData::Unit, tag)
                 }
                 EnumVariant::Tuple {
@@ -866,8 +963,8 @@ impl SemanticAnalyzer {
 
                         types.push(resolved_ty);
                     }
-                    let tag = next_tag;
-                    next_tag += 1;
+                    let tag = next_tag_or_err(next_tag, &name, var_name)?;
+                    next_tag = tag as u16 + 1;
                     (var_name.node.clone(), VariantData::Tuple(types), tag)
                 }
                 EnumVariant::Struct {
@@ -899,8 +996,8 @@ impl SemanticAnalyzer {
                         field_offset += size;
                     }
 
-                    let tag = next_tag;
-                    next_tag += 1;
+                    let tag = next_tag_or_err(next_tag, &name, var_name)?;
+                    next_tag = tag as u16 + 1;
                     (
                         var_name.node.clone(),
                         VariantData::Struct(variant_fields),
@@ -910,19 +1007,34 @@ impl SemanticAnalyzer {
             };
 
             // Check for duplicate variant
+            let variant_span = match variant {
+                EnumVariant::Unit { name, .. } => name.span,
+                EnumVariant::Tuple { name, .. } => name.span,
+                EnumVariant::Struct { name, .. } => name.span,
+            };
+
             if !seen_variants.insert(variant_name.clone()) {
-                // Get the span from the variant
-                let variant_span = match variant {
-                    EnumVariant::Unit { name, .. } => name.span,
-                    EnumVariant::Tuple { name, .. } => name.span,
-                    EnumVariant::Struct { name, .. } => name.span,
-                };
                 return Err(SemaError::DuplicateSymbol {
                     name: variant_name,
                     span: variant_span,
                     previous_span: None,
                 });
             }
+
+            // Two variants sharing a discriminant are indistinguishable at
+            // runtime: the tag is the whole value for a unit variant, and it is
+            // what the match jump table indexes by, so the second arm would be
+            // unreachable.
+            if let Some((_, first)) = tags_used.iter().find(|(t, _)| *t == tag) {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "enum discriminant {} is used by both '{}::{}' and '{}::{}'",
+                        tag, name, first, name, variant_name
+                    ),
+                    span: variant_span,
+                });
+            }
+            tags_used.push((tag, variant_name.clone()));
 
             variants.push(VariantInfo {
                 name: variant_name,

@@ -284,3 +284,92 @@ fn an_imported_inline_function_is_expanded_not_called() {
     );
     assert!(asm.contains("CMP"), "the body should be expanded in place");
 }
+
+// ============================================================================
+// Argument width
+// ============================================================================
+//
+// Arguments were stored with a bare `STA` whatever the parameter's type, so
+// anything wider than a byte arrived with only its low byte set. It compiled,
+// and the callee then read whatever happened to be in the next slot.
+
+#[test]
+fn a_u16_argument_arrives_with_both_bytes() {
+    let src = r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[inline]
+        fn split(v: u16) { LO = v.low; HI = v.high; }
+        #[reset]
+        fn main() { split(0x1234); loop {} }
+    "#;
+    assert_eq!(run(src).mem16(0x0900), 0x1234);
+}
+
+#[test]
+fn an_enum_argument_arrives_as_a_whole_pointer() {
+    // An enum is passed as a two-byte pointer. With only the low byte written,
+    // the callee dereferenced a half-formed address.
+    assert_eq!(
+        out8(
+            r#"
+            enum Direction { OUTPUT = 0xFF, INPUT = 0x00 }
+            const OUT: addr = 0x0900;
+            #[inline]
+            fn set(d: Direction) { OUT = d as u8; }
+            #[reset]
+            fn main() { set(Direction::OUTPUT); loop {} }
+        "#
+        ),
+        0xFF
+    );
+}
+
+#[test]
+fn an_eight_bit_argument_widens_to_a_u16_parameter() {
+    // There is no high byte to copy, so it has to be zeroed rather than left
+    // as whatever the slot held.
+    let src = r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[inline]
+        fn widen(v: u16) { LO = v.low; HI = v.high; }
+        #[reset]
+        fn main() { let small: u8 = 0x42; widen(small); loop {} }
+    "#;
+    assert_eq!(run(src).mem16(0x0900), 0x0042);
+}
+
+#[test]
+fn mixed_width_arguments_land_in_their_own_slots() {
+    let src = r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        #[inline]
+        fn three(x: u8, y: u16, z: u8) { R0 = x; R1 = y.high; R2 = z; }
+        #[reset]
+        fn main() { three(1, 0x0203, 4); loop {} }
+    "#;
+    let mut e = run(src);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (1, 2, 4),
+        "a wide argument must not push the ones after it out of place"
+    );
+}
+
+#[test]
+fn a_string_argument_arrives_as_a_whole_pointer() {
+    // Strings are two-byte pointers like enums; a truncated one indexes
+    // whatever page the low byte happens to name.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        const MSG: str = "hi";
+        #[inline]
+        fn first_len(s: str) -> u16 { return s.len; }
+        #[reset]
+        fn main() { OUT = first_len(MSG).low; loop {} }
+    "#;
+    assert_eq!(run(src).mem(0x0900), 2);
+}

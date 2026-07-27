@@ -683,8 +683,6 @@ fn generate_inline_call(
     // Each parameter has a specific zero-page address that was assigned when the function was defined
     // We need to store the argument values at those exact addresses
     for (i, arg) in args.iter().enumerate() {
-        generate_expr(arg, emitter, info, string_collector)?;
-
         // Get the parameter info for this position
         let param = &params[i];
 
@@ -693,7 +691,14 @@ fn generate_inline_call(
             if let Some(param_info) = param_symbols.get(&param.name.span) {
                 match param_info.location {
                     crate::sema::table::SymbolLocation::ZeroPage(addr) => {
-                        emitter.emit_inst("STA", &format!("${:02X}", addr));
+                        store_inline_arg(
+                            arg,
+                            &param_info.ty,
+                            addr,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?;
                     }
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(format!(
@@ -802,6 +807,110 @@ fn generate_inline_call(
     emitter.pop_inline();
 
     result
+}
+
+/// Store one argument into an inline function's parameter slot, at the width
+/// the parameter actually is.
+///
+/// This used to emit a bare `STA`, whatever the parameter's type. Anything
+/// wider than a byte therefore arrived with only its low byte set and the rest
+/// left as whatever happened to be in the slot: `#[inline] fn f(v: u16)` called
+/// as `f(0x1234)` stored `$34` and read garbage for the high byte, and an enum
+/// parameter — a two-byte pointer — was dereferenced through a half-written
+/// address. It compiled, and it silently did the wrong thing.
+///
+/// The register conventions mirror `generate_call`: 16-bit scalars come back in
+/// A:Y, pointer-like values (enums, strings) in A:X, and aggregates are copied
+/// from the variable's own slot rather than evaluated into registers.
+fn store_inline_arg(
+    arg: &Spanned<Expr>,
+    param_ty: &Type,
+    dest: u8,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    let arg_ty = info.resolved_types.get(&arg.span);
+
+    // Aggregates are passed by reference: copy the descriptor straight out of
+    // the argument variable's slot. A slice is 4 bytes (base + length); a struct
+    // or array is a 2-byte pointer.
+    let aggregate_bytes = match param_ty {
+        Type::Slice(_) => Some(4u8),
+        Type::Named(name) if !info.type_registry.enums.contains_key(name) => Some(2),
+        Type::Array(_, _) => Some(2),
+        _ => None,
+    };
+    if let Some(width) = aggregate_bytes {
+        if let Expr::Variable(var_name) = &arg.node
+            && let Some(sym) = info
+                .resolved_symbols
+                .get(&arg.span)
+                .or_else(|| info.table.lookup(var_name))
+            && let crate::sema::table::SymbolLocation::ZeroPage(src) = sym.location
+        {
+            for k in 0..width {
+                emitter.emit_inst("LDA", &format!("${:02X}", src + k));
+                emitter.emit_inst("STA", &format!("${:02X}", dest + k));
+            }
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+        return Err(CodegenError::UnsupportedOperation(format!(
+            "passing this expression to an inline function's `{}` parameter is not supported;              use a variable",
+            format_type_name(param_ty)
+        )));
+    }
+
+    generate_expr(arg, emitter, info, string_collector)?;
+
+    // Enums and strings are 2-byte pointers returned in A:X.
+    let is_pointer_pair = match param_ty {
+        Type::Named(name) => info.type_registry.enums.contains_key(name),
+        Type::String => true,
+        _ => false,
+    };
+    if is_pointer_pair {
+        emitter.emit_inst("STA", &format!("${:02X}", dest));
+        emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
+        return Ok(());
+    }
+
+    // 16-bit scalars come back in A:Y. An 8-bit argument widening to a 16-bit
+    // parameter has no high byte to store, so zero-extend it.
+    let is_16bit = matches!(
+        param_ty,
+        Type::Primitive(crate::ast::PrimitiveType::U16)
+            | Type::Primitive(crate::ast::PrimitiveType::I16)
+            | Type::Primitive(crate::ast::PrimitiveType::B16)
+    );
+    emitter.emit_inst("STA", &format!("${:02X}", dest));
+    if is_16bit {
+        let arg_is_8bit = arg_ty.is_some_and(|ty| {
+            matches!(
+                ty,
+                Type::Primitive(crate::ast::PrimitiveType::U8)
+                    | Type::Primitive(crate::ast::PrimitiveType::I8)
+                    | Type::Primitive(crate::ast::PrimitiveType::B8)
+                    | Type::Primitive(crate::ast::PrimitiveType::Bool)
+            )
+        });
+        if arg_is_8bit {
+            emitter.emit_inst("LDY", "#$00");
+        }
+        emitter.emit_inst("STY", &format!("${:02X}", dest + 1));
+    }
+    Ok(())
+}
+
+/// A type's name for diagnostics.
+fn format_type_name(ty: &Type) -> String {
+    match ty {
+        Type::Slice(_) => "slice".to_string(),
+        Type::Array(_, _) => "array".to_string(),
+        Type::Named(n) => n.clone(),
+        other => format!("{:?}", other),
+    }
 }
 
 /// Generate parameter updates for tail recursive calls

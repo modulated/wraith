@@ -90,6 +90,20 @@ pub enum SemaError {
         span: Span,
     },
 
+    /// A failure inside an imported module, already rendered against that
+    /// module's own source. Its spans index a file the driver never read, so it
+    /// cannot be rendered later — it is formatted where it is caught and then
+    /// carried verbatim, with the `import` that pulled the module in shown as
+    /// the trail leading to it.
+    InModule {
+        path: String,
+        rendered: String,
+        /// Intermediate hops of the import chain, each already rendered by the
+        /// level that held the relevant source, innermost first.
+        trail: Vec<String>,
+        import_span: Span,
+    },
+
     /// Out of zero page memory
     OutOfZeroPage { span: Span },
 
@@ -131,13 +145,27 @@ impl SemaError {
 
     /// Format error with source code context and filename
     pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
+        self.format_with_source_of_file(source, filename, crate::ast::ROOT_FILE)
+    }
+
+    /// Render against the text of a specific file.
+    ///
+    /// Errors raised while analyzing an imported module carry that module's
+    /// spans, so they must be rendered against that module's source — not the
+    /// root's, which is all the driver has.
+    pub fn format_with_source_of_file(
+        &self,
+        source: &str,
+        filename: Option<&str>,
+        file: u32,
+    ) -> String {
         match self {
             SemaError::UndefinedSymbol { name, span } => {
                 let msg = format!("undefined symbol '{}'", name);
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::TypeMismatch {
@@ -148,7 +176,7 @@ impl SemaError {
                 let msg = format!("expected {}, found {}", expected, found);
                 format!(
                     "error: type mismatch\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::InvalidBinaryOp {
@@ -179,7 +207,7 @@ impl SemaError {
                 }
                 format!(
                     "error: invalid binary operation\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::InvalidUnaryOp {
@@ -190,7 +218,7 @@ impl SemaError {
                 let msg = format!("cannot apply '{}' to type {}", op, operand_ty);
                 format!(
                     "error: invalid unary operation\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ArityMismatch {
@@ -201,7 +229,7 @@ impl SemaError {
                 let msg = format!("expected {} argument(s), found {}", expected, found);
                 format!(
                     "error: function call\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ImmutableAssignment { symbol, span } => {
@@ -209,7 +237,7 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::CircularImport { path, chain } => {
@@ -227,7 +255,7 @@ impl SemaError {
                 let msg = format!("expected {}, found {}", expected, found);
                 format!(
                     "error: return type mismatch\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ReturnOutsideFunction { span } => {
@@ -235,7 +263,7 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::BreakOutsideLoop { span } => {
@@ -243,7 +271,7 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::DuplicateSymbol {
@@ -263,7 +291,7 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::FieldNotFound {
@@ -278,21 +306,43 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ImportError { path, reason, span } => {
                 let msg = format!("failed to import '{}': {}", path, reason);
                 format!(
                     "error: import error\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
+            }
+            SemaError::InModule {
+                path,
+                rendered,
+                trail,
+                import_span,
+            } => {
+                // The child diagnostic already says what and where. All this
+                // adds is the trail leading to it. Each hop was rendered by the
+                // level that held the matching source, so the chain reads from
+                // the failing module outward to the file being compiled.
+                let mut out = rendered.clone();
+                for hop in trail {
+                    out.push_str("\n\n");
+                    out.push_str(hop);
+                }
+                out.push_str(&format!(
+                    "\n\nnote: in module '{}', imported here\n{}",
+                    path,
+                    import_span.format_error_context_of(source, filename, "", file)
+                ));
+                out
             }
             SemaError::OutOfZeroPage { span } => {
                 let msg = "no more zero page addresses available".to_string();
                 format!(
                     "error: out of zero page memory\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::FrameRegionOverflow { chain, needed } => {
@@ -308,21 +358,21 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::Custom { message, span } => {
                 format!(
                     "error: {}\n{}",
                     message,
-                    span.format_error_context(source, filename, message)
+                    span.format_error_context_of(source, filename, message, file)
                 )
             }
             SemaError::ConstantOverflow { value, ty, span } => {
                 let msg = format!("constant value {} does not fit in type {}", value, ty);
                 format!(
                     "error: constant overflow\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::WriteOnlyRead { name, span } => {
@@ -330,7 +380,7 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ReadOnlyWrite { name, span } => {
@@ -338,7 +388,7 @@ impl SemaError {
                 format!(
                     "error: {}\n{}",
                     msg,
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::InvalidAddrUsage { context, span } => {
@@ -348,7 +398,7 @@ impl SemaError {
                 );
                 format!(
                     "error: invalid addr usage\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ArrayIndexOutOfBounds {
@@ -362,7 +412,7 @@ impl SemaError {
                 );
                 format!(
                     "error: array index out of bounds\n{}",
-                    span.format_error_context(source, filename, &msg)
+                    span.format_error_context_of(source, filename, &msg, file)
                 )
             }
         }
@@ -493,6 +543,9 @@ impl std::fmt::Display for SemaError {
                     "field '{}' not found in struct '{}' at {}..{}",
                     field_name, struct_name, span.start, span.end
                 )
+            }
+            SemaError::InModule { path, rendered, .. } => {
+                write!(f, "in module '{}':\n{}", path, rendered)
             }
             SemaError::ImportError { path, reason, span } => {
                 write!(

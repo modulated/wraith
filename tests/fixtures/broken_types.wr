@@ -1,0 +1,13 @@
+// Fixture for the import-diagnostics tests: a module that parses but does not
+// type-check. Assigning an enum where a byte is wanted is the same shape a
+// driver hits writing a register, so the message has to name the real line.
+pub const DDRA: addr = 0x6003;
+
+pub enum Direction {
+    OUTPUT = 0xFF,
+    INPUT = 0x00
+}
+
+pub fn set_direction(d: Direction) {
+    DDRA = d;
+}
