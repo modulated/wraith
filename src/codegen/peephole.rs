@@ -675,6 +675,15 @@ fn eliminate_redundant_cmp_zero(lines: &[Line]) -> Vec<Line> {
 ///
 /// Tracks Y register value through the instruction stream and removes
 /// redundant loads of 0 into Y.
+/// Whether control leaving here means X and Y come back unknown.
+///
+/// A `JSR` runs a whole function, which is free to use both index registers —
+/// and every function this compiler emits does. `RTS`/`RTI`/`BRK`/`JMP` end
+/// the straight-line run for the same reason a label starts a new one.
+fn clobbers_index_registers(mnemonic: &str) -> bool {
+    matches!(mnemonic, "JSR" | "RTS" | "RTI" | "BRK" | "JMP")
+}
+
 fn eliminate_redundant_ldy_zero(lines: &[Line]) -> Vec<Line> {
     let mut result = Vec::new();
     let mut y_is_zero = false;
@@ -704,9 +713,15 @@ fn eliminate_redundant_ldy_zero(lines: &[Line]) -> Vec<Line> {
                 } else if mnemonic == "PLY" {
                     // Y pulled from stack, unknown
                     y_is_zero = false;
+                } else if clobbers_index_registers(mnemonic) {
+                    // A called function is free to use Y, and every function
+                    // this compiler emits does — for field offsets, indexing
+                    // and the `(zp),Y` stores. Assuming Y survives a JSR
+                    // dropped the `LDY #$00` in front of a store through a
+                    // pointer, which then wrote at the callee's leftover
+                    // offset instead of at the pointer itself.
+                    y_is_zero = false;
                 }
-                // Note: JSR/RTS don't necessarily change Y on 6502
-                // but we reset at labels to be safe
             }
             Line::Label(_) => {
                 // At labels, we don't know Y's value (could jump here from anywhere)
@@ -832,6 +847,10 @@ fn eliminate_redundant_ldx_zero(lines: &[Line]) -> Vec<Line> {
                     x_is_zero = false;
                 } else if mnemonic == "PLX" {
                     // X pulled from stack, unknown
+                    x_is_zero = false;
+                } else if clobbers_index_registers(mnemonic) {
+                    // Same as Y: a callee owns X, and a pointer return value
+                    // arrives in it.
                     x_is_zero = false;
                 }
             }

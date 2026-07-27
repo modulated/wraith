@@ -858,3 +858,34 @@ fn a_read_after_an_indirect_indexed_store_is_not_elided() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (3, 8));
 }
+
+#[test]
+fn a_pointer_store_after_a_call_reloads_y() {
+    // `STA (zp),Y` needs Y at the byte offset, and the peephole used to assume
+    // Y survived a `JSR` — "JSR/RTS don't necessarily change Y on 6502", which
+    // is true of the instruction and false of every function this compiler
+    // emits. The second store's `LDY #$00` was dropped and the write landed at
+    // the callee's leftover offset instead.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        static A: u8 = 0;
+        static B: u8 = 0;
+        fn scribble(v: u8) -> u8 {
+            let buf: [u8; 8] = [0; 8];
+            buf[7] = v;
+            return buf[7];
+        }
+        #[reset]
+        fn main() {
+            let p: &u8 = &A;
+            *p = 0x11;
+            R1 = scribble(9);
+            *p = 0x33;
+            R0 = A;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x33, "the second store reached A, not A+Y");
+    assert_eq!(e.mem(0x0901), 9);
+}
