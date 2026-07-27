@@ -254,7 +254,8 @@ pub(super) fn generate_variable(
 
         // Check if this is a pointer-like type (Array, String, Enum)
         // These use the A:X register convention
-        let is_pointer_like = matches!(sym.ty, Type::Array(..) | Type::String) || is_enum;
+        let is_pointer_like =
+            matches!(sym.ty, Type::Array(..) | Type::String | Type::Pointer(_)) || is_enum;
 
         match sym.location {
             SymbolLocation::FrameOffset(_) => Err(CodegenError::Internal(

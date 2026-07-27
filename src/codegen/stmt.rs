@@ -200,6 +200,35 @@ pub fn generate_stmt(
                     }
                 }
 
+                // Local array: the data lives in RAM (see `LocalArray`), not
+                // inline in the code stream where it used to be emitted and
+                // where writes would have gone to ROM on a real board. Fill the
+                // block from the initializer, then put its address in the
+                // frame slot — every downstream path still reads the slot as a
+                // 2-byte pointer, so indexing is unchanged.
+                if let Some(arr) = info.local_arrays.get(&name.span)
+                    && let crate::sema::table::SymbolLocation::ZeroPage(slot) = sym.location
+                {
+                    let elem_size = match &sym.ty {
+                        Type::Array(elem, _) => {
+                            crate::codegen::expr::type_byte_size(elem, info).max(1)
+                        }
+                        _ => 1,
+                    };
+                    emitter.emit_comment(&format!(
+                        "local array {} @ ${:04X} ({} bytes, RAM)",
+                        name.node, arr.addr, arr.size
+                    ));
+                    generate_local_array_init(arr.addr, arr.size, elem_size, init, emitter, info)?;
+                    // Point the frame slot at the block.
+                    emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr & 0xFF));
+                    emitter.emit_inst("STA", &format!("${:02X}", slot));
+                    emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr >> 8));
+                    emitter.emit_inst("STA", &format!("${:02X}", slot + 1));
+                    emitter.invalidate_registers();
+                    return Ok(());
+                }
+
                 // Slice value: `let s: &[T] = arr[start..end];`. Materialize the
                 // 4-byte fat-pointer descriptor into s's frame slot:
                 //   slot[0..1] = base = arr's data pointer + start*elem_size
@@ -354,16 +383,20 @@ pub fn generate_stmt(
                     sym.ty,
                     Type::Array(_, _)
                         | Type::String
+                        | Type::Pointer(_)
                         | Type::Function(_, _)
                         | Type::Primitive(crate::ast::PrimitiveType::U16)
                         | Type::Primitive(crate::ast::PrimitiveType::I16)
                         | Type::Primitive(crate::ast::PrimitiveType::B16)
                 ) || is_enum;
 
-                // Arrays, enums, and strings store address in A (low) and X (high)
-                // Other u16 types store in A (low) and Y (high)
+                // Arrays, enums, strings and pointers carry an address in
+                // A (low) and X (high); other 16-bit values use A (low) and
+                // Y (high). Storing only A leaves the high byte as whatever was
+                // in the slot, which reads as a pointer into an arbitrary page.
                 let is_array_or_enum =
-                    matches!(sym.ty, Type::Array(_, _) | Type::String) || is_enum;
+                    matches!(sym.ty, Type::Array(_, _) | Type::String | Type::Pointer(_))
+                        || is_enum;
 
                 match sym.location {
                     crate::sema::table::SymbolLocation::FrameOffset(_) => {
@@ -660,6 +693,17 @@ pub fn generate_stmt(
                 }
             }
 
+            // `*p = v` — write through a pointer. Handled before the value is
+            // evaluated below, because the pointer has to be staged first and
+            // the generic path assumes the target is a name.
+            if let crate::ast::Expr::Unary {
+                op: crate::ast::UnaryOp::Deref,
+                operand,
+            } = &target.node
+            {
+                return generate_deref_assignment(operand, value, emitter, info, string_collector);
+            }
+
             // 1. Generate code for value (result in A)
             generate_expr(value, emitter, info, string_collector)?;
 
@@ -715,15 +759,17 @@ pub fn generate_stmt(
                         let is_multibyte = matches!(
                             sym.ty,
                             Type::Array(_, _)
+                                | Type::Pointer(_)
                                 | Type::Function(_, _)
                                 | Type::Primitive(crate::ast::PrimitiveType::U16)
                                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                                 | Type::Primitive(crate::ast::PrimitiveType::B16)
                         ) || is_enum;
 
-                        // Arrays and enums store address in A (low) and X (high)
-                        // Other u16 types store in A (low) and Y (high)
-                        let is_array_or_enum = matches!(sym.ty, Type::Array(_, _)) || is_enum;
+                        // Arrays, enums and pointers carry an address in
+                        // A (low) and X (high); other 16-bit values use A:Y.
+                        let is_array_or_enum =
+                            matches!(sym.ty, Type::Array(_, _) | Type::Pointer(_)) || is_enum;
 
                         match sym.location {
                             crate::sema::table::SymbolLocation::FrameOffset(_) => {
@@ -1395,11 +1441,14 @@ fn generate_index_assignment(
         CodegenError::UnsupportedOperation("Type information not found".to_string())
     })?;
 
+    // A pointer's slot holds a base address just as a local array's does, so
+    // `p[i] = v` is the same indirect store scaled by the element width. The
+    // pointer carries no length, so there is nothing to bounds-check.
     let element_type = match object_type {
-        Type::Array(elem_ty, _size) => elem_ty,
+        Type::Array(elem_ty, ..) | Type::Pointer(elem_ty) => elem_ty,
         _ => {
             return Err(CodegenError::UnsupportedOperation(
-                "Can only index arrays".to_string(),
+                "Can only index arrays and pointers".to_string(),
             ));
         }
     };
@@ -1529,7 +1578,7 @@ fn generate_index_assignment(
             }
             _ => {
                 return Err(CodegenError::UnsupportedOperation(format!(
-                    "Array '{}' must be in zero page for indexed assignment",
+                    "'{}' must be in zero page for indexed assignment",
                     array_name
                 )));
             }
@@ -2017,7 +2066,6 @@ fn generate_field_assignment(
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
-    use crate::ast::PrimitiveType;
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
@@ -2058,24 +2106,20 @@ fn generate_field_assignment(
             })?;
         // Function-pointer fields are 2-byte code addresses, so they must be
         // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
-        let is_multibyte = matches!(
-            &field_info.ty,
-            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
-                | Type::Function(..)
-        );
+        let is_multibyte = crate::codegen::expr::field_is_two_bytes(&field_info.ty);
+        // Sema rejects assigning through a `const`, so a read-only base here
+        // would mean a store quietly aimed at ROM.
+        if base.is_read_only() {
+            return Err(CodegenError::UnsupportedOperation(
+                "cannot write to constant data".to_string(),
+            ));
+        }
         emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
         generate_expr(value, emitter, info, string_collector)?;
-        let field_addr = base + field_info.offset as u16;
-        if field_addr < 0x100 {
-            emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-            if is_multibyte {
-                emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
-            }
-        } else {
-            emitter.emit_inst("STA", &format!("${:04X}", field_addr));
-            if is_multibyte {
-                emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
-            }
+        let at = base.plus(field_info.offset as u16);
+        emitter.emit_inst("STA", &at.operand(0));
+        if is_multibyte {
+            emitter.emit_inst(store_high(&field_info.ty), &at.operand(1));
         }
         return Ok(());
     }
@@ -2089,8 +2133,11 @@ fn generate_field_assignment(
             .or_else(|| info.table.lookup(var_name))
             .ok_or_else(|| CodegenError::SymbolNotFound(var_name.clone()))?;
 
-        // Get the base address of the struct
-        let sym_is_param = sym.is_param;
+        // Get the base address of the struct. A `&Struct` holds a 2-byte
+        // address in its slot exactly as a struct parameter does, so it takes
+        // the same indirect store path — that is what makes `p.field = v`
+        // auto-deref.
+        let sym_is_param = sym.is_param || matches!(sym.ty, Type::Pointer(_));
         let base_addr = match sym.location {
             SymbolLocation::ZeroPage(addr) => addr as u16,
             SymbolLocation::Absolute(addr) => addr,
@@ -2102,14 +2149,25 @@ fn generate_field_assignment(
             }
         };
 
-        // Get the struct type name from the symbol's type
-        let struct_name = if let Type::Named(name) = &sym.ty {
-            name
-        } else {
-            return Err(CodegenError::UnsupportedOperation(format!(
-                "variable '{}' is not a struct type",
-                var_name
-            )));
+        // Get the struct type name from the symbol's type, looking through one
+        // level of pointer.
+        let struct_name = match &sym.ty {
+            Type::Named(name) => name,
+            Type::Pointer(inner) => match &**inner {
+                Type::Named(name) => name,
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "variable '{}' is not a pointer to a struct",
+                        var_name
+                    )));
+                }
+            },
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "variable '{}' is not a struct type",
+                    var_name
+                )));
+            }
         };
 
         // Look up the struct definition
@@ -2131,13 +2189,7 @@ fn generate_field_assignment(
         // Check if field is multi-byte
         // Function-pointer fields hold a 2-byte code address, so they are stored
         // as a pair like u16 — a device vtable depends on it.
-        let is_multibyte = matches!(
-            &field_info.ty,
-            Type::Primitive(PrimitiveType::U16)
-                | Type::Primitive(PrimitiveType::I16)
-                | Type::Primitive(PrimitiveType::B16)
-                | Type::Function(..)
-        );
+        let is_multibyte = crate::codegen::expr::field_is_two_bytes(&field_info.ty);
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
 
@@ -2159,7 +2211,7 @@ fn generate_field_assignment(
             // Save value to temp
             emitter.emit_inst("STA", "$20"); // Save low byte
             if is_multibyte {
-                emitter.emit_inst("STY", "$21"); // Save high byte
+                emitter.emit_inst(store_high(&field_info.ty), "$21"); // Save high byte
             }
 
             // Set Y to field offset and store via indirect
@@ -2177,15 +2229,16 @@ fn generate_field_assignment(
             // Local struct - direct access
             let field_addr = base_addr + field_info.offset as u16;
 
+            let hi = store_high(&field_info.ty);
             if field_addr < 0x100 {
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
                 if is_multibyte {
-                    emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+                    emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
                 }
             } else {
                 emitter.emit_inst("STA", &format!("${:04X}", field_addr));
                 if is_multibyte {
-                    emitter.emit_inst("STY", &format!("${:04X}", field_addr + 1));
+                    emitter.emit_inst(hi, &format!("${:04X}", field_addr + 1));
                 }
             }
         }
@@ -2201,6 +2254,17 @@ fn generate_field_assignment(
         Err(CodegenError::UnsupportedOperation(
             "Field assignment only supported on variables (not expressions)".to_string(),
         ))
+    }
+}
+
+/// Which register holds the high byte of a value about to be stored into a
+/// struct field. A `&T` arrives in A:X like every other pointer-like value;
+/// a u16 or a function pointer arrives in A:Y.
+fn store_high(ty: &crate::sema::types::Type) -> &'static str {
+    if crate::codegen::expr::field_high_byte_in_x(ty) {
+        "STX"
+    } else {
+        "STY"
     }
 }
 
@@ -2732,6 +2796,169 @@ fn generate_match_arm_bodies(
         }
     }
 
+    Ok(())
+}
+
+/// Emit `*p = value`.
+///
+/// The pointer is staged first and the value parked in the high pool, mirroring
+/// `generate_index_assignment`: evaluating the value can clobber whatever is in
+/// zero page, so the two cannot simply be produced in order.
+fn generate_deref_assignment(
+    ptr_expr: &Spanned<crate::ast::Expr>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::PrimitiveType;
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    let is_multibyte = matches!(
+        info.resolved_types.get(&ptr_expr.span),
+        Some(Type::Pointer(inner))
+            if matches!(
+                **inner,
+                Type::Primitive(PrimitiveType::U16)
+                    | Type::Primitive(PrimitiveType::I16)
+                    | Type::Primitive(PrimitiveType::B16)
+            )
+    );
+    let width: u8 = if is_multibyte { 2 } else { 1 };
+
+    // Park the value while the pointer is set up. Not $20/$21 — those are
+    // hardcoded by several other paths — but the high pool, as the indexed
+    // store does.
+    let save = emitter
+        .temp_alloc
+        .alloc_high(width)
+        .ok_or_else(|| CodegenError::Internal("no temp space for a pointer store".to_string()))?;
+
+    emitter.emit_comment("Store through pointer");
+    generate_expr(value, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", &format!("${:02X}", save));
+    if is_multibyte {
+        // A 16-bit value arrives as A:Y.
+        emitter.emit_inst("STY", &format!("${:02X}", save + 1));
+    }
+
+    // Resolve the pointer into a zero-page pair we can use with `(zp),Y`.
+    let ptr = if let crate::ast::Expr::Variable(_) = &ptr_expr.node
+        && let Some(sym) = info.resolved_symbols.get(&ptr_expr.span)
+        && let SymbolLocation::ZeroPage(addr) = sym.location
+    {
+        addr
+    } else {
+        generate_expr(ptr_expr, emitter, info, string_collector)?;
+        let staged = emitter.memory_layout.deref_ptr();
+        emitter.emit_inst("STA", &format!("${:02X}", staged));
+        emitter.emit_inst("STX", &format!("${:02X}", staged + 1));
+        staged
+    };
+
+    for k in 0..width {
+        emitter.emit_inst("LDY", &format!("#${:02X}", k));
+        emitter.emit_inst("LDA", &format!("${:02X}", save + k));
+        emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+    }
+
+    emitter.temp_alloc.free_high(save, width);
+    // An indirect store can land anywhere; no cached belief about zero page
+    // survives it.
+    emitter.invalidate_registers();
+    Ok(())
+}
+
+/// Fill a local array's RAM block from its initializer.
+///
+/// The data used to be emitted once, as bytes in the code stream. Now it lives
+/// in RAM and has to be written at run time, on every call — an unavoidable cost
+/// of the array being writable at all. A uniform fill becomes a loop when it is
+/// worth one; explicit elements are stored individually.
+fn generate_local_array_init(
+    addr: u16,
+    size: u16,
+    elem_size: usize,
+    init: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    use crate::ast::{Expr, Literal};
+    use crate::sema::const_eval::eval_const_expr;
+
+    /// A constant initializer element, or None if it is not compile-time known.
+    fn const_of(e: &Spanned<Expr>) -> Option<i64> {
+        match &e.node {
+            Expr::Literal(Literal::Integer(v)) => Some(*v),
+            Expr::Literal(Literal::Bool(b)) => Some(i64::from(*b)),
+            _ => eval_const_expr(e).ok().and_then(|c| c.as_integer()),
+        }
+    }
+
+    /// Store `value` as `elem_size` little-endian bytes at `addr + offset`.
+    fn store_elem(emitter: &mut Emitter, addr: u16, offset: u16, value: i64, elem_size: usize) {
+        for b in 0..elem_size {
+            let byte = ((value >> (8 * b)) & 0xFF) as u8;
+            emitter.emit_inst("LDA", &format!("#${:02X}", byte));
+            emitter.emit_inst("STA", &format!("${:04X}", addr + offset + b as u16));
+        }
+    }
+
+    match &init.node {
+        // `[v; n]` — every element the same. A byte-wide zero (or any uniform
+        // byte) over a block worth looping for becomes a loop; otherwise the
+        // stores are cheaper than the loop overhead.
+        Expr::Literal(Literal::ArrayFill { value, count }) => {
+            let v = const_of(value).ok_or_else(|| {
+                CodegenError::UnsupportedOperation(
+                    "array fill value must be a constant expression".to_string(),
+                )
+            })?;
+            let uniform_byte = (0..elem_size).all(|b| ((v >> (8 * b)) & 0xFF) == (v & 0xFF));
+            if uniform_byte && size > 8 {
+                emitter.emit_inst("LDA", &format!("#${:02X}", (v & 0xFF) as u8));
+                // Absolute,X reaches 256 bytes, so a larger block needs one loop
+                // per chunk. X counts down and the branch fires on the wrap from
+                // $00 to $FF, which is what covers index 0.
+                let mut done = 0u16;
+                while done < size {
+                    let chunk = (size - done).min(256);
+                    let loop_label = emitter.next_label("ai");
+                    emitter.emit_inst("LDX", &format!("#${:02X}", (chunk - 1) as u8));
+                    emitter.emit_label(&loop_label);
+                    emitter.emit_inst("STA", &format!("${:04X},X", addr + done));
+                    emitter.emit_inst("DEX", "");
+                    emitter.emit_inst("CPX", "#$FF");
+                    emitter.emit_inst("BNE", &loop_label);
+                    done += chunk;
+                }
+                emitter.invalidate_registers();
+            } else {
+                for i in 0..*count as u16 {
+                    store_elem(emitter, addr, i * elem_size as u16, v, elem_size);
+                }
+            }
+        }
+        // `[a, b, c]` — element by element.
+        Expr::Literal(Literal::Array(elements)) => {
+            for (i, e) in elements.iter().enumerate() {
+                let v = const_of(e).ok_or_else(|| {
+                    CodegenError::UnsupportedOperation(
+                        "array elements must be constant expressions".to_string(),
+                    )
+                })?;
+                store_elem(emitter, addr, i as u16 * elem_size as u16, v, elem_size);
+            }
+        }
+        _ => {
+            let _ = info;
+            return Err(CodegenError::UnsupportedOperation(
+                "a local array must be initialized with an array literal".to_string(),
+            ));
+        }
+    }
+    emitter.invalidate_registers();
     Ok(())
 }
 

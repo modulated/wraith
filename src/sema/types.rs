@@ -17,6 +17,12 @@ pub enum Type {
     /// In memory: [u8 length] [bytes...] (so max 255 bytes).
     /// A `str` value is a 16-bit pointer to the start of the length byte.
     String,
+    /// Pointer type `&T` — a 16-bit address of a single value.
+    ///
+    /// Unlike `Slice`, it carries no length. It is a raw address with no
+    /// lifetime attached; what keeps it from dangling is the escape analysis in
+    /// `sema::analyze::escape`, not the type.
+    Pointer(Box<Type>),
     /// Function type (params, return_type)
     Function(Vec<Type>, Box<Type>),
     /// Void/Unit type (for functions with no return)
@@ -41,7 +47,11 @@ impl Type {
             Type::Primitive(prim) => prim.size_bytes(),
             Type::Array(ty, len) => ty.size() * len,
             Type::Slice(_) => 4, // Fat pointer: 2 bytes base address + 2 bytes length
-            Type::String => 2,   // String is represented as a pointer to length-prefixed data
+            // Deliberately does not recurse into the pointee: that is what lets
+            // a struct hold a pointer to its own type without the size
+            // computation running away.
+            Type::Pointer(_) => 2,
+            Type::String => 2, // String is represented as a pointer to length-prefixed data
             Type::Function(_, _) => 2, // Function pointer is 16-bit address
             Type::Void => 0,
             Type::Named(_) => 0, // Size depends on definition, needs lookup
@@ -63,6 +73,7 @@ impl Type {
             },
             Type::Array(element_ty, size) => format!("[{}; {}]", element_ty.display_name(), size),
             Type::Slice(element_ty) => format!("&[{}]", element_ty.display_name()),
+            Type::Pointer(pointee) => format!("&{}", pointee.display_name()),
             Type::Function(params, ret) => {
                 let params_str = params
                     .iter()
@@ -111,5 +122,74 @@ impl Type {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod pointer_size_tests {
+    use super::*;
+
+    fn ptr(inner: Type) -> Type {
+        Type::Pointer(Box::new(inner))
+    }
+
+    #[test]
+    fn a_pointer_is_two_bytes_whatever_it_points_at() {
+        assert_eq!(ptr(Type::Primitive(PrimitiveType::U8)).size(), 2);
+        assert_eq!(ptr(Type::Primitive(PrimitiveType::U16)).size(), 2);
+        assert_eq!(ptr(Type::Named("BigStruct".into())).size(), 2);
+        assert_eq!(
+            ptr(Type::Array(
+                Box::new(Type::Primitive(PrimitiveType::U8)),
+                200
+            ))
+            .size(),
+            2
+        );
+    }
+
+    #[test]
+    fn sizing_a_pointer_does_not_recurse_into_the_pointee() {
+        // This is what lets `struct Node { next: &Node }` terminate: the size
+        // computation stops at the pointer rather than following the type back
+        // into itself.
+        let mut deep = Type::Named("Node".into());
+        for _ in 0..1000 {
+            deep = ptr(deep);
+        }
+        assert_eq!(deep.size(), 2);
+    }
+
+    #[test]
+    fn a_pointer_reads_back_as_ampersand_t() {
+        assert_eq!(
+            ptr(Type::Primitive(PrimitiveType::U8)).display_name(),
+            "&u8"
+        );
+        assert_eq!(ptr(Type::Named("Device".into())).display_name(), "&Device");
+        // A slice keeps its own spelling; the two are distinct types.
+        assert_eq!(
+            Type::Slice(Box::new(Type::Primitive(PrimitiveType::U8))).display_name(),
+            "&[u8]"
+        );
+    }
+
+    #[test]
+    fn a_pointer_is_not_implicitly_convertible_to_anything_else() {
+        let p = ptr(Type::Primitive(PrimitiveType::U8));
+        assert!(
+            p.is_implicitly_convertible_to(&p),
+            "an identical pointer is fine"
+        );
+        assert!(!p.is_implicitly_convertible_to(&Type::Primitive(PrimitiveType::U16)));
+        assert!(!Type::Primitive(PrimitiveType::U16).is_implicitly_convertible_to(&p));
+        assert!(!p.is_implicitly_convertible_to(&ptr(Type::Primitive(PrimitiveType::U16))));
+    }
+
+    #[test]
+    fn a_pointer_is_not_a_primitive() {
+        // `is_primitive` gates the unary `-` and `~` operands, so this is what
+        // rejects `-p` without a dedicated check.
+        assert!(!ptr(Type::Primitive(PrimitiveType::U8)).is_primitive());
     }
 }

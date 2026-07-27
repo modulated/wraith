@@ -179,7 +179,7 @@ pub fn set_stack_pointer(value: u8) {
 // String Type: str
 //   - Type-safe string primitive
 //   - Stored as 2-byte pointer to length-prefixed data in DATA section
-//   - Format in memory: [u16 length LE][bytes...]
+//   - Format in memory: [u8 length][bytes...] (so at most 255 bytes)
 //   - Immutable, static lifetime
 //
 // Operations:

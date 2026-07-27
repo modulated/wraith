@@ -32,6 +32,26 @@ pub(crate) fn type_byte_size(ty: &crate::sema::types::Type, info: &ProgramInfo) 
     }
 }
 
+/// Load a value through a zero-page pointer at `ptr`, `offset` bytes in.
+///
+/// `LDY #offset / LDA (ptr),Y`, plus the `PHA/INY/LDA/TAY/PLA` dance for a
+/// 16-bit value so it ends up in the A:Y convention. This is the one sequence
+/// that had been written out three times — for the enum discriminant, for a
+/// struct parameter's field, and for the slice descriptor copy — and is now
+/// shared by `*p` and `p.field` too.
+pub(crate) fn emit_deref_load(emitter: &mut Emitter, ptr: u8, offset: u8, is_multibyte: bool) {
+    emitter.emit_inst("LDY", &format!("#${:02X}", offset));
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
+    if is_multibyte {
+        emitter.emit_inst("PHA", "");
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
+        emitter.emit_inst("TAY", "");
+        emitter.emit_inst("PLA", "");
+    }
+    emitter.reg_state.modify_a();
+}
+
 /// Emit an indirect-indexed array element load through a zero-page pointer at
 /// `ptr`. For u8 elements this is `LDA (ptr),Y`; for u16 elements the index is
 /// scaled ×2 and both bytes are loaded, ending with the low byte in A and the
@@ -48,11 +68,15 @@ fn emit_indexed_load(
     use crate::ast::PrimitiveType;
     use crate::sema::types::Type;
 
-    // Determine whether the element type occupies two bytes (arrays and slices
-    // share the indirect-indexed load path; a slice's slot holds the base
-    // pointer just like an array variable's slot).
+    // Determine whether the element type occupies two bytes (arrays, slices and
+    // pointers share the indirect-indexed load path; each of their slots holds
+    // a base pointer rather than the data). `p[i]` on a pointer is the i-th
+    // element from it, scaled by the element width — a pointer carries no
+    // length, so there is nothing to bounds-check.
     let elem_ty = match info.resolved_types.get(&object.span) {
-        Some(Type::Array(elem, _)) | Some(Type::Slice(elem)) => Some(&**elem),
+        Some(Type::Array(elem, _)) | Some(Type::Slice(elem)) | Some(Type::Pointer(elem)) => {
+            Some(&**elem)
+        }
         _ => None,
     };
     let is_multibyte = matches!(
@@ -434,9 +458,16 @@ pub fn generate_struct_init_runtime(
             if field_size == 1 {
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
             } else if field_size == 2 {
-                // For u16: A has low byte, Y has high byte
+                // A holds the low byte; the high byte is in Y for a u16 or a
+                // function pointer, but in X for a `&T` — the pointer
+                // convention every other pointer-like value uses.
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-                emitter.emit_inst("STY", &format!("${:02X}", field_addr + 1));
+                let hi = if field_high_byte_in_x(&field_info.ty) {
+                    "STX"
+                } else {
+                    "STY"
+                };
+                emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
             } else {
                 return Err(CodegenError::UnsupportedOperation(format!(
                     "struct field type with size {} not yet supported",
@@ -464,6 +495,91 @@ pub fn generate_struct_init_runtime(
     Ok(())
 }
 
+/// Whether a *struct field* occupies two bytes.
+///
+/// Beyond the obvious 16-bit primitives this has to include a function pointer
+/// and a `&T`: both hold an address. Loading one byte of a code address and
+/// letting the caller supply a high byte from whatever an index register
+/// happened to hold is how a ROM dispatch table came to jump into nowhere.
+///
+/// The two are not interchangeable once loaded, though. A `&T` follows the
+/// pointer convention and wants its high byte in X; everything else, function
+/// pointers included, uses A:Y. `field_high_byte_in_x` is that half.
+pub(crate) fn field_high_byte_in_x(ty: &crate::sema::types::Type) -> bool {
+    matches!(ty, crate::sema::types::Type::Pointer(_))
+}
+
+pub(crate) fn field_is_two_bytes(ty: &crate::sema::types::Type) -> bool {
+    use crate::sema::types::Type;
+    matches!(
+        ty,
+        Type::Function(..)
+            | Type::Pointer(_)
+            | Type::Primitive(
+                crate::ast::PrimitiveType::U16
+                    | crate::ast::PrimitiveType::I16
+                    | crate::ast::PrimitiveType::B16
+            )
+    )
+}
+
+/// Where a statically-addressable value lives.
+///
+/// Almost everything has a number: a zero-page frame slot, or a BSS static
+/// whose address analysis assigned. A `const` array does not — its data is
+/// placed in the DATA section during codegen and referenced by label, and its
+/// symbol carries the `Absolute(0)` sentinel instead of an address. Treating
+/// that sentinel as real is how `ROM[i].field` came to read `$0002`: the
+/// element offset added to nothing.
+#[derive(Clone, Debug)]
+pub(crate) enum StaticBase {
+    Addr(u16),
+    /// A label the assembler places, plus a byte offset into it.
+    Label(String, u16),
+}
+
+impl StaticBase {
+    pub(crate) fn plus(&self, delta: u16) -> Self {
+        match self {
+            StaticBase::Addr(a) => StaticBase::Addr(a.wrapping_add(delta)),
+            StaticBase::Label(l, off) => StaticBase::Label(l.clone(), off.wrapping_add(delta)),
+        }
+    }
+
+    /// The assembler operand naming this address `extra` bytes further on.
+    /// Zero-page form where it fits, since that is a byte and a cycle cheaper.
+    pub(crate) fn operand(&self, extra: u16) -> String {
+        match self {
+            StaticBase::Addr(a) => {
+                let a = a.wrapping_add(extra);
+                if a < 0x100 {
+                    format!("${:02X}", a)
+                } else {
+                    format!("${:04X}", a)
+                }
+            }
+            StaticBase::Label(l, off) => match off.wrapping_add(extra) {
+                0 => l.clone(),
+                n => format!("{}+{}", l, n),
+            },
+        }
+    }
+
+    /// Always the two-byte form, for indexed addressing where zero-page,Y does
+    /// not exist for `LDA`.
+    fn operand_abs(&self, extra: u16) -> String {
+        match self {
+            StaticBase::Addr(a) => format!("${:04X}", a.wrapping_add(extra)),
+            StaticBase::Label(..) => self.operand(extra),
+        }
+    }
+
+    /// ROM data: writable only by mistake.
+    pub(crate) fn is_read_only(&self) -> bool {
+        matches!(self, StaticBase::Label(..))
+    }
+}
+
 /// Resolve a chain of *local* (inline, non-pointer) struct accesses to a static
 /// `(base_address, struct_type_name)`. Handles `Variable` and nested `Field`
 /// objects (and constant array indices). Returns `None` when any link is not
@@ -472,27 +588,15 @@ pub fn generate_struct_init_runtime(
 pub(crate) fn resolve_static_struct_lvalue(
     expr: &Spanned<crate::ast::Expr>,
     info: &ProgramInfo,
-) -> Option<(u16, String)> {
+) -> Option<(StaticBase, String)> {
     use crate::ast::Expr;
-    use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
     match &expr.node {
-        Expr::Variable(name) => {
-            let sym = info
-                .resolved_symbols
-                .get(&expr.span)
-                .or_else(|| info.table.lookup(name))?;
-            if sym.is_param {
-                return None; // parameter slot holds a pointer, not the struct
-            }
-            let addr = match sym.location {
-                SymbolLocation::ZeroPage(a) => a as u16,
-                SymbolLocation::Absolute(a) => a,
-                _ => return None,
-            };
-            match &sym.ty {
-                Type::Named(n) => Some((addr, n.clone())),
+        Expr::Variable(_) => {
+            let (base, ty) = resolve_static_addr(expr, info)?;
+            match ty {
+                Type::Named(n) => Some((base, n)),
                 _ => None,
             }
         }
@@ -501,7 +605,7 @@ pub(crate) fn resolve_static_struct_lvalue(
             let sdef = info.type_registry.get_struct(&struct_name)?;
             let finfo = sdef.get_field(&field.node)?;
             match &finfo.ty {
-                Type::Named(inner) => Some((base + finfo.offset as u16, inner.clone())),
+                Type::Named(inner) => Some((base.plus(finfo.offset as u16), inner.clone())),
                 _ => None, // scalar field: not a further struct
             }
         }
@@ -511,7 +615,7 @@ pub(crate) fn resolve_static_struct_lvalue(
             let (base, elem_struct) = array_of_struct_base(object, info)?;
             let idx = const_index(index, info)?;
             let sdef = info.type_registry.get_struct(&elem_struct)?;
-            Some((base + (idx * sdef.total_size) as u16, elem_struct))
+            Some((base.plus((idx * sdef.total_size) as u16), elem_struct))
         }
         _ => None,
     }
@@ -551,8 +655,6 @@ pub(crate) fn emit_array_struct_field_indexed(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<bool, CodegenError> {
-    use crate::sema::types::Type;
-
     let Some((base, elem_struct)) = array_of_struct_base(array, info) else {
         return Ok(false); // not a local array-of-struct; caller falls back
     };
@@ -566,15 +668,8 @@ pub(crate) fn emit_array_struct_field_indexed(
             field.node, elem_struct
         ))
     })?;
-    let field_addr = base + finfo.offset as u16;
-    let is_multibyte = matches!(
-        &finfo.ty,
-        Type::Primitive(
-            crate::ast::PrimitiveType::U16
-                | crate::ast::PrimitiveType::I16
-                | crate::ast::PrimitiveType::B16
-        )
-    );
+    let field = base.plus(finfo.offset as u16);
+    let is_multibyte = field_is_two_bytes(&finfo.ty);
 
     match value {
         None => {
@@ -582,16 +677,28 @@ pub(crate) fn emit_array_struct_field_indexed(
             generate_expr(index, emitter, info, string_collector)?;
             emit_scale_index(emitter, elem_size);
             emitter.emit_inst("TAY", "");
-            emitter.emit_inst("LDA", &format!("${:04X},Y", field_addr));
+            emitter.emit_inst("LDA", &format!("{},Y", field.operand_abs(0)));
             if is_multibyte {
                 emitter.emit_inst("PHA", "");
-                emitter.emit_inst("LDA", &format!("${:04X},Y", field_addr + 1));
-                emitter.emit_inst("TAY", ""); // Y = high byte
+                emitter.emit_inst("LDA", &format!("{},Y", field.operand_abs(1)));
+                let hi = if field_high_byte_in_x(&finfo.ty) {
+                    "TAX"
+                } else {
+                    "TAY"
+                };
+                emitter.emit_inst(hi, ""); // high byte to its register
                 emitter.emit_inst("PLA", ""); // A = low byte
             }
             emitter.mark_a_unknown();
         }
         Some(val) => {
+            // Sema rejects assigning through a `const`, so reaching here with a
+            // label base would mean a store quietly aimed at ROM.
+            if base.is_read_only() {
+                return Err(CodegenError::UnsupportedOperation(
+                    "cannot write to constant data".to_string(),
+                ));
+            }
             emitter.emit_comment("Array-of-struct indexed field write");
             // Evaluate the value and park it in the arg pool ($F4/$F5), which the
             // index expression below does not touch, then compute the element
@@ -599,7 +706,12 @@ pub(crate) fn emit_array_struct_field_indexed(
             generate_expr(val, emitter, info, string_collector)?;
             emitter.emit_inst("STA", "$F4");
             if is_multibyte {
-                emitter.emit_inst("STY", "$F5");
+                let hi = if field_high_byte_in_x(&finfo.ty) {
+                    "STX"
+                } else {
+                    "STY"
+                };
+                emitter.emit_inst(hi, "$F5");
             }
             // The value now sits in A but was just stashed; drop register
             // tracking so the index load below isn't wrongly elided.
@@ -608,10 +720,10 @@ pub(crate) fn emit_array_struct_field_indexed(
             emit_scale_index(emitter, elem_size);
             emitter.emit_inst("TAY", "");
             emitter.emit_inst("LDA", "$F4");
-            emitter.emit_inst("STA", &format!("${:04X},Y", field_addr));
+            emitter.emit_inst("STA", &format!("{},Y", field.operand_abs(0)));
             if is_multibyte {
                 emitter.emit_inst("LDA", "$F5");
-                emitter.emit_inst("STA", &format!("${:04X},Y", field_addr + 1));
+                emitter.emit_inst("STA", &format!("{},Y", field.operand_abs(1)));
             }
             emitter.mark_a_unknown();
         }
@@ -627,9 +739,9 @@ pub(crate) fn emit_array_struct_field_indexed(
 fn resolve_static_addr(
     expr: &Spanned<crate::ast::Expr>,
     info: &ProgramInfo,
-) -> Option<(u16, crate::sema::types::Type)> {
+) -> Option<(StaticBase, crate::sema::types::Type)> {
     use crate::ast::Expr;
-    use crate::sema::table::SymbolLocation;
+    use crate::sema::table::{SymbolKind, SymbolLocation};
     use crate::sema::types::Type;
 
     match &expr.node {
@@ -641,19 +753,28 @@ fn resolve_static_addr(
             if sym.is_param {
                 return None; // pointer, not inline storage
             }
+            // A const *array* is laid out in the DATA section under its own
+            // name. Any other const is folded into the instruction stream and
+            // has no address to speak of.
+            if sym.kind == SymbolKind::Constant {
+                return match &sym.ty {
+                    Type::Array(..) => Some((StaticBase::Label(name.clone(), 0), sym.ty.clone())),
+                    _ => None,
+                };
+            }
             let addr = match sym.location {
                 SymbolLocation::ZeroPage(a) => a as u16,
                 SymbolLocation::Absolute(a) => a,
                 _ => return None,
             };
-            Some((addr, sym.ty.clone()))
+            Some((StaticBase::Addr(addr), sym.ty.clone()))
         }
         Expr::Field { object, field } => {
             let (base, ty) = resolve_static_addr(object, info)?;
             let Type::Named(sname) = ty else { return None };
             let sdef = info.type_registry.get_struct(&sname)?;
             let finfo = sdef.get_field(&field.node)?;
-            Some((base + finfo.offset as u16, finfo.ty.clone()))
+            Some((base.plus(finfo.offset as u16), finfo.ty.clone()))
         }
         Expr::Index { object, index } => {
             let (base, ty) = resolve_static_addr(object, info)?;
@@ -662,7 +783,7 @@ fn resolve_static_addr(
             };
             let idx = const_index(index, info)?;
             let esize = type_byte_size(&elem, info);
-            Some((base + (idx * esize) as u16, (*elem).clone()))
+            Some((base.plus((idx * esize) as u16), (*elem).clone()))
         }
         _ => None,
     }
@@ -673,7 +794,7 @@ fn resolve_static_addr(
 fn array_of_struct_base(
     expr: &Spanned<crate::ast::Expr>,
     info: &ProgramInfo,
-) -> Option<(u16, String)> {
+) -> Option<(StaticBase, String)> {
     use crate::sema::types::Type;
 
     let (addr, ty) = resolve_static_addr(expr, info)?;
@@ -703,7 +824,7 @@ fn const_index(expr: &Spanned<crate::ast::Expr>, info: &ProgramInfo) -> Option<u
 /// Emit a load of `base.field` (a scalar struct field at a static address) into
 /// A (low) / Y (high for u16). Shared by the local single-level and nested paths.
 fn emit_static_field_load(
-    base_addr: u16,
+    base: StaticBase,
     struct_name: &str,
     field: &Spanned<String>,
     emitter: &mut Emitter,
@@ -721,28 +842,49 @@ fn emit_static_field_load(
             field.node, struct_name
         ))
     })?;
-    let is_multibyte = matches!(
-        &finfo.ty,
-        crate::sema::types::Type::Primitive(
-            crate::ast::PrimitiveType::U16
-                | crate::ast::PrimitiveType::I16
-                | crate::ast::PrimitiveType::B16
-        )
-    );
-    let field_addr = base_addr + finfo.offset as u16;
-    if field_addr < 0x100 {
-        emitter.emit_inst("LDA", &format!("${:02X}", field_addr));
-        if is_multibyte {
-            emitter.emit_inst("LDY", &format!("${:02X}", field_addr + 1));
-        }
-    } else {
-        emitter.emit_inst("LDA", &format!("${:04X}", field_addr));
-        if is_multibyte {
-            emitter.emit_inst("LDY", &format!("${:04X}", field_addr + 1));
-        }
+    let is_multibyte = field_is_two_bytes(&finfo.ty);
+    let at = base.plus(finfo.offset as u16);
+    emitter.emit_inst("LDA", &at.operand(0));
+    if is_multibyte {
+        let hi = if field_high_byte_in_x(&finfo.ty) {
+            "LDX"
+        } else {
+            "LDY"
+        };
+        emitter.emit_inst(hi, &at.operand(1));
     }
     emitter.mark_a_unknown();
     Ok(())
+}
+
+/// If `expr` is a field/index chain whose root is a pointer variable, return
+/// that variable's name.
+///
+/// `p.field` auto-derefs because a pointer's slot holds an address exactly as a
+/// struct parameter's does. `p.a.b` does not: `resolve_static_struct_lvalue`
+/// computes a compile-time address, and there is no compile-time address behind
+/// a pointer. Naming the pointer makes the fix obvious rather than leaving the
+/// generic "only supported on variables" message to be puzzled over.
+fn pointer_rooted_chain_base(
+    expr: &Spanned<crate::ast::Expr>,
+    info: &ProgramInfo,
+) -> Option<String> {
+    use crate::ast::Expr;
+    let mut cur = expr;
+    loop {
+        match &cur.node {
+            Expr::Field { object, .. } | Expr::Index { object, .. } => cur = object,
+            Expr::Paren(inner) => cur = inner,
+            Expr::Variable(name) => {
+                let is_ptr = matches!(
+                    info.resolved_types.get(&cur.span),
+                    Some(crate::sema::types::Type::Pointer(_))
+                );
+                return if is_ptr { Some(name.clone()) } else { None };
+            }
+            _ => return None,
+        }
+    }
 }
 
 pub(super) fn generate_field_access(
@@ -778,6 +920,13 @@ pub(super) fn generate_field_access(
         {
             return Ok(());
         }
+        if let Some(base) = pointer_rooted_chain_base(object, info) {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "cannot follow a field chain through the pointer '{}'; bind an intermediate, \
+                 as `let inner: &T = &{}.<field>;`",
+                base, base
+            )));
+        }
         return Err(CodegenError::UnsupportedOperation(
             "Field access only supported on variables and local struct/array chains".to_string(),
         ));
@@ -806,19 +955,33 @@ pub(super) fn generate_field_access(
             // Parameters are pass-by-reference (the slot holds a pointer); locals
             // hold the struct inline. Distinguish via the explicit is_param flag
             // (frames put params and locals in the same region, so an address
-            // range test no longer works).
-            let sym_is_param = sym.is_param;
+            // range test no longer works). A `&Struct` is in exactly the same
+            // shape as a struct parameter — a 2-byte address in the slot — so
+            // `p.field` takes the same path, which is why it auto-derefs.
+            let sym_is_param =
+                sym.is_param || matches!(sym.ty, crate::sema::types::Type::Pointer(_));
 
             emitter.emit_comment(&format!("Field access: {}.{}", var_name, field.node));
 
-            // Get the struct type name from the symbol's type
-            let struct_name = if let crate::sema::types::Type::Named(name) = &sym.ty {
-                name
-            } else {
-                return Err(CodegenError::UnsupportedOperation(format!(
-                    "variable '{}' is not a struct type",
-                    var_name
-                )));
+            // Get the struct type name from the symbol's type, looking through
+            // one level of pointer.
+            let struct_name = match &sym.ty {
+                crate::sema::types::Type::Named(name) => name,
+                crate::sema::types::Type::Pointer(inner) => match &**inner {
+                    crate::sema::types::Type::Named(name) => name,
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(format!(
+                            "variable '{}' is not a pointer to a struct",
+                            var_name
+                        )));
+                    }
+                },
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "variable '{}' is not a struct type",
+                        var_name
+                    )));
+                }
             };
 
             // Look up the struct definition
@@ -846,15 +1009,7 @@ pub(super) fn generate_field_access(
             // A function-pointer field holds a 2-byte code address, so it must be
             // loaded as a pair like u16 — reading only the low byte would call
             // through a half-formed vector.
-            let is_multibyte = matches!(
-                &field_info.ty,
-                crate::sema::types::Type::Function(..)
-                    | crate::sema::types::Type::Primitive(
-                        crate::ast::PrimitiveType::U16
-                            | crate::ast::PrimitiveType::I16
-                            | crate::ast::PrimitiveType::B16
-                    )
-            );
+            let is_multibyte = field_is_two_bytes(&field_info.ty);
 
             if is_parameter {
                 // The struct pointer lives directly in this parameter's frame slot;
@@ -869,21 +1024,31 @@ pub(super) fn generate_field_access(
                     emitter.emit_inst("PHA", ""); // stash low byte
                     emitter.emit_inst("INY", ""); // next field byte
                     emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
-                    emitter.emit_inst("TAY", ""); // Y = high byte
+                    let hi = if field_high_byte_in_x(&field_info.ty) {
+                        "TAX"
+                    } else {
+                        "TAY"
+                    };
+                    emitter.emit_inst(hi, ""); // high byte to its register
                     emitter.emit_inst("PLA", ""); // A = low byte
                 }
             } else {
                 // Local struct - direct access
                 let field_addr = base_addr + field_info.offset as u16;
+                let hi = if field_high_byte_in_x(&field_info.ty) {
+                    "LDX"
+                } else {
+                    "LDY"
+                };
                 if field_addr < 0x100 {
                     emitter.emit_inst("LDA", &format!("${:02X}", field_addr));
                     if is_multibyte {
-                        emitter.emit_inst("LDY", &format!("${:02X}", field_addr + 1));
+                        emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
                     }
                 } else {
                     emitter.emit_inst("LDA", &format!("${:04X}", field_addr));
                     if is_multibyte {
-                        emitter.emit_inst("LDY", &format!("${:04X}", field_addr + 1));
+                        emitter.emit_inst(hi, &format!("${:04X}", field_addr + 1));
                     }
                 }
             }
@@ -1233,4 +1398,26 @@ fn generate_enum_variant_runtime(
     // to use the pointer. The temp allocator will be reset at function boundaries.
 
     Ok(())
+}
+
+#[cfg(test)]
+mod pointer_size_tests {
+    use crate::ast::PrimitiveType;
+    use crate::sema::types::Type;
+
+    /// `type_byte_size` reaches `Type::Pointer` through its `other => other.size()`
+    /// fallback rather than an arm of its own, which is easy to break by adding
+    /// a more specific arm above it. Two bytes is the whole calling convention:
+    /// get it wrong and arguments are marshalled at the wrong width.
+    #[test]
+    fn a_pointer_is_two_bytes_here_too() {
+        assert_eq!(
+            Type::Pointer(Box::new(Type::Primitive(PrimitiveType::U8))).size(),
+            2
+        );
+        assert_eq!(
+            Type::Pointer(Box::new(Type::Named("Device".into()))).size(),
+            2
+        );
+    }
 }

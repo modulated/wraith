@@ -359,9 +359,15 @@ fn zero_array_large_optimized() {
     "#,
     );
 
-    // Large zero arrays (>= 16 bytes) should be optimized
-    assert_asm_contains(&asm, ".RES 32");
-    assert_asm_contains(&asm, "Zero-filled array optimized: 32 bytes");
+    // A local array lives in RAM now, so there is no ROM data to reserve. A
+    // block this size is filled with a loop rather than 32 individual stores.
+    assert_asm_contains(&asm, "buf @ $");
+    assert_asm_contains(&asm, "LDX #$1F");
+    assert_asm_contains(&asm, "DEX");
+    assert!(
+        !asm.contains(".RES"),
+        "no ROM data is reserved for a local array"
+    );
 }
 
 #[test]
@@ -374,9 +380,9 @@ fn zero_array_threshold_optimized() {
     "#,
     );
 
-    // Exactly 16 bytes should be optimized
-    assert_asm_contains(&asm, ".RES 16");
-    assert_asm_contains(&asm, "Zero-filled array optimized");
+    // Above the threshold where a fill loop beats individual stores.
+    assert_asm_contains(&asm, "LDX #$0F");
+    assert_asm_contains(&asm, "DEX");
 }
 
 #[test]
@@ -389,10 +395,15 @@ fn non_zero_array_not_optimized() {
     "#,
     );
 
-    // Non-zero arrays should NOT be optimized (no .RES)
-    assert!(!asm.contains(".RES"), "Non-zero arrays should not use .RES");
+    // A uniform non-zero fill loops just like a zero fill; the value is the
+    // only difference.
+    assert_asm_contains(&asm, "LDA #$05");
+    assert_asm_contains(&asm, "LDX #$1F");
+    assert!(
+        !asm.contains(".RES"),
+        "no ROM data is reserved for a local array"
+    );
     // Should emit individual bytes
-    assert_asm_contains(&asm, ".BYTE");
 }
 
 #[test]
@@ -405,15 +416,17 @@ fn very_large_zero_array() {
     "#,
     );
 
-    // Very large zero arrays should be optimized
-    assert_asm_contains(&asm, ".RES 256");
-    assert_asm_contains(&asm, "Zero-filled array optimized: 256 bytes");
-    // Should NOT have hundreds of .BYTE directives
-    let byte_count = asm.matches(".BYTE $00").count();
+    // 256 bytes is exactly one absolute,X page, so it is a single fill loop and
+    // no data at all in the code stream.
+    assert_asm_contains(&asm, "LDX #$FF");
     assert!(
-        byte_count < 10,
-        "Optimized arrays should have very few .BYTE directives, found {}",
-        byte_count
+        !asm.contains(".RES"),
+        "no ROM data is reserved for a local array"
+    );
+    let byte_count = asm.matches(".BYTE $00").count();
+    assert_eq!(
+        byte_count, 0,
+        "a local array emits no data directives, found {byte_count}"
     );
 }
 

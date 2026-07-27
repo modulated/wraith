@@ -8,6 +8,7 @@
 
 pub mod analyze;
 pub mod const_eval;
+pub mod init;
 pub mod table;
 pub mod type_defs;
 pub mod types;
@@ -82,6 +83,9 @@ pub enum SemaError {
         field_name: String,
         span: Span,
     },
+
+    /// A pointer that would outlive the storage it names.
+    EscapingPointer { reason: String, span: Span },
 
     /// Import error
     ImportError {
@@ -307,6 +311,12 @@ impl SemaError {
                     "error: {}\n{}",
                     msg,
                     span.format_error_context_of(source, filename, &msg, file)
+                )
+            }
+            SemaError::EscapingPointer { reason, span } => {
+                format!(
+                    "error: pointer escapes its frame\n{}",
+                    span.format_error_context_of(source, filename, reason, file)
                 )
             }
             SemaError::ImportError { path, reason, span } => {
@@ -542,6 +552,13 @@ impl std::fmt::Display for SemaError {
                     f,
                     "field '{}' not found in struct '{}' at {}..{}",
                     field_name, struct_name, span.start, span.end
+                )
+            }
+            SemaError::EscapingPointer { reason, span } => {
+                write!(
+                    f,
+                    "pointer escapes its frame at {}..{}: {}",
+                    span.start, span.end, reason
                 )
             }
             SemaError::InModule { path, rendered, .. } => {
@@ -850,6 +867,18 @@ pub struct StaticInit {
     pub bytes: Vec<InitByte>,
 }
 
+/// A local array's data block.
+#[derive(Debug, Clone)]
+pub struct LocalArray {
+    /// Offset within the declaring function's block during analysis; an
+    /// absolute RAM address after `finalize_frames`.
+    pub addr: u16,
+    /// Size of the data in bytes.
+    pub size: u16,
+    /// The function that declared it, used to find its block's base.
+    pub function: String,
+}
+
 pub struct ProgramInfo {
     // Placeholder for analyzed program data
     pub table: table::SymbolTable,
@@ -862,6 +891,11 @@ pub struct ProgramInfo {
     /// with the call graph) so nested loops, scratch-using expressions, and
     /// calls in the loop body cannot clobber a live bound.
     pub loop_bound_slots: HashMap<Span, SymbolInfo>,
+    /// Where each local array's data lives in RAM, keyed by the declaration's
+    /// name span. Local array *data* used to be emitted inline in the CODE
+    /// section with only a pointer in the frame slot, which meant writing to a
+    /// local array on a ROM board did nothing at all.
+    pub local_arrays: HashMap<Span, LocalArray>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
     /// Map of expression spans to their resolved types

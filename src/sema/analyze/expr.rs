@@ -94,10 +94,12 @@ impl SemanticAnalyzer {
                 target_type,
             } => {
                 // Check that the inner expression is valid
-                self.check_expr(inner)?;
+                let source_ty = self.check_expr(inner)?;
 
                 // Validate BCD casts for constant expressions
                 let target_ty = self.resolve_type(&target_type.node)?;
+
+                Self::check_pointer_cast(&source_ty, &target_ty, expr.span)?;
                 if let Type::Primitive(prim) = &target_ty
                     && matches!(
                         prim,
@@ -496,6 +498,36 @@ impl SemanticAnalyzer {
             (self.check_expr(left)?, self.check_expr(right)?)
         };
 
+        // No binary operator applies to a pointer. This has to be said
+        // explicitly: the compatibility gate further down is `left_ty ==
+        // right_ty`, so `p + q` on two `&u8`s passes it and emits a 16-bit add
+        // using the A:Y convention on values that arrived in A:X — a wrong
+        // answer with no diagnostic anywhere.
+        //
+        // Arithmetic is `p[i]`, scaled by the element width. Comparison goes
+        // through `as u16`, which puts the address in the register pair the
+        // 16-bit compare paths expect.
+        if matches!(left_ty, Type::Pointer(_)) || matches!(right_ty, Type::Pointer(_)) {
+            let hint = match op {
+                BinaryOp::Add | BinaryOp::Sub => {
+                    "index instead, as `p[i]`, which scales by the element width"
+                }
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => "compare the addresses, as `p as u16 == q as u16`",
+                _ => "cast to `u16` first if you mean to operate on the address",
+            };
+            return Err(SemaError::InvalidBinaryOp {
+                op: format!("{:?} ({})", op, hint),
+                left_ty: left_ty.display_name(),
+                right_ty: right_ty.display_name(),
+                span,
+            });
+        }
+
         // String operators: `+` concatenates (str), `==`/`!=` compare (bool).
         if matches!((&left_ty, &right_ty), (Type::String, Type::String)) {
             match op {
@@ -700,16 +732,222 @@ impl SemanticAnalyzer {
         Ok(*ret_type)
     }
 
+    /// The legality matrix for casts that involve a pointer on either side.
+    ///
+    /// Casts are otherwise unchecked in this language — a cast is how you say
+    /// "I know what I am doing". A pointer is the one place where being wrong
+    /// is silent rather than merely surprising, so both directions are pinned
+    /// down:
+    ///
+    /// - `p as u16` and `p as &U` keep all 16 bits. Anything narrower would
+    ///   throw away the page and leave a plausible-looking zero-page address.
+    /// - `n as &T` accepts an integer of any width (an 8-bit one names a
+    ///   zero-page byte), but nothing else. `true as &u8` or `s as &u8` have no
+    ///   meaning, and letting them through would produce a pointer to whatever
+    ///   the representation happened to be.
+    fn check_pointer_cast(
+        source: &Type,
+        target: &Type,
+        span: crate::ast::Span,
+    ) -> Result<(), SemaError> {
+        let integer = |t: &Type| {
+            matches!(
+                t,
+                Type::Primitive(
+                    PrimitiveType::U8
+                        | PrimitiveType::I8
+                        | PrimitiveType::U16
+                        | PrimitiveType::I16
+                        | PrimitiveType::Addr
+                )
+            )
+        };
+
+        if matches!(source, Type::Pointer(_))
+            && !matches!(
+                target,
+                Type::Pointer(_) | Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16)
+            )
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "cannot cast a pointer to {}; an address is 16 bits, so only \
+                     `as u16`, `as i16` or another pointer type keeps it whole",
+                    target.display_name()
+                ),
+                span,
+            });
+        }
+
+        if matches!(target, Type::Pointer(_))
+            && !matches!(source, Type::Pointer(_))
+            && !integer(source)
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "cannot cast {} to a pointer; only an integer address can be",
+                    source.display_name()
+                ),
+                span,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Type-check `&operand`.
+    ///
+    /// Only a few expression forms have an address to take. A literal, a call
+    /// result or an arithmetic result lives in a register or a scratch byte
+    /// that is about to be reused, so `&` on one would hand back an address
+    /// with nothing behind it.
+    ///
+    /// Several *named* things are rejected too, each for its own reason:
+    ///
+    /// - an immutable `const` is recorded at the sentinel address `Absolute(0)`
+    ///   and referenced by ROM label, so `&CONST` would silently mean `$0000`;
+    /// - an `addr` declaration carries a read/write access mode that is checked
+    ///   at the symbol, and a pointer would launder that check away;
+    /// - a function name already *is* its address;
+    /// - a string, slice or enum variable is already a pointer.
+    fn check_addr_of(
+        &mut self,
+        operand: &Spanned<Expr>,
+        span: crate::ast::Span,
+    ) -> Result<Type, SemaError> {
+        let reject = |what: &str, hint: &str| {
+            Err(SemaError::Custom {
+                message: if hint.is_empty() {
+                    format!("cannot take the address of {}", what)
+                } else {
+                    format!("cannot take the address of {}; {}", what, hint)
+                },
+                span,
+            })
+        };
+
+        match &operand.node {
+            Expr::Paren(inner) => self.check_addr_of(inner, span),
+
+            Expr::Variable(name) => {
+                let sym = match self.table.lookup(name) {
+                    Some(s) => s.clone(),
+                    None => {
+                        return Err(SemaError::UndefinedSymbol {
+                            name: name.clone(),
+                            span: operand.span,
+                        });
+                    }
+                };
+                match sym.kind {
+                    SymbolKind::Constant => {
+                        return reject(
+                            &format!("the constant '{}'", name),
+                            "constants live in ROM and are referenced by label, not by address",
+                        );
+                    }
+                    SymbolKind::Address => {
+                        return reject(
+                            &format!("the address declaration '{}'", name),
+                            "its read/write access mode is checked at the name; \
+                             write `0x1234 as &u8` if that is really what you want",
+                        );
+                    }
+                    SymbolKind::Function => {
+                        return reject(
+                            &format!("the function '{}'", name),
+                            "a function name is already its address",
+                        );
+                    }
+                    _ => {}
+                }
+                // Run the ordinary variable check so the symbol is resolved,
+                // marked used, and recorded as a liveness edge.
+                let ty = self.check_expr(operand)?;
+                match ty {
+                    // An array decays to a pointer to its first element: the
+                    // variable's slot already holds exactly that pointer.
+                    Type::Array(elem, _) => Ok(Type::Pointer(elem)),
+                    Type::String | Type::Slice(_) => reject(
+                        &format!("'{}'", name),
+                        "it is already a reference; pass it directly",
+                    ),
+                    Type::Named(ref n) if self.type_registry.get_enum(n).is_some() => reject(
+                        &format!("'{}'", name),
+                        "an enum value is already a pointer; pass it directly",
+                    ),
+                    other => Ok(Type::Pointer(Box::new(other))),
+                }
+            }
+
+            Expr::Index { .. } => {
+                let elem_ty = self.check_expr(operand)?;
+                Ok(Type::Pointer(Box::new(elem_ty)))
+            }
+
+            Expr::Field { .. } => {
+                let field_ty = self.check_expr(operand)?;
+                Ok(Type::Pointer(Box::new(field_ty)))
+            }
+
+            // `&*p` is just `p`.
+            Expr::Unary {
+                op: crate::ast::UnaryOp::Deref,
+                operand: inner,
+            } => self.check_expr(inner),
+
+            _ => reject(
+                "a temporary",
+                "only a variable, an element or a field has an address",
+            ),
+        }
+    }
+
     fn check_unary(
         &mut self,
         op: &crate::ast::UnaryOp,
         operand: &Spanned<Expr>,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
+        // `&x` inspects the operand's *form* before checking it, because only a
+        // few forms have an address at all.
+        if matches!(op, crate::ast::UnaryOp::AddrOf) {
+            return self.check_addr_of(operand, span);
+        }
+
         let operand_ty = self.check_expr(operand)?;
 
         // Check type compatibility with the operator
         match op {
+            crate::ast::UnaryOp::AddrOf => unreachable!("handled above"),
+            crate::ast::UnaryOp::Deref => match operand_ty {
+                Type::Pointer(inner) => match *inner {
+                    // A struct or enum pointee has no by-value form to produce:
+                    // this language has no aggregate temporaries, so a field is
+                    // the unit of access.
+                    Type::Named(ref n) => Err(SemaError::Custom {
+                        message: format!(
+                            "cannot dereference a pointer to '{}' as a value; read a field \
+                             instead, as `p.field`",
+                            n
+                        ),
+                        span,
+                    }),
+                    Type::Array(..) | Type::Slice(_) | Type::String | Type::Void => {
+                        Err(SemaError::Custom {
+                            message: "cannot dereference a pointer to this type as a value"
+                                .to_string(),
+                            span,
+                        })
+                    }
+                    scalar => Ok(scalar),
+                },
+                other => Err(SemaError::InvalidUnaryOp {
+                    op: "*".to_string(),
+                    operand_ty: other.display_name(),
+                    span,
+                }),
+            },
             crate::ast::UnaryOp::Neg => {
                 // Negation works on numeric types and always yields a signed
                 // result: `-5` is i8, not u8. `5` on its own infers as u8, so
@@ -932,6 +1170,16 @@ impl SemanticAnalyzer {
         // Get the type of the object
         let object_ty = self.check_expr(object)?;
 
+        // One level of pointer is looked through, so `p.field` means
+        // `(*p).field`. A struct *parameter* is already a pointer under the
+        // hood and `s.field` works on it, so making `&Struct` behave
+        // differently would be gratuitous. Only one level: a pointer to a
+        // pointer to a struct has to be dereferenced explicitly.
+        let object_ty = match &object_ty {
+            Type::Pointer(inner) if matches!(**inner, Type::Named(_)) => (**inner).clone(),
+            _ => object_ty,
+        };
+
         // Extract struct name from the type
         let struct_name = match &object_ty {
             Type::Named(name) => name,
@@ -1026,12 +1274,18 @@ impl SemanticAnalyzer {
                 // value, so no compile-time bounds check.
                 Ok((**element_ty).clone())
             }
+            Type::Pointer(element_ty) => {
+                // `p[i]` is the i-th element from the pointer, scaled by the
+                // element width. A pointer carries no length, so there is
+                // nothing to bounds-check against; that is what slices are for.
+                Ok((**element_ty).clone())
+            }
             Type::String => {
                 // String indexing returns u8 (a single byte)
                 Ok(Type::Primitive(PrimitiveType::U8))
             }
             _ => Err(SemaError::TypeMismatch {
-                expected: "array, slice, or string".to_string(),
+                expected: "array, slice, pointer, or string".to_string(),
                 found: object_ty.display_name(),
                 span: object.span,
             }),

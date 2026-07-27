@@ -42,6 +42,10 @@ pub enum UnaryOp {
     BitNot,
     /// Logical NOT: !x
     Not,
+    /// Address-of: `&x`. Yields a `&T` pointing at the operand's storage.
+    AddrOf,
+    /// Dereference: `*p`. Reads through a `&T`.
+    Deref,
 }
 
 /// A literal value

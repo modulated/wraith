@@ -2,14 +2,14 @@
 // Memory manipulation functions optimized for 6502
 
 /// Copy up to 255 bytes from source to destination.
-/// - dest: Destination pointer (u16 address)
-/// - src: Source pointer (u16 address)
+/// - dest: Destination pointer
+/// - src: Source pointer
 /// - len: Number of bytes to copy (0..=255)
 ///
-/// The pointers are dereferenced: bytes are read from *(src+i) and written to
-/// *(dest+i). Uses zero-page vectors $F0/$F1 (src) and $F2/$F3 (dest) with
-/// indirect-indexed addressing. For lengths above 255 use `memcpy16`.
-pub fn memcpy(dest: u16, src: u16, len: u8) {
+/// Bytes are read from `src[i]` and written to `dest[i]`. Uses zero-page
+/// vectors $F0/$F1 (src) and $F2/$F3 (dest) with indirect-indexed addressing.
+/// For lengths above 255 use `memcpy16`.
+pub fn memcpy(dest: &u8, src: &u8, len: u8) {
     asm {
         "LDA {src}",
         "STA $F0",
@@ -32,14 +32,14 @@ pub fn memcpy(dest: u16, src: u16, len: u8) {
 }
 
 /// Copy up to 65535 bytes from source to destination (true 16-bit length).
-/// - dest: Destination pointer (u16 address)
-/// - src: Source pointer (u16 address)
+/// - dest: Destination pointer
+/// - src: Source pointer
 /// - len: Number of bytes to copy (0..=65535)
 ///
-/// Dereferences both pointers. Copies one byte at a time, advancing the src and
-/// dest zero-page vectors ($F0/$F1 and $F2/$F3) and counting down a 16-bit byte
-/// counter ($F4/$F5), so it handles copies that cross page boundaries.
-pub fn memcpy16(dest: u16, src: u16, len: u16) {
+/// Copies one byte at a time, advancing the src and dest zero-page vectors
+/// ($F0/$F1 and $F2/$F3) and counting down a 16-bit byte counter ($F4/$F5), so
+/// it handles copies that cross page boundaries.
+pub fn memcpy16(dest: &u8, src: &u8, len: u16) {
     asm {
         "LDA {src}",
         "STA $F0",
@@ -79,13 +79,12 @@ pub fn memcpy16(dest: u16, src: u16, len: u16) {
 }
 
 /// Fill up to 255 bytes with a constant byte value.
-/// - dest: Destination pointer (u16 address)
+/// - dest: Destination pointer
 /// - value: Byte value to fill with
 /// - len: Number of bytes to fill (0..=255)
 ///
-/// Dereferences dest and writes *(dest+i) = value. For longer fills use
-/// `memset16`.
-pub fn memset(dest: u16, value: u8, len: u8) {
+/// Writes `dest[i] = value`. For longer fills use `memset16`.
+pub fn memset(dest: &u8, value: u8, len: u8) {
     asm {
         "LDA {dest}",
         "STA $F2",
@@ -104,10 +103,10 @@ pub fn memset(dest: u16, value: u8, len: u8) {
 }
 
 /// Fill up to 65535 bytes with a constant byte value (true 16-bit length).
-/// - dest: Destination pointer (u16 address)
+/// - dest: Destination pointer
 /// - value: Byte value to fill with
 /// - len: Number of bytes to fill (0..=65535)
-pub fn memset16(dest: u16, value: u8, len: u16) {
+pub fn memset16(dest: &u8, value: u8, len: u16) {
     asm {
         "LDA {dest}",
         "STA $F2",
@@ -141,22 +140,36 @@ pub fn memset16(dest: u16, value: u8, len: u16) {
 }
 
 /// Compare two memory regions for equality
-/// - a: First memory region address
-/// - b: Second memory region address
+/// - a: First memory region
+/// - b: Second memory region
 /// - len: Number of bytes to compare
 /// Returns: 1 if equal, 0 if not equal (as u8 for simplicity)
-pub fn memcmp(a: u16, b: u16, len: u8) -> u8 {
+pub fn memcmp(a: &u8, b: &u8, len: u8) -> u8 {
     let i: u8 = 0;
     loop {
         if i >= len { break; }
 
         let byte_a: u8 = 0;
         let byte_b: u8 = 0;
+        // `{a}` substitutes the *frame slot* holding the pointer, so `LDA {a},Y`
+        // reads zero page rather than the buffer. Both pointers have to be
+        // staged into a zero-page vector and read with `(zp),Y`, the way memcpy
+        // does above. The staging is repeated each iteration on purpose: $F0-$F3
+        // is also the compiler's binary-operation save pool, and the comparisons
+        // in this loop body may use it.
         asm {
+            "LDA {a}",
+            "STA $F0",
+            "LDA {a}+1",
+            "STA $F1",
+            "LDA {b}",
+            "STA $F2",
+            "LDA {b}+1",
+            "STA $F3",
             "LDY {i}",
-            "LDA {a},Y",
+            "LDA ($F0),Y",
             "STA {byte_a}",
-            "LDA {b},Y",
+            "LDA ($F2),Y",
             "STA {byte_b}"
         }
 
@@ -228,11 +241,11 @@ pub fn mem_jump(address: u16) {
 // ============================================================================
 
 /// Copy string contents to a buffer with overflow protection
-/// - dest: Destination buffer address
+/// - dest: Destination buffer
 /// - dest_size: Size of destination buffer
 /// - s: Source string
 /// Returns: Number of bytes actually copied (may be less than s.len if buffer too small)
-pub fn str_copy(dest: u16, dest_size: u16, s: str) -> u16 {
+pub fn str_copy(dest: &u8, dest_size: u16, s: str) -> u16 {
     // Determine how many bytes to copy (min of string length and buffer size).
     // A str is at most 255 bytes, so the count always fits in a u8.
     let copy_len: u16 = s.len;
@@ -244,20 +257,20 @@ pub fn str_copy(dest: u16, dest_size: u16, s: str) -> u16 {
         return 0 as u16;
     }
 
-    // The character data begins one byte past the u8 length prefix. Compute the
-    // source data pointer, then reuse memcpy (which dereferences both pointers).
-    let src_lo: u8 = 0;
-    let src_hi: u8 = 0;
+    // The character data begins one byte past the u8 length prefix. A str is
+    // itself a pointer, but to the prefixed block, so the +1 is still needed;
+    // it lands straight in the pointer's own slot rather than being taken apart
+    // into two bytes and reassembled with a shift.
+    let src: &u8 = 0 as &u8;
     asm {
         "LDA {s}",
         "CLC",
         "ADC #$01",
-        "STA {src_lo}",
+        "STA {src}",
         "LDA {s}+1",
         "ADC #$00",
-        "STA {src_hi}"
+        "STA {src}+1"
     }
-    let src: u16 = ((src_hi as u16) << 8) | (src_lo as u16);
 
     memcpy(dest, src, copy_len as u8);
 

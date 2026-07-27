@@ -161,9 +161,12 @@ pub(super) fn generate_call(
         let is_slice = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
+        let is_pointer = param_types
+            .get(i)
+            .is_some_and(|param_ty| matches!(param_ty, Type::Pointer(_)));
         total_bytes += if is_slice {
             4
-        } else if is_16bit || is_struct || is_array || is_string {
+        } else if is_16bit || is_struct || is_array || is_string || is_pointer {
             2
         } else {
             1
@@ -233,6 +236,22 @@ pub(super) fn generate_call(
             // Store high byte from X (enums use A:X convention)
             emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
 
+            temp_offset += 2;
+            arg_info.push((temp_addr, 2));
+            continue;
+        }
+
+        // A pointer argument is a 2-byte address in A:X, like an enum or a
+        // string. It is a *value* produced by an expression, not a descriptor
+        // copied out of a slot, so it does not belong on the array/struct
+        // pass-by-reference paths further down.
+        let param_is_pointer = param_types
+            .get(i)
+            .is_some_and(|ty| matches!(ty, Type::Pointer(_)));
+        if param_is_pointer {
+            generate_expr(arg, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
             temp_offset += 2;
             arg_info.push((temp_addr, 2));
             continue;
@@ -773,6 +792,7 @@ fn generate_inline_call(
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
+            local_arrays: info.local_arrays.clone(),
             type_registry: info.type_registry.clone(),
             resolved_types: info.resolved_types.clone(),
             imported_items: info.imported_items.clone(),
@@ -867,7 +887,7 @@ fn store_inline_arg(
     // Enums and strings are 2-byte pointers returned in A:X.
     let is_pointer_pair = match param_ty {
         Type::Named(name) => info.type_registry.enums.contains_key(name),
-        Type::String => true,
+        Type::String | Type::Pointer(_) => true,
         _ => false,
     };
     if is_pointer_pair {
@@ -907,6 +927,7 @@ fn store_inline_arg(
 fn format_type_name(ty: &Type) -> String {
     match ty {
         Type::Slice(_) => "slice".to_string(),
+        Type::Pointer(p) => format!("&{}", p.display_name()),
         Type::Array(_, _) => "array".to_string(),
         Type::Named(n) => n.clone(),
         other => format!("{:?}", other),

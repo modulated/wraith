@@ -51,7 +51,22 @@ impl Parser<'_> {
     }
 
     /// Parse postfix operations: as, field access, indexing
-    fn parse_postfix(&mut self, mut expr: Spanned<Expr>) -> ParseResult<Spanned<Expr>> {
+    fn parse_postfix(&mut self, expr: Spanned<Expr>) -> ParseResult<Spanned<Expr>> {
+        self.parse_postfix_with(expr, true)
+    }
+
+    /// Postfix suffixes, optionally stopping short of `as`.
+    ///
+    /// `&x` and `*p` need the suffixes that *narrow* the operand — `&x[0]` is
+    /// the address of the element, `*p.next` dereferences the field — but not
+    /// `as`, which widens outward: `&x as u16` is `(&x) as u16`, the address as
+    /// a number, matching C and Rust. Leaving `as` to the caller is what makes
+    /// the two bind in the right order.
+    fn parse_postfix_with(
+        &mut self,
+        mut expr: Spanned<Expr>,
+        allow_cast: bool,
+    ) -> ParseResult<Spanned<Expr>> {
         loop {
             if self.check(&Token::Dot) {
                 self.advance();
@@ -131,7 +146,7 @@ impl Parser<'_> {
                         span,
                     );
                 }
-            } else if self.check(&Token::As) {
+            } else if allow_cast && self.check(&Token::As) {
                 self.advance();
                 let target_type = self.parse_type()?;
                 let span = expr.span.merge(target_type.span);
@@ -172,6 +187,39 @@ impl Parser<'_> {
                 let operand = self.parse_prefix_expr()?;
                 let span = start.merge(operand.span);
                 Ok(Spanned::new(Expr::unary(UnaryOp::BitNot, operand), span))
+            }
+
+            // `&x` and `*p`. Unlike the arms above, the operand takes its
+            // postfix suffixes first, so `&x[0]` is the address of the element
+            // and `*p.next` dereferences the field — matching C and Rust. The
+            // arms above do not (`-x.f` parses as `(-x).f`), which is a
+            // separate pre-existing bug; copying it here would make `&x[0]`
+            // mean `(&x)[0]`, which is meaningless.
+            //
+            // `as` is the exception: it is left for the caller so that
+            // `&x as u16` is `(&x) as u16` rather than the address of a cast.
+            Some(Token::Amp) => {
+                self.advance();
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix_with(inner, false)?;
+                let span = start.merge(operand.span);
+                Ok(Spanned::new(Expr::unary(UnaryOp::AddrOf, operand), span))
+            }
+            Some(Token::Star) => {
+                self.advance();
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix_with(inner, false)?;
+                let span = start.merge(operand.span);
+                Ok(Spanned::new(Expr::unary(UnaryOp::Deref, operand), span))
+            }
+            // `&&x` is one token; take the address twice.
+            Some(Token::AndAnd) => {
+                self.advance();
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix_with(inner, false)?;
+                let span = start.merge(operand.span);
+                let once = Spanned::new(Expr::unary(UnaryOp::AddrOf, operand), span);
+                Ok(Spanned::new(Expr::unary(UnaryOp::AddrOf, once), span))
             }
 
             // Parenthesized expression
@@ -535,15 +583,33 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Slice type: &[T] (all slices are mutable)
+            // `&[T]` is a slice, `&T` a pointer. Both spell "reference to"; a
+            // slice additionally carries a length.
             Some(Token::Amp) => {
                 self.advance();
-                self.expect(&Token::LBracket)?;
-                let element = self.parse_type()?;
-                self.expect(&Token::RBracket)?;
+                if self.check(&Token::LBracket) {
+                    self.advance();
+                    let element = self.parse_type()?;
+                    self.expect(&Token::RBracket)?;
+                    let span = start.merge(self.previous_span());
+                    // All slices are mutable (no mut keyword in language)
+                    Ok(Spanned::new(TypeExpr::slice(element, true), span))
+                } else {
+                    let pointee = self.parse_type()?;
+                    let span = start.merge(self.previous_span());
+                    Ok(Spanned::new(TypeExpr::pointer(pointee), span))
+                }
+            }
+
+            // `&&T` lexes as a single `&&` token, so a pointer to a pointer
+            // never reaches the arm above. Split it here rather than making the
+            // user write `&(&T)`.
+            Some(Token::AndAnd) => {
+                self.advance();
+                let inner = self.parse_type()?;
                 let span = start.merge(self.previous_span());
-                // All slices are mutable (no mut keyword in language)
-                Ok(Spanned::new(TypeExpr::slice(element, true), span))
+                let once = Spanned::new(TypeExpr::pointer(inner), span);
+                Ok(Spanned::new(TypeExpr::pointer(once), span))
             }
 
             // Array type: [T; N]

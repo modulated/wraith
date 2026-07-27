@@ -72,6 +72,12 @@ pub enum TypeExpr {
         mutable: bool,
     },
 
+    /// Pointer type: &T. A 16-bit address of a single value.
+    ///
+    /// Spelled with the same `&` as the slice type, which is also an unchecked
+    /// reference in this language; a slice additionally carries a length.
+    Pointer { pointee: Box<Spanned<TypeExpr>> },
+
     /// Function pointer type: fn(params) -> ret (ret omitted = void).
     /// Stored as a 16-bit code address.
     Function {
@@ -104,6 +110,13 @@ impl TypeExpr {
         TypeExpr::Slice {
             element: Box::new(element),
             mutable,
+        }
+    }
+
+    /// Create a pointer type
+    pub fn pointer(pointee: Spanned<TypeExpr>) -> Self {
+        TypeExpr::Pointer {
+            pointee: Box::new(pointee),
         }
     }
 }

@@ -99,6 +99,19 @@ impl MemoryLayout {
         self.temp_storage_start + 0x02
     }
 
+    /// Zero-page pair used to stage a pointer that is not already in zero page,
+    /// so `(zp),Y` can read through it.
+    ///
+    /// Must miss the enum-pointer triple at `pointer_ops_start..+2` and the
+    /// jump vector at `+4`, hence `+6` ($36/$37). Deliberately not `$20/$21`:
+    /// those are hardcoded — not reserved through `TempAllocator` — by the
+    /// struct copy, the slice-descriptor copy and the enum discriminant read,
+    /// and not `$F0-$FE`, which is contended between the compiler's own pools
+    /// and `std/mem.wr`.
+    pub fn deref_ptr(&self) -> u8 {
+        self.pointer_ops_start + 6
+    }
+
     /// Get the jump table indirect pointer address (2 bytes for JMP indirect)
     /// Used by match statement jump table dispatch.
     ///
