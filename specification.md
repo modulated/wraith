@@ -755,6 +755,19 @@ p2.x = 15;
 let x_coord: u8 = p1.x;
 ```
 
+A field may be named `len`, `low` or `high`. On a struct-typed object the
+field wins over the built-in accessor (which applies only to slices, arrays
+and strings for `.len`, and to `u16`/`i16` for `.low`/`.high`):
+
+```rust
+struct Entry { len: u8, flags: u8 }
+let e: Entry = { len: 4, flags: 1 };
+let n: u8 = e.len;   // the field: 4
+
+let a: [u8; 4] = [1, 2, 3, 4];
+let m: u16 = a.len;  // the built-in: 4
+```
+
 ### Memory Layout
 
 Structs are laid out sequentially in memory with no padding:

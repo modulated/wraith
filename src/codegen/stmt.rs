@@ -838,6 +838,45 @@ pub fn generate_stmt(
                         string_collector,
                     )?;
                 }
+                // A `.len`/`.low`/`.high` target that sema re-resolved as a
+                // struct field access stores like a plain field.
+                crate::ast::Expr::SliceLen(object)
+                    if info.accessor_fields.contains(&target.span) =>
+                {
+                    let field = crate::ast::Spanned::new("len".to_string(), target.span);
+                    generate_field_assignment(
+                        object,
+                        &field,
+                        value,
+                        emitter,
+                        info,
+                        string_collector,
+                    )?;
+                }
+                crate::ast::Expr::U16Low(object) if info.accessor_fields.contains(&target.span) => {
+                    let field = crate::ast::Spanned::new("low".to_string(), target.span);
+                    generate_field_assignment(
+                        object,
+                        &field,
+                        value,
+                        emitter,
+                        info,
+                        string_collector,
+                    )?;
+                }
+                crate::ast::Expr::U16High(object)
+                    if info.accessor_fields.contains(&target.span) =>
+                {
+                    let field = crate::ast::Spanned::new("high".to_string(), target.span);
+                    generate_field_assignment(
+                        object,
+                        &field,
+                        value,
+                        emitter,
+                        info,
+                        string_collector,
+                    )?;
+                }
                 crate::ast::Expr::Slice {
                     object,
                     start,

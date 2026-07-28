@@ -159,50 +159,62 @@ impl SemanticAnalyzer {
                 // Verify the expression is actually a slice, array, or string
                 let slice_ty = self.check_expr(slice_expr)?;
 
-                // Check if it's a type that has a length
-                match &slice_ty {
-                    Type::Slice(..) | Type::Array(_, _) | Type::String => {
-                        // Slice/array/string length is always u16 on 6502 (our usize equivalent)
-                        Type::Primitive(PrimitiveType::U16)
-                    }
-                    _ => {
-                        return Err(SemaError::TypeMismatch {
-                            expected: "slice, array, or string".to_string(),
-                            found: slice_ty.display_name(),
-                            span: slice_expr.span,
-                        });
+                // A struct field named `len` wins over the built-in accessor:
+                // the parser emitted SliceLen before types were known.
+                if let Some(field_ty) = self.accessor_field_type(&slice_ty, "len", expr.span) {
+                    field_ty
+                } else {
+                    // Check if it's a type that has a length
+                    match &slice_ty {
+                        Type::Slice(..) | Type::Array(_, _) | Type::String => {
+                            // Slice/array/string length is always u16 on 6502 (our usize equivalent)
+                            Type::Primitive(PrimitiveType::U16)
+                        }
+                        _ => {
+                            return Err(SemaError::TypeMismatch {
+                                expected: "slice, array, or string".to_string(),
+                                found: slice_ty.display_name(),
+                                span: slice_expr.span,
+                            });
+                        }
                     }
                 }
             }
 
             Expr::U16Low(operand) => {
                 let operand_ty = self.check_expr(operand)?;
-                match &operand_ty {
-                    Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16) => {
-                        Type::Primitive(PrimitiveType::U8)
-                    }
-                    _ => {
-                        return Err(SemaError::TypeMismatch {
-                            expected: "u16 or i16".to_string(),
-                            found: operand_ty.display_name(),
-                            span: operand.span,
-                        });
+                if let Some(field_ty) = self.accessor_field_type(&operand_ty, "low", expr.span) {
+                    field_ty
+                } else {
+                    match &operand_ty {
+                        Type::Primitive(PrimitiveType::U16)
+                        | Type::Primitive(PrimitiveType::I16) => Type::Primitive(PrimitiveType::U8),
+                        _ => {
+                            return Err(SemaError::TypeMismatch {
+                                expected: "u16 or i16".to_string(),
+                                found: operand_ty.display_name(),
+                                span: operand.span,
+                            });
+                        }
                     }
                 }
             }
 
             Expr::U16High(operand) => {
                 let operand_ty = self.check_expr(operand)?;
-                match &operand_ty {
-                    Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::I16) => {
-                        Type::Primitive(PrimitiveType::U8)
-                    }
-                    _ => {
-                        return Err(SemaError::TypeMismatch {
-                            expected: "u16 or i16".to_string(),
-                            found: operand_ty.display_name(),
-                            span: operand.span,
-                        });
+                if let Some(field_ty) = self.accessor_field_type(&operand_ty, "high", expr.span) {
+                    field_ty
+                } else {
+                    match &operand_ty {
+                        Type::Primitive(PrimitiveType::U16)
+                        | Type::Primitive(PrimitiveType::I16) => Type::Primitive(PrimitiveType::U8),
+                        _ => {
+                            return Err(SemaError::TypeMismatch {
+                                expected: "u16 or i16".to_string(),
+                                found: operand_ty.display_name(),
+                                span: operand.span,
+                            });
+                        }
                     }
                 }
             }
@@ -1160,6 +1172,35 @@ impl SemanticAnalyzer {
 
         // Return the enum type
         Ok(Type::Named(enum_name.node.clone()))
+    }
+
+    /// Re-decide a `.len`/`.low`/`.high` access by the object's type.
+    ///
+    /// The parser emits the built-in accessor node (`SliceLen`, `U16Low`,
+    /// `U16High`) for those three names before types are known, which would
+    /// make a struct field with one of those names unreachable. If the object
+    /// is a struct (or, like `check_field_access`, a pointer to one) that
+    /// actually has a field by that name, this is a field access: record the
+    /// expression's span in `accessor_fields` so codegen emits one, and
+    /// return the field's type. Otherwise return None and the caller falls
+    /// through to the built-in meaning.
+    fn accessor_field_type(
+        &mut self,
+        object_ty: &Type,
+        name: &str,
+        span: crate::ast::Span,
+    ) -> Option<Type> {
+        let named = match object_ty {
+            Type::Named(n) => n,
+            Type::Pointer(inner) => match &**inner {
+                Type::Named(n) => n,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let field = self.type_registry.get_struct(named)?.get_field(name)?;
+        self.accessor_fields.insert(span);
+        Some(field.ty.clone())
     }
 
     fn check_field_access(

@@ -800,6 +800,7 @@ fn generate_inline_call(
             unreachable_stmts: info.unreachable_stmts.clone(),
             tail_call_info: info.tail_call_info.clone(),
             resolved_struct_names: info.resolved_struct_names.clone(),
+            accessor_fields: info.accessor_fields.clone(),
             string_pool: info.string_pool.clone(),
             function_frames: info.function_frames.clone(),
             static_inits: info.static_inits.clone(),

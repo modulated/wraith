@@ -169,6 +169,12 @@ pub fn generate_expr(
             data,
         } => generate_enum_variant(enum_name, variant, data, emitter, info, string_collector),
         Expr::SliceLen(object) => {
+            // Sema resolved this `.len` as a struct field access rather than
+            // the built-in accessor (the parser chose before types were known).
+            if info.accessor_fields.contains(&expr.span) {
+                let field = Spanned::new("len".to_string(), expr.span);
+                return generate_field_access(object, &field, emitter, info, string_collector);
+            }
             // Get the type of the object to determine how to access its length
             if let Some(obj_ty) = info.resolved_types.get(&object.span) {
                 match obj_ty {
@@ -249,6 +255,11 @@ pub fn generate_expr(
         }
 
         Expr::U16Low(operand) => {
+            // Sema resolved this `.low` as a struct field access.
+            if info.accessor_fields.contains(&expr.span) {
+                let field = Spanned::new("low".to_string(), expr.span);
+                return generate_field_access(operand, &field, emitter, info, string_collector);
+            }
             emitter.emit_comment("u16/i16 .low access");
 
             // Optimize for simple variable access (most common case)
@@ -293,6 +304,11 @@ pub fn generate_expr(
         }
 
         Expr::U16High(operand) => {
+            // Sema resolved this `.high` as a struct field access.
+            if info.accessor_fields.contains(&expr.span) {
+                let field = Spanned::new("high".to_string(), expr.span);
+                return generate_field_access(operand, &field, emitter, info, string_collector);
+            }
             emitter.emit_comment("u16/i16 .high access");
 
             // Optimize for simple variable access

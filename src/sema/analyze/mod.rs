@@ -74,6 +74,10 @@ pub struct SemanticAnalyzer {
     pub(super) expected_type: Option<Type>,
     /// Map from span to resolved struct name for anonymous struct inits
     pub(super) resolved_struct_names: HashMap<Span, String>,
+    /// Spans of `.len`/`.low`/`.high` expressions resolved as struct field
+    /// accesses rather than the built-in accessors (see `ProgramInfo::
+    /// accessor_fields`).
+    pub(super) accessor_fields: HashSet<Span>,
     /// Memory configuration from wraith.toml for overlap checking
     pub(super) memory_config: crate::config::MemoryConfig,
     /// Current function being analyzed (for tracking symbol scope in inline asm)
@@ -155,6 +159,7 @@ impl SemanticAnalyzer {
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::default(),
+            accessor_fields: HashSet::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
             frame_cursor: 0,
@@ -200,6 +205,7 @@ impl SemanticAnalyzer {
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::default(),
+            accessor_fields: HashSet::default(),
             memory_config: crate::config::MemoryConfig::load_or_default(),
             current_function: None,
             frame_cursor: 0,
@@ -321,6 +327,7 @@ impl SemanticAnalyzer {
             unreachable_stmts: self.unreachable_stmts.clone(),
             tail_call_info,
             resolved_struct_names: self.resolved_struct_names.clone(),
+            accessor_fields: self.accessor_fields.clone(),
             string_pool: HashMap::default(), // Will be populated during codegen
             function_frames,
             static_inits: self.static_inits.clone(),

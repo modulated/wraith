@@ -504,3 +504,156 @@ fn a_pointer_field_can_be_written_as_well_as_read() {
         (0x11, 0x22, 0x33)
     );
 }
+
+// ============================================================================
+// Fields named `len`, `low` and `high`
+//
+// The parser spells those three as built-in accessors before types are known,
+// which used to make a struct field with one of those names unreachable —
+// and `len` is the natural name for exactly the kind of table this file is
+// about. Sema now re-decides by the object's type: on a struct that has the
+// field it is a field access, recorded by span for codegen; everywhere else
+// the built-in meaning stands.
+// ============================================================================
+
+#[test]
+fn a_field_named_len_reads_from_a_static_table() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Entry { len: u8, flags: u8 }
+        static REG: [Entry; 3] = [
+            Entry { len: 4, flags: 1 },
+            Entry { len: 8, flags: 2 },
+            Entry { len: 16, flags: 3 },
+        ];
+        #[reset]
+        fn main() {
+            let i: u8 = 1;
+            R0 = REG[i].len;
+            R1 = REG[2].len;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (8, 16));
+}
+
+#[test]
+fn a_field_named_len_writes_to_a_static_table() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Entry { len: u8, flags: u8 }
+        static REG: [Entry; 3] = [
+            Entry { len: 4, flags: 1 },
+            Entry { len: 8, flags: 2 },
+            Entry { len: 16, flags: 3 },
+        ];
+        #[reset]
+        fn main() {
+            let i: u8 = 1;
+            REG[i].len = 42;
+            R0 = REG[i].len;
+            R1 = REG[2].len;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (42, 16),
+        "the neighbour entry is untouched"
+    );
+}
+
+#[test]
+fn a_field_named_len_reads_from_a_const_table() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Entry { len: u8, flags: u8 }
+        const ROM: [Entry; 2] = [
+            Entry { len: 5, flags: 1 },
+            Entry { len: 9, flags: 2 },
+        ];
+        #[reset]
+        fn main() { let i: u8 = 1; R0 = ROM[i].len; loop {} }
+    "#);
+    assert_eq!(e.mem(0x0900), 9);
+}
+
+#[test]
+fn fields_named_low_and_high_on_a_local_struct() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Halves { low: u8, high: u8 }
+        #[reset]
+        fn main() {
+            let h: Halves = Halves { low: 0x34, high: 0x12 };
+            h.high = 0x56;
+            R0 = h.low;
+            R1 = h.high;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x34, 0x56));
+}
+
+#[test]
+fn a_field_named_len_works_through_a_struct_parameter() {
+    // A struct parameter is a pointer under the hood, so this exercises the
+    // auto-deref half of the re-resolution.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Entry { len: u8, flags: u8 }
+        fn read_len(e: Entry) -> u8 { return e.len; }
+        #[reset]
+        fn main() {
+            let e: Entry = Entry { len: 7, flags: 1 };
+            R0 = read_len(e);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 7);
+}
+
+#[test]
+fn the_builtin_accessors_still_apply_to_arrays_and_u16s() {
+    // A struct may call its fields `len`/`low`/`high` without stealing those
+    // names from arrays and u16s: the choice is made per access, by type.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        struct Entry { len: u8, low: u8, high: u8 }
+        static REG: [Entry; 1] = [Entry { len: 2, low: 0x34, high: 0x12 }];
+        #[reset]
+        fn main() {
+            let a: [u8; 4] = [1, 2, 3, 4];
+            let w: u16 = 0xBEEF;
+            R0 = REG[0].low;
+            R1 = a.len.low;   // array length is a u16; both are the built-ins
+            R2 = w.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (0x34, 4, 0xBE)
+    );
+}
+
+#[test]
+fn a_field_named_len_on_a_const_table_still_rejects_writes() {
+    // Resolving `.len` as a field must not reopen the ROM-store hole the
+    // lvalue-root walk closed for plain fields.
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        struct Entry { len: u8 }
+        const ROM: [Entry; 2] = [Entry { len: 1 }, Entry { len: 2 }];
+        #[reset]
+        fn main() { let i: u8 = 0; ROM[i].len = 9; R0 = 0; loop {} }
+    "#,
+    );
+    assert!(err.contains("ROM"), "{err}");
+}

@@ -440,6 +440,16 @@ impl SemanticAnalyzer {
                     }
                     cur = object;
                 }
+                // A `.len`/`.low`/`.high` that sema re-resolved as a struct
+                // field access peels exactly like a plain `Expr::Field`.
+                Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner)
+                    if self.accessor_fields.contains(&cur.span) =>
+                {
+                    if self.denotes_a_reference(inner) {
+                        return None;
+                    }
+                    cur = inner;
+                }
                 Expr::Paren(inner) => cur = inner,
                 _ => return None,
             }

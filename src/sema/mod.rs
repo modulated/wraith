@@ -910,6 +910,11 @@ pub struct ProgramInfo {
     pub tail_call_info: HashMap<String, TailCallInfo>,
     /// Map of anonymous struct init spans to their resolved struct names
     pub resolved_struct_names: HashMap<Span, String>,
+    /// Spans of `.len`/`.low`/`.high` expressions that sema resolved as struct
+    /// field accesses rather than the built-in accessors. The parser emits the
+    /// built-in node before types are known; sema re-decides by the object's
+    /// type and records the choice here for codegen.
+    pub accessor_fields: HashSet<Span>,
     /// Global string pool for cross-module string deduplication
     /// Maps string content to a unique label (e.g., "Hello" -> "str_0")
     pub string_pool: HashMap<String, String>,
