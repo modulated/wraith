@@ -1509,6 +1509,20 @@ impl SemanticAnalyzer {
                             });
                         }
 
+                        // Bounds are byte offsets, but the value is held as a
+                        // Rust String: slicing inside a multi-byte character
+                        // would panic on the non-boundary index. Reject it.
+                        if !s.is_char_boundary(start_usize) || !s.is_char_boundary(end_usize) {
+                            return Err(SemaError::Custom {
+                                message: format!(
+                                    "string slice {}..{} falls inside a multi-byte character; \
+                                     slice at character boundaries",
+                                    start_idx, actual_end
+                                ),
+                                span,
+                            });
+                        }
+
                         // Extract substring
                         let result = &s[start_usize..end_usize];
 

@@ -17,7 +17,7 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Remaining criticals: const string slice panic, compound-assignment re-evaluation | FE-C1, FE-C2 |
+| 1 | Remaining critical: compound-assignment re-evaluation | FE-C2 |
 | 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps the fixed classes from regressing |
 
 ---
@@ -87,7 +87,8 @@ A const of struct or enum type is now rejected at declaration with a pointer to 
 
 ### Front end
 
-**FE-C1. Compiler panic: constant string slice on a non-UTF-8 boundary.**
+**~~FE-C1. Compiler panic: constant string slice on a non-UTF-8 boundary.~~ FIXED.**
+Both constant-slice sites (`const_eval.rs`, `check_slice` in `analyze/expr.rs`) validate char boundaries and return a proper `SemaError`; a boundary-aligned slice of the same string compiles and reads back correctly (regression tests: `e2e::strings_slices::a_const_slice_*`, the first of which panicked the compiler before). The original entry follows.
 `const_eval.rs:135` — byte indices into a Rust `String`. `"héllo"[0..2]` panics: `byte index 2 is not a char boundary`.
 _Fix:_ operate on `s.as_bytes()` (6502 strings are bytes anyway — bytes are arguably the *right* semantics) or validate char boundaries with a proper error.
 

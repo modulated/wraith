@@ -386,3 +386,44 @@ fn foreach_slice_over_255_elements() {
     // 300 elements each == 1 -> sum 300 == 0x012C.
     assert_eq!(e.mem16(0x0400), 300, "iterated all 300 elements");
 }
+
+// ============================================================================
+// Multi-byte characters in constant slices
+//
+// Constant string slices index by byte, but the value is held as a Rust
+// String: slicing inside a multi-byte character used to *panic* the compiler
+// ("byte index 2 is not a char boundary"). It is a clean error now, and a
+// boundary-aligned slice of the same string compiles and reads back.
+// ============================================================================
+
+#[test]
+fn a_const_slice_inside_a_multibyte_character_is_an_error_not_a_panic() {
+    let result = crate::common::harness::compile(
+        r#"
+        const S: str = "héllo";
+        const T: str = S[0..2];
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    match result {
+        crate::common::harness::CompileResult::SemaError(e) => {
+            assert!(e.contains("multi-byte character"), "{e}")
+        }
+        other => panic!("expected a sema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_const_slice_at_a_character_boundary_works() {
+    // "héllo" is six bytes; S[0..3] is "hé", whose second byte is é's first
+    // (0xC3).
+    let mut e = run(r#"
+        const S: str = "héllo";
+        const T: str = S[0..3];
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { OUT = T[1]; loop {} }
+    "#);
+    assert_eq!(e.mem(0x0900), 0xC3);
+}

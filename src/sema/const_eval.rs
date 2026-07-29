@@ -156,6 +156,21 @@ pub fn eval_const_expr_with_env(
                         });
                     }
 
+                    // Bounds are byte offsets, but the value is held as a Rust
+                    // String: slicing inside a multi-byte character would panic
+                    // on the non-boundary index (and couldn't be represented at
+                    // all). Reject it rather than crash.
+                    if !s.is_char_boundary(start_usize) || !s.is_char_boundary(end_usize) {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "string slice {}..{} falls inside a multi-byte character; \
+                                 slice at character boundaries",
+                                start_idx, actual_end
+                            ),
+                            span: expr.span,
+                        });
+                    }
+
                     // Extract substring
                     let result = s[start_usize..end_usize].to_string();
 
