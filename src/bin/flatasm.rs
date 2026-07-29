@@ -3,8 +3,7 @@
 //!
 //! Wraith emits fully-placed absolute assembly and writes the interrupt vector
 //! table directly at `$FFFA`-`$FFFF`. That is a flat-image model, not the
-//! relocatable-segment model a ca65/ld65 linker config assumes, so the output
-//! is assembled here rather than linked. Shares its implementation with the
+//! relocatable-segment model like some other assemblers/linkers. Shares its implementation with the
 //! test harness via `wraith::asm`.
 //!
 //! Usage:
