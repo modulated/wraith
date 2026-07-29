@@ -896,6 +896,9 @@ pub struct ProgramInfo {
     /// section with only a pointer in the frame slot, which meant writing to a
     /// local array on a ROM board did nothing at all.
     pub local_arrays: HashMap<Span, LocalArray>,
+    /// Where each enum-typed local's data lives in RAM, keyed like
+    /// `local_arrays`; see `SemanticAnalyzer::enum_blocks`.
+    pub enum_blocks: HashMap<Span, LocalArray>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
     /// Map of expression spans to their resolved types

@@ -407,6 +407,21 @@ pub fn generate_stmt(
                     matches!(sym.ty, Type::Array(_, _) | Type::String | Type::Pointer(_))
                         || is_enum;
 
+                // An enum value binds by *copy*: the constructed bytes live in
+                // shared codegen scratch until here (and a returned enum points
+                // into the callee's reused region), so without the copy two
+                // live enums alias and any later temp use destroys the payload.
+                // The variable's slot points at its own per-declaration block
+                // from here on.
+                let enum_block = if is_enum {
+                    info.enum_blocks.get(&name.span).cloned()
+                } else {
+                    None
+                };
+                if let Some(block) = &enum_block {
+                    emit_enum_copy_to_block(block, emitter)?;
+                }
+
                 match sym.location {
                     crate::sema::table::SymbolLocation::FrameOffset(_) => {
                         return Err(CodegenError::Internal(
@@ -779,6 +794,20 @@ pub fn generate_stmt(
                         // A (low) and X (high); other 16-bit values use A:Y.
                         let is_array_or_enum =
                             matches!(sym.ty, Type::Array(_, _) | Type::Pointer(_)) || is_enum;
+
+                        // Same copy-on-bind as the VarDecl path: an enum
+                        // reassignment must land in the variable's own block,
+                        // found through the declaration's span. A target
+                        // without a block (a parameter) keeps the old
+                        // pointer-store behavior.
+                        if is_enum
+                            && let Some(block) = sym
+                                .decl_span
+                                .and_then(|sp| info.enum_blocks.get(&sp))
+                                .cloned()
+                        {
+                            emit_enum_copy_to_block(&block, emitter)?;
+                        }
 
                         match sym.location {
                             crate::sema::table::SymbolLocation::FrameOffset(_) => {
@@ -2099,6 +2128,40 @@ fn generate_slice_assignment(
         ));
     }
 
+    Ok(())
+}
+
+/// Copy an enum value's bytes from the pointer in A:X into the variable's own
+/// per-declaration block, then load the block's address into A:X for the slot
+/// store that follows. Without this the slot would point at shared codegen
+/// scratch (construction) or a dead frame (call result), and two live enums
+/// would alias.
+fn emit_enum_copy_to_block(
+    block: &crate::sema::LocalArray,
+    emitter: &mut Emitter,
+) -> Result<(), CodegenError> {
+    if block.size == 0 || block.size > 255 {
+        return Err(CodegenError::Internal(format!(
+            "enum data block of {} bytes cannot be copied by the byte loop",
+            block.size
+        )));
+    }
+    let ptr = emitter.memory_layout.deref_ptr();
+    emitter.emit_comment("Copy enum value into its own storage");
+    emitter.emit_inst("STA", &format!("${:02X}", ptr));
+    emitter.emit_inst("STX", &format!("${:02X}", ptr + 1));
+    let copy_label = emitter.next_label("encp");
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_label(&copy_label);
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
+    emitter.emit_inst("STA", &format!("${:04X},Y", block.addr));
+    emitter.emit_inst("INY", "");
+    emitter.emit_inst("CPY", &format!("#${:02X}", block.size as u8));
+    emitter.emit_inst("BNE", &copy_label);
+    // The slot now points at the block, whose address is a compile-time constant.
+    emitter.emit_inst("LDA", &format!("#${:02X}", block.addr & 0xFF));
+    emitter.emit_inst("LDX", &format!("#${:02X}", (block.addr >> 8) & 0xFF));
+    emitter.invalidate_registers();
     Ok(())
 }
 

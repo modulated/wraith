@@ -386,7 +386,11 @@ impl SemanticAnalyzer {
         }
 
         // Rebase every declaration's offset to an absolute address.
-        for arr in self.local_arrays.values_mut() {
+        for arr in self
+            .local_arrays
+            .values_mut()
+            .chain(self.enum_blocks.values_mut())
+        {
             let base = function_base
                 .get(&arr.function)
                 .copied()

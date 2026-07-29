@@ -39,6 +39,11 @@ pub struct SemanticAnalyzer {
     /// function's array block; `finalize_frames` rewrites it to an absolute RAM
     /// address once the blocks have been laid out.
     pub(super) local_arrays: HashMap<Span, crate::sema::LocalArray>,
+    /// Where each enum-typed local's *data* lives, same keying and rebasing as
+    /// `local_arrays`. An enum value binds by copying the constructed bytes
+    /// into this block; without it every variable points into shared codegen
+    /// scratch and two live enums alias.
+    pub(super) enum_blocks: HashMap<Span, crate::sema::LocalArray>,
     /// Bytes of local-array data each function needs, consumed by
     /// `finalize_frames` to lay the blocks out in RAM.
     pub(super) array_block_sizes: HashMap<String, u16>,
@@ -139,6 +144,7 @@ impl SemanticAnalyzer {
             folded_constants: HashMap::default(),
             loop_bound_slots: HashMap::default(),
             local_arrays: HashMap::default(),
+            enum_blocks: HashMap::default(),
             array_block_sizes: HashMap::default(),
             array_cursor: 0,
             resolved_types: HashMap::default(),
@@ -185,6 +191,7 @@ impl SemanticAnalyzer {
             folded_constants: HashMap::default(),
             loop_bound_slots: HashMap::default(),
             local_arrays: HashMap::default(),
+            enum_blocks: HashMap::default(),
             array_block_sizes: HashMap::default(),
             array_cursor: 0,
             resolved_types: HashMap::default(),
@@ -320,6 +327,7 @@ impl SemanticAnalyzer {
             folded_constants: self.folded_constants.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
             local_arrays: self.local_arrays.clone(),
+            enum_blocks: self.enum_blocks.clone(),
             type_registry: self.type_registry.clone(),
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),
@@ -487,6 +495,7 @@ impl SemanticAnalyzer {
                     is_pub: false, // Function parameters are never public
                     containing_function: self.current_function.clone(),
                     is_param: true,
+                    decl_span: Some(param.name.span),
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Add to resolved_symbols so codegen (especially inline asm) can find it

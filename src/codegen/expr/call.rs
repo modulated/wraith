@@ -793,6 +793,7 @@ fn generate_inline_call(
             folded_constants: info.folded_constants.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
             local_arrays: info.local_arrays.clone(),
+            enum_blocks: info.enum_blocks.clone(),
             type_registry: info.type_registry.clone(),
             resolved_types: info.resolved_types.clone(),
             imported_items: info.imported_items.clone(),

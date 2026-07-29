@@ -45,6 +45,10 @@ pub struct SymbolInfo {
     /// locals now that both live in the function frame). Replaces the old
     /// address-range test that assumed parameters occupied $80-$BF.
     pub is_param: bool,
+    /// Span of the name at the declaration site. Codegen keys per-declaration
+    /// state (e.g. an enum local's data block) on it, and a use site finds the
+    /// declaration through the resolved symbol.
+    pub decl_span: Option<crate::ast::Span>,
 }
 
 #[derive(Debug, Clone)]

@@ -286,6 +286,32 @@ impl SemanticAnalyzer {
             }
         }
 
+        // An enum local's frame slot likewise holds a pointer, and what it
+        // points at must be the variable's *own* storage: runtime-constructed
+        // enums are otherwise built in shared codegen scratch, so two live
+        // enums (or any later temp use) would destroy an earlier one's bytes.
+        // Reserve a per-declaration block in the same colored region arrays
+        // use; codegen copies the constructed bytes into it on binding.
+        if let Type::Named(n) = &declared_ty
+            && let Some(enum_def) = self.type_registry.get_enum(n)
+        {
+            let bytes = (enum_def.total_size as u16).max(1);
+            if let Some(f) = self.current_function.clone() {
+                let at = self.array_cursor;
+                self.array_cursor += bytes;
+                self.enum_blocks.insert(
+                    name.span,
+                    crate::sema::LocalArray {
+                        addr: at,
+                        size: bytes,
+                        function: f.clone(),
+                    },
+                );
+                let entry = self.array_block_sizes.entry(f).or_insert(0);
+                *entry = (*entry).max(self.array_cursor);
+            }
+        }
+
         let info = SymbolInfo {
             name: name.node.clone(),
             kind: SymbolKind::Variable,
@@ -296,6 +322,7 @@ impl SemanticAnalyzer {
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
             is_param: false,
+            decl_span: Some(name.span),
         };
         self.table.insert(name.node.clone(), info.clone());
         // Also add to resolved_symbols so codegen can find it
@@ -541,6 +568,7 @@ impl SemanticAnalyzer {
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
             is_param: false,
+            decl_span: Some(var_name.span),
         };
         self.table.insert(var_name.node.clone(), info.clone());
         // Register the loop variable at its own declaration span so codegen can
@@ -573,6 +601,7 @@ impl SemanticAnalyzer {
                     is_pub: false,
                     containing_function: self.current_function.clone(),
                     is_param: false,
+                    decl_span: None,
                 },
             );
             Some((bound_offset, counter_size))
@@ -652,6 +681,7 @@ impl SemanticAnalyzer {
                 is_pub: false,
                 containing_function: self.current_function.clone(),
                 is_param: false,
+                decl_span: Some(idx_var.span),
             };
             self.table.insert(idx_var.node.clone(), idx_info.clone());
             self.resolved_symbols.insert(idx_var.span, idx_info);
@@ -680,6 +710,7 @@ impl SemanticAnalyzer {
             is_pub: false, // Local variables are never public
             containing_function: self.current_function.clone(),
             is_param: false,
+            decl_span: Some(var_name.span),
         };
         self.table.insert(var_name.node.clone(), info.clone());
         // Add to resolved_symbols so codegen can find it
@@ -703,6 +734,7 @@ impl SemanticAnalyzer {
                     is_pub: false,
                     containing_function: self.current_function.clone(),
                     is_param: false,
+                    decl_span: None,
                 },
             );
         }
@@ -950,6 +982,7 @@ impl SemanticAnalyzer {
                             is_pub: false, // Pattern bindings are never public
                             containing_function: self.current_function.clone(),
                             is_param: false,
+                            decl_span: Some(binding.name.span),
                         };
                         self.table.insert(binding.name.node.clone(), info.clone());
                         // Also add to resolved_symbols so codegen can find it
@@ -971,6 +1004,7 @@ impl SemanticAnalyzer {
                     is_pub: false, // Pattern bindings are never public
                     containing_function: self.current_function.clone(),
                     is_param: false,
+                    decl_span: Some(pattern_span),
                 };
                 self.table.insert(name.clone(), info.clone());
                 // Pattern::Variable carries no span of its own, but the arm's

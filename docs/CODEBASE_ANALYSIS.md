@@ -6,7 +6,7 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (6 remaining — the placement pair, math-JSR tracking, the temp-pool four, the import-merge three, the indirect-call spill, four of the five `$0000` constants bugs, and the match-pattern critical were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (5 remaining — 17 were fixed after the audit; see the struck-through entries). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest. *(Substantially fixed: all demonstrated sites now allocate, spill, or error — see CG-C3/C5/C6.)*
@@ -17,8 +17,8 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
-| 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1 from regressing |
+| 1 | Remaining criticals: ForEach >255 elements, address-taken + tail-recursive, static zero-fill overrun, const string slice panic, compound-assignment re-evaluation | CG-C9, C10, C11, FE-C1, FE-C2 |
+| 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps the fixed classes from regressing |
 
 ---
 
@@ -47,9 +47,8 @@ Was: `ps[ident(1)].x = 42` stored 1, because the call's argument staging was han
 **~~CG-C7. `contains_call` misses `Expr::CallIndirect`.~~ FIXED.**
 Was: a u16 op whose right side is a vtable call took the "$F0 is safe" fast path, and the callee's own codegen used the same pool — `(x + x) + ops.run(3 as u16)` restored the callee's product as the left operand. `contains_call` now covers `CallIndirect` (and `Match`, `StructInit`/`AnonStructInit`, `EnumVariant`, `Slice`) (regression test: `e2e::vtable::a_u16_left_operand_survives_an_indirect_call`).
 
-**CG-C8. Runtime-constructed enums are pointers into shared scratch — any two live enum values alias.**
-`aggregate.rs:1282-1298` builds enum bytes in the `$20–$3F` pool and stores the *pointer*; nothing copies the bytes out. `let e1 = mk(1); let e2 = mk(2);` — `match e1` extracts 2 (reproduced). Any later `$20` temp use destroys a live enum's payload.
-_Fix:_ allocate runtime enum storage in the function's frame and copy on binding. This is a redesign, not a patch; until then the feature is only safe when matched immediately.
+**~~CG-C8. Runtime-constructed enums are pointers into shared scratch — any two live enum values alias.~~ FIXED.**
+An enum-typed local now gets a per-declaration data block in the same call-graph-colored RAM region local arrays use (sema `enum_blocks`, laid out by `finalize_frames`, merged across imports), and binding — both `let` and reassignment — copies the constructed bytes into it. The variable's slot points at its own block from then on, so `let e1 = mk(1); let e2 = mk(2); match e1` extracts 1, and `a = mk(3)` replaces only `a`. `SymbolInfo` carries a `decl_span` so a use site can find its declaration's block (regression tests: three in `e2e::enums`; two verified to fail with the fix reverted). Note: an enum *parameter* is still a bare pointer — passing `mk(1)` as an argument hands the callee scratch-backed storage; if that proves to matter in practice, the same copy needs to happen in argument marshaling.
 
 **CG-C9. ForEach over large/wide arrays silently miscounts or misindexes.**
 `stmt.rs:1274` emits `CPX #$12C` for a 300-element array; `asm.rs:544` truncates to `#$2C` (44 iterations, confirmed in the binary). u16-element arrays of 128–255 elements wrap the scaled offset and re-read elements 0..n-129.

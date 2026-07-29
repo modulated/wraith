@@ -104,6 +104,7 @@ impl SemanticAnalyzer {
             is_pub: func.is_pub,
             containing_function: None, // Functions are global
             is_param: false,
+            decl_span: Some(func.name.span),
         };
         self.function_signatures
             .insert(name.clone(), info.ty.clone());
@@ -327,6 +328,7 @@ impl SemanticAnalyzer {
             is_pub: stat.is_pub,
             containing_function: None, // Globals are not scoped to a function
             is_param: false,
+            decl_span: Some(stat.name.span),
         };
         self.table.insert(name, info);
 
@@ -545,6 +547,7 @@ impl SemanticAnalyzer {
             is_pub: addr.is_pub,
             containing_function: None, // Addresses are global
             is_param: false,
+            decl_span: Some(addr.name.span),
         };
         self.table.insert(name, info);
 
@@ -873,6 +876,9 @@ impl SemanticAnalyzer {
         for (span, la) in &imported_analyzer.local_arrays {
             self.local_arrays.insert(*span, la.clone());
         }
+        for (span, eb) in &imported_analyzer.enum_blocks {
+            self.enum_blocks.insert(*span, eb.clone());
+        }
         for (name, size) in &imported_analyzer.array_block_sizes {
             self.array_block_sizes.entry(name.clone()).or_insert(*size);
         }
@@ -1023,6 +1029,7 @@ impl SemanticAnalyzer {
                 is_pub: struct_def.is_pub,
                 containing_function: None, // Types are global
                 is_param: false,
+                decl_span: Some(struct_def.name.span),
             },
         );
 
@@ -1219,6 +1226,7 @@ impl SemanticAnalyzer {
                 is_pub: enum_def.is_pub,
                 containing_function: None, // Types are global
                 is_param: false,
+                decl_span: Some(enum_def.name.span),
             },
         );
 

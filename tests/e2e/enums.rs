@@ -480,3 +480,85 @@ fn a_match_expression_checks_patterns_too() {
         "{err}"
     );
 }
+
+// ============================================================================
+// Runtime enum values own their storage
+//
+// A runtime-constructed enum used to be a pointer into shared codegen
+// scratch: the second construction overwrote the first's bytes, and any
+// later use of the $20 temp destroyed a live enum's payload. Binding now
+// copies the bytes into the variable's own per-declaration block.
+// ============================================================================
+
+#[test]
+fn two_live_enums_do_not_alias() {
+    // mk constructs Value in the same scratch both times; before the copy,
+    // `e1` and `e2` were the same address and matching e1 extracted 2.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        enum Msg { Ping, Value(u8) }
+        fn mk(n: u8) -> Msg { return Msg::Value(n); }
+        #[reset]
+        fn main() {
+            let e1: Msg = mk(1);
+            let e2: Msg = mk(2);
+            match e1 {
+                Msg::Ping => { R0 = 0; }
+                Msg::Value(v) => { R0 = v; }
+            }
+            match e2 {
+                Msg::Ping => { R1 = 0; }
+                Msg::Value(v) => { R1 = v; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (1, 2));
+}
+
+#[test]
+fn an_enum_payload_survives_later_temp_use() {
+    // Every binary op uses the same scratch the enum was constructed in.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        enum Msg { Ping, Value(u8) }
+        #[reset]
+        fn main() {
+            let m: Msg = Msg::Value(42);
+            let x: u8 = 3 + 4 + 5 + 6;
+            match m {
+                Msg::Ping => { OUT = 0; }
+                Msg::Value(v) => { OUT = v + x; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 42 + 18);
+}
+
+#[test]
+fn reassigning_an_enum_replaces_only_that_variable() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        enum Msg { Ping, Value(u8) }
+        fn mk(n: u8) -> Msg { return Msg::Value(n); }
+        #[reset]
+        fn main() {
+            let a: Msg = mk(1);
+            let b: Msg = mk(2);
+            a = mk(3);
+            match a {
+                Msg::Ping => { R0 = 0; }
+                Msg::Value(v) => { R0 = v; }
+            }
+            match b {
+                Msg::Ping => { R1 = 0; }
+                Msg::Value(v) => { R1 = v; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (3, 2));
+}
