@@ -257,6 +257,7 @@ impl SemanticAnalyzer {
                 // (mirrors the match-statement path).
                 let mut arm_types = Vec::new();
                 for arm in arms {
+                    self.check_pattern_type(&arm.pattern, &match_ty)?;
                     self.table.enter_scope();
                     self.add_pattern_bindings(&arm.pattern.node, arm.pattern.span, &match_ty)?;
                     let arm_ty = self.check_expr(&arm.body)?;

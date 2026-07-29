@@ -150,6 +150,14 @@ impl SemanticAnalyzer {
 
                 // Analyze each arm
                 for arm in arms {
+                    // The pattern must make sense for the scrutinee before it
+                    // is trusted for bindings: a pattern naming a different
+                    // enum compares tags against the wrong discriminants, and
+                    // an out-of-range literal silently truncates in the
+                    // emitted CMP (`match x { 300 => ... }` with `x: u8`
+                    // matched x == 44).
+                    self.check_pattern_type(&arm.pattern, &match_ty)?;
+
                     // Enter new scope for pattern bindings
                     self.table.enter_scope();
 
@@ -762,6 +770,132 @@ impl SemanticAnalyzer {
     }
 
     /// Add pattern bindings to the current scope
+    /// Check a match pattern against the scrutinee's type.
+    ///
+    /// Nothing used to validate this: a pattern naming a different enum
+    /// compiled and compared tags against the wrong discriminants, and a
+    /// literal that doesn't fit the scrutinee silently truncated in the
+    /// emitted CMP. Struct/enum variants also get their shape checked here
+    /// (unknown variant, wrong binding count), which `add_pattern_bindings`
+    /// otherwise ignores by producing no bindings.
+    pub(super) fn check_pattern_type(
+        &mut self,
+        pattern: &Spanned<crate::ast::Pattern>,
+        match_ty: &Type,
+    ) -> Result<(), SemaError> {
+        use crate::ast::Pattern;
+        match &pattern.node {
+            Pattern::EnumVariant {
+                enum_name,
+                variant,
+                bindings,
+            } => {
+                let Type::Named(scrut_name) = match_ty else {
+                    return Err(SemaError::TypeMismatch {
+                        expected: format!("'{}'", enum_name.node),
+                        found: match_ty.display_name(),
+                        span: pattern.span,
+                    });
+                };
+                if scrut_name != &enum_name.node {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "pattern is for enum '{}' but the matched value is '{}'",
+                            enum_name.node, scrut_name
+                        ),
+                        span: pattern.span,
+                    });
+                }
+                let enum_def =
+                    self.type_registry
+                        .get_enum(scrut_name)
+                        .ok_or_else(|| SemaError::Custom {
+                            message: format!("enum '{}' not found", scrut_name),
+                            span: pattern.span,
+                        })?;
+                let variant_info =
+                    enum_def
+                        .get_variant(&variant.node)
+                        .ok_or_else(|| SemaError::Custom {
+                            message: format!(
+                                "variant '{}' not found in enum '{}'",
+                                variant.node, scrut_name
+                            ),
+                            span: variant.span,
+                        })?;
+                use crate::sema::type_defs::VariantData as TypeDefVariantData;
+                match (&variant_info.data, bindings.len()) {
+                    (TypeDefVariantData::Unit, 0) => {}
+                    (TypeDefVariantData::Unit, _) => {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "variant '{}' takes no data, but the pattern binds {} name(s)",
+                                variant.node,
+                                bindings.len()
+                            ),
+                            span: pattern.span,
+                        });
+                    }
+                    (TypeDefVariantData::Tuple(fields), n) if n != fields.len() => {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "variant '{}' has {} field(s), but the pattern binds {}",
+                                variant.node,
+                                fields.len(),
+                                n
+                            ),
+                            span: pattern.span,
+                        });
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            Pattern::Literal(lit) => self.check_pattern_literal_fits(lit, match_ty),
+            Pattern::Range { start, end, .. } => {
+                self.check_pattern_literal_fits(start, match_ty)?;
+                self.check_pattern_literal_fits(end, match_ty)
+            }
+            Pattern::Wildcard | Pattern::Variable(_) => Ok(()),
+        }
+    }
+
+    /// A literal (or range bound) in a pattern must be representable in the
+    /// scrutinee's type; the emitted CMP is a plain byte compare and would
+    /// otherwise match the truncated value.
+    fn check_pattern_literal_fits(
+        &mut self,
+        lit: &Spanned<Expr>,
+        match_ty: &Type,
+    ) -> Result<(), SemaError> {
+        let Ok(val) = eval_const_expr_with_env(lit, &self.const_env) else {
+            return Ok(()); // not constant: nothing to check
+        };
+        let Some(int_val) = val.as_integer() else {
+            return Ok(());
+        };
+        let fits = match match_ty {
+            Type::Primitive(PrimitiveType::U8) => (0..=255).contains(&int_val),
+            Type::Primitive(PrimitiveType::I8) => (-128..=127).contains(&int_val),
+            Type::Primitive(PrimitiveType::U16) | Type::Primitive(PrimitiveType::Addr) => {
+                (0..=65535).contains(&int_val)
+            }
+            Type::Primitive(PrimitiveType::I16) => (-32768..=32767).contains(&int_val),
+            _ => true,
+        };
+        if !fits {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "pattern literal {} cannot match a value of type {}",
+                    int_val,
+                    match_ty.display_name()
+                ),
+                span: lit.span,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn add_pattern_bindings(
         &mut self,
         pattern: &Pattern,

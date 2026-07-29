@@ -6,7 +6,7 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (7 remaining — the placement pair, math-JSR tracking, the temp-pool four, the import-merge three, the indirect-call spill, and four of the five `$0000`-sentinel constants bugs were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (6 remaining — the placement pair, math-JSR tracking, the temp-pool four, the import-merge three, the indirect-call spill, four of the five `$0000` constants bugs, and the match-pattern critical were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest. *(Substantially fixed: all demonstrated sites now allocate, spill, or error — see CG-C3/C5/C6.)*
@@ -17,9 +17,8 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Match-pattern checking against scrutinee type | SE-C7 |
-| 2 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
-| 3 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–2 from regressing |
+| 1 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
+| 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1 from regressing |
 
 ---
 
@@ -84,9 +83,8 @@ A failed const-eval of a scalar- or string-typed const is now a hard `SemaError`
 **~~SE-C6. Several analyzer maps don't survive import — including `accessor_fields` and all of mutable statics.~~ FIXED.**
 The merge now covers `accessor_fields`, `resolved_struct_names`, `unreachable_stmts`, the child's full type registry (an imported function may use types the importer never names), `warnings`, `static_inits`, and mutable-static symbols. The BSS collision is solved by relocation: the child's allocations are shifted past the importer's high-water mark, so statics can be declared in any order across modules (regression tests: `e2e::imports::an_accessor_named_field_works_in_an_imported_function`, `mutable_statics_in_an_imported_module_are_initialized_and_dont_collide`, `a_static_declared_before_the_import_relocates_the_imported_ones`). A systematic merged-state struct remains a good idea but the list is currently complete.
 
-**SE-C7. Match patterns are never checked against the scrutinee type.**
-`stmt.rs:142-164`, `expr.rs:229-271`. `match a { B::Z(v) => ... }` with `a: A` compiles (wrong discriminant compare); `match x { 300 => ... }` with `x: u8` compiles and `f(44)` takes the `300` arm (both reproduced).
-_Fix:_ validate enum patterns name the scrutinee's enum; literal/range patterns fit the scrutinee type.
+**~~SE-C7. Match patterns are never checked against the scrutinee type.~~ FIXED.**
+A new `check_pattern_type` runs in both match paths (statement and expression): enum patterns must name the scrutinee's enum (and the variant must exist, with the right binding count — a unit variant with bindings or a tuple variant with the wrong arity now errors cleanly instead of producing no bindings), and literal/range patterns must be representable in the scrutinee type (regression tests: five in `e2e::enums`).
 
 **~~SE-C8. A bare `const` struct is accepted but never emitted; field reads hit `$0000`.~~ FIXED.**
 A const of struct or enum type is now rejected at declaration with a pointer to `static` or a const array (regression test: `e2e::consts::a_const_of_struct_type_is_rejected`).

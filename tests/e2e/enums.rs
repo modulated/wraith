@@ -355,3 +355,128 @@ fn jump_table_dispatch_preserves_the_payload_pointer() {
     assert_eq!(pick(2), 33);
     assert_eq!(pick(3), 44);
 }
+
+// ============================================================================
+// Patterns checked against the scrutinee
+//
+// Nothing used to validate a pattern against the matched value's type: a
+// pattern naming a different enum compared tags against the wrong
+// discriminants, and an out-of-range literal silently truncated in the
+// emitted CMP (`300` matched a u8 as 44).
+// ============================================================================
+
+fn expect_error(src: &str) -> String {
+    match crate::common::harness::compile(src) {
+        crate::common::harness::CompileResult::SemaError(e)
+        | crate::common::harness::CompileResult::CodegenError(e) => e,
+        crate::common::harness::CompileResult::Success(..) => {
+            panic!("expected a compile error, but it compiled")
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_pattern_naming_a_different_enum_is_rejected() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        enum A { X, Y }
+        enum B { Z }
+        #[reset]
+        fn main() {
+            let a: A = A::X;
+            match a {
+                B::Z => { OUT = 1; }
+                _ => { OUT = 2; }
+            }
+            loop {}
+        }
+    "#,
+    );
+    assert!(
+        err.contains("enum 'B' but the matched value is 'A'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_literal_pattern_out_of_range_for_the_scrutinee_is_rejected() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        fn f(x: u8) -> u8 {
+            match x {
+                300 => { return 1; }
+                _ => { return 2; }
+            }
+        }
+        #[reset]
+        fn main() { OUT = f(44); loop {} }
+    "#,
+    );
+    assert!(err.contains("300 cannot match a value of type u8"), "{err}");
+}
+
+#[test]
+fn a_negative_literal_pattern_on_an_unsigned_scrutinee_is_rejected() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let x: u8 = 251;
+            match x {
+                -5 => { OUT = 1; }
+                _ => { OUT = 2; }
+            }
+            loop {}
+        }
+    "#,
+    );
+    assert!(err.contains("-5 cannot match a value of type u8"), "{err}");
+}
+
+#[test]
+fn a_tuple_variant_pattern_with_the_wrong_binding_count_is_rejected() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        enum E { Pair(u8, u8) }
+        #[reset]
+        fn main() {
+            let e: E = E::Pair(1, 2);
+            match e {
+                E::Pair(a, b, c) => { OUT = a + b + c; }
+            }
+            loop {}
+        }
+    "#,
+    );
+    assert!(err.contains("2 field(s), but the pattern binds 3"), "{err}");
+}
+
+#[test]
+fn a_match_expression_checks_patterns_too() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        enum A { X, Y }
+        enum B { Z }
+        #[reset]
+        fn main() {
+            let a: A = A::X;
+            let r: u8 = match a {
+                B::Z => 1,
+                _ => 2,
+            };
+            OUT = r;
+            loop {}
+        }
+    "#,
+    );
+    assert!(
+        err.contains("enum 'B' but the matched value is 'A'"),
+        "{err}"
+    );
+}
