@@ -52,7 +52,6 @@ An enum-typed local now gets a per-declaration data block in the same call-graph
 
 **~~CG-C9. ForEach over large/wide arrays silently miscounts or misindexes.~~ FIXED.**
 Sema rejects `for x in arr` past 255 elements (127 for u16 elements) with a message pointing at the workarounds, and the flat assembler now errors on any byte-mode operand that doesn't fit instead of truncating (`LDA #$1234`, a `CPX #$12C` from the next compiler bug of this shape) (regression tests: `e2e::control_flow::foreach_*`).
-_Fix:_ reject `for x in arr` above 255 elements (and byte-size > 255 for scaled paths) at sema; make flatasm range-check immediates instead of truncating.
 
 **~~CG-C10. Address-taken + tail-recursive function: loop restart jumps into the `$E0`-staging prologue — infinite loop.~~ FIXED.**
 The tail-call loop label is now emitted *after* the function-pointer prologue, so an iteration no longer re-copies the stale `$E0` staging over the freshly updated parameters (regression test: `e2e::functions::a_tail_recursive_function_can_be_address_taken`, which looped forever before).
