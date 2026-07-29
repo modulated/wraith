@@ -405,3 +405,33 @@ fn an_interrupt_handler_can_be_pinned() {
     // would have put it.
     assert!(asm.contains(".WORD on_irq"));
 }
+
+// ============================================================================
+// Measurement integrity
+//
+// The allocator reserves each function's *measured* size, so anything the
+// measuring pass under-counts is bytes the next function's .ORG lands on top
+// of.
+
+#[test]
+fn reset_handler_static_initializers_are_counted_in_its_size() {
+    // main is declared first, so filler is placed right after it. Before the
+    // fix, main's measured size omitted the static-init stream, filler was
+    // .ORG'd into the middle of it, and reset never finished initializing
+    // `tab` or reached the body.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        static tab: [u8; 20] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
+        #[reset]
+        fn main() {
+            R0 = tab[19];
+            R1 = filler();
+            loop {}
+        }
+        fn filler() -> u8 { return 0xAB; }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (20, 0xAB));
+}

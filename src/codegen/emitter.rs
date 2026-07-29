@@ -146,10 +146,12 @@ impl Emitter {
 
     pub fn emit_word(&mut self, value: u16) {
         self.output.push_str(&format!(".WORD ${:04X}\n", value));
+        self.byte_count += 2;
     }
 
     pub fn emit_word_label(&mut self, label: &str) {
         self.output.push_str(&format!(".WORD {}\n", label));
+        self.byte_count += 2;
     }
 
     pub fn emit_byte(&mut self, value: u8) {

@@ -270,6 +270,17 @@ fn measure(
     e.memory_layout = layout.clone();
     e.set_current_function(name.clone());
 
+    // The reset prologue (stack-pointer init + static initializers) is emitted
+    // by the real pass before anything else; it must be measured too. Shared
+    // helper so the two cannot drift.
+    let is_reset = func
+        .attributes
+        .iter()
+        .any(|attr| matches!(attr, FnAttribute::Reset));
+    if is_reset {
+        super::item::emit_reset_prologue(&mut e, info);
+    }
+
     if is_interrupt {
         e.emit_inst("PHA", "");
         e.emit_inst("TXA", "");

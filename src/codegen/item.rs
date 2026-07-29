@@ -175,6 +175,13 @@ fn generate_function(
     };
     emitter.emit_org(function_addr);
 
+    // Size-integrity check (see the end of this function): the allocator
+    // reserved `function_size` bytes from the measuring pass. If the real pass
+    // emits more, the next allocation overlaps this function's tail — the
+    // failure mode this catches is silent binary corruption, so it is a hard
+    // internal error, not a warning.
+    let bytes_before = emitter.byte_count();
+
     // Record this allocation for conflict detection
     section_alloc.record_allocation(
         name.clone(),
@@ -245,13 +252,7 @@ fn generate_function(
         .iter()
         .any(|attr| matches!(attr, FnAttribute::Reset));
     if is_reset {
-        emitter.emit_comment("Initialize software stack pointer for parameter preservation");
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("STA", "$FF"); // Stack pointer at $FF, stack at $0200-$02FF
-
-        // Mutable statics live in RAM, which holds garbage at power-on, so their
-        // declared initial values must be written here before any user code runs.
-        emit_static_inits(emitter, info);
+        emit_reset_prologue(emitter, info);
     }
 
     // Set current function context for tail call detection and inline asm scoping
@@ -346,7 +347,35 @@ fn generate_function(
         }
     }
 
+    // The measuring pass reserved `function_size` bytes for everything above.
+    // Emitting more means the two passes disagree about the function's size,
+    // and the next function's .ORG lands inside this one's tail.
+    let emitted = emitter.byte_count() - bytes_before;
+    if emitted > function_size {
+        return Err(CodegenError::Internal(format!(
+            "function '{}' emitted {} bytes but was measured at {} — \
+             the measuring pass (placement::measure) does not match the real one",
+            name, emitted, function_size
+        )));
+    }
+
     Ok(())
+}
+
+/// The reset-handler prologue: software-stack pointer init ($FF points at the
+/// $0200 page), then the mutable-static initializers (RAM is undefined at
+/// power-on, so their declared values must be written before any user code
+/// runs). Shared between the measuring pass (`placement::measure`) and the
+/// real one — if the two ever drift, the allocator hands out addresses the
+/// emitted bytes overflow, and the next function is spliced into this one.
+pub(crate) fn emit_reset_prologue(emitter: &mut Emitter, info: &ProgramInfo) {
+    emitter.emit_comment("Initialize software stack pointer for parameter preservation");
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("STA", "$FF"); // Stack pointer at $FF, stack at $0200-$02FF
+
+    // Mutable statics live in RAM, which holds garbage at power-on, so their
+    // declared initial values must be written here before any user code runs.
+    emit_static_inits(emitter, info);
 }
 
 /// Write each mutable static's declared initial value into its RAM location.
