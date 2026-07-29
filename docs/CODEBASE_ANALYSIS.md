@@ -6,7 +6,7 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (20 remaining — the two placement-measurement criticals below were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (19 remaining — the two placement-measurement criticals and the math-JSR tracking critical below were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest.
@@ -17,13 +17,12 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Put register invalidation on `JSR` inside `emit_inst` (or invalidate after every stdlib math JSR) | CG-C4, H6 class |
-| 2 | Route every `$F0–$F3` use through `TempAllocator`; replace all fallbacks (`unwrap_or(0xF2)`, `$20/$21`) with errors or spills | CG-C3, C5, C6, H3 |
-| 3 | One exhaustive-walker helper for AST recursion; one merged-state struct for the import merge | SE-C2/C5/C6, SE-H1/H2/H3, CG-C7, FE-C2-ish |
-| 4 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
-| 5 | Match-pattern checking against scrutinee type | SE-C7 |
-| 6 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
-| 7 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–6 from regressing |
+| 1 | Route every `$F0–$F3` use through `TempAllocator`; replace all fallbacks (`unwrap_or(0xF2)`, `$20/$21`) with errors or spills | CG-C3, C5, C6, H3 |
+| 2 | One exhaustive-walker helper for AST recursion; one merged-state struct for the import merge | SE-C2/C5/C6, SE-H1/H2/H3, CG-C7, FE-C2-ish |
+| 3 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
+| 4 | Match-pattern checking against scrutinee type | SE-C7 |
+| 5 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
+| 6 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–5 from regressing |
 
 ---
 
@@ -41,9 +40,8 @@ Was: `placement::measure()` reproduced interrupt and function-pointer prologues 
 `binary.rs:292-296` + `:327`/`:349` fall back to `unwrap_or(0xF2)` when the 4-byte high pool is full. `(a+b) + ((c+d) + ((e+f) + (g+h)))` evaluates to `(a+b) + ((e+f) + ((e+f) + (g+h)))` (291 instead of 255, reproduced). Same `unwrap_or` pattern at `binary.rs:718-719, :865, :960, :1036-1037`.
 _Fix:_ spill to the software stack or return `CodegenError`; never substitute a hardcoded address.
 
-**CG-C4. `JSR mul16/div16/mod16` doesn't invalidate register tracking.**
-`binary.rs:794, :932, :1019`. The tracker keeps believing `A == ZeroPage(x)` across the call; `x * y + x` stores the product's low byte as the right operand (p = 2408 instead of 2400, reproduced). u8 mul/div are accidentally safe (loop labels wipe tracking).
-_Fix:_ invalidate after each math JSR — preferably structurally, in `emit_inst` on `JSR` (see CG-H6).
+**~~CG-C4. `JSR mul16/div16/mod16` doesn't invalidate register tracking.~~ FIXED.**
+Was: the tracker kept believing `A == ZeroPage(x)` across the math JSR; `x * y + x` stored the product's low byte as the right operand (2408 instead of 2400). Fixed structurally: `emit_inst` now invalidates all register beliefs on any `JSR`, so no present or future call site can forget (regression tests: `e2e::math16::an_operand_survives_a_{mul16,div16,mod16}_call`).
 
 **CG-C5. Hardcoded `$F0–$F2` scratch collides with allocator-managed uses (three shapes).**
 - `for c in s { arr[1] = c; }` — the foreach stages the string pointer at `$F0/$F1` for the loop's duration (`stmt.rs:1236-1245`); the body's index assignment parks its value at `alloc_high(2)` = `$F0` (`stmt.rs:1511`). Iteration 2 reads through a wild pointer.
@@ -137,7 +135,7 @@ _Fix:_ a real `Stmt::CompoundAssign` node with the address evaluated once, or re
 - **CG-H2. Two peephole passes are flag-unsafe** (`peephole.rs:384-461`): `ORA #$00`/`AND #$FF`/`EOR #$00` and `TAX;TXA` removals don't consult flag liveness. Current codegen never emits the vulnerable sequences, but user `asm {}` flows through the same pipeline.
 - **CG-H3/H4. Silent `$20/$21` fallbacks** in index assignment (`stmt.rs:1511-1515`) and slice materialization (`stmt.rs:1757-1763`) — should be hard errors like the deref-store path.
 - **CG-H5. Matches with ~15–20+ arms emit out-of-range branches** — fails at `flatasm` time (loud, good) but the compiler should invert-over-JMP like it does for `if`.
-- **CG-H6. Tracking invalidation is per-callsite convention, not structural.** CG-C4 is the demonstrated instance; raw `LDX`/`LDY` sites (`unary.rs:163,168`, `literal.rs:42-43`) have the same shape. Invalidate by mnemonic inside `emit_inst`.
+- **CG-H6. Tracking invalidation is per-callsite convention, not structural.** CG-C4 was the demonstrated instance and is fixed (`emit_inst` invalidates on `JSR`); raw `LDX`/`LDY` sites (`unary.rs:163,168`, `literal.rs:42-43`) have the same shape with no live instance demonstrated. Remaining work: invalidate by mnemonic for the load/store class too, or add tracked variants for every load/store and forbid raw ones outside the emitter.
 - **FE-H1. Unary `-`/`!`/`~` don't bind postfix operators** (`parser/expr.rs:173-190`) — `-p.x` fails with "cannot apply '-' to type P". Self-acknowledged in a comment; `&`/`*` already do it right via `parse_postfix_with`.
 - **FE-H2. Array sizes never range-checked** — `[u8; 4294967296]` hangs the compiler >2 min (static) or silently truncates to 0 bytes (local). The BSS-overflow machinery exists; the check must happen before materialization.
 - **FE-H3. One statement error cascades into thousands.** Recovery exists only at item level; `synchronize()` stops *inside* the function body. Add statement-level recovery in `parse_block` and cap total errors.

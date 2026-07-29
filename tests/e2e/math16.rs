@@ -270,3 +270,69 @@ fn div16_reads_actual_parameter_frame_address() {
         "div16 must not read parameters from the stale fixed $80/$82 addresses"
     );
 }
+
+// ============================================================================
+// Register tracking across the stdlib JSR
+//
+// `x * y + x` used to store the product's low byte as the second `x`: the
+// tracker believed A still held x's low byte from the operand marshal across
+// `JSR mul16`, and elided the reload. Calls now invalidate every cached
+// belief structurally, in `emit_inst`.
+// ============================================================================
+
+#[test]
+fn an_operand_survives_a_mul16_call() {
+    // 300 * 7 + 300 = 2400; the stale-belief version produced 2408.
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let x: u16 = 300;
+            let y: u16 = 7;
+            let p: u16 = x * y + x;
+            LO = p.low;
+            HI = p.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0900), 2400);
+}
+
+#[test]
+fn an_operand_survives_a_div16_call() {
+    // 2100 / 7 + 7 = 307.
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let x: u16 = 2100;
+            let y: u16 = 7;
+            let p: u16 = x / y + y;
+            LO = p.low;
+            HI = p.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0900), 307);
+}
+
+#[test]
+fn an_operand_survives_a_mod16_call() {
+    // 2101 % 7 + 2101: 2101 % 7 = 1, so 2102.
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let x: u16 = 2101;
+            let y: u16 = 7;
+            let p: u16 = x % y + x;
+            LO = p.low;
+            HI = p.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0900), 2102);
+}

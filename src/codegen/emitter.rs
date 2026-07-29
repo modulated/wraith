@@ -127,6 +127,15 @@ impl Emitter {
 
         // Track if this is a terminal instruction (RTS, RTI, or unconditional JMP)
         self.last_was_terminal = matches!(mnemonic, "RTS" | "RTI" | "JMP");
+
+        // No belief survives a call: the callee's body is not visible here, and
+        // every register and memory location the tracker mirrors may change. The
+        // instruction itself touching nothing is not the point — the function it
+        // transfers to is (this is the structural form of the bug behind
+        // 0e2cd37, and of `x * y + x` eliding the reload of x after JSR mul16).
+        if mnemonic == "JSR" {
+            self.reg_state.invalidate_all();
+        }
     }
 
     pub fn emit_comment(&mut self, comment: &str) {
