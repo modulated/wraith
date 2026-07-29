@@ -1,5 +1,6 @@
 //! End-to-end tests for functions
 
+use crate::common::exec::run;
 use crate::common::*;
 
 #[test]
@@ -54,4 +55,26 @@ fn function_return_value() {
 
     assert_asm_contains(&asm, "JSR get_value");
     assert_asm_contains(&asm, "RTS");
+}
+
+#[test]
+fn a_tail_recursive_function_can_be_address_taken() {
+    // The tail-call loop label used to sit *before* the function-pointer
+    // prologue, so each "iteration" re-copied the $E0 staging block over the
+    // freshly updated parameter: the loop reloaded the original argument
+    // forever. Called through a pointer, count(5) must actually reach 0.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        fn count(n: u8) -> u8 {
+            if n == 0 { return 0; }
+            return count(n - 1);
+        }
+        #[reset]
+        fn main() {
+            let f: fn(u8) -> u8 = count;
+            OUT = f(5);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0);
 }

@@ -54,9 +54,8 @@ An enum-typed local now gets a per-declaration data block in the same call-graph
 `stmt.rs:1274` emits `CPX #$12C` for a 300-element array; `asm.rs:544` truncates to `#$2C` (44 iterations, confirmed in the binary). u16-element arrays of 128–255 elements wrap the scaled offset and re-read elements 0..n-129.
 _Fix:_ reject `for x in arr` above 255 elements (and byte-size > 255 for scaled paths) at sema; make flatasm range-check immediates instead of truncating.
 
-**CG-C10. Address-taken + tail-recursive function: loop restart jumps into the `$E0`-staging prologue — infinite loop.**
-`item.rs:267-270` emits `{name}_loop_start` before the function-pointer prologue (`item.rs:299-315`). The tail update writes new args into frame params, jumps to the label, and the prologue immediately overwrites them with the stale `$E0` staging (reproduced: `count` loops forever on its original argument).
-_Fix:_ emit the loop-start label after the staging prologue.
+**~~CG-C10. Address-taken + tail-recursive function: loop restart jumps into the `$E0`-staging prologue — infinite loop.~~ FIXED.**
+The tail-call loop label is now emitted *after* the function-pointer prologue, so an iteration no longer re-copies the stale `$E0` staging over the freshly updated parameters (regression test: `e2e::functions::a_tail_recursive_function_can_be_address_taken`, which looped forever before).
 
 **CG-C11. Static zero-fill writes past the array for sizes > 256 not a multiple of 256.**
 `item.rs:377-392`: a 300-byte static zeroes 512 bytes (reproduced). Self-heals in the default layout but destroys anything a custom `wraith.toml` places after it.

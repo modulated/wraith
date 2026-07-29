@@ -258,17 +258,18 @@ fn generate_function(
     // Set current function context for tail call detection and inline asm scoping
     emitter.set_current_function(name.clone());
 
-    // Check if function has tail recursion - if so, emit loop restart label
+    // Check if function has tail recursion - if so, emit loop restart label.
+    // The label goes *after* the prologues: the tail-call update writes the
+    // new argument values into the frame params and jumps here, so anything
+    // that rewrites params must not run again. In particular the
+    // function-pointer prologue below copies the $E0 staging block over the
+    // params — jumping in before it reloaded the *original* arguments on
+    // every iteration and the loop never progressed.
     let has_tail_recursion = info
         .function_metadata
         .get(name)
         .map(|m| m.has_tail_recursion)
         .unwrap_or(false);
-
-    if has_tail_recursion {
-        emitter.emit_comment("Tail recursive function - loop optimization enabled");
-        emitter.emit_label(&format!("{}_loop_start", name));
-    }
 
     // Check if this is an interrupt handler
     // Note: Reset is NOT an interrupt - it's the entry point, so no prologue/epilogue
@@ -313,6 +314,11 @@ fn generate_function(
             emitter.emit_inst("STA", &format!("${:02X}", frame.base + i));
         }
         emitter.invalidate_registers();
+    }
+
+    if has_tail_recursion {
+        emitter.emit_comment("Tail recursive function - loop optimization enabled");
+        emitter.emit_label(&format!("{}_loop_start", name));
     }
 
     // Body
