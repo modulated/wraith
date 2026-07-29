@@ -32,6 +32,12 @@ fn determine_match_strategy(arms: &[crate::ast::MatchArm], info: &ProgramInfo) -
     // Collect enum variant tags from the patterns
     let mut enum_tags: Vec<u8> = Vec::new();
     let mut wildcard_arm_index: Option<usize> = None;
+    // The widest tag range of any enum named in the patterns. The dispatch
+    // table is indexed by the *runtime* tag, so it must span the enum's whole
+    // range, not just the tags that happen to have arms: a variant without an
+    // arm whose tag exceeds every armed tag would otherwise read past the end
+    // of the table into whatever bytes follow it.
+    let mut enum_def_max_tag: u8 = 0;
 
     for (i, arm) in arms.iter().enumerate() {
         match &arm.pattern.node {
@@ -43,6 +49,9 @@ fn determine_match_strategy(arms: &[crate::ast::MatchArm], info: &ProgramInfo) -
                     && let Some(variant_info) = enum_def.get_variant(&variant.node)
                 {
                     enum_tags.push(variant_info.tag);
+                    if let Some(def_max) = enum_def.variants.iter().map(|v| v.tag).max() {
+                        enum_def_max_tag = enum_def_max_tag.max(def_max);
+                    }
                 }
             }
             Pattern::Wildcard | Pattern::Variable(_) => {
@@ -55,7 +64,7 @@ fn determine_match_strategy(arms: &[crate::ast::MatchArm], info: &ProgramInfo) -
     // Use jump table for enum matches with 3+ arms
     // This avoids the BEQ branch distance limitation for large match bodies
     if !enum_tags.is_empty() && arms.len() >= 3 {
-        let max_tag = enum_tags.iter().copied().max().unwrap_or(0);
+        let max_tag = enum_def_max_tag;
 
         // Dispatch doubles the tag into an 8-bit index (`ASL; TAX`), so a tag
         // above 127 wraps and selects the wrong entry. The table is also dense,

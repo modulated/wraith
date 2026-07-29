@@ -411,7 +411,53 @@ fn an_interrupt_handler_can_be_pinned() {
 //
 // The allocator reserves each function's *measured* size, so anything the
 // measuring pass under-counts is bytes the next function's .ORG lands on top
-// of.
+// of. Two omissions lived here: jump-table .WORDs added nothing to the count
+// (the emitter never counted them), and the reset handler's static
+// initializers were not reproduced at all. Both corrupted the binary
+// silently; `generate_function` now also hard-errors if the real pass ever
+// emits more than was measured.
+// ============================================================================
+
+#[test]
+fn a_match_jump_table_is_counted_in_the_functions_size() {
+    // Eight arms is a 16-byte table — past the 10-byte measurement slack — so
+    // before the fix, `filler` was placed inside `pick`'s match body and the
+    // top two arms jumped into filler/leftover bytes.
+    let src = r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        const R3: addr = 0x0903;
+        enum E { A, B, C, D, F, G, H, I }
+        fn pick(x: E) -> u8 {
+            match x {
+                E::A => { return 1; }
+                E::B => { return 2; }
+                E::C => { return 3; }
+                E::D => { return 4; }
+                E::F => { return 5; }
+                E::G => { return 6; }
+                E::H => { return 7; }
+                _ => { return 9; }
+            }
+        }
+        fn filler() -> u8 { return 0xAA; }
+        #[reset]
+        fn main() {
+            R0 = pick(E::G);
+            R1 = pick(E::H);
+            R2 = filler();
+            R3 = pick(E::I);   // no arm: the wildcard table entry, the last one
+            loop {}
+        }
+    "#;
+    let mut e = run(src);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (6, 7, 0xAA, 9),
+        "every table entry, the wildcard included, and the following function survive placement"
+    );
+}
 
 #[test]
 fn reset_handler_static_initializers_are_counted_in_its_size() {

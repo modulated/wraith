@@ -6,25 +6,24 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code**. They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (20 remaining — the two placement-measurement criticals below were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest.
-3. **Function-size measurement and emission can drift apart.** Two independent overlap corruptions (jump tables, reset-handler static inits) exist because `placement.rs::measure()` doesn't emit exactly what `generate_function` emits. There is no final "emitted bytes == measured bytes" assertion, which would have caught both.
+3. **Function-size measurement and emission can drift apart.** Two independent overlap corruptions (jump tables, reset-handler static inits) existed because `placement.rs::measure()` didn't emit exactly what `generate_function` emits. *(Fixed: a shared prologue helper, word counting in the emitter, and a hard "emitted bytes > measured bytes" internal error now guard this class.)*
 4. **Docs and implementation drift in both directions.** The spec documents features that don't work (shadowing, multidimensional arrays), misses features that do (struct-variant matching), and several verbatim spec examples don't compile.
 
 **Recommended fix order** (details in each section):
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Assert emitted size == measured size in placement; share one prologue helper between `measure()` and `generate_function` | CG-C1, CG-C2 and the whole class |
-| 2 | Put register invalidation on `JSR` inside `emit_inst` (or invalidate after every stdlib math JSR) | CG-C4, H6 class |
-| 3 | Route every `$F0–$F3` use through `TempAllocator`; replace all fallbacks (`unwrap_or(0xF2)`, `$20/$21`) with errors or spills | CG-C3, C5, C6, H3 |
-| 4 | One exhaustive-walker helper for AST recursion; one merged-state struct for the import merge | SE-C2/C5/C6, SE-H1/H2/H3, CG-C7, FE-C2-ish |
-| 5 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
-| 6 | Match-pattern checking against scrutinee type | SE-C7 |
-| 7 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
-| 8 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–7 from regressing |
+| 1 | Put register invalidation on `JSR` inside `emit_inst` (or invalidate after every stdlib math JSR) | CG-C4, H6 class |
+| 2 | Route every `$F0–$F3` use through `TempAllocator`; replace all fallbacks (`unwrap_or(0xF2)`, `$20/$21`) with errors or spills | CG-C3, C5, C6, H3 |
+| 3 | One exhaustive-walker helper for AST recursion; one merged-state struct for the import merge | SE-C2/C5/C6, SE-H1/H2/H3, CG-C7, FE-C2-ish |
+| 4 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
+| 5 | Match-pattern checking against scrutinee type | SE-C7 |
+| 6 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
+| 7 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–6 from regressing |
 
 ---
 
@@ -32,13 +31,11 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 ### Codegen (src/codegen/)
 
-**CG-C1. Match jump tables invisible to size measurement; next function overwrites the match body.**
-`emitter.rs:147-153` — `emit_word`/`emit_word_label` never bump `byte_count`; `placement.rs:254-310` measures via `byte_count + 10`. A jump table with >5 entries overflows the slack and the next function's `.ORG` lands inside the match. Reproduced: an 8-arm enum match measured 65 bytes, was 71; the following function's bytes were spliced into arms 6–7. `flatasm` overwrites silently.
-_Fix:_ count 2 bytes in both emitters; audit `emit_raw`/`.BYTE` mid-function paths for the same omission; see structural fix #1.
+**~~CG-C1. Match jump tables invisible to size measurement; next function overwrites the match body.~~ FIXED.**
+Was: `emit_word`/`emit_word_label` never bumped `byte_count`, so `placement::measure()` under-measured and the next function's `.ORG` landed inside the match. Fixed by counting both words in the emitter and adding a hard emitted-vs-measured assertion in `generate_function` (regression test: `e2e::placement::a_match_jump_table_is_counted_in_the_functions_size`). The same test surfaced a second, independent bug — the table was sized by the largest *armed* tag, so a variant with no arm and a higher tag read past the table; `determine_match_strategy` now uses the enum definition's maximum tag.
 
-**CG-C2. Reset-handler static initializers not measured — same overlap corruption.**
-`placement.rs::measure()` reproduces interrupt and function-pointer prologues but not the reset prologue (`item.rs:247-255` + `emit_static_inits`). A `static` with a nontrivial initializer breaks the layout whenever `main` isn't the last function. Reproduced: `filler` `.ORG`'d into the middle of main's init stream; reset executes `STA $ABA9; RTS`.
-_Fix:_ share one "emit prologue" helper between measure and generate; add the size assertion.
+**~~CG-C2. Reset-handler static initializers not measured — same overlap corruption.~~ FIXED.**
+Was: `placement::measure()` reproduced interrupt and function-pointer prologues but not the reset prologue (`item.rs:247-255` + `emit_static_inits`). Fixed by sharing one `emit_reset_prologue` helper between the measuring and real passes (regression test: `e2e::placement::reset_handler_static_initializers_are_counted_in_its_size`).
 
 **CG-C3. u16 left-save pool exhaustion silently reuses a live ancestor's slot.**
 `binary.rs:292-296` + `:327`/`:349` fall back to `unwrap_or(0xF2)` when the 4-byte high pool is full. `(a+b) + ((c+d) + ((e+f) + (g+h)))` evaluates to `(a+b) + ((e+f) + ((e+f) + (g+h)))` (291 instead of 255, reproduced). Same `unwrap_or` pattern at `binary.rs:718-719, :865, :960, :1036-1037`.
@@ -214,5 +211,5 @@ _Fix:_ a real `Stmt::CompoundAssign` node with the address evaluated once, or re
 1. **CI (highest-value process change).** A single GitHub Actions workflow running `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and a `cargo fuzz run` smoke pass would gate everything above.
 2. **Compile the spec's examples as tests.** A doc-test-style harness that extracts ```rust blocks from specification.md and asserts they compile would have caught 8 of the HIGH doc bugs automatically, permanently.
 3. **Sema-level fuzzing.** Point the existing cargo-fuzz harness at `sema::analyze` and at const-eval (string slicing in particular).
-4. **Add a size-integrity assertion in codegen.** "Emitted bytes for function F == measured bytes" as a hard internal error converts the whole measurement-drift class from silent corruption to a loud compiler bug at first occurrence.
+4. ~~Add a size-integrity assertion in codegen.~~ **Done** — `generate_function` now hard-errors when the real pass emits more than the measuring pass reserved.
 5. **Error-message golden tests** following `import_diagnostics.rs`'s exact-position style for the top ~20 diagnostics.
