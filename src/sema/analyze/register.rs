@@ -235,6 +235,23 @@ impl SemanticAnalyzer {
         // meets a `.WORD` naming a label nobody emitted.
         self.record_initializer_refs(&name, &stat.init);
 
+        // A struct or enum `const` has no home: it cannot fold into const_env,
+        // and codegen emits ROM data only for const arrays and strings, so the
+        // declaration would exist but its bytes never would — every field read
+        // hits the Absolute(0) sentinel. Say so, rather than emitting nothing.
+        if !stat.mutable
+            && let Type::Named(name) = &declared_ty
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "a const cannot have struct or enum type '{}'; only scalars, arrays and \
+                     strings are supported. Use a `static` (kept in RAM) or a const array",
+                    name
+                ),
+                span: stat.ty.span,
+            });
+        }
+
         // If it's a non-mutable static (const), evaluate it and add to const_env
         if !stat.mutable {
             match eval_const_expr_with_env(&stat.init, &self.const_env) {
@@ -262,8 +279,21 @@ impl SemanticAnalyzer {
                     }
                     self.const_env.insert(name.clone(), val);
                 }
-                Err(_) => {
-                    // If it's not a constant expression, that's okay - just don't add to const_env
+                Err(err) => {
+                    // Aggregate consts (arrays) are fine unevaluated: their data
+                    // is emitted to ROM by codegen. A scalar const has no other
+                    // path — if it doesn't fold, it has no value anywhere, and
+                    // every use reads the Absolute(0) sentinel. Reject it.
+                    if declared_ty.is_primitive() || matches!(&declared_ty, Type::String) {
+                        return Err(SemaError::Custom {
+                            message: format!(
+                                "const '{}' must have a constant initializer ({}); \
+                                 only arrays may reference runtime data",
+                                name, err
+                            ),
+                            span: stat.init.span,
+                        });
+                    }
                 }
             }
         }

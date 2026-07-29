@@ -27,6 +27,24 @@ impl SemanticAnalyzer {
             }
             Expr::Unary { operand, .. } => self.contains_addr_reference(operand),
             Expr::Paren(inner) => self.contains_addr_reference(inner),
+            // Every form below wraps subexpressions that may hide an addr
+            // reference — `VIC as u16 + 1` used to fold to the register's
+            // *address* and never read the register at all.
+            Expr::Cast { expr: inner, .. } => self.contains_addr_reference(inner),
+            Expr::Index { object, index } => {
+                self.contains_addr_reference(object) || self.contains_addr_reference(index)
+            }
+            Expr::Field { object, .. } => self.contains_addr_reference(object),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                self.contains_addr_reference(object)
+                    || self.contains_addr_reference(start)
+                    || self.contains_addr_reference(end)
+            }
+            Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner) => {
+                self.contains_addr_reference(inner)
+            }
             _ => false,
         }
     }

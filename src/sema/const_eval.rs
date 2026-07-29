@@ -62,6 +62,31 @@ pub fn eval_const_expr_with_env(
         Expr::Binary { left, op, right } => eval_binary_with_env(left, *op, right, expr.span, env),
         Expr::Unary { op, operand } => eval_unary_with_env(*op, operand, expr.span, env),
         Expr::Paren(inner) => eval_const_expr_with_env(inner, env),
+        // The byte accessors fold through their operand: `.low`/`.high` of a
+        // constant u16 are the constant's bytes (without these, `C.low` on a
+        // `const C: u16` never folded and codegen read the Absolute(0)
+        // sentinel — $0000 — for it).
+        Expr::U16Low(operand) => match eval_const_expr_with_env(operand, env)? {
+            ConstValue::Integer(v) => Ok(ConstValue::Integer(v & 0xFF)),
+            _ => Err(SemaError::Custom {
+                message: ".low requires a constant integer".to_string(),
+                span: expr.span,
+            }),
+        },
+        Expr::U16High(operand) => match eval_const_expr_with_env(operand, env)? {
+            ConstValue::Integer(v) => Ok(ConstValue::Integer((v >> 8) & 0xFF)),
+            _ => Err(SemaError::Custom {
+                message: ".high requires a constant integer".to_string(),
+                span: expr.span,
+            }),
+        },
+        Expr::SliceLen(operand) => match eval_const_expr_with_env(operand, env)? {
+            ConstValue::String(s) => Ok(ConstValue::Integer(s.len() as i64)),
+            _ => Err(SemaError::Custom {
+                message: "only a constant string's length folds at compile time".to_string(),
+                span: expr.span,
+            }),
+        },
         Expr::Cast {
             expr: inner,
             target_type,

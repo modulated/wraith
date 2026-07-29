@@ -6,6 +6,7 @@ mod aggregate_init;
 mod bcd;
 mod bcd_validation;
 mod complex_features;
+mod consts;
 mod control_flow;
 mod cpu_flags;
 mod dead_code;

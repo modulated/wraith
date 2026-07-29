@@ -643,6 +643,7 @@ fn test_string_slicing_with_concatenation() {
 
 #[test]
 fn test_string_len_property() {
+    // A constant string's length folds at compile time.
     let asm = compile_success(
         r#"
         const MSG: str = "Hello";
@@ -651,7 +652,17 @@ fn test_string_len_property() {
         }
         "#,
     );
-    // Should access length
+    assert_asm_contains(&asm, "LDA #$05");
+
+    // A runtime string's length goes through the indirect load.
+    let asm = compile_success(
+        r#"
+        fn main() {
+            let msg: str = "Hello";
+            let len: u16 = msg.len;
+        }
+        "#,
+    );
     assert_asm_contains(&asm, "String .len access");
 }
 

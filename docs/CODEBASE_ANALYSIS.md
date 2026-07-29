@@ -6,7 +6,7 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (11 remaining — the placement-measurement pair, the math-JSR tracking bug, the four temp-pool criticals, the three import-merge criticals, and the indirect-call spill bug were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (7 remaining — the placement pair, math-JSR tracking, the temp-pool four, the import-merge three, the indirect-call spill, and four of the five `$0000`-sentinel constants bugs were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest. *(Substantially fixed: all demonstrated sites now allocate, spill, or error — see CG-C3/C5/C6.)*
@@ -17,10 +17,9 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
-| 2 | Match-pattern checking against scrutinee type | SE-C7 |
-| 3 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
-| 4 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–3 from regressing |
+| 1 | Match-pattern checking against scrutinee type | SE-C7 |
+| 2 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
+| 3 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–2 from regressing |
 
 ---
 
@@ -67,20 +66,17 @@ _Fix:_ emit the partial page as a shorter final loop, mirroring `generate_local_
 
 ### Sema (src/sema/)
 
-**SE-C1. `.low`/`.high` on a `const u16` reads `$0000`.**
-`const_eval.rs:56-161` has no accessor-node cases, so the fold never fires; codegen's variable fast-path emits the `Absolute(0)` sentinel. `const C: u16 = 1234; let lo: u8 = C.low;` → `LDA $0000`.
-_Fix:_ teach const-eval the three accessor nodes; and/or reject builtin accessors on `Constant` symbols in sema.
+**~~SE-C1. `.low`/`.high` on a `const u16` reads `$0000`.~~ FIXED.**
+The const evaluator now handles all three accessor nodes (`.low`/`.high` of a constant integer, `.len` of a constant string), so these fold at their use sites (regression test: `e2e::consts::low_and_high_of_a_const_u16_fold_to_its_bytes`).
 
 **~~SE-C2. Using an imported `pub const` scalar reads `$0000`.~~ FIXED.**
 `const_env` is now merged in `process_import`, so imported constants fold at their use sites and `const D: u8 = C + 1` in the importer works (regression test: `e2e::imports::an_imported_scalar_const_has_its_value`).
 
-**SE-C3. A scalar `const` whose initializer doesn't fold is silently accepted; every use reads `$0000`.**
-`register.rs:265-267` — "that's okay, just don't add to const_env" is fine for aggregates, fatal for scalars: no other path gives the constant a value.
-_Fix:_ failed const-eval of a scalar-typed const is a hard `SemaError`.
+**~~SE-C3. A scalar `const` whose initializer doesn't fold is silently accepted; every use reads `$0000`.~~ FIXED.**
+A failed const-eval of a scalar- or string-typed const is now a hard `SemaError` at the declaration; aggregates keep their ROM-data path (regression test: `e2e::consts::a_scalar_const_with_an_unevaluable_initializer_is_rejected`).
 
-**SE-C4. A memory-mapped read hidden under a cast is folded to a compile-time constant.**
-`expr.rs:15-32` (`contains_addr_reference` has no `Cast` arm). `VIC as u16 + 1` emits `LDA #$21 / LDY #$D0` and never reads the register at `$D020`. Also corrupts slice bounds like `arr[0..REG]`.
-_Fix:_ recurse through `Cast` (and audit `Index`/`Field`/`Slice`).
+**~~SE-C4. A memory-mapped read hidden under a cast is folded to a compile-time constant.~~ FIXED.**
+`contains_addr_reference` now recurses through `Cast`, `Index`, `Field`, `Slice`, and the accessor nodes, so `VIC as u16 + 1` reads the register at runtime like `VIC + 1` does (regression test: `e2e::consts::an_addr_read_under_a_cast_is_not_folded_to_its_address`).
 
 **~~SE-C5. Local arrays in imported functions are emitted inline in ROM again.~~ FIXED.**
 `local_arrays` and `array_block_sizes` are now merged, so imported functions' local arrays get RAM blocks like the root module's (regression test: `e2e::imports::a_local_array_in_an_imported_function_lives_in_ram`).
@@ -92,9 +88,8 @@ The merge now covers `accessor_fields`, `resolved_struct_names`, `unreachable_st
 `stmt.rs:142-164`, `expr.rs:229-271`. `match a { B::Z(v) => ... }` with `a: A` compiles (wrong discriminant compare); `match x { 300 => ... }` with `x: u8` compiles and `f(44)` takes the `300` arm (both reproduced).
 _Fix:_ validate enum patterns name the scrutinee's enum; literal/range patterns fit the scrutinee type.
 
-**SE-C8. A bare `const` struct is accepted but never emitted; field reads hit `$0000`.**
-`register.rs:200-304` accepts any type; `item.rs:429-452` emits data only for const arrays/strings. `TBL.b` → `LDA $0002`.
-_Fix:_ reject non-scalar/non-array/non-str consts, or route them through the `sema::init` flattener into DATA.
+**~~SE-C8. A bare `const` struct is accepted but never emitted; field reads hit `$0000`.~~ FIXED.**
+A const of struct or enum type is now rejected at declaration with a pointer to `static` or a const array (regression test: `e2e::consts::a_const_of_struct_type_is_rejected`).
 
 ### Front end
 
