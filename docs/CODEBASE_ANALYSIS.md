@@ -6,7 +6,7 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (5 remaining — 17 were fixed after the audit; see the struck-through entries). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (**all 22 fixed after the audit** — see the struck-through entries; 5 front-end/HIGH items remain open further down). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest. *(Substantially fixed: all demonstrated sites now allocate, spill, or error — see CG-C3/C5/C6.)*
@@ -17,7 +17,7 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Remaining critical: compound-assignment re-evaluation | FE-C2 |
+| 1 | ~~All 22 audit criticals fixed~~ CI + sema-level fuzzer + doc-examples-compiled-in-tests | prevents the next crop |
 | 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps the fixed classes from regressing |
 
 ---
@@ -92,9 +92,8 @@ Both constant-slice sites (`const_eval.rs`, `check_slice` in `analyze/expr.rs`) 
 `const_eval.rs:135` — byte indices into a Rust `String`. `"héllo"[0..2]` panics: `byte index 2 is not a char boundary`.
 _Fix:_ operate on `s.as_bytes()` (6502 strings are bytes anyway — bytes are arguably the *right* semantics) or validate char boundaries with a proper error.
 
-**FE-C2. Compound assignment evaluates the target multiple times.**
-`parser/stmt.rs:483-496` desugars `x += y` by cloning the target. `arr[idx()] += 5;` calls `idx()` three times (reproduced in emitted asm) — a hardware-register read in an lvalue executes 3×.
-_Fix:_ a real `Stmt::CompoundAssign` node with the address evaluated once, or restrict targets to side-effect-free lvalues in sema.
+**~~FE-C2. Compound assignment evaluates the target multiple times.~~ FIXED (by rejection).**
+The desugar still clones the target — semantically invisible for pure targets, but a call in the target ran its side effects three times. Compound-assignment targets containing a call are now a parse error pointing at the bind-first rewrite; pure targets (`arr[i] += 5`, `arr[i + 1] += 1`) keep working (regression tests: `e2e::operators::compound_assignment_*`). A real evaluate-once `Stmt::CompoundAssign` node remains the fuller fix if the restriction chafes.
 
 ---
 

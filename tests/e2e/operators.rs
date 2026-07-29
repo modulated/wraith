@@ -313,3 +313,45 @@ fn u16_comparison_uses_both_bytes() {
         1
     );
 }
+
+// ============================================================================
+// Compound assignment targets
+//
+// `x += y` desugars to `x = x + y`, which evaluates the target twice. A pure
+// target only costs cycles, but a call in the target ran its side effects
+// three times in the emitted code — `arr[idx()] += 5` called idx() for the
+// load, the add, and the store. That shape is a parse error now.
+// ============================================================================
+
+#[test]
+fn compound_assignment_with_a_call_in_the_target_is_rejected() {
+    crate::common::assert_error_contains(
+        r#"
+        fn idx() -> u8 { return 1; }
+        #[reset]
+        fn main() {
+            let arr: [u8; 4] = [0; 4];
+            arr[idx()] += 5;
+            loop {}
+        }
+    "#,
+        "compound assignment would evaluate this call twice",
+    );
+}
+
+#[test]
+fn compound_assignment_through_a_pure_index_still_works() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let arr: [u8; 4] = [10; 4];
+            let i: u8 = 2;
+            arr[i] += 5;
+            arr[i + 1] += 1;
+            OUT = arr[2] + arr[3];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 26);
+}

@@ -482,6 +482,20 @@ impl Parser<'_> {
 
                 // Expand compound assignments: x += y becomes x = x + y
                 let value = if let Some(op) = compound_op {
+                    // The desugar evaluates the target twice. For a pure
+                    // target (a variable, an index chain of pure
+                    // expressions) that is only a few wasted cycles, but a
+                    // call in the target runs its side effects twice —
+                    // `arr[idx()] += 5` called idx() three times in the
+                    // emitted code. Reject that shape loudly instead of
+                    // building evaluate-once machinery for it.
+                    if let Some(call_span) = find_call_span(&expr) {
+                        return Err(ParseError::custom(
+                            call_span,
+                            "compound assignment would evaluate this call twice; \
+                             bind it first, e.g. `let _i = idx(); arr[_i] = arr[_i] + v;`",
+                        ));
+                    }
                     let left_clone = expr.clone();
                     Spanned::new(
                         crate::ast::Expr::Binary {
@@ -508,5 +522,28 @@ impl Parser<'_> {
         self.expect(&Token::Semi)?;
         let span = start.merge(self.previous_span());
         Ok(Spanned::new(Stmt::expr(expr), span))
+    }
+}
+
+/// The span of the first call (direct or indirect) anywhere in an lvalue
+/// chain, if there is one. Used to reject compound assignments whose desugar
+/// would run the call twice.
+fn find_call_span(expr: &crate::ast::Spanned<crate::ast::Expr>) -> Option<crate::ast::Span> {
+    use crate::ast::Expr;
+    match &expr.node {
+        Expr::Call { .. } | Expr::CallIndirect { .. } => Some(expr.span),
+        Expr::Binary { left, right, .. } => find_call_span(left).or_else(|| find_call_span(right)),
+        Expr::Unary { operand, .. } => find_call_span(operand),
+        Expr::Paren(inner) => find_call_span(inner),
+        Expr::Cast { expr: inner, .. } => find_call_span(inner),
+        Expr::Index { object, index } => find_call_span(object).or_else(|| find_call_span(index)),
+        Expr::Field { object, .. } => find_call_span(object),
+        Expr::Slice {
+            object, start, end, ..
+        } => find_call_span(object)
+            .or_else(|| find_call_span(start))
+            .or_else(|| find_call_span(end)),
+        Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner) => find_call_span(inner),
+        _ => None,
     }
 }
