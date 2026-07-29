@@ -57,9 +57,8 @@ _Fix:_ reject `for x in arr` above 255 elements (and byte-size > 255 for scaled 
 **~~CG-C10. Address-taken + tail-recursive function: loop restart jumps into the `$E0`-staging prologue — infinite loop.~~ FIXED.**
 The tail-call loop label is now emitted *after* the function-pointer prologue, so an iteration no longer re-copies the stale `$E0` staging over the freshly updated parameters (regression test: `e2e::functions::a_tail_recursive_function_can_be_address_taken`, which looped forever before).
 
-**CG-C11. Static zero-fill writes past the array for sizes > 256 not a multiple of 256.**
-`item.rs:377-392`: a 300-byte static zeroes 512 bytes (reproduced). Self-heals in the default layout but destroys anything a custom `wraith.toml` places after it.
-_Fix:_ emit the partial page as a shorter final loop, mirroring `generate_local_array_init` (`stmt.rs:2963-2974`).
+**~~CG-C11. Static zero-fill writes past the array for sizes > 256 not a multiple of 256.~~ FIXED.**
+The fill is now one loop for full 256-byte pages plus a shorter loop for the trailing partial page, instead of one loop that ran the partial page's STA for a full 256 iterations (regression tests: `e2e::statics::a_zero_static_larger_than_a_page_does_not_overfill` and `..._of_exactly_one_page_keeps_its_single_loop`).
 
 ### Sema (src/sema/)
 

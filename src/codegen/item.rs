@@ -408,21 +408,39 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
         if len == 0 {
             continue;
         }
-        // Large all-zero blocks: fill with a loop instead of `len` stores.
+        // Large all-zero blocks: fill with loops instead of `len` stores.
+        // Full 256-byte pages share one loop (X wraps through 0, so CPX #$00
+        // is the full-page trip count); the trailing partial page gets its
+        // own, shorter loop. One loop for both used to run the partial page's
+        // STA for a full 256 iterations, zeroing `256 - rem` bytes past the
+        // allocation.
         if len > 8 && init.bytes.iter().all(|b| matches!(b, InitByte::Byte(0))) {
-            let loop_label = emitter.next_label("bssz");
+            let full_pages = len / 256;
+            let rem = len % 256;
             emitter.emit_comment(&format!("{}: zero {} bytes", init.name, len));
             emitter.emit_inst("LDA", "#$00");
-            emitter.emit_inst("LDX", "#$00");
-            emitter.emit_label(&loop_label);
-            for page in 0..len.div_ceil(256) {
-                let base = init.addr as usize + page * 256;
-                emitter.emit_inst("STA", &format!("${:04X},X", base));
+            if full_pages > 0 {
+                let loop_label = emitter.next_label("bssz");
+                emitter.emit_inst("LDX", "#$00");
+                emitter.emit_label(&loop_label);
+                for page in 0..full_pages {
+                    let base = init.addr as usize + page * 256;
+                    emitter.emit_inst("STA", &format!("${:04X},X", base));
+                }
+                emitter.emit_inst("INX", "");
+                emitter.emit_inst("CPX", "#$00");
+                emitter.emit_inst("BNE", &loop_label);
             }
-            emitter.emit_inst("INX", "");
-            let count = if len >= 256 { 0u8 } else { len as u8 };
-            emitter.emit_inst("CPX", &format!("#${:02X}", count));
-            emitter.emit_inst("BNE", &loop_label);
+            if rem > 0 {
+                let loop_label = emitter.next_label("bssz");
+                emitter.emit_inst("LDX", "#$00");
+                emitter.emit_label(&loop_label);
+                let base = init.addr as usize + full_pages * 256;
+                emitter.emit_inst("STA", &format!("${:04X},X", base));
+                emitter.emit_inst("INX", "");
+                emitter.emit_inst("CPX", &format!("#${:02X}", rem as u8));
+                emitter.emit_inst("BNE", &loop_label);
+            }
             emitter.invalidate_registers();
             continue;
         }

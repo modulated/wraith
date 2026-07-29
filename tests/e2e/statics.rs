@@ -3,6 +3,7 @@
 //! BSS (RAM) section and are initialized by the reset handler.
 
 use crate::common::exec::run;
+use crate::common::harness::compile_success;
 
 #[test]
 fn static_scalar_read_write() {
@@ -171,5 +172,43 @@ fn software_stack_page_comes_from_config() {
     assert!(
         asm.contains("$0200,X"),
         "software stack should use the configured page ($0200 by default)"
+    );
+}
+
+#[test]
+fn a_zero_static_larger_than_a_page_does_not_overfill() {
+    // 300 bytes = one full page (CPX #$00 loop over one STA) plus 44 bytes
+    // (CPX #$2C loop). The old single loop ran the partial page's STA for a
+    // full 256 iterations, zeroing 212 bytes past the allocation — harmless
+    // only because later statics are initialized afterwards in the default
+    // layout.
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x0900;
+        static big: [u8; 300] = [0; 300];
+        #[reset]
+        fn main() { OUT = big[44]; loop {} }
+    "#,
+    );
+    assert!(
+        asm.contains("CPX #$2C"),
+        "the partial page must use a 44-count loop:\n{asm}"
+    );
+}
+
+#[test]
+fn a_zero_static_of_exactly_one_page_keeps_its_single_loop() {
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x0900;
+        static big: [u8; 256] = [0; 256];
+        #[reset]
+        fn main() { OUT = big[255]; loop {} }
+    "#,
+    );
+    assert!(asm.contains("CPX #$00"), "full-page loop:\n{asm}");
+    assert!(
+        !asm.contains("bssz_3"),
+        "no partial-page loop needed:\n{asm}"
     );
 }
