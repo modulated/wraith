@@ -652,6 +652,33 @@ impl SemanticAnalyzer {
             }
         };
 
+        // ForEach lowers to an 8-bit counter in X with an 8-bit compare, and
+        // u16 elements scale the offset in a byte: beyond 255 elements (or 127
+        // for u16) the bound or the offset silently wraps — a 300-element
+        // array iterated 44 times, a 200-element u16 array re-reading elements
+        // 0..71. Reject rather than miscompile.
+        if let Type::Array(_, size) = &iterable_ty {
+            let elem_wide = matches!(
+                element_ty,
+                Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+            );
+            let limit = if elem_wide { 127 } else { 255 };
+            if *size > limit {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "cannot iterate a {}-element {} array with `for .. in`: the loop \
+                         counter and offset are 8-bit, so at most {} elements work. Iterate \
+                         a slice of it in two halves, or index it with a `for i in 0..N` \
+                         loop instead",
+                        size,
+                        if elem_wide { "u16-element" } else { "" },
+                        limit
+                    ),
+                    span: iterable.span,
+                });
+            }
+        }
+
         // Determine loop variable type (explicit or inferred from array element type)
         let var_ty = if let Some(ty) = var_type {
             let declared_ty = self.resolve_type(&ty.node)?;

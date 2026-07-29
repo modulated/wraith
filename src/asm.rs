@@ -541,7 +541,17 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                         emit(&mut mem, &mut addr, (delta as i8) as u8);
                     }
                     Mode::Imm | Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY => {
-                        emit(&mut mem, &mut addr, resolve(&labels, &parsed.value)? as u8);
+                        let v = resolve(&labels, &parsed.value)?;
+                        // A byte-mode operand that doesn't fit is almost
+                        // always a bug upstream (a 300-element loop bound, a
+                        // hand-written `#$1234`): truncating it assembles the
+                        // wrong program without a word.
+                        if v > 0xFF {
+                            return Err(format!(
+                                "{mnem} operand {v:#06X} does not fit in a byte (at {instr_addr:#06X})"
+                            ));
+                        }
+                        emit(&mut mem, &mut addr, v as u8);
                     }
                     Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind => {
                         let v = resolve(&labels, &parsed.value)?;

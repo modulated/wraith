@@ -281,3 +281,61 @@ fn match_expression_compatible_arms_unify() {
         300
     );
 }
+
+// ============================================================================
+// ForEach size limits
+//
+// ForEach lowers to an 8-bit counter and offset: past 255 elements (or 127
+// for u16 elements, whose byte offset is the index doubled) the bound or the
+// offset silently wrapped — a 300-element array iterated 44 times, a
+// 200-element u16 array re-reading elements 0..71. Both are errors now.
+// ============================================================================
+
+#[test]
+fn foreach_over_an_array_past_255_elements_is_rejected() {
+    assert_error_contains(
+        r#"
+        static big: [u8; 300] = [0; 300];
+        #[reset]
+        fn main() {
+            let sum: u8 = 0;
+            for x in big { sum = sum + x; }
+            loop {}
+        }
+    "#,
+        "cannot iterate",
+    );
+}
+
+#[test]
+fn foreach_over_a_wide_array_past_127_elements_is_rejected() {
+    assert_error_contains(
+        r#"
+        static big: [u16; 200] = [0; 200];
+        #[reset]
+        fn main() {
+            let sum: u8 = 0;
+            for x in big { sum = sum + x.low; }
+            loop {}
+        }
+    "#,
+        "cannot iterate",
+    );
+}
+
+#[test]
+fn foreach_at_the_limits_still_works() {
+    // 255 u8 elements and 127 u16 elements are the largest that fit.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: [u8; 255] = [2; 255];
+            let count: u8 = 0;
+            for x in a { count = count + 1; }
+            OUT = count;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 255);
+}

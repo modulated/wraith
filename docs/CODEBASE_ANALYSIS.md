@@ -17,7 +17,7 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | Remaining criticals: ForEach >255 elements, address-taken + tail-recursive, static zero-fill overrun, const string slice panic, compound-assignment re-evaluation | CG-C9, C10, C11, FE-C1, FE-C2 |
+| 1 | Remaining criticals: const string slice panic, compound-assignment re-evaluation | FE-C1, FE-C2 |
 | 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps the fixed classes from regressing |
 
 ---
@@ -50,8 +50,8 @@ Was: a u16 op whose right side is a vtable call took the "$F0 is safe" fast path
 **~~CG-C8. Runtime-constructed enums are pointers into shared scratch — any two live enum values alias.~~ FIXED.**
 An enum-typed local now gets a per-declaration data block in the same call-graph-colored RAM region local arrays use (sema `enum_blocks`, laid out by `finalize_frames`, merged across imports), and binding — both `let` and reassignment — copies the constructed bytes into it. The variable's slot points at its own block from then on, so `let e1 = mk(1); let e2 = mk(2); match e1` extracts 1, and `a = mk(3)` replaces only `a`. `SymbolInfo` carries a `decl_span` so a use site can find its declaration's block (regression tests: three in `e2e::enums`; two verified to fail with the fix reverted). Note: an enum *parameter* is still a bare pointer — passing `mk(1)` as an argument hands the callee scratch-backed storage; if that proves to matter in practice, the same copy needs to happen in argument marshaling.
 
-**CG-C9. ForEach over large/wide arrays silently miscounts or misindexes.**
-`stmt.rs:1274` emits `CPX #$12C` for a 300-element array; `asm.rs:544` truncates to `#$2C` (44 iterations, confirmed in the binary). u16-element arrays of 128–255 elements wrap the scaled offset and re-read elements 0..n-129.
+**~~CG-C9. ForEach over large/wide arrays silently miscounts or misindexes.~~ FIXED.**
+Sema rejects `for x in arr` past 255 elements (127 for u16 elements) with a message pointing at the workarounds, and the flat assembler now errors on any byte-mode operand that doesn't fit instead of truncating (`LDA #$1234`, a `CPX #$12C` from the next compiler bug of this shape) (regression tests: `e2e::control_flow::foreach_*`).
 _Fix:_ reject `for x in arr` above 255 elements (and byte-size > 255 for scaled paths) at sema; make flatasm range-check immediates instead of truncating.
 
 **~~CG-C10. Address-taken + tail-recursive function: loop restart jumps into the `$E0`-staging prologue — infinite loop.~~ FIXED.**
