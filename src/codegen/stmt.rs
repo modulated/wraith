@@ -1236,31 +1236,12 @@ pub fn generate_stmt(
                 .reg_state
                 .set_x(crate::codegen::regstate::RegisterValue::Immediate(0));
 
-            // For strings, we need to load the length first
-            // For arrays, the size is known at compile time
-            let array_size = if is_string {
-                // For strings, get length at runtime
-                emitter.emit_comment("String iteration - load length");
-                // Load string pointer to temp location
-                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base));
-                emitter.emit_inst("STA", "$F0");
-                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 1));
-                emitter.emit_inst("STA", "$F1");
-                // Load length (first byte)
-                emitter.emit_inst("LDY", "#$00");
-                emitter.emit_inst("LDA", "($F0),Y");
-                // Store length in temp location for comparison
-                emitter.emit_inst("STA", "$F2");
-                None // Will compare against $F2
-            } else if is_slice {
-                // Slice: length is the low byte of the descriptor at base+2
-                // (iteration is bounded to 255 elements). Compare against $F2.
-                emitter.emit_comment("Slice iteration - load length");
-                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 2));
-                emitter.emit_inst("STA", "$F2");
+            // For arrays the size is a compile-time constant. Strings and
+            // slices have a runtime length, staged (with the string pointer)
+            // at the loop *head* below.
+            let array_size = if is_string || is_slice {
                 None
             } else {
-                // For arrays, size is known at compile time
                 match &iterable_ty {
                     crate::sema::types::Type::Array(_, sz) => Some(*sz),
                     _ => {
@@ -1274,9 +1255,28 @@ pub fn generate_stmt(
             // Loop start
             emitter.emit_label(&loop_label);
 
-            // Check if counter (X) >= length
-            if is_string || is_slice {
-                // Compare X against the runtime length parked in $F2
+            // String/slice staging ($F0-$F2) lives only from here to the
+            // element read — never across the body, which is arbitrary code
+            // and may use those bytes itself (an earlier version staged once
+            // before the loop, and a body's index assignment silently
+            // destroyed the string pointer). It is therefore re-staged on
+            // every iteration, which costs a handful of cycles per element.
+            if is_string {
+                // Re-stage the string pointer and read the length prefix.
+                emitter.emit_comment("String iteration - load length");
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base));
+                emitter.emit_inst("STA", "$F0");
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 1));
+                emitter.emit_inst("STA", "$F1");
+                emitter.emit_inst("LDY", "#$00");
+                emitter.emit_inst("LDA", "($F0),Y");
+                emitter.emit_inst("STA", "$F2");
+                emitter.emit_inst("CPX", "$F2");
+            } else if is_slice {
+                // Length is the low byte of the descriptor at base+2
+                // (iteration is bounded to 255 elements).
+                emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 2));
+                emitter.emit_inst("STA", "$F2");
                 emitter.emit_inst("CPX", "$F2");
             } else if let Some(size) = array_size {
                 // Compare X against known array size
@@ -1515,13 +1515,14 @@ fn generate_index_assignment(
     // Step 3: Save the value while the index is evaluated. It cannot live in the
     // shared $20 temp: evaluating a compound index like `a[i + 2]` uses $20 for
     // its own operand, overwriting the value, and the store below would then
-    // write the index expression's operand instead. Take a dedicated slot.
+    // write the index expression's operand instead. Take a dedicated slot —
+    // and if the pool is exhausted, fail loudly: the old $20/$21 fallback was
+    // the very temp the comment above explains cannot hold the value.
     emitter.emit_comment("Save value to temp");
-    let save = emitter.temp_alloc.alloc_high(2);
-    let (save_lo, save_hi) = match save {
-        Some(a) => (a, a + 1),
-        None => (0x20, 0x21),
-    };
+    let save = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in index assignment".to_string())
+    })?;
+    let (save_lo, save_hi) = (save, save + 1);
     emitter.emit_inst("STA", &format!("${:02X}", save_lo));
     if is_multibyte {
         emitter.emit_inst("STY", &format!("${:02X}", save_hi));
@@ -1568,9 +1569,7 @@ fn generate_index_assignment(
                 emitter.emit_inst("STA", &format!("{},Y", array_name));
             }
             emitter.invalidate_registers();
-            if let Some(a) = save {
-                emitter.temp_alloc.free_high(a, 2);
-            }
+            emitter.temp_alloc.free_high(save, 2);
             return Ok(());
         }
 
@@ -1637,9 +1636,7 @@ fn generate_index_assignment(
         ));
     }
 
-    if let Some(a) = save {
-        emitter.temp_alloc.free_high(a, 2);
-    }
+    emitter.temp_alloc.free_high(save, 2);
 
     // This path mutates A/X/Y through raw instructions the register tracker does
     // not follow, so drop all cached register beliefs. Otherwise a following read

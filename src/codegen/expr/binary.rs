@@ -89,14 +89,40 @@ fn generate_string_eq(
         "String equality (==)"
     });
 
-    // Left pointer -> $F0/$F1.
-    generate_expr(left, emitter, info, string_collector)?;
-    emitter.emit_inst("STA", "$F0");
-    emitter.emit_inst("STX", "$F1");
-    // Right pointer -> $F2/$F3.
-    generate_expr(right, emitter, info, string_collector)?;
-    emitter.emit_inst("STA", "$F2");
-    emitter.emit_inst("STX", "$F3");
+    // The two pointers are staged in $F0-$F3 for the compare loop. A call in
+    // the right operand would clobber them from inside the callee (the high
+    // pool is a global namespace the allocator cannot defend across a JSR), so
+    // the left pointer goes to the software stack instead and is re-staged
+    // after the call. A call-free right operand of string type is a variable
+    // or parenthesized one — it touches no pools — so hardcoded staging is
+    // sound there. (This is the same fast-path/spill split as the u16 binary
+    // op above.)
+    if contains_call(&right.node) {
+        // Left pointer (A:X) -> software stack, via the A:Y spill convention.
+        generate_expr(left, emitter, info, string_collector)?;
+        emitter.emit_inst("PHA", ""); // save low byte
+        emitter.emit_inst("TXA", ""); // A = high byte
+        emitter.emit_inst("TAY", ""); // Y = high byte
+        emitter.emit_inst("PLA", ""); // A = low byte
+        emitter.spill_scalar(2);
+        // Right pointer -> $F2/$F3.
+        generate_expr(right, emitter, info, string_collector)?;
+        emitter.emit_inst("STA", "$F2");
+        emitter.emit_inst("STX", "$F3");
+        // Re-stage the left pointer at $F0/$F1.
+        emitter.reload_scalar(2); // A = low, Y = high
+        emitter.emit_inst("STA", "$F0");
+        emitter.emit_inst("STY", "$F1");
+    } else {
+        // Left pointer -> $F0/$F1.
+        generate_expr(left, emitter, info, string_collector)?;
+        emitter.emit_inst("STA", "$F0");
+        emitter.emit_inst("STX", "$F1");
+        // Right pointer -> $F2/$F3.
+        generate_expr(right, emitter, info, string_collector)?;
+        emitter.emit_inst("STA", "$F2");
+        emitter.emit_inst("STX", "$F3");
+    }
 
     let loop_label = emitter.next_label("streq_loop");
     let equal_label = emitter.next_label("streq_eq");
@@ -295,6 +321,12 @@ pub(super) fn generate_binary(
         None
     };
 
+    // High pool exhausted (two u16 ancestor saves already live): fall back to
+    // the software-stack spill. A hardcoded fallback address would be a live
+    // ancestor's own save slot — `(a+b) + ((c+d) + ((e+f) + (g+h)))` used to
+    // silently evaluate `(e+f)` twice and `(c+d)` never.
+    let needs_spill = needs_spill || (use_stack && is_u16 && left_save_addr.is_none());
+
     if use_stack && needs_spill {
         // Right operand contains a call: spill the left operand across it.
         let spill_size = if is_u16 { 2 } else { 1 };
@@ -323,8 +355,12 @@ pub(super) fn generate_binary(
         generate_expr(left, emitter, info, string_collector)?;
 
         if is_u16 {
-            // 2a. For u16: Save BOTH bytes to allocated temp storage
-            let save_addr = left_save_addr.unwrap_or(0xF2); // Fallback to hardcoded if alloc failed
+            // 2a. For u16: Save BOTH bytes to allocated temp storage. The slot
+            // is provably present: allocation failure above routed us to the
+            // spill path instead.
+            let save_addr = left_save_addr.ok_or_else(|| {
+                CodegenError::Internal("u16 left-operand save slot missing".to_string())
+            })?;
             emitter.emit_inst("STA", &format!("${:02X}", save_addr));
             emitter.emit_inst("STY", &format!("${:02X}", save_addr + 1));
         } else {
@@ -346,14 +382,14 @@ pub(super) fn generate_binary(
         // 5. Restore left operand
         if is_u16 {
             // 5a. For u16: Load BOTH bytes from allocated temp storage
-            let save_addr = left_save_addr.unwrap_or(0xF2);
+            let save_addr = left_save_addr.ok_or_else(|| {
+                CodegenError::Internal("u16 left-operand save slot missing".to_string())
+            })?;
             emitter.emit_inst("LDA", &format!("${:02X}", save_addr));
             emitter.emit_inst("LDY", &format!("${:02X}", save_addr + 1));
             emitter.reg_state.invalidate_all();
             // Free the temp storage
-            if left_save_addr.is_some() {
-                emitter.temp_alloc.free_high(save_addr, 2);
-            }
+            emitter.temp_alloc.free_high(save_addr, 2);
         } else {
             // 5b. For u8: Transfer from Y -> A
             emitter.emit_inst("TYA", "");
@@ -714,9 +750,14 @@ fn generate_multiply_u8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     //     multiplicand <<= 1
     //     multiplier >>= 1
 
-    // Allocate temp storage
-    let multiplicand = emitter.temp_alloc.alloc_high(1).unwrap_or(0xF0);
-    let result_addr = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x22);
+    // Allocate temp storage. No hardcoded fallback: an exhausted pool means a
+    // live value already occupies whatever address we'd guess.
+    let multiplicand = emitter.temp_alloc.alloc_high(1).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in u8 multiply".to_string())
+    })?;
+    let result_addr = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in u8 multiply".to_string())
+    })?;
     let temp = emitter.memory_layout.temp_reg();
 
     let loop_label = emitter.next_label("ml");
@@ -861,8 +902,11 @@ fn generate_divide(
     // Divide u8 A / TEMP using repeated subtraction
     // Result (quotient) in A
 
-    // Allocate temp storage
-    let quotient_addr = emitter.temp_alloc.alloc_primary(2).unwrap_or(0x22);
+    // Allocate temp storage. No hardcoded fallback: an exhausted pool means a
+    // live value already occupies whatever address we'd guess.
+    let quotient_addr = emitter.temp_alloc.alloc_primary(2).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in u8 divide".to_string())
+    })?;
     let dividend_addr = quotient_addr + 1;
 
     let loop_label = emitter.next_label("dl");
@@ -956,8 +1000,11 @@ fn generate_modulo(
     // Modulo A % TEMP using repeated subtraction
     // Result (remainder) in A
 
-    // Allocate temp storage
-    let dividend_addr = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x23);
+    // Allocate temp storage. No hardcoded fallback: an exhausted pool means a
+    // live value already occupies whatever address we'd guess.
+    let dividend_addr = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in u8 modulo".to_string())
+    })?;
 
     let loop_label = emitter.next_label("md");
     let end_label = emitter.next_label("mx");
@@ -1033,8 +1080,12 @@ fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let temp = emitter.memory_layout.temp_reg(); // divisor
-    let divd = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x26);
-    let sign = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x27);
+    let divd = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in i8 divide".to_string())
+    })?;
+    let sign = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in i8 divide".to_string())
+    })?;
 
     // Save dividend, then compute result sign = dividend ⊕ divisor (bit 7).
     emitter.emit_inst("STA", &format!("${:02X}", divd));
@@ -1067,7 +1118,9 @@ fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 fn generate_modulo_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let temp = emitter.memory_layout.temp_reg(); // divisor
-    let divd = emitter.temp_alloc.alloc_primary(1).unwrap_or(0x26);
+    let divd = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in i8 modulo".to_string())
+    })?;
 
     // Save the dividend; its sign becomes the remainder's sign.
     emitter.emit_inst("STA", &format!("${:02X}", divd));

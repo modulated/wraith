@@ -134,19 +134,28 @@ pub(super) fn generate_index(
             emitter.emit_comment("Skip 1-byte length header to access character data");
         }
 
+        // The pointer is staged across the index expression, which is
+        // arbitrary code: it must come from the allocator so a nested user
+        // (`.len`, u8 multiply, an enclosing index assignment's parked value)
+        // gets different bytes. The old hardcoded $F0/$F1 collided with all
+        // three.
+        let stage = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+            CodegenError::Internal("temporary storage exhausted in string index".to_string())
+        })?;
+
         // Get string pointer
         generate_expr(object, emitter, info, string_collector)?;
-        emitter.emit_inst("STA", "$F0");
-        emitter.emit_inst("STX", "$F1");
+        emitter.emit_inst("STA", &format!("${:02X}", stage));
+        emitter.emit_inst("STX", &format!("${:02X}", stage + 1));
 
         // Skip length prefix (add 1 to pointer for u8 length)
         if emitter.is_verbose() {
             emitter.emit_comment("Add 1 to pointer to skip u8 length prefix");
         }
         let skip_label = emitter.next_label("si");
-        emitter.emit_inst("INC", "$F0");
+        emitter.emit_inst("INC", &format!("${:02X}", stage));
         emitter.emit_inst("BNE", &skip_label);
-        emitter.emit_inst("INC", "$F1");
+        emitter.emit_inst("INC", &format!("${:02X}", stage + 1));
         emitter.emit_label(&skip_label);
 
         // Get index in Y
@@ -154,8 +163,9 @@ pub(super) fn generate_index(
         emitter.emit_inst("TAY", "");
 
         // Load byte
-        emitter.emit_inst("LDA", "($F0),Y");
+        emitter.emit_inst("LDA", &format!("(${:02X}),Y", stage));
         emitter.reg_state.modify_a();
+        emitter.temp_alloc.free_high(stage, 2);
 
         return Ok(());
     }
@@ -700,18 +710,25 @@ pub(crate) fn emit_array_struct_field_indexed(
                 ));
             }
             emitter.emit_comment("Array-of-struct indexed field write");
-            // Evaluate the value and park it in the arg pool ($F4/$F5), which the
-            // index expression below does not touch, then compute the element
-            // offset into Y and store.
+            // Evaluate the value and park it in the arg pool *allocated*, so a
+            // call in the index expression — whose own argument staging comes
+            // from the same pool — is handed different bytes. The old comment
+            // asserted "the index expression below does not touch" $F4/$F5
+            // without reserving them; `ps[ident(1)].x = 42` stored 1.
+            let park = emitter.temp_alloc.alloc_arg(2).ok_or_else(|| {
+                CodegenError::Internal(
+                    "temporary storage exhausted in array-of-struct field write".to_string(),
+                )
+            })?;
             generate_expr(val, emitter, info, string_collector)?;
-            emitter.emit_inst("STA", "$F4");
+            emitter.emit_inst("STA", &format!("${:02X}", park));
             if is_multibyte {
                 let hi = if field_high_byte_in_x(&finfo.ty) {
                     "STX"
                 } else {
                     "STY"
                 };
-                emitter.emit_inst(hi, "$F5");
+                emitter.emit_inst(hi, &format!("${:02X}", park + 1));
             }
             // The value now sits in A but was just stashed; drop register
             // tracking so the index load below isn't wrongly elided.
@@ -719,12 +736,13 @@ pub(crate) fn emit_array_struct_field_indexed(
             generate_expr(index, emitter, info, string_collector)?;
             emit_scale_index(emitter, elem_size);
             emitter.emit_inst("TAY", "");
-            emitter.emit_inst("LDA", "$F4");
+            emitter.emit_inst("LDA", &format!("${:02X}", park));
             emitter.emit_inst("STA", &format!("{},Y", field.operand_abs(0)));
             if is_multibyte {
-                emitter.emit_inst("LDA", "$F5");
+                emitter.emit_inst("LDA", &format!("${:02X}", park + 1));
                 emitter.emit_inst("STA", &format!("{},Y", field.operand_abs(1)));
             }
+            emitter.temp_alloc.free_arg(park, 2);
             emitter.mark_a_unknown();
         }
     }

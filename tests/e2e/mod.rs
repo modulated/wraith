@@ -35,6 +35,7 @@ mod pointers;
 mod statics;
 mod stdlib;
 mod strings_slices;
+mod temp_pools;
 mod types;
 mod variables;
 mod vtable;

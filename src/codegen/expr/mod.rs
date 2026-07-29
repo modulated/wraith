@@ -190,14 +190,24 @@ pub fn generate_expr(
                         // Get string address in A:X
                         generate_expr(object, emitter, info, string_collector)?;
 
-                        // Store pointer to temp location ($F0-$F1)
-                        emitter.emit_inst("STA", "$F0");
-                        emitter.emit_inst("STX", "$F1");
+                        // Stage the pointer through the allocator: the staging
+                        // is brief, but an enclosing construct (an index
+                        // assignment's parked value, a u16 binary op's left
+                        // save) may already own $F0/$F1, and the old hardcoded
+                        // store overwrote it.
+                        let stage = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+                            CodegenError::Internal(
+                                "temporary storage exhausted in string .len".to_string(),
+                            )
+                        })?;
+                        emitter.emit_inst("STA", &format!("${:02X}", stage));
+                        emitter.emit_inst("STX", &format!("${:02X}", stage + 1));
 
                         // Load length (single byte) via indirect indexed
                         // Result is u8 in A, zero-extended to u16 in Y:A
                         emitter.emit_inst("LDY", "#$00");
-                        emitter.emit_inst("LDA", "($F0),Y"); // Load length byte
+                        emitter.emit_inst("LDA", &format!("(${:02X}),Y", stage)); // Load length byte
+                        emitter.temp_alloc.free_high(stage, 2);
                         // Length is always <= 255, so high byte is 0
                         emitter.emit_inst("LDY", "#$00"); // High byte = 0
                         // Result: length in A (low byte), Y = 0 (high byte)
