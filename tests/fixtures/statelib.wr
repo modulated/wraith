@@ -1,0 +1,31 @@
+// Fixture module for the import-merge tests in tests/e2e/imports.rs.
+//
+// Every shape of analyzer state the import merge used to drop: a scalar const
+// (const_env), a function with a local array (local_arrays), a struct with a
+// field named `len` (accessor_fields), and a mutable static (static_inits +
+// the BSS high-water mark).
+
+pub const LIBC: u8 = 5;
+
+pub struct Rec {
+    len: u8,
+    flags: u8,
+}
+
+pub fn fill_and_read() -> u8 {
+    let buf: [u8; 4] = [1, 2, 3, 4];
+    buf[0] = 7;
+    return buf[0];
+}
+
+pub fn len_field_roundtrip(start: u8) -> u8 {
+    let r: Rec = Rec { len: start, flags: 0 };
+    r.len = r.len + 1;
+    return r.len;
+}
+
+static LIBCOUNT: u8 = 41;
+
+pub fn read_libcount() -> u8 {
+    return LIBCOUNT;
+}

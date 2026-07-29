@@ -743,17 +743,65 @@ impl SemanticAnalyzer {
             }
         }
 
+        // Merge the child's whole type registry, not just the types the import
+        // names: an imported function may use a struct or enum internally (a
+        // local, a field type) that the importing module never mentions, and
+        // codegen resolves field layouts through this registry.
+        for (name, def) in &imported_analyzer.type_registry.structs {
+            if self.type_registry.get_struct(name).is_none() {
+                self.type_registry.add_struct(def.clone());
+            }
+        }
+        for (name, def) in &imported_analyzer.type_registry.enums {
+            if self.type_registry.get_enum(name).is_none() {
+                self.type_registry.add_enum(def.clone());
+            }
+        }
+
+        // The child allocated its mutable statics from the same BSS base we
+        // would have, so its addresses collide with whatever this module (or a
+        // previously imported one) already allocated. Relocate: shift every
+        // child allocation up by this module's current BSS high-water mark.
+        // Only addresses inside the child's own BSS run are touched — `addr`
+        // declarations name hardware and consts carry the Absolute(0)
+        // sentinel.
+        const DEFAULT_BSS_START: u16 = 0x0400;
+        let bss_start = self
+            .memory_config
+            .get_section("BSS")
+            .map(|s| s.start)
+            .unwrap_or(DEFAULT_BSS_START);
+        let bss_shift = self.bss_cursor.unwrap_or(bss_start) - bss_start;
+        let child_bss_end = imported_analyzer.bss_cursor;
+        let shift_addr = |a: u16| -> u16 {
+            match child_bss_end {
+                Some(end) if a >= bss_start && a < end => a + bss_shift,
+                _ => a,
+            }
+        };
+
         // Merge ALL resolved_symbols from the imported module
         // This is necessary because when we emit imported functions during codegen,
         // they reference symbols (variables, constants, addresses) using their original spans
         for (span, symbol) in &imported_analyzer.resolved_symbols {
+            let mut symbol = symbol.clone();
+            if let crate::sema::table::SymbolLocation::Absolute(a) = symbol.location {
+                symbol.location = crate::sema::table::SymbolLocation::Absolute(shift_addr(a));
+            }
             self.resolved_symbols.insert(*span, symbol.clone());
 
-            // Also add constants and addresses to the symbol table so they're visible
-            // to code in this module
-            if matches!(symbol.kind, SymbolKind::Constant | SymbolKind::Address)
-                && self.table.lookup(&symbol.name).is_none()
-            {
+            // Also add constants, addresses, and mutable statics to the symbol
+            // table so they're visible to code in this module — and so codegen
+            // can find them when emitting the child's items (its mutable
+            // statics are looked up by name when their BSS equate is written).
+            let is_global = symbol.containing_function.is_none()
+                && matches!(
+                    symbol.location,
+                    crate::sema::table::SymbolLocation::Absolute(_)
+                );
+            let mergeable = matches!(symbol.kind, SymbolKind::Constant | SymbolKind::Address)
+                || (symbol.kind == SymbolKind::Variable && is_global);
+            if mergeable && self.table.lookup(&symbol.name).is_none() {
                 self.table.insert(symbol.name.clone(), symbol.clone());
             }
         }
@@ -761,6 +809,55 @@ impl SemanticAnalyzer {
         // Merge folded_constants so constant expressions from imported modules are available
         for (span, value) in &imported_analyzer.folded_constants {
             self.folded_constants.insert(*span, value.clone());
+        }
+
+        // Merge the constant environment, or an imported `pub const` scalar has
+        // no value here: uses of it don't fold, and codegen reads the
+        // Absolute(0) sentinel — $0000 — instead of the constant. Same for a
+        // `const D: u8 = C + 1` written in this module.
+        for (name, value) in &imported_analyzer.const_env {
+            self.const_env.entry(name.clone()).or_insert(value.clone());
+        }
+
+        // Merge diagnostics the child collected; its analysis is part of this
+        // compile, so its warnings are too.
+        self.warnings.extend(imported_analyzer.warnings.clone());
+
+        // Merge span-keyed resolutions produced while checking the child's
+        // bodies. Without these, codegen sees the AST forms but not their
+        // decisions: anonymous struct literals lose their resolved name, a
+        // struct field named `len`/`low`/`high` is misread as the built-in
+        // accessor, and statements the child proved unreachable are emitted.
+        for (span, name) in &imported_analyzer.resolved_struct_names {
+            self.resolved_struct_names.insert(*span, name.clone());
+        }
+        self.accessor_fields
+            .extend(imported_analyzer.accessor_fields.iter().copied());
+        self.unreachable_stmts
+            .extend(imported_analyzer.unreachable_stmts.iter().copied());
+
+        // Merge local-array placements. Without these, an imported function's
+        // local array is emitted inline in the CODE section again — stores to
+        // it write ROM, a silent no-op on hardware (the regression
+        // ProgramInfo::local_arrays was built to fix).
+        for (span, la) in &imported_analyzer.local_arrays {
+            self.local_arrays.insert(*span, la.clone());
+        }
+        for (name, size) in &imported_analyzer.array_block_sizes {
+            self.array_block_sizes.entry(name.clone()).or_insert(*size);
+        }
+
+        // Merge mutable statics: their startup images (relocated like the
+        // symbols above), and advance our BSS high-water mark past the child's
+        // relocated run.
+        self.static_inits
+            .extend(imported_analyzer.static_inits.iter().map(|init| {
+                let mut init = init.clone();
+                init.addr = shift_addr(init.addr);
+                init
+            }));
+        if let Some(end) = child_bss_end {
+            self.bss_cursor = Some(end + bss_shift);
         }
 
         // Merge loop-bound slots so for-loops in imported functions keep their

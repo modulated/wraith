@@ -6,7 +6,7 @@ _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm,
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (15 remaining — the placement-measurement pair, the math-JSR tracking bug, and the four temp-pool criticals below were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (11 remaining — the placement-measurement pair, the math-JSR tracking bug, the four temp-pool criticals, the three import-merge criticals, and the indirect-call spill bug were fixed after the audit). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest. *(Substantially fixed: all demonstrated sites now allocate, spill, or error — see CG-C3/C5/C6.)*
@@ -17,11 +17,10 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | One exhaustive-walker helper for AST recursion; one merged-state struct for the import merge | SE-C2/C5/C6, SE-H1/H2/H3, CG-C7, FE-C2-ish |
-| 2 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
-| 3 | Match-pattern checking against scrutinee type | SE-C7 |
-| 4 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
-| 5 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–4 from regressing |
+| 1 | The eight `$0000`-sentinel constant bugs (const-eval + sema guards) | SE-C1/C2/C3/C8 |
+| 2 | Match-pattern checking against scrutinee type | SE-C7 |
+| 3 | Runtime enum storage redesign (frame slots, not scratch pointers) | CG-C8 |
+| 4 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps 1–3 from regressing |
 
 ---
 
@@ -47,9 +46,8 @@ Was: ForEach-over-string staged its pointer for the whole loop while a body's in
 **~~CG-C6. Array-of-struct field write parks the value at `$F4/$F5` without allocating.~~ FIXED.**
 Was: `ps[ident(1)].x = 42` stored 1, because the call's argument staging was handed the same `$F4`. The park is now allocated from the arg pool; exhaustion is a hard error (regression test: `e2e::temp_pools::array_of_struct_field_write_with_a_call_in_the_index`).
 
-**CG-C7. `contains_call` misses `Expr::CallIndirect`.**
-`binary.rs:47-61`. A u16 op whose right side is a vtable call takes the "$F0 is safe" fast path; the callee's own codegen uses the same pool. `(x + x) + ops.run(3 as u16)` restores the callee's product as the left operand (reproduced).
-_Fix:_ add `CallIndirect` (and audit `Match`) to `contains_call`.
+**~~CG-C7. `contains_call` misses `Expr::CallIndirect`.~~ FIXED.**
+Was: a u16 op whose right side is a vtable call took the "$F0 is safe" fast path, and the callee's own codegen used the same pool — `(x + x) + ops.run(3 as u16)` restored the callee's product as the left operand. `contains_call` now covers `CallIndirect` (and `Match`, `StructInit`/`AnonStructInit`, `EnumVariant`, `Slice`) (regression test: `e2e::vtable::a_u16_left_operand_survives_an_indirect_call`).
 
 **CG-C8. Runtime-constructed enums are pointers into shared scratch — any two live enum values alias.**
 `aggregate.rs:1282-1298` builds enum bytes in the `$20–$3F` pool and stores the *pointer*; nothing copies the bytes out. `let e1 = mk(1); let e2 = mk(2);` — `match e1` extracts 2 (reproduced). Any later `$20` temp use destroys a live enum's payload.
@@ -73,9 +71,8 @@ _Fix:_ emit the partial page as a shorter final loop, mirroring `generate_local_
 `const_eval.rs:56-161` has no accessor-node cases, so the fold never fires; codegen's variable fast-path emits the `Absolute(0)` sentinel. `const C: u16 = 1234; let lo: u8 = C.low;` → `LDA $0000`.
 _Fix:_ teach const-eval the three accessor nodes; and/or reject builtin accessors on `Constant` symbols in sema.
 
-**SE-C2. Using an imported `pub const` scalar reads `$0000`.**
-`register.rs:746-813` — `const_env` is never merged in `process_import`. Also silently breaks `const D: u8 = C + 1;` in the importer.
-_Fix:_ merge `const_env`.
+**~~SE-C2. Using an imported `pub const` scalar reads `$0000`.~~ FIXED.**
+`const_env` is now merged in `process_import`, so imported constants fold at their use sites and `const D: u8 = C + 1` in the importer works (regression test: `e2e::imports::an_imported_scalar_const_has_its_value`).
 
 **SE-C3. A scalar `const` whose initializer doesn't fold is silently accepted; every use reads `$0000`.**
 `register.rs:265-267` — "that's okay, just don't add to const_env" is fine for aggregates, fatal for scalars: no other path gives the constant a value.
@@ -85,13 +82,11 @@ _Fix:_ failed const-eval of a scalar-typed const is a hard `SemaError`.
 `expr.rs:15-32` (`contains_addr_reference` has no `Cast` arm). `VIC as u16 + 1` emits `LDA #$21 / LDY #$D0` and never reads the register at `$D020`. Also corrupts slice bounds like `arr[0..REG]`.
 _Fix:_ recurse through `Cast` (and audit `Index`/`Field`/`Slice`).
 
-**SE-C5. Local arrays in imported functions are emitted inline in ROM again.**
-`register.rs:746-813` — `local_arrays` and `array_block_sizes` aren't merged (unlike `loop_bound_slots`). The exact regression `ProgramInfo::local_arrays` was built to fix: `buf[0] = 7` stores into ROM in imported modules.
-_Fix:_ merge both maps.
+**~~SE-C5. Local arrays in imported functions are emitted inline in ROM again.~~ FIXED.**
+`local_arrays` and `array_block_sizes` are now merged, so imported functions' local arrays get RAM blocks like the root module's (regression test: `e2e::imports::a_local_array_in_an_imported_function_lives_in_ram`).
 
-**SE-C6. Several analyzer maps don't survive import — including `accessor_fields` and all of mutable statics.**
-`register.rs:746-813`. An imported function using a struct field named `len` fails with `Length access (.len) not yet implemented for type: Rec` (the child's accessor-field decision is lost). Also missing: `static_inits`/`bss_cursor` (mutable statics in imported modules are broken outright — undefined symbol from the *defining* module, and BSS addresses would collide even if merged naively) and `unreachable_stmts`.
-_Fix:_ audit the merge list systematically; a single merged-state struct (structural fix #4) prevents recurrence.
+**~~SE-C6. Several analyzer maps don't survive import — including `accessor_fields` and all of mutable statics.~~ FIXED.**
+The merge now covers `accessor_fields`, `resolved_struct_names`, `unreachable_stmts`, the child's full type registry (an imported function may use types the importer never names), `warnings`, `static_inits`, and mutable-static symbols. The BSS collision is solved by relocation: the child's allocations are shifted past the importer's high-water mark, so statics can be declared in any order across modules (regression tests: `e2e::imports::an_accessor_named_field_works_in_an_imported_function`, `mutable_statics_in_an_imported_module_are_initialized_and_dont_collide`, `a_static_declared_before_the_import_relocates_the_imported_ones`). A systematic merged-state struct remains a good idea but the list is currently complete.
 
 **SE-C7. Match patterns are never checked against the scrutinee type.**
 `stmt.rs:142-164`, `expr.rs:229-271`. `match a { B::Z(v) => ... }` with `a: A` compiles (wrong discriminant compare); `match x { 300 => ... }` with `x: u8` compiles and `f(44)` takes the `300` arm (both reproduced).
@@ -117,8 +112,8 @@ _Fix:_ a real `Stmt::CompoundAssign` node with the address evaluated once, or re
 
 ### Compiler
 
-- **SE-H1/H2. Escape analysis never descends into `for…in` bodies, and its expression walker misses `For` bounds, `Match` scrutinees/arms, `StructInit` fields, `Slice` bounds, `CallIndirect`, and the accessor nodes** (`escape.rs:463, 472-504`). `return &y` inside a `for x in arr` body compiles clean; the identical line elsewhere errors. Same fix class as the accessor blind spots — make the walkers exhaustive.
-- **SE-H3. Escape rule 2 misses stores through accessor-named fields** (`escape.rs:421-437`). `G1.other = &y;` errors; `G1.len = &x;` compiles. Peel the accessor nodes via `accessor_fields` (also `addr_of_target`, `escape.rs:194-207`).
+- **~~SE-H1/H2. Escape analysis never descends into `for…in` bodies, and its expression walker misses several forms.~~ FIXED** — `walk_stmts` now covers `ForEach`; `walk_exprs_in_stmt` covers `For` bounds, `ForEach` iterables, and `Match` scrutinees; `walk_expr` covers `Match` arms, `StructInit`/`AnonStructInit` fields, `EnumVariant` data, `Slice`, `CallIndirect`, and the accessor nodes; `walk_calls` reports indirect calls so rule 4 sees their arguments (regression tests: `e2e::pointer_escape::{returning_a_local_pointer_from_a_for_each_body_is_rejected, address_of_a_local_in_a_for_bound_of_a_recursive_function_is_rejected}`).
+- **~~SE-H3. Escape rule 2 misses stores through accessor-named fields.~~ FIXED** — `stores_beyond_the_frame` and `addr_of_target` peel the accessor nodes via `accessor_fields` (regression test: `e2e::pointer_escape::storing_a_local_pointer_through_an_accessor_named_field_is_rejected`).
 - **SE-H4. Slice assignment to a `const` array bypasses the ROM-write check** (`stmt.rs:432-457`). `LUT[0..2] = [9, 9];` emits stores into ROM; `LUT[0] = 9;` is rejected. Peel `Expr::Slice` in `lvalue_root`.
 - **SE-H5. Struct literals are not validated** (`expr.rs:122-137, 1033-1073`). `Point { x: true, z: 5 }` compiles; in the ROM path a 1-byte value in a 2-byte field shifts every later field — layout corruption. Unknown names and wrong types should error, and field values should get `expected_type` so literals adopt field width. Same gap in enum struct-variants.
 - **SE-H6. `const` declarations never check the initializer against the declared type** (`register.rs:240-268`). `const C: u8 = "hello";` compiles; `const B: [u8; 2] = [300, 2];` silently truncates; `init.rs:168-174` truncates `[0; 5]` into `[u8; 2]` while `[0,0,0,0,0]` errors.

@@ -125,3 +125,27 @@ fn function_pointer_variable_still_direct() {
     "#);
     assert_eq!(e.mem(0x0900), 27, "p(9) = 27");
 }
+
+#[test]
+fn a_u16_left_operand_survives_an_indirect_call() {
+    // contains_call missed CallIndirect, so `(x + x)` was parked in the $F0
+    // pool across `ops.run(...)` — whose callee's own u16 arithmetic writes
+    // the same pool — and the "restored" left operand was the callee's
+    // product. (100 + 100) + run(3) = 200 + 12 = 212.
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        struct Ops { run: fn(u16) -> u16 }
+        fn big(v: u16) -> u16 { return v * 3 + v; }
+        static ops: Ops = Ops { run: big };
+        #[reset]
+        fn main() {
+            let x: u16 = 100;
+            let p: u16 = (x + x) + ops.run(3 as u16);
+            LO = p.low;
+            HI = p.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0900), 212);
+}

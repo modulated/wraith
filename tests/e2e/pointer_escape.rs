@@ -284,3 +284,72 @@ fn the_allowed_shapes_still_execute_correctly() {
         13
     );
 }
+
+// ============================================================================
+// Walker coverage
+//
+// The escape walkers enumerate AST forms by hand, and three of them forgot
+// forms: ForEach bodies were never descended into, `for` range bounds and
+// match scrutinees were never visited, and a `.len` re-resolved as a struct
+// field wasn't peeled like a field. Each hole let `&local` through.
+// ============================================================================
+
+#[test]
+fn returning_a_local_pointer_from_a_for_each_body_is_rejected() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        fn leak(arr: [u8; 4]) -> &u8 {
+            for x in arr {
+                let y: u8 = x;
+                return &y;
+            }
+        }
+        #[reset]
+        fn main() { let a: [u8; 4] = [1, 2, 3, 4]; let p: &u8 = leak(a); OUT = *p; loop {} }
+    "#,
+    );
+    assert!(err.contains("returns a pointer"), "{err}");
+}
+
+#[test]
+fn address_of_a_local_in_a_for_bound_of_a_recursive_function_is_rejected() {
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        fn take(p: &u8) -> u8 { return *p; }
+        fn rec(n: u8) -> u8 {
+            let local: u8 = 3;
+            let acc: u8 = 0;
+            for i in 0..take(&local) { acc = acc + i; }
+            if n == 0 { return acc; }
+            return rec(n - 1);
+        }
+        #[reset]
+        fn main() { OUT = rec(2); loop {} }
+    "#,
+    );
+    assert!(err.contains("recursive"), "{err}");
+}
+
+#[test]
+fn storing_a_local_pointer_through_an_accessor_named_field_is_rejected() {
+    // `len` is a field here, not the built-in accessor — the store must be
+    // checked exactly like `G1.other = &y`, which was always rejected.
+    let err = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        static DUMMY: u8 = 0;
+        struct Rec { len: &u8, other: &u8 }
+        static G1: Rec = Rec { len: &DUMMY, other: &DUMMY };
+        #[reset]
+        fn main() {
+            let y: u8 = 5;
+            G1.len = &y;
+            OUT = *G1.len;
+            loop {}
+        }
+    "#,
+    );
+    assert!(err.contains("storing a pointer to a local"), "{err}");
+}

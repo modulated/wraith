@@ -46,7 +46,9 @@ fn is_y_preserving(expr: &Expr) -> bool {
 /// must instead be spilled across the call.
 fn contains_call(expr: &Expr) -> bool {
     match expr {
-        Expr::Call { .. } => true,
+        // An indirect call is still a call: the trampoline JSRs to a function
+        // that uses the same scratch pools this function does.
+        Expr::Call { .. } | Expr::CallIndirect { .. } => true,
         Expr::Binary { left, right, .. } => contains_call(&left.node) || contains_call(&right.node),
         Expr::Unary { operand, .. } => contains_call(&operand.node),
         Expr::Paren(inner) => contains_call(&inner.node),
@@ -56,6 +58,22 @@ fn contains_call(expr: &Expr) -> bool {
         Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner) => {
             contains_call(&inner.node)
         }
+        Expr::Match { expr, arms } => {
+            contains_call(&expr.node) || arms.iter().any(|arm| contains_call(&arm.body.node))
+        }
+        Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+            fields.iter().any(|f| contains_call(&f.value.node))
+        }
+        Expr::EnumVariant { data, .. } => match data {
+            crate::ast::VariantData::Unit => false,
+            crate::ast::VariantData::Tuple(exprs) => exprs.iter().any(|e| contains_call(&e.node)),
+            crate::ast::VariantData::Struct(fields) => {
+                fields.iter().any(|f| contains_call(&f.value.node))
+            }
+        },
+        Expr::Slice {
+            object, start, end, ..
+        } => contains_call(&object.node) || contains_call(&start.node) || contains_call(&end.node),
         _ => false,
     }
 }

@@ -263,3 +263,109 @@ fn an_unused_function_in_the_importing_file_is_dropped_too() {
         "an unreachable function in the root module is dropped"
     );
 }
+
+// ============================================================================
+// Analyzer state surviving the merge
+//
+// The import merge used to drop whole categories of child-analyzer state, and
+// each dropped map was a distinct miscompile: constants read as $0000, local
+// arrays emitted in ROM, accessor-named fields misread, mutable statics never
+// initialized and colliding with the importer's own. The fixture is
+// `tests/fixtures/statelib.wr`.
+// ============================================================================
+
+const STATELIB: &str = "tests/fixtures/statelib.wr";
+
+#[test]
+fn an_imported_scalar_const_has_its_value() {
+    // const_env was not merged: the use did not fold, and codegen read the
+    // Absolute(0) sentinel — $0000 — instead of the constant.
+    let mut e = run(&format!(
+        r#"
+        import {{ LIBC }} from "{STATELIB}";
+        const OUT: addr = 0x0900;
+        const D: u8 = LIBC + 1;
+        #[reset]
+        fn main() {{
+            OUT = D;
+            loop {{}}
+        }}
+    "#
+    ));
+    assert_eq!(e.mem(0x0900), 6);
+}
+
+#[test]
+fn a_local_array_in_an_imported_function_lives_in_ram() {
+    // local_arrays was not merged: the array's data went inline into the CODE
+    // section, and buf[0] = 7 wrote ROM — a silent no-op on hardware.
+    let mut e = run(&format!(
+        r#"
+        import {{ fill_and_read }} from "{STATELIB}";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {{
+            OUT = fill_and_read();
+            loop {{}}
+        }}
+    "#
+    ));
+    assert_eq!(e.mem(0x0900), 7);
+}
+
+#[test]
+fn an_accessor_named_field_works_in_an_imported_function() {
+    // accessor_fields was not merged: the child's `.len`-is-a-field decision
+    // was lost, and codegen applied the built-in accessor to a struct.
+    let mut e = run(&format!(
+        r#"
+        import {{ len_field_roundtrip }} from "{STATELIB}";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {{
+            OUT = len_field_roundtrip(10);
+            loop {{}}
+        }}
+    "#
+    ));
+    assert_eq!(e.mem(0x0900), 11);
+}
+
+#[test]
+fn mutable_statics_in_an_imported_module_are_initialized_and_dont_collide() {
+    // static_inits was not merged (LIBCOUNT never initialized) and the child's
+    // BSS run started at the same base as the root's (ROOTC would share its
+    // address). The child's allocations are now relocated past the importer's.
+    let mut e = run(&format!(
+        r#"
+        import {{ read_libcount }} from "{STATELIB}";
+        const OUT: addr = 0x0900;
+        static ROOTC: u8 = 99;
+        #[reset]
+        fn main() {{
+            OUT = read_libcount() + ROOTC;
+            loop {{}}
+        }}
+    "#
+    ));
+    assert_eq!(e.mem(0x0900), 41 + 99);
+}
+
+#[test]
+fn a_static_declared_before_the_import_relocates_the_imported_ones() {
+    // Root's static comes first, so the child's BSS run (which started at the
+    // same base) must move up past it rather than share its address.
+    let mut e = run(&format!(
+        r#"
+        static ROOTC: u8 = 99;
+        import {{ read_libcount }} from "{STATELIB}";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {{
+            OUT = read_libcount() + ROOTC;
+            loop {{}}
+        }}
+    "#
+    ));
+    assert_eq!(e.mem(0x0900), 41 + 99);
+}

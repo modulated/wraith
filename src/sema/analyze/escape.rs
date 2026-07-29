@@ -196,6 +196,13 @@ impl SemanticAnalyzer {
             Expr::Paren(i) => &**i,
             Expr::Index { object, .. } => object,
             Expr::Field { object, .. } => object,
+            // A `.len`/`.low`/`.high` re-resolved as a struct field: the
+            // address is the object's storage, same as a plain field.
+            Expr::SliceLen(i) | Expr::U16Low(i) | Expr::U16High(i)
+                if self.accessor_fields.contains(&operand.span) =>
+            {
+                &**i
+            }
             _ => operand,
         };
         let sym = self.resolved_symbols.get(&inner.span)?;
@@ -229,7 +236,11 @@ impl SemanticAnalyzer {
                 // A store into anything that outlives the frame. Returning a
                 // parameter is *not* an escape: the caller already had it.
                 if let Stmt::Assign { target, value } = &stmt.node
-                    && stores_beyond_the_frame(&self.resolved_symbols, target)
+                    && stores_beyond_the_frame(
+                        &self.resolved_symbols,
+                        &self.accessor_fields,
+                        target,
+                    )
                     && let Some(i) = param_index(value, &params)
                 {
                     direct.insert(i);
@@ -312,7 +323,11 @@ impl SemanticAnalyzer {
                 Stmt::Assign { target, value } => {
                     if self.is_pointer_expr(value)
                         && self.provenance_of(value, facts) == Provenance::Local
-                        && stores_beyond_the_frame(&self.resolved_symbols, target)
+                        && stores_beyond_the_frame(
+                            &self.resolved_symbols,
+                            &self.accessor_fields,
+                            target,
+                        )
                     {
                         fail(
                             SemaError::EscapingPointer {
@@ -420,6 +435,7 @@ impl SemanticAnalyzer {
 /// may name anything at all, so it has to be assumed to outlive us.
 fn stores_beyond_the_frame(
     resolved: &HashMap<Span, crate::sema::table::SymbolInfo>,
+    accessor_fields: &HashSet<Span>,
     target: &Spanned<Expr>,
 ) -> bool {
     match &target.node {
@@ -430,7 +446,14 @@ fn stores_beyond_the_frame(
             op: UnaryOp::Deref, ..
         } => true,
         Expr::Field { object, .. } | Expr::Index { object, .. } => {
-            stores_beyond_the_frame(resolved, object)
+            stores_beyond_the_frame(resolved, accessor_fields, object)
+        }
+        // A `.len`/`.low`/`.high` that sema re-resolved as a struct field
+        // peels exactly like a plain field access.
+        Expr::SliceLen(inner) | Expr::U16Low(inner) | Expr::U16High(inner)
+            if accessor_fields.contains(&target.span) =>
+        {
+            stores_beyond_the_frame(resolved, accessor_fields, inner)
         }
         _ => false,
     }
@@ -460,9 +483,10 @@ fn walk_stmts(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Stmt>)) {
                 walk_stmts(e, f);
             }
         }
-        Stmt::While { body, .. } | Stmt::Loop { body } | Stmt::For { body, .. } => {
-            walk_stmts(body, f)
-        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. } => walk_stmts(body, f),
         Stmt::Match { arms, .. } => arms.iter().for_each(|a| walk_stmts(&a.body, f)),
         _ => {}
     }
@@ -479,6 +503,12 @@ fn walk_exprs_in_stmt(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Expr>)) 
         }
         Stmt::Return(Some(e)) | Stmt::Expr(e) => visit(e),
         Stmt::If { condition, .. } | Stmt::While { condition, .. } => visit(condition),
+        Stmt::For { range, .. } => {
+            visit(&range.start);
+            visit(&range.end);
+        }
+        Stmt::ForEach { iterable, .. } => visit(iterable),
+        Stmt::Match { expr, .. } => visit(expr),
         _ => {}
     }
 }
@@ -493,21 +523,49 @@ fn walk_expr(e: &Spanned<Expr>, f: &mut impl FnMut(&Spanned<Expr>)) {
             walk_expr(right, f);
         }
         Expr::Call { args, .. } => args.iter().for_each(|a| walk_expr(a, f)),
+        Expr::CallIndirect { callee, args } => {
+            walk_expr(callee, f);
+            args.iter().for_each(|a| walk_expr(a, f));
+        }
         Expr::Index { object, index } => {
             walk_expr(object, f);
             walk_expr(index, f);
         }
         Expr::Field { object, .. } => walk_expr(object, f),
         Expr::Cast { expr, .. } => walk_expr(expr, f),
+        Expr::SliceLen(i) | Expr::U16Low(i) | Expr::U16High(i) => walk_expr(i, f),
+        Expr::Slice {
+            object, start, end, ..
+        } => {
+            walk_expr(object, f);
+            walk_expr(start, f);
+            walk_expr(end, f);
+        }
+        Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+            fields.iter().for_each(|fi| walk_expr(&fi.value, f))
+        }
+        Expr::EnumVariant { data, .. } => match data {
+            crate::ast::VariantData::Unit => {}
+            crate::ast::VariantData::Tuple(exprs) => exprs.iter().for_each(|e| walk_expr(e, f)),
+            crate::ast::VariantData::Struct(fields) => {
+                fields.iter().for_each(|fi| walk_expr(&fi.value, f))
+            }
+        },
+        Expr::Match { expr, arms } => {
+            walk_expr(expr, f);
+            arms.iter().for_each(|a| walk_expr(&a.body, f));
+        }
         _ => {}
     }
 }
 
-/// Visit every direct call in this statement, with its callee name and args.
+/// Visit every call in this statement, with its callee name and args. Indirect
+/// calls are reported under a name no function has, so the caller's
+/// known-function test fails and they take the indirect path.
 fn walk_calls(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&str, &[Spanned<Expr>])) {
-    walk_exprs_in_stmt(stmt, &mut |e| {
-        if let Expr::Call { function, args } = &e.node {
-            f(&function.node, args);
-        }
+    walk_exprs_in_stmt(stmt, &mut |e| match &e.node {
+        Expr::Call { function, args } => f(&function.node, args),
+        Expr::CallIndirect { args, .. } => f("<indirect>", args),
+        _ => {}
     });
 }
