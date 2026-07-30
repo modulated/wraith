@@ -141,7 +141,13 @@ fn main() {
         Ok(tokens) => tokens,
         Err(e) => {
             eprintln!("{}Error:{} Lexical analysis failed", RED, RESET);
-            eprintln!("{:?}", e);
+            // Render with source carets like every other front-end error,
+            // not as the error struct's Debug output.
+            let span = wraith::Span::new(e.span.start, e.span.end);
+            eprintln!(
+                "{}",
+                span.format_error_context(&source, Some(&file), &e.message)
+            );
             std::process::exit(1);
         }
     };

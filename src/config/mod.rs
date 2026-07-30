@@ -51,7 +51,37 @@ impl Config {
         let content = fs::read_to_string(path.as_ref())
             .map_err(|e| format!("Failed to read config file: {}", e))?;
 
-        toml::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
+        let config: Self =
+            toml::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Check a user-supplied config for the mistakes that used to panic deep
+    /// in the compiler: a section with `end < start` (the size subtraction
+    /// underflows) and a `default_section` naming a section that doesn't
+    /// exist.
+    pub fn validate(&self) -> Result<(), String> {
+        for s in &self.sections {
+            if s.end < s.start {
+                return Err(format!(
+                    "section '{}' has end ({:#06X}) before start ({:#06X})",
+                    s.name, s.end, s.start
+                ));
+            }
+        }
+        if !self.sections.iter().any(|s| s.name == self.default_section) {
+            return Err(format!(
+                "default_section '{}' is not one of the configured sections: [{}]",
+                self.default_section,
+                self.sections
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(())
     }
 
     /// Try to load from wraith.toml in current directory, fall back to defaults
@@ -125,7 +155,9 @@ impl MemoryConfig {
 
     /// Get the default section for functions without explicit section or org
     pub fn default_section(&self) -> &Section {
-        // Use configured default section
+        // Config::from_file validates this, and the built-in default is
+        // well-formed, so a miss here means a MemoryConfig was constructed
+        // by hand with a bad name — a compiler bug, not a user mistake.
         self.get_section(&self.default_section_name)
             .unwrap_or_else(|| {
                 panic!(
@@ -180,5 +212,35 @@ mod tests {
         let default = config.default_section();
         assert_eq!(default.name, "CODE");
         assert_eq!(default.start, 0x8000);
+    }
+
+    #[test]
+    fn a_section_with_end_before_start_is_rejected() {
+        // This used to panic deep in the compiler (size subtraction underflow).
+        let toml = r#"
+            default_section = "CODE"
+            [[sections]]
+            name = "CODE"
+            start = 32768
+            end = 16384
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("CODE"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_default_section_is_rejected() {
+        // This used to panic in default_section().
+        let toml = r#"
+            default_section = "ROM"
+            [[sections]]
+            name = "CODE"
+            start = 32768
+            end = 49151
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("ROM"), "{err}");
     }
 }

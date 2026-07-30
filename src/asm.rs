@@ -418,7 +418,10 @@ fn resolve(labels: &HashMap<String, u16>, v: &ValueExpr) -> Result<u16, String> 
 pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
     // ---- Pass 1: collect label addresses ----
     let mut labels: HashMap<String, u16> = HashMap::new();
-    let mut addr: u16 = 0;
+    // The counter is u32 so that a program ending exactly at $10000 (the
+    // vector table's last byte is $FFFF) is legal; only crossing past it —
+    // or defining a label there — is an error.
+    let mut addr: u32 = 0;
     for raw in asm.lines() {
         let line = clean_line(raw);
         if line.is_empty() {
@@ -428,12 +431,22 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
         if let Some((name, val)) = line.split_once('=') {
             let value =
                 parse_num(val.trim()).ok_or_else(|| format!("bad symbol value: {}", val.trim()))?;
-            labels.insert(name.trim().to_string(), value);
+            let name = name.trim().to_string();
+            if labels.insert(name.clone(), value).is_some() {
+                return Err(format!("duplicate symbol '{name}'"));
+            }
             continue;
         }
         let (label, line) = split_leading_label(line);
         if let Some(l) = label {
-            labels.insert(l.to_string(), addr);
+            // A second definition used to replace the first silently, so
+            // every reference landed on whichever came last.
+            if addr > 0xFFFF {
+                return Err(format!("label '{l}' is defined past $FFFF"));
+            }
+            if labels.insert(l.to_string(), addr as u16).is_some() {
+                return Err(format!("duplicate label '{l}'"));
+            }
         }
         if line.is_empty() {
             continue;
@@ -441,38 +454,54 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
         let mut parts = line.splitn(2, char::is_whitespace);
         let head = parts.next().unwrap();
         let rest = parts.next().map(str::trim);
+        // Labels past a wrap would record addresses near $0000 and emit over
+        // the program's own start.
+        let bump = |addr: &mut u32, n: u16| -> Result<(), String> {
+            *addr += n as u32;
+            if *addr > 0x10000 {
+                return Err("assembly exceeds the $0000-$FFFF address space".to_string());
+            }
+            Ok(())
+        };
         match head {
             ".ORG" => {
                 let a = rest.ok_or(".ORG needs an address")?;
-                addr = parse_num(a).ok_or_else(|| format!("bad .ORG address: {a}"))?;
+                addr = parse_num(a).ok_or_else(|| format!("bad .ORG address: {a}"))? as u32;
             }
             ".BYTE" => {
                 let r = rest.ok_or(".BYTE needs values")?;
-                addr = addr.wrapping_add(r.split(',').count() as u16);
+                bump(&mut addr, r.split(',').count() as u16)?;
             }
-            ".WORD" => addr = addr.wrapping_add(2),
+            ".WORD" => bump(&mut addr, 2)?,
             ".RES" => {
                 let r = rest.ok_or(".RES needs a count")?;
                 let n: u16 = r
                     .trim()
                     .parse()
                     .map_err(|_| format!("bad .RES count: {r}"))?;
-                addr = addr.wrapping_add(n);
+                bump(&mut addr, n)?;
             }
             mnem => {
                 let parsed = parse_operand(mnem, rest)?;
-                addr = addr.wrapping_add(instr_len(parsed.mode));
+                bump(&mut addr, instr_len(parsed.mode))?;
             }
         }
     }
 
     // ---- Pass 2: emit bytes ----
     let mut mem = [0u8; IMAGE_SIZE];
-    let mut addr: u16 = 0;
-    let emit = |mem: &mut [u8; IMAGE_SIZE], a: &mut u16, byte: u8| {
+    let mut addr: u32 = 0;
+    fn emit(mem: &mut [u8; IMAGE_SIZE], a: &mut u32, byte: u8) -> Result<(), String> {
+        // Emitting the byte *at* $FFFF is legal (the vector table lives
+        // there); emitting one after it is the wrap that used to silently
+        // overwrite the program's start.
+        if *a >= IMAGE_SIZE as u32 {
+            return Err("assembly exceeds the $0000-$FFFF address space".to_string());
+        }
         mem[*a as usize] = byte;
-        *a = a.wrapping_add(1);
-    };
+        *a += 1;
+        Ok(())
+    }
 
     for raw in asm.lines() {
         let line = clean_line(raw);
@@ -489,13 +518,18 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
         match head {
             ".ORG" => {
                 let a = rest.ok_or(".ORG needs an address")?;
-                addr = parse_num(a).ok_or_else(|| format!("bad .ORG address: {a}"))?;
+                addr = parse_num(a).ok_or_else(|| format!("bad .ORG address: {a}"))? as u32;
             }
             ".BYTE" => {
                 for tok in rest.ok_or(".BYTE needs values")?.split(',') {
                     let v = parse_num(tok.trim())
                         .ok_or_else(|| format!("bad .BYTE value: {}", tok.trim()))?;
-                    emit(&mut mem, &mut addr, v as u8);
+                    // Same rule as byte-mode instruction operands: no silent
+                    // truncation of a value that doesn't fit.
+                    if v > 0xFF {
+                        return Err(format!(".BYTE value {v:#06X} does not fit in a byte"));
+                    }
+                    emit(&mut mem, &mut addr, v as u8)?;
                 }
             }
             ".WORD" => {
@@ -507,8 +541,8 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                         resolve(&labels, &ValueExpr::Label(l, off))?
                     }
                 };
-                emit(&mut mem, &mut addr, (v & 0xFF) as u8);
-                emit(&mut mem, &mut addr, (v >> 8) as u8);
+                emit(&mut mem, &mut addr, (v & 0xFF) as u8)?;
+                emit(&mut mem, &mut addr, (v >> 8) as u8)?;
             }
             ".RES" => {
                 let r = rest.ok_or(".RES needs a count")?;
@@ -517,7 +551,7 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                     .parse()
                     .map_err(|_| format!("bad .RES count: {r}"))?;
                 for _ in 0..n {
-                    emit(&mut mem, &mut addr, 0);
+                    emit(&mut mem, &mut addr, 0)?;
                 }
             }
             mnem => {
@@ -525,7 +559,7 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                 let op = opcode(mnem, parsed.mode)
                     .ok_or_else(|| format!("no opcode for {mnem} in this addressing mode"))?;
                 let instr_addr = addr;
-                emit(&mut mem, &mut addr, op);
+                emit(&mut mem, &mut addr, op)?;
                 match parsed.mode {
                     Mode::Imp | Mode::Acc => {}
                     Mode::Rel => {
@@ -538,7 +572,7 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                                 "branch out of range: {instr_addr:#06X} -> {target:#06X} (delta {delta})"
                             ));
                         }
-                        emit(&mut mem, &mut addr, (delta as i8) as u8);
+                        emit(&mut mem, &mut addr, (delta as i8) as u8)?;
                     }
                     Mode::Imm | Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY => {
                         let v = resolve(&labels, &parsed.value)?;
@@ -551,12 +585,12 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                                 "{mnem} operand {v:#06X} does not fit in a byte (at {instr_addr:#06X})"
                             ));
                         }
-                        emit(&mut mem, &mut addr, v as u8);
+                        emit(&mut mem, &mut addr, v as u8)?;
                     }
                     Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind => {
                         let v = resolve(&labels, &parsed.value)?;
-                        emit(&mut mem, &mut addr, (v & 0xFF) as u8);
-                        emit(&mut mem, &mut addr, (v >> 8) as u8);
+                        emit(&mut mem, &mut addr, (v & 0xFF) as u8)?;
+                        emit(&mut mem, &mut addr, (v >> 8) as u8)?;
                     }
                 }
             }
@@ -564,4 +598,43 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
     }
 
     Ok(mem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_duplicate_label_is_an_error_not_a_silent_redefinition() {
+        // Every reference used to land on whichever definition came last.
+        let err = assemble(".ORG $8000\nfoo:\nfoo:\n    RTS\n").unwrap_err();
+        assert!(err.contains("duplicate label 'foo'"), "{err}");
+    }
+
+    #[test]
+    fn a_duplicate_symbol_is_an_error() {
+        let err = assemble("X = $0400\nX = $0500\n").unwrap_err();
+        assert!(err.contains("duplicate symbol 'X'"), "{err}");
+    }
+
+    #[test]
+    fn emission_past_the_top_of_memory_is_an_error() {
+        // The counter used to wrap to $0000 and overwrite the program's start.
+        let err = assemble(".ORG $FFFF\n.BYTE 1, 2\n").unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn a_byte_at_the_very_top_of_memory_is_legal() {
+        // The vector table's last byte is $FFFF; ending exactly there must work.
+        let mem = assemble(".ORG $FFFF\n.BYTE $EE\n").unwrap();
+        assert_eq!(mem[0xFFFF], 0xEE);
+    }
+
+    #[test]
+    fn a_byte_value_that_does_not_fit_is_an_error() {
+        // Used to truncate to 44.
+        let err = assemble(".ORG $8000\n.BYTE 300\n").unwrap_err();
+        assert!(err.contains("does not fit"), "{err}");
+    }
 }

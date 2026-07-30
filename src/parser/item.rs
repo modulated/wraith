@@ -305,7 +305,19 @@ impl Parser<'_> {
                         self.expect(&Token::LParen)?;
                         let addr = match self.peek().cloned() {
                             Some(Token::Integer(n)) => {
+                                let span = self.current_span();
                                 self.advance();
+                                // `n as u16` truncated: #[org(0x10000)] became
+                                // $0000 and failed later for the wrong reason.
+                                if !(0..=0xFFFF).contains(&n) {
+                                    return Err(ParseError::custom(
+                                        span,
+                                        format!(
+                                            "#[org] address {:#X} is out of range ($0000-$FFFF)",
+                                            n
+                                        ),
+                                    ));
+                                }
                                 n as u16
                             }
                             tok => {

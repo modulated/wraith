@@ -281,9 +281,17 @@ pub fn lex(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 });
             }
             Err(()) => {
+                let text = &source[lexer.span()];
+                // A failed numeric match is an out-of-range literal (the
+                // i64 parse overflowed), not an unlexable character — say so.
+                let message = if text.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    format!("integer literal {} is too large (max {})", text, i64::MAX)
+                } else {
+                    format!("unexpected character: {:?}", text)
+                };
                 return Err(LexError {
                     span: lexer.span(),
-                    message: format!("unexpected character: {:?}", &source[lexer.span()]),
+                    message,
                 });
             }
         }

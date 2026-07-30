@@ -129,5 +129,8 @@ fn the_generic_interrupt_attribute_is_rejected() {
         crate::common::harness::CompileResult::SemaError(e) => e,
         other => panic!("expected a sema error, got {other:?}"),
     };
-    assert!(err.contains("#[irq]"), "should point at the real attributes: {err}");
+    assert!(
+        err.contains("#[irq]"),
+        "should point at the real attributes: {err}"
+    );
 }
