@@ -441,9 +441,41 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::LBrace)?;
 
+        // Statement-level error recovery: a bad statement is recorded and
+        // skipped to the next recovery point, so one typo doesn't cascade
+        // into a bogus error per remaining token (the item-level recovery
+        // alone synchronized *into* the body and treated each statement as
+        // a malformed item).
         let mut stmts = Vec::with_capacity(8);
         while !self.check(&Token::RBrace) {
-            stmts.push(self.parse_stmt()?);
+            if self.peek().is_none() {
+                break; // let the expect(RBrace) below report the EOF
+            }
+            if self.error_limit_reached() {
+                return Err(ParseError::custom(
+                    self.current_span(),
+                    "too many parse errors; giving up on this block",
+                ));
+            }
+            let pos_before = self.position();
+            match self.parse_stmt() {
+                Ok(stmt) => stmts.push(stmt),
+                Err(err) => {
+                    self.record_error(err);
+                    // Ensure progress, mirroring the item-level recovery.
+                    if self.position() == pos_before {
+                        self.synchronize();
+                        if self.position() == pos_before
+                            && self.peek().is_some()
+                            && !self.check(&Token::RBrace)
+                        {
+                            self.advance();
+                        }
+                    } else {
+                        self.synchronize();
+                    }
+                }
+            }
         }
 
         self.expect(&Token::RBrace)?;

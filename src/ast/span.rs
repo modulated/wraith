@@ -205,7 +205,10 @@ fn offset_to_line_col(source: &str, offset: usize) -> LineCol {
     let mut line = 1;
     let mut col = 1;
 
-    for (i, ch) in source.chars().enumerate() {
+    // char_indices yields *byte* offsets, matching the span's. (chars()
+    // .enumerate() counted characters, so a caret past any multi-byte
+    // character drifted right — or onto the wrong line.)
+    for (i, ch) in source.char_indices() {
         if i >= offset {
             break;
         }
@@ -283,6 +286,23 @@ mod tests {
         assert_eq!(a.merge(b), a);
         // Within one file it still merges normally.
         assert_eq!(a.merge(Span::new(30, 40)), Span::new(10, 40));
+    }
+
+    #[test]
+    fn carets_count_columns_past_multibyte_characters() {
+        // The offset walker counted *characters* against a *byte* offset, so
+        // the caret for the `true` below drifted two columns right (one per
+        // extra byte in "héllo").
+        let source = "fn main() {\n    let s: str = \"héllo\";\n    let x: u8 = true;\n}\n";
+        let start = source.find("true").unwrap();
+        let span = Span::new(start, start + 4);
+        let pos = span.to_line_col(source);
+        assert_eq!((pos.line, pos.col), (3, 17));
+        let rendered = span.format_error_context(source, None, "expected u8");
+        let caret_line = rendered.lines().nth(3).unwrap();
+        let carets_at = caret_line.find('^').unwrap();
+        let true_at = rendered.lines().nth(2).unwrap().find("true").unwrap();
+        assert_eq!(carets_at, true_at, "caret sits under the token: {rendered}");
     }
 
     #[test]

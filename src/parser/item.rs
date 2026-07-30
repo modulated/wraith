@@ -23,6 +23,10 @@ impl Parser<'_> {
                     // Record error
                     self.record_error(err);
 
+                    if self.error_limit_reached() {
+                        break;
+                    }
+
                     // Ensure we make progress to avoid infinite loops
                     if self.position() == pos_before {
                         // Parser didn't advance, manually skip to next potential item start

@@ -157,9 +157,22 @@ impl<'a> Parser<'a> {
         self.pos
     }
 
+    /// The most errors a single parse collects before it stops trying. One
+    /// malformed statement used to cascade into thousands of bogus follow-up
+    /// errors; statement-level recovery makes that rare, but a pathological
+    /// file still gets a ceiling.
+    const MAX_ERRORS: usize = 50;
+
     /// Record a parse error and continue parsing
     fn record_error(&mut self, error: ParseError) {
-        self.errors.push(error);
+        if self.errors.len() < Self::MAX_ERRORS {
+            self.errors.push(error);
+        }
+    }
+
+    /// Whether the error ceiling has been hit and parsing should wind down.
+    fn error_limit_reached(&self) -> bool {
+        self.errors.len() >= Self::MAX_ERRORS
     }
 
     /// Synchronize parser state after an error by skipping to a recovery point
@@ -303,5 +316,51 @@ mod tests {
         "#;
         let file = parse(source).expect("parse error");
         assert_eq!(file.items.len(), 1);
+    }
+
+    #[test]
+    fn statement_errors_recover_within_the_block() {
+        // Each bad statement is reported once and parsing resumes at the
+        // next one: the count is proportional to the mistakes, not to the
+        // number of following tokens (which used to cascade into thousands).
+        let source = r#"
+            fn main() {
+                let x: u8 = ;
+                let y: u8 = 2;
+                let z: u8 = y + ;
+                let w: u8 = 4;
+            }
+        "#;
+        let tokens = lex(source).expect("lexer error");
+        let err = Parser::parse(&tokens).expect_err("should fail to parse");
+        match err.kind {
+            ParseErrorKind::Multiple(errors) => {
+                assert_eq!(errors.len(), 2, "one error per bad statement");
+            }
+            other => panic!("expected multiple errors, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pathological_file_hits_the_error_cap() {
+        // 200 malformed statements must not produce 200+ errors.
+        let mut source = String::from("fn main() {\n");
+        for i in 0..200 {
+            source.push_str(&format!("let v{}: u8 = ;\n", i));
+        }
+        source.push_str("}\n");
+        let tokens = lex(&source).expect("lexer error");
+        let err = Parser::parse(&tokens).expect_err("should fail to parse");
+        match err.kind {
+            ParseErrorKind::Multiple(errors) => {
+                assert!(
+                    errors.len() <= Parser::MAX_ERRORS,
+                    "capped at {} errors, got {}",
+                    Parser::MAX_ERRORS,
+                    errors.len()
+                );
+            }
+            other => panic!("expected multiple errors, got {other:?}"),
+        }
     }
 }
