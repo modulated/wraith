@@ -408,9 +408,11 @@ fn an_empty_if_block_is_not_a_struct_literal() {
     // failed at the *next* statement — the struct-init-vs-block ambiguity
     // resolved the wrong way in condition position.
     assert_eq!(
-        eval("let a: u8 = 1; let b: u8 = 2;
+        eval(
+            "let a: u8 = 1; let b: u8 = 2;
               if a == b { }
-              if a != b { OUT = 3; }"),
+              if a != b { OUT = 3; }"
+        ),
         3
     );
 }
@@ -419,10 +421,12 @@ fn an_empty_if_block_is_not_a_struct_literal() {
 fn a_comment_only_if_block_parses_too() {
     // Comments leave no tokens, so this is the same shape as `{ }`.
     assert_eq!(
-        eval("let a: u8 = 1; let b: u8 = 2;
+        eval(
+            "let a: u8 = 1; let b: u8 = 2;
               if a == b { // nothing to do
               }
-              OUT = 7;"),
+              OUT = 7;"
+        ),
         7
     );
 }
@@ -443,4 +447,3 @@ fn an_empty_struct_literal_still_parses_outside_conditions() {
     "#);
     assert_eq!(e.mem(0x0900), 5);
 }
-

@@ -10,3 +10,7 @@ wraith = { path = ".." }
 [[bin]]
 name = "fuzz_parser"
 path = "fuzz_targets/fuzz_parser.rs"
+
+[[bin]]
+name = "fuzz_sema"
+path = "fuzz_targets/fuzz_sema.rs"

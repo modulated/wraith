@@ -206,7 +206,7 @@ Use the `const` keyword to declare compile-time constants. Constants are evaluat
 ```rust
 const MAX_SPRITES: u8 = 8;
 const SCREEN_WIDTH: u16 = 320;
-const PI_TIMES_100: u8 = 314;
+const PI_TIMES_100: u16 = 314;
 
 fn init() {
     for i in 0..MAX_SPRITES {
@@ -281,8 +281,8 @@ configured region.
 Use the `addr` keyword to declare memory-mapped I/O addresses:
 
 ```rust
-let LED: addr = 0x6000;      // Memory-mapped LED
-let BUTTON: addr = 0x6001;   // Memory-mapped button
+const LED: addr = 0x6000;      // Memory-mapped LED
+const BUTTON: addr = 0x6001;   // Memory-mapped button
 
 fn main() {
     LED = 1;                 // Write to address
@@ -294,8 +294,8 @@ Addresses can be read from or written to like variables, but they represent fixe
 They can also be marked as read only or write only and this is enforced at compile time.
 
 ```rust
-let LED: write addr = 0x6000;    // Write only address
-let BUTTON: read addr = 0x6001;  // Read only address
+const LED: write addr = 0x6000;    // Write only address
+const BUTTON: read addr = 0x6001;  // Read only address
 
 fn main() {
     LED = 1;                 // Write to address - OK
@@ -332,26 +332,33 @@ fn main() {
 
 ### Shadowing
 
-Wraith supports variable shadowing - declaring a new variable with the same name:
+Wraith does **not** allow variable shadowing — redeclaring a name that is
+already in scope is a compile error:
 
 ```rust
 fn calculate() {
     let x: u8 = 5;
-    let x: u16 = x as u16;  // Shadows previous x, different type
-
-    if x > 10 {
-        let x: u8 = 3;      // Shadows again within block
-        // x is u8 here
-    }
-    // x is u16 here
+    let x: u16 = x as u16;  // ERROR: duplicate symbol 'x'
 }
 ```
 
-**Shadowing Characteristics:**
-- Can change type of shadowed variable
-- Previous variable becomes inaccessible
-- Shadowing ends at block scope
-- Useful for type conversions and reusing common names
+Bind a new name instead, and let the frame allocator share the storage:
+
+```rust
+fn calculate() {
+    let x: u8 = 5;
+    let x_wide: u16 = x as u16;  // OK - a distinct name
+
+    if x_wide > 10 {
+        let x_small: u8 = 3;     // OK - a distinct name
+    }
+}
+```
+
+**Why:** a local's zero-page slot is assigned by call-graph coloring, not by
+scope, so a shadowed name would not get fresh storage anyway — the old and
+new bindings would alias. Rejecting the redeclaration makes that visible
+instead of surprising.
 
 ### Zero Page Allocation
 
@@ -982,7 +989,7 @@ fn unwrap_or_default(opt: Option) -> u8 {
 }
 ```
 
-⚠️ **Status**: Tuple variant pattern matching with data extraction has code generation support but is **experimental and minimally tested**. The implementation exists in the compiler but may have edge cases or bugs. Thorough testing is ongoing.
+✅ **Status**: Tuple variant pattern matching with data extraction works and is covered by execution tests.
 
 #### Struct Variants
 
@@ -1001,19 +1008,18 @@ let msg: Message = Message::Move { x: 10, y: 20 };
 let color: Message = Message::ChangeColor { r: 255, g: 128, b: 0 };
 ```
 
-**Pattern Matching with Struct Variants** (❌ NOT YET IMPLEMENTED):
+**Pattern Matching with Struct Variants**:
 
 ```rust
-// This syntax is NOT currently supported:
 match msg {
-    Message::Move { x, y } => {  // ❌ Compilation error
-        // Field extraction not implemented
+    Message::Move { x, y } => {
+        // x and y are bound to the field values
     }
     _ => {}
 }
 ```
 
-❌ **Status**: Struct variant pattern matching with field extraction is **not yet implemented**. The compiler will return an error: "Pattern bindings for struct variants not yet implemented". For now, you can only match on struct variants without extracting their fields.
+✅ **Status**: Struct variant pattern matching with field extraction works and is covered by execution tests. Fields are checked against the variant definition: an unknown field name or a value of the wrong type is a compile error.
 
 #### Memory Layout
 
@@ -1290,26 +1296,28 @@ fn process(slice: &[u8]) {
 
 ### Multidimensional Arrays
 
-Wraith supports arrays of arrays for multidimensional data:
+❌ **Status**: Arrays of arrays are **not implemented**. The type parses, but
+the compiler rejects it:
 
 ```rust
-// 2D array: 4 rows × 8 columns
 let screen: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 0],
     [0, 1, 1, 1, 1, 1, 1, 0],
     [0, 1, 0, 0, 0, 0, 1, 0],
     [0, 0, 0, 0, 0, 0, 0, 0],
 ];
-
-// Access elements
-screen[1][3] = 2;  // Row 1, column 3
-let pixel: u8 = screen[2][5];
+// ERROR: unsupported operation: array elements must be constant expressions
 ```
 
-**Memory Layout:**
-- Row-major order (rows stored sequentially)
-- No padding between elements
-- Total size: rows × columns × element_size
+**Workaround:** flatten to one dimension and index manually, or use an array
+of structs:
+
+```rust
+// 4 rows × 8 columns, flattened: element (r, c) lives at r * 8 + c
+let screen: [u8; 32] = [0; 32];
+screen[1 * 8 + 3] = 2;              // row 1, column 3
+let pixel: u8 = screen[2 * 8 + 5];
+```
 
 ### Array Assignment and Copying
 
@@ -1325,8 +1333,8 @@ source[0] = 10;  // dest is unchanged (independent copy)
 **For large arrays**, use `memcpy` for efficiency:
 
 ```rust
-let source: [u8; 100] = [...];
-let dest: [u8; 100];
+let source: [u8; 100] = [0; 100];
+let dest: [u8; 100] = [0; 100];
 memcpy(&dest, &source, 100);
 ```
 
@@ -1706,7 +1714,7 @@ for i: u8 in 0..10 {
 }
 
 // Over slices (type inferred from slice element type)
-fn process(data: [u8]) {
+fn process(data: &[u8]) {
     for item in data {  // item is inferred as u8
         // process item
     }
@@ -1803,8 +1811,8 @@ Conditions in if/while use short-circuit evaluation:
 
 ```rust
 // Check bounds before array access
-if i < array.length && array[i] == target {
-    // array[i] only evaluated if i < array.length
+if i < array.len && array[i] == target {
+    // array[i] only evaluated if i < array.len
 }
 
 // Check address validity before reading
@@ -1984,7 +1992,7 @@ fn increment() {
 
 ```rust
 fn add_with_carry(a: u8, b: u8) -> u8 {
-    let result: u8;
+    let result: u8 = 0;
     asm {
         "clc",
         "lda {a}",
@@ -2003,7 +2011,7 @@ Inline assembly can modify registers without compiler tracking:
 
 ```rust
 fn custom_operation() -> u8 {
-    let result: u8;
+    let result: u8 = 0;
     asm {
         "LDA #$42",      // Load accumulator
         "CLC",
@@ -2025,7 +2033,7 @@ fn custom_operation() -> u8 {
 **Reading Hardware Registers:**
 ```rust
 fn read_timer() -> u8 {
-    let value: u8;
+    let value: u8 = 0;
     asm {
         "LDA $D012",  // Read VIC-II raster register (C64 example)
         "STA {value}",
@@ -2077,7 +2085,7 @@ Use labels for loops and branches within asm blocks:
 
 ```rust
 fn find_byte(haystack: u16, needle: u8, len: u8) -> u8 {
-    let result: u8;
+    let result: u8 = 0;
     asm {
         "LDA {needle}",
         "LDY #$00",

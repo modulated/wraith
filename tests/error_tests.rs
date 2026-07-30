@@ -15,25 +15,24 @@ use test_harness::*;
 
 #[test]
 fn test_parse_error_missing_semicolon() {
-    assert_fails_at(
-        r#"
+    // Exact message and position: the error must point at the `}` that
+    // followed the missing `;`, not merely fail somewhere in parsing.
+    let src = r#"
         fn main() {
             let x: u8 = 10
         }
-        "#,
-        "parse",
-    );
+        "#;
+    assert_error_contains(src, "expected Semi");
+    assert_error_contains(src, "--> 4:9");
 }
 
 #[test]
 fn test_parse_error_unclosed_brace() {
-    assert_fails_at(
-        r#"
+    let src = r#"
         fn main() {
             let x: u8 = 10;
-        "#,
-        "parse",
-    );
+        "#;
+    assert_error_contains(src, "expected RBrace, found end of file");
 }
 
 #[test]
@@ -67,15 +66,15 @@ fn test_parse_error_invalid_token() {
 
 #[test]
 fn test_type_error_mismatch_assignment() {
-    assert_error_contains(
-        r#"
+    // Both types must be named, and the caret must land on the value.
+    let src = r#"
         fn main() {
             let x: u8 = 10;
             x = 300;  // 300 doesn't fit in u8, will be inferred as u16
         }
-        "#,
-        "type mismatch",
-    );
+        "#;
+    assert_error_contains(src, "expected u8, found u16");
+    assert_error_contains(src, "--> 4:17");
 }
 
 #[test]
@@ -94,41 +93,39 @@ fn test_type_error_invalid_operation() {
 
 #[test]
 fn test_type_error_function_arity() {
-    assert_error_contains(
-        r#"
+    let src = r#"
         fn add(a: u8, b: u8) -> u8 {
             return a + b;
         }
         fn main() {
             let x: u8 = add(10);  // Missing second argument
         }
-        "#,
-        "expected 2",
-    );
+        "#;
+    assert_error_contains(src, "expected 2 argument(s), found 1");
+    assert_error_contains(src, "--> 6:25");
 }
 
 #[test]
 fn test_type_error_undefined_variable() {
-    assert_error_contains(
-        r#"
+    // The message must name the symbol, and the caret the use site.
+    let src = r#"
         fn main() {
             let x: u8 = undefined_var;
         }
-        "#,
-        "undefined",
-    );
+        "#;
+    assert_error_contains(src, "undefined symbol 'undefined_var'");
+    assert_error_contains(src, "--> 3:25");
 }
 
 #[test]
 fn test_type_error_undefined_function() {
-    assert_error_contains(
-        r#"
+    let src = r#"
         fn main() {
             undefined_func();
         }
-        "#,
-        "undefined",
-    );
+        "#;
+    assert_error_contains(src, "undefined symbol 'undefined_func'");
+    assert_error_contains(src, "--> 3:13");
 }
 
 #[test]

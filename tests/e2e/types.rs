@@ -501,3 +501,16 @@ fn a_local_struct_array_larger_than_a_frame_slot_is_rejected() {
         "at most 255",
     );
 }
+
+#[test]
+fn multidimensional_arrays_are_rejected_loudly() {
+    // The spec once claimed support; the compiler has none. Until it does,
+    // the rejection must stay loud rather than miscompile.
+    let r = crate::common::compile(
+        "fn main() { let m: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]]; m[1][2] = 9; }",
+    );
+    assert!(
+        !matches!(r, crate::common::harness::CompileResult::Success(..)),
+        "arrays of arrays are not implemented"
+    );
+}
