@@ -1789,13 +1789,20 @@ fn generate_slice_materialize(
         arr_name
     ));
 
-    // Evaluate end first and park it at $21, then start at $20 (leaving start in
-    // A). Bounds are expected to be simple (variable/literal) so this does not
-    // clobber $20/$21; complex bounds may.
+    // Evaluate each bound and spill it to the software stack immediately, so
+    // a complex bound (a binary op, a call) cannot clobber the one parked
+    // before it — the old code staged `end` at $21 across `start`'s
+    // evaluation, and $20/$21 are exactly the temps binary ops write. Once
+    // both are reloaded the arithmetic below is straight-line and the
+    // hardcoded $20-$23 are safe.
     generate_expr(end, emitter, info, string_collector)?;
-    emitter.emit_inst("STA", "$21");
+    emitter.spill_scalar(1);
     generate_expr(start, emitter, info, string_collector)?;
+    emitter.spill_scalar(1);
+    emitter.reload_scalar(1); // A = start (pushed last)
     emitter.emit_inst("STA", "$20");
+    emitter.reload_scalar(1); // A = end
+    emitter.emit_inst("STA", "$21");
 
     // len = (end - start) [+ 1 for an inclusive range], as a 16-bit value. The
     // +1 can carry into the high byte (e.g. `0..=255` is 256 elements).

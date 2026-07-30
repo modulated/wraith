@@ -161,6 +161,28 @@ fn slice_with_runtime_bounds_u16() {
 }
 
 #[test]
+fn slice_with_complex_runtime_bounds_keeps_both() {
+    // The runtime path parked `end` at $21 while `start` was still being
+    // evaluated — and a u16 subexpression inside `start` stages its operands
+    // at exactly $20/$21. `end` came back as 0, so the length wrapped.
+    let mut e = run(r#"
+        const E0: addr = 0x0400;
+        const LEN: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let a: [u8; 8] = [10, 11, 12, 13, 14, 15, 16, 17];
+            let w: u16 = 2;
+            let s: &[u8] = a[(w + 1) as u8..(w + 4) as u8];   // 13, 14, 15
+            E0 = s[0 as u8];
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 13, "s[0] == a[3]");
+    assert_eq!(e.mem(0x0401), 3, "s.len == 6 - 3 == 3");
+}
+
+#[test]
 fn slice_reassignment() {
     // `s = arr[a..b];` retargets an existing slice variable.
     let mut e = run(r#"
