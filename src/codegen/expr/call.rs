@@ -128,6 +128,40 @@ pub(super) fn generate_call(
         _ => Vec::new(),
     };
 
+    // Fast path: all-trivial 8-bit args (literal or variable) to a
+    // non-recursive, non-address-taken callee go straight into the callee's
+    // frame. Frame coloring guarantees the callee's param slots don't alias
+    // the caller's live frame — that only breaks down within a recursion
+    // SCC, which is excluded — so the temp-pool round-trip below is pure
+    // overhead here (`LDA #$03; STA $F4; LDA $F4; STA $40` per arg).
+    let params_all_u8 = param_types.len() == args.len()
+        && param_types.iter().all(|ty| {
+            matches!(
+                ty,
+                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U8)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I8)
+                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::Bool)
+            )
+        });
+    let args_trivial = args.iter().all(|arg| {
+        matches!(
+            arg.node,
+            crate::ast::Expr::Literal(crate::ast::Literal::Integer(_))
+                | crate::ast::Expr::Variable(_)
+        )
+    });
+    if !args.is_empty() && params_all_u8 && args_trivial && !is_address_taken && !is_recursive_edge
+    {
+        emitter.invalidate_registers();
+        for (i, arg) in args.iter().enumerate() {
+            generate_expr(arg, emitter, info, string_collector)?;
+            emitter.emit_inst("STA", &format!("${:02X}", param_base + i as u8));
+        }
+        emitter.emit_inst("JSR", &function.node);
+        emitter.reg_state.invalidate_all();
+        return Ok(());
+    }
+
     // STEP 1: Evaluate all arguments into TEMPORARY storage first
     // This prevents recursive calls from overwriting parameters that are still needed
     //

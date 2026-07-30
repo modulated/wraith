@@ -34,7 +34,10 @@ impl SemanticAnalyzer {
     /// Returns the frame map and the set of call-graph edges that lie within a
     /// recursion cycle (a call across such an edge must save/restore the callee
     /// frame at runtime).
-    pub(super) fn finalize_frames(&mut self) -> Result<FinalizedFrames, SemaError> {
+    pub(super) fn finalize_frames(
+        &mut self,
+        source: &crate::ast::SourceFile,
+    ) -> Result<FinalizedFrames, SemaError> {
         // Deterministic node ordering (HashMap iteration order is not stable).
         let mut nodes: Vec<String> = self.frame_sizes.keys().cloned().collect();
         nodes.sort();
@@ -194,11 +197,17 @@ impl SemanticAnalyzer {
                 Vec::new()
             };
 
+            // Save only the scratch regions the handler's reachable code can
+            // actually touch. A full scratch save is 60 zero-page bytes and
+            // ~780 cycles per interrupt; a handler that does no 16-bit math
+            // has no business preserving $D0-$DC.
+            let (save_scratch, save_math) = self.interrupt_scratch_needs(&reachable, source);
+
             interrupt_save_info.insert(
                 handler.clone(),
                 InterruptSaveInfo {
-                    save_scratch: true,
-                    save_math: true,
+                    save_scratch,
+                    save_math,
                     shared_frames,
                 },
             );
@@ -399,6 +408,153 @@ impl SemanticAnalyzer {
         }
 
         Ok(())
+    }
+
+    /// Whether a handler's reachable code can touch the shared codegen
+    /// scratch region ($20-$3F / $E0-$FE) or the 16-bit math routines'
+    /// working storage ($D0-$DC), as (scratch, math). Anything not provably
+    /// trivial sets scratch; only a 16-bit Mul/Div/Mod (or a direct call to
+    /// those routines) sets math.
+    fn interrupt_scratch_needs(
+        &self,
+        reachable: &HashSet<String>,
+        source: &crate::ast::SourceFile,
+    ) -> (bool, bool) {
+        let mut needs = (false, false);
+        for item in source.items.iter().chain(self.imported_items.iter()) {
+            let crate::ast::Item::Function(f) = &item.node else {
+                continue;
+            };
+            if reachable.contains(&f.name.node) {
+                self.scan_stmt_for_scratch(&f.body.node, &mut needs);
+            }
+            if needs.0 && needs.1 {
+                break;
+            }
+        }
+        needs
+    }
+
+    fn scan_stmt_for_scratch(&self, stmt: &crate::ast::Stmt, needs: &mut (bool, bool)) {
+        use crate::ast::Stmt;
+        match stmt {
+            Stmt::VarDecl { init, .. } => self.scan_expr_for_scratch(init, needs),
+            Stmt::Assign { target, value } => {
+                self.scan_expr_for_scratch(target, needs);
+                self.scan_expr_for_scratch(value, needs);
+            }
+            Stmt::Expr(e) => self.scan_expr_for_scratch(e, needs),
+            Stmt::Return(Some(e)) => self.scan_expr_for_scratch(e, needs),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.scan_expr_for_scratch(condition, needs);
+                self.scan_stmt_for_scratch(&then_branch.node, needs);
+                if let Some(e) = else_branch {
+                    self.scan_stmt_for_scratch(&e.node, needs);
+                }
+            }
+            Stmt::While { condition, body } => {
+                self.scan_expr_for_scratch(condition, needs);
+                self.scan_stmt_for_scratch(&body.node, needs);
+            }
+            Stmt::Loop { body } => self.scan_stmt_for_scratch(&body.node, needs),
+            Stmt::For { range, body, .. } => {
+                self.scan_expr_for_scratch(&range.start, needs);
+                self.scan_expr_for_scratch(&range.end, needs);
+                self.scan_stmt_for_scratch(&body.node, needs);
+            }
+            Stmt::ForEach { iterable, body, .. } => {
+                needs.0 = true; // the loop stages a pointer for its whole body
+                self.scan_expr_for_scratch(iterable, needs);
+                self.scan_stmt_for_scratch(&body.node, needs);
+            }
+            Stmt::Match { expr, arms } => {
+                needs.0 = true; // dispatch scratch + scrutinee staging
+                self.scan_expr_for_scratch(expr, needs);
+                for arm in arms {
+                    self.scan_stmt_for_scratch(&arm.body.node, needs);
+                }
+            }
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.scan_stmt_for_scratch(&s.node, needs);
+                }
+            }
+            // Hand-written assembly may use any zero-page byte.
+            Stmt::Asm { .. } => needs.0 = true,
+        }
+    }
+
+    fn scan_expr_for_scratch(
+        &self,
+        expr: &crate::ast::Spanned<crate::ast::Expr>,
+        needs: &mut (bool, bool),
+    ) {
+        use crate::ast::{BinaryOp, Expr, Literal};
+        match &expr.node {
+            // Loads that compile to a single instruction: no scratch involved.
+            Expr::Literal(Literal::Integer(_))
+            | Expr::Literal(Literal::Bool(_))
+            | Expr::Variable(_)
+            | Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => {}
+
+            Expr::Paren(inner) => self.scan_expr_for_scratch(inner, needs),
+
+            Expr::Binary { op, left, right } => {
+                needs.0 = true; // operand staging ($F0 pool / $20)
+                if matches!(op, BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) {
+                    let wide = self.resolved_types.get(&expr.span).is_some_and(|t| {
+                        matches!(
+                            t,
+                            crate::sema::types::Type::Primitive(
+                                crate::ast::PrimitiveType::U16
+                                    | crate::ast::PrimitiveType::I16
+                                    | crate::ast::PrimitiveType::B16
+                            )
+                        )
+                    });
+                    if wide {
+                        needs.1 = true; // JSR mul16/div16/mod16 uses $D0-$DC
+                    }
+                }
+                self.scan_expr_for_scratch(left, needs);
+                self.scan_expr_for_scratch(right, needs);
+            }
+
+            Expr::Call { function, args } => {
+                needs.0 = true; // argument staging
+                if matches!(function.node.as_str(), "mul16" | "div16" | "mod16") {
+                    needs.1 = true;
+                }
+                for a in args {
+                    self.scan_expr_for_scratch(a, needs);
+                }
+            }
+
+            // Everything else — calls through pointers, casts, aggregates,
+            // slices, matches, strings — stages through the scratch pools.
+            Expr::Literal(_)
+            | Expr::Unary { .. }
+            | Expr::Cast { .. }
+            | Expr::Field { .. }
+            | Expr::Index { .. }
+            | Expr::Slice { .. }
+            | Expr::CallIndirect { .. }
+            | Expr::StructInit { .. }
+            | Expr::AnonStructInit { .. }
+            | Expr::EnumVariant { .. }
+            | Expr::SliceLen(_)
+            | Expr::U16Low(_)
+            | Expr::U16High(_)
+            | Expr::Match { .. } => needs.0 = true,
+        }
     }
 
     fn rewrite_frame_offsets(

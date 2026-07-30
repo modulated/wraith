@@ -134,3 +134,49 @@ fn the_generic_interrupt_attribute_is_rejected() {
         "should point at the real attributes: {err}"
     );
 }
+
+#[test]
+fn a_trivial_handler_saves_no_zero_page() {
+    // The prologue used to save 60 zero-page bytes unconditionally (~780
+    // cycles per interrupt). A handler that touches no scratch saves none.
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x400;
+        #[irq]
+        fn on_irq() {
+            OUT = 1;
+        }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    let handler = asm.split("on_irq:").nth(1).expect("handler emitted");
+    let body = handler.split("RTI").next().unwrap();
+    assert!(
+        !body.contains("Save zero-page"),
+        "trivial handler must not save zero-page:\n{body}"
+    );
+}
+
+#[test]
+fn a_math_handler_saves_the_math_scratch() {
+    // 16-bit multiply runs through mul16's $D0-$DC working storage, which
+    // main code may be using when the interrupt lands.
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x400;
+        #[irq]
+        fn on_irq() {
+            let x: u16 = 300;
+            let y: u16 = x * 3;
+            OUT = y.low;
+        }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    let handler = asm.split("on_irq:").nth(1).expect("handler emitted");
+    let body = handler.split("RTI").next().unwrap();
+    assert!(body.contains("LDA $D0"), "math scratch saved:\n{body}");
+    assert!(body.contains("LDA $20"), "binary-op scratch saved:\n{body}");
+}
