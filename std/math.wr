@@ -150,43 +150,30 @@ pub fn count_bits(value: u8) -> u8 {
 }
 
 /// Reverse the bits in a byte
-/// Optimized assembly: Uses zero page $20 for temp storage
-/// Cycles: ~66-76 (saved cycles by using fixed ZP instead of variable)
 /// Example: 0b11010010 -> 0b01001011
-/// Note: Uses zero page $20 for temporary storage
+///
+/// Plain Wraith on purpose: the asm version staged through zp $20 inside the
+/// caller's instruction stream, which is the compiler's own scratch pool.
 #[inline]
 pub fn reverse_bits(value: u8) -> u8 {
-    asm {
-        "LDA #$00",
-        "STA $20",
-        "LDA {value}",
-        "LDX #$08",
-        "reverse_loop:",
-        "LSR A",
-        "ROL $20",
-        "DEX",
-        "BNE reverse_loop",
-        "LDA $20",
+    let v: u8 = value;
+    let r: u8 = 0;
+    for i in 0..8 {
+        r = r << 1;
+        if (v & 1) != 0 {
+            r = r | 1;
+        }
+        v = v >> 1;
     }
+    return r;
 }
 
-/// Swap the high and low nibbles of a byte
-/// Optimized assembly: Result left in accumulator
-/// Cycles: ~10-14 (saved 2 cycles by eliminating STA)
-/// Example: 0xAB -> 0xBA
+/// Swap the high and low nibbles of a byte (e.g., 0xAB -> 0xBA)
+///
+/// Plain Wraith: the hand-rolled ASL/ADC/ROL sequence was a nibble short.
 #[inline]
 pub fn swap_nibbles(value: u8) -> u8 {
-    asm {
-        "LDA {value}",
-        "ASL A",
-        "ADC #$80",
-        "ROL A",
-        "ADC #$80",
-        "ROL A",
-        "ADC #$80",
-        "ROL A",
-        "ADC #$80",
-    }
+    return (value >> 4) | (value << 4);
 }
 
 // ============================================================================

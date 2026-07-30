@@ -63,7 +63,8 @@ pub(super) fn generate_type_cast(
 
     // A pointer arrives in A:X; a 16-bit scalar in A:Y. Casting between them is
     // therefore a register shuffle, not a value change — and the 6502 has no
-    // X↔Y transfer, so it has to go through memory.
+    // X↔Y transfer, so it has to go through memory. (A function name is NOT
+    // this shape: code addresses use the A:Y scalar convention.)
     let source_is_pointer = matches!(source_type, Some(crate::sema::types::Type::Pointer(_)));
 
     // Evaluate the source expression
@@ -95,13 +96,18 @@ pub(super) fn generate_type_cast(
                         return Ok(());
                     }
 
-                    // Check if source is already 16-bit
+                    // Check if source is already 16-bit. A function name
+                    // counts: a code address is 2 bytes and arrives in A:Y
+                    // like any other 16-bit scalar, so `f as u16` is a pure
+                    // type change. (Zero-extending it used to clobber the
+                    // high byte — mem_jump landed in nowhere.)
                     let source_is_16bit = source_type.is_some_and(|ty| {
                         matches!(
                             ty,
                             crate::sema::types::Type::Primitive(PrimitiveType::U16)
                                 | crate::sema::types::Type::Primitive(PrimitiveType::I16)
                                 | crate::sema::types::Type::Primitive(PrimitiveType::B16)
+                                | crate::sema::types::Type::Function(_, _)
                         )
                     });
 

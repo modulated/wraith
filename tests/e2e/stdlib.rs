@@ -392,3 +392,218 @@ fn test_bit_reports_set_and_clear() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (1, 0));
 }
+
+// ---------------------------------------------------------------------------
+// std/math.wr — saturating arithmetic and bit rotation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn saturating_add_caps_at_255() {
+    let mut e = run(r#"
+        import { saturating_add } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            R0 = saturating_add(200, 100);
+            R1 = saturating_add(10, 20);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (255, 30));
+}
+
+#[test]
+fn saturating_sub_floors_at_0() {
+    let mut e = run(r#"
+        import { saturating_sub } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            R0 = saturating_sub(10, 20);
+            R1 = saturating_sub(50, 20);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0, 30));
+}
+
+#[test]
+fn count_bits_counts_set_bits() {
+    let mut e = run(r#"
+        import { count_bits } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        #[reset]
+        fn main() {
+            R0 = count_bits(0xB4);
+            R1 = count_bits(0);
+            R2 = count_bits(0xFF);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (4, 0, 8));
+}
+
+#[test]
+fn reverse_bits_mirrors_the_byte() {
+    let mut e = run(r#"
+        import { reverse_bits } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            R0 = reverse_bits(0x80);
+            R1 = reverse_bits(0xB4);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x01, 0x2D));
+}
+
+#[test]
+fn swap_nibbles_exchanges_halves() {
+    let mut e = run(r#"
+        import { swap_nibbles } from "std/math.wr";
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() {
+            R0 = swap_nibbles(0xAB);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0xBA);
+}
+
+// ---------------------------------------------------------------------------
+// std/mem.wr — absolute read/write/jump
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mem_write_then_mem_read_round_trips() {
+    let mut e = run(r#"
+        import { mem_read, mem_write } from "std/mem.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            mem_write(0x0950, 42);
+            OUT = mem_read(0x0950);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 42);
+}
+
+#[test]
+fn mem_jump_transfers_control_and_the_target_returns() {
+    // mem_jump JMPs; the target's own RTS lands back at mem_jump's call
+    // site. Both writes must happen, in order.
+    let mut e = run(r#"
+        import { mem_jump } from "std/mem.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        fn target() {
+            R0 = 42;
+        }
+        #[reset]
+        fn main() {
+            mem_jump(target as u16);
+            R1 = 99;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (42, 99));
+}
+
+// ---------------------------------------------------------------------------
+// std/intrinsics.wr
+// ---------------------------------------------------------------------------
+
+#[test]
+fn intrinsics_disable_interrupts_masks_irq_and_enable_rearms_it() {
+    // SEI then CLI, both from the library rather than hand-written asm.
+    let mut e = run(r#"
+        import { disable_interrupts, enable_interrupts } from "std/intrinsics.wr";
+        const OUT: addr = 0x0900;
+        #[irq]
+        fn on_irq() {
+            OUT = OUT + 1;
+        }
+        #[reset]
+        fn main() {
+            OUT = 0;
+            disable_interrupts();
+            loop {}
+        }
+    "#);
+    assert!(
+        e.irq_stays_masked(),
+        "disable_interrupts() must mask the IRQ line"
+    );
+
+    let mut e = run(r#"
+        import { enable_interrupts } from "std/intrinsics.wr";
+        const OUT: addr = 0x0900;
+        #[irq]
+        fn on_irq() {
+            OUT = OUT + 1;
+        }
+        #[reset]
+        fn main() {
+            OUT = 0;
+            enable_interrupts();
+            loop {}
+        }
+    "#);
+    e.pulse_irq();
+    assert_eq!(e.mem(0x0900), 1, "enable_interrupts() must unmask");
+}
+
+#[test]
+fn intrinsics_set_and_clear_carry_are_observable() {
+    let mut e = run(r#"
+        import { set_carry, clear_carry } from "std/intrinsics.wr";
+        const OUT: addr = 0x0900;
+        const OUT2: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let r1: u8 = 0;
+            let r2: u8 = 0;
+            set_carry();
+            asm {
+                "LDA #$00",
+                "ADC #$00",
+                "STA {r1}"
+            }
+            clear_carry();
+            asm {
+                "LDA #$00",
+                "ADC #$00",
+                "STA {r2}"
+            }
+            OUT = r1;
+            OUT2 = r2;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (1, 0));
+}
+
+#[test]
+fn intrinsics_nop_is_a_no_op() {
+    let mut e = run(r#"
+        import { nop } from "std/intrinsics.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            OUT = 7;
+            nop();
+            nop();
+            OUT = OUT + 1;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 8);
+}
