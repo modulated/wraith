@@ -1,0 +1,5 @@
+import { ca } from "cycle_a.wr";
+
+pub fn cb(x: u8) -> u8 {
+    return ca(x);
+}

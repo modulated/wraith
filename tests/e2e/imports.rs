@@ -369,3 +369,81 @@ fn a_static_declared_before_the_import_relocates_the_imported_ones() {
     ));
     assert_eq!(e.mem(0x0900), 41 + 99);
 }
+
+// ============================================================================
+// Diamond imports and cycles
+//
+// A imports B and C, and C also imports B. Each module used to be analyzed in
+// a child that inherited the *already-imported* set, so whichever order the
+// imports came in, one of them skipped the file wholesale and its symbols
+// vanished from that analyzer — "undefined symbol" in C when B came first.
+// Modules are now analyzed once and replayed into later importers; a path on
+// the current chain is a true cycle and an error.
+// ============================================================================
+
+const DIAMOND_B: &str = "tests/fixtures/diamond_b.wr";
+const DIAMOND_C: &str = "tests/fixtures/diamond_c.wr";
+
+#[test]
+fn a_diamond_import_works_in_either_order() {
+    for imports in [
+        format!(
+            "import {{ BASE, bump }} from \"{DIAMOND_B}\";\nimport {{ use_b }} from \"{DIAMOND_C}\";",
+        ),
+        format!(
+            "import {{ use_b }} from \"{DIAMOND_C}\";\nimport {{ BASE, bump }} from \"{DIAMOND_B}\";",
+        ),
+    ] {
+        let src = format!(
+            r#"
+            {imports}
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                OUT = use_b(1);
+                loop {{}}
+            }}
+        "#
+        );
+        assert_eq!(run(&src).mem(0x0900), 12, "bump(1) + BASE = 2 + 10");
+    }
+}
+
+#[test]
+fn mutable_statics_in_a_diamond_have_one_address_and_one_init() {
+    // The shared BSS cursor gives BCOUNT and AROOT distinct addresses
+    // regardless of which module allocates first, and the reset handler
+    // initializes BCOUNT once.
+    let mut e = run(&format!(
+        r#"
+        static AROOT: u8 = 99;
+        import {{ read_bcount }} from "{DIAMOND_B}";
+        import {{ c_read }} from "{DIAMOND_C}";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {{
+            OUT = read_bcount() + c_read() + AROOT;
+            loop {{}}
+        }}
+    "#
+    ));
+    assert_eq!(e.mem(0x0900), 41 + 41 + 99);
+}
+
+#[test]
+fn a_true_cycle_is_an_error_not_a_silent_skip() {
+    // The cycle used to be "skipped", which just moved the failure to an
+    // undefined symbol downstream. It now names the cycle.
+    let err = match crate::common::harness::compile(
+        r#"
+        import { ca } from "tests/fixtures/cycle_a.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { OUT = ca(1); loop {} }
+    "#,
+    ) {
+        crate::common::harness::CompileResult::SemaError(e) => e,
+        other => panic!("expected a sema error, got {other:?}"),
+    };
+    assert!(err.contains("circular import"), "{err}");
+}

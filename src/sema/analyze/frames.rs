@@ -320,7 +320,7 @@ impl SemanticAnalyzer {
             .unwrap_or(DEFAULT_BSS);
         // Statics were allocated first and are never reused, so blocks begin
         // above whatever they consumed.
-        let base_start = self.bss_cursor.unwrap_or(bss_start);
+        let base_start = self.import_context.borrow().bss_cursor.unwrap_or(bss_start);
 
         let size_of = |f: &String| self.array_block_sizes.get(f).copied().unwrap_or(0);
         let scc_size: Vec<u16> = sccs.iter().map(|c| c.iter().map(&size_of).sum()).collect();

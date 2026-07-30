@@ -5,6 +5,7 @@
 
 use rustc_hash::FxHashSet as HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::ast::{EnumVariant, Import, Item, PrimitiveType, Span, Spanned};
 use crate::sema::const_eval::{ConstValue, eval_const_expr_with_env};
@@ -447,6 +448,8 @@ impl SemanticAnalyzer {
     /// address. Statics are allocated in declaration order from the start of the
     /// BSS section; unlike function frames they are never reused or colored,
     /// because they are live for the whole program and shared with interrupts.
+    /// The cursor is shared across the whole import graph, so no two modules'
+    /// globals ever collide, whoever allocates first.
     fn bss_alloc(&mut self, size: u16, span: crate::ast::Span) -> Result<u16, SemaError> {
         // Fall back to a built-in RAM range when the project's wraith.toml
         // predates the BSS section, so existing configs keep working. The
@@ -458,7 +461,8 @@ impl SemanticAnalyzer {
             .get_section("BSS")
             .map(|s| (s.start, s.end))
             .unwrap_or(DEFAULT_BSS);
-        let base = self.bss_cursor.unwrap_or(start);
+        let mut ctx = self.import_context.borrow_mut();
+        let base = ctx.bss_cursor.unwrap_or(start);
         let last = base as u32 + size as u32 - 1;
         if last > end as u32 {
             return Err(SemaError::Custom {
@@ -469,7 +473,7 @@ impl SemanticAnalyzer {
                 span,
             });
         }
-        self.bss_cursor = Some(base + size);
+        ctx.bss_cursor = Some(base + size);
         Ok(base)
     }
 
@@ -554,39 +558,16 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
-    pub(super) fn process_import(&mut self, import: &Import) -> Result<(), SemaError> {
-        // Resolve the import path
-        let import_str = &import.path.node;
-        let import_path = if import_str.starts_with("./") || import_str.starts_with("../") {
-            // Relative import - resolve relative to the current file's directory
-            if let Some(base) = &self.base_path {
-                base.parent().unwrap_or(base).join(import_str)
-            } else {
-                PathBuf::from(import_str)
-            }
-        } else {
-            // Non-relative import - search in standard library directory first
-            let std_path = Self::get_std_lib_path().join(import_str);
-            if std_path.exists() {
-                std_path
-            } else {
-                // Fall back to current directory or relative to base path
-                if let Some(base) = &self.base_path {
-                    base.parent().unwrap_or(base).join(import_str)
-                } else {
-                    PathBuf::from(import_str)
-                }
-            }
-        };
-
-        // Check if we've already imported this file to avoid circular imports
-        if self.imported_files.contains(&import_path) {
-            return Ok(());
-        }
-        self.imported_files.insert(import_path.clone());
-
+    /// Read, parse and analyze one module file, then store the result for
+    /// replay by later importers. Analysis errors are rendered against the
+    /// module's own source and carried upward with the import trail.
+    fn analyze_module_file(
+        &mut self,
+        import_path: &PathBuf,
+        import: &Import,
+    ) -> Result<(Rc<SemanticAnalyzer>, Vec<Spanned<crate::ast::Item>>), SemaError> {
         // Load and parse the imported file
-        let source = std::fs::read_to_string(&import_path).map_err(|e| SemaError::ImportError {
+        let source = std::fs::read_to_string(import_path).map_err(|e| SemaError::ImportError {
             path: import.path.node.clone(),
             // The formatter already prefixes "failed to import '<path>':".
             reason: e.to_string(),
@@ -638,11 +619,16 @@ impl SemanticAnalyzer {
         // frame sizes, which we merge below so the root's finalize_frames colors
         // imported functions together with this module (fixing the historical
         // collision where a child allocator also started at $40).
-        let mut imported_analyzer = SemanticAnalyzer::with_base_path(import_path.clone());
-        imported_analyzer.imported_files = self.imported_files.clone();
-        imported_analyzer
-            .analyze_module(&ast)
-            .map_err(|e| match e {
+        self.import_context
+            .borrow_mut()
+            .stack
+            .push(import_path.clone());
+        let mut child = SemanticAnalyzer::with_base_path(import_path.clone());
+        child.import_context = Rc::clone(&self.import_context);
+        let result = child.analyze_module(&ast);
+        self.import_context.borrow_mut().stack.pop();
+        if let Err(e) = result {
+            return Err(match e {
                 // The failure is deeper in the chain. Its diagnostic is already
                 // rendered; what this level can add is the hop *through* this
                 // module, because we are the ones holding its source.
@@ -679,16 +665,89 @@ impl SemanticAnalyzer {
                     trail: Vec::new(),
                     import_span: import.path.span,
                 },
-            })?;
+            });
+        }
+
+        let analyzer = Rc::new(child);
+        self.import_context
+            .borrow_mut()
+            .modules
+            .insert(import_path.clone(), (analyzer.clone(), ast.items.clone()));
+        Ok((analyzer, ast.items))
+    }
+
+    pub(super) fn process_import(&mut self, import: &Import) -> Result<(), SemaError> {
+        // Resolve the import path
+        let import_str = &import.path.node;
+        let import_path = if import_str.starts_with("./") || import_str.starts_with("../") {
+            // Relative import - resolve relative to the current file's directory
+            if let Some(base) = &self.base_path {
+                base.parent().unwrap_or(base).join(import_str)
+            } else {
+                PathBuf::from(import_str)
+            }
+        } else {
+            // Non-relative import - search in standard library directory first
+            let std_path = Self::get_std_lib_path().join(import_str);
+            if std_path.exists() {
+                std_path
+            } else {
+                // Fall back to current directory or relative to base path
+                if let Some(base) = &self.base_path {
+                    base.parent().unwrap_or(base).join(import_str)
+                } else {
+                    PathBuf::from(import_str)
+                }
+            }
+        };
+
+        // Canonicalize so the same file reached by two spellings ("b.wr",
+        // "./b.wr", an absolute path) is one node in the import graph.
+        let import_path = std::fs::canonicalize(&import_path).unwrap_or(import_path);
+
+        // A path already on the current chain is a true cycle (A -> B -> A).
+        // A module that merely finished analyzing earlier (a diamond: A
+        // imports B and C, and C also imports B) is not a cycle — its stored
+        // analysis is replayed into this importer below.
+        if self.import_context.borrow().stack.contains(&import_path) {
+            let chain = self
+                .import_context
+                .borrow()
+                .stack
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            return Err(SemaError::CircularImport {
+                path: import.path.node.clone(),
+                chain,
+            });
+        }
+
+        // Replay a completed module, or analyze it now. Either way we end up
+        // with the module's analyzer and its items; the merge below is
+        // identical for both paths, which is what makes diamond imports
+        // order-independent.
+        let replay = self
+            .import_context
+            .borrow()
+            .modules
+            .get(&import_path)
+            .cloned();
+        let (imported_analyzer, module_items, is_replay) = if let Some((an, items)) = replay {
+            (an, items, true)
+        } else {
+            let (an, items) = self.analyze_module_file(&import_path, import)?;
+            (an, items, false)
+        };
 
         // Collect all items from the imported file for codegen
         // We collect ALL items, not just the imported symbols, because functions
         // may depend on other functions in the same module
-        self.imported_items.extend(ast.items.clone());
+        self.imported_items.extend(module_items.iter().cloned());
 
         // Also collect items from transitively imported modules
         self.imported_items
-            .extend(imported_analyzer.imported_items.clone());
+            .extend(imported_analyzer.imported_items.iter().cloned());
 
         // Work out which names this import brings in. A glob takes every `pub`
         // item in the module (private ones stay private, exactly as a named
@@ -761,8 +820,7 @@ impl SemanticAnalyzer {
         // memcpy); codegen looks up the callee's signature by name to marshal
         // arguments, and without it would treat every argument as a single byte
         // and corrupt the call.
-        for item in ast
-            .items
+        for item in module_items
             .iter()
             .chain(imported_analyzer.imported_items.iter())
         {
@@ -791,36 +849,10 @@ impl SemanticAnalyzer {
             }
         }
 
-        // The child allocated its mutable statics from the same BSS base we
-        // would have, so its addresses collide with whatever this module (or a
-        // previously imported one) already allocated. Relocate: shift every
-        // child allocation up by this module's current BSS high-water mark.
-        // Only addresses inside the child's own BSS run are touched — `addr`
-        // declarations name hardware and consts carry the Absolute(0)
-        // sentinel.
-        const DEFAULT_BSS_START: u16 = 0x0400;
-        let bss_start = self
-            .memory_config
-            .get_section("BSS")
-            .map(|s| s.start)
-            .unwrap_or(DEFAULT_BSS_START);
-        let bss_shift = self.bss_cursor.unwrap_or(bss_start) - bss_start;
-        let child_bss_end = imported_analyzer.bss_cursor;
-        let shift_addr = |a: u16| -> u16 {
-            match child_bss_end {
-                Some(end) if a >= bss_start && a < end => a + bss_shift,
-                _ => a,
-            }
-        };
-
         // Merge ALL resolved_symbols from the imported module
         // This is necessary because when we emit imported functions during codegen,
         // they reference symbols (variables, constants, addresses) using their original spans
         for (span, symbol) in &imported_analyzer.resolved_symbols {
-            let mut symbol = symbol.clone();
-            if let crate::sema::table::SymbolLocation::Absolute(a) = symbol.location {
-                symbol.location = crate::sema::table::SymbolLocation::Absolute(shift_addr(a));
-            }
             self.resolved_symbols.insert(*span, symbol.clone());
 
             // Also add constants, addresses, and mutable statics to the symbol
@@ -853,8 +885,11 @@ impl SemanticAnalyzer {
         }
 
         // Merge diagnostics the child collected; its analysis is part of this
-        // compile, so its warnings are too.
-        self.warnings.extend(imported_analyzer.warnings.clone());
+        // compile, so its warnings are too. A replayed module's warnings were
+        // already reported by the first import.
+        if !is_replay {
+            self.warnings.extend(imported_analyzer.warnings.clone());
+        }
 
         // Merge span-keyed resolutions produced while checking the child's
         // bodies. Without these, codegen sees the AST forms but not their
@@ -883,17 +918,13 @@ impl SemanticAnalyzer {
             self.array_block_sizes.entry(name.clone()).or_insert(*size);
         }
 
-        // Merge mutable statics: their startup images (relocated like the
-        // symbols above), and advance our BSS high-water mark past the child's
-        // relocated run.
-        self.static_inits
-            .extend(imported_analyzer.static_inits.iter().map(|init| {
-                let mut init = init.clone();
-                init.addr = shift_addr(init.addr);
-                init
-            }));
-        if let Some(end) = child_bss_end {
-            self.bss_cursor = Some(end + bss_shift);
+        // Merge mutable statics' startup images. The shared BSS cursor means
+        // their addresses are already final — but a replayed module's images
+        // are already here from its first import, so dedupe by name.
+        for init in &imported_analyzer.static_inits {
+            if !self.static_inits.iter().any(|i| i.name == init.name) {
+                self.static_inits.push(init.clone());
+            }
         }
 
         // Merge loop-bound slots so for-loops in imported functions keep their
@@ -940,9 +971,6 @@ impl SemanticAnalyzer {
                 .or_default()
                 .extend(refs.iter().cloned());
         }
-
-        // Merge the imported files set
-        self.imported_files.extend(imported_analyzer.imported_files);
 
         Ok(())
     }

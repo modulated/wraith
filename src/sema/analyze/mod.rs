@@ -19,7 +19,42 @@ use crate::sema::{FunctionMetadata, ProgramInfo, SemaError, Warning};
 
 use crate::ast::Span;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
+
+/// State shared by every analyzer working on one compilation's import graph.
+///
+/// A module is analyzed once and *replayed* into every later importer: the
+/// first import of a file runs the full merge; a later one — a diamond, like
+/// A importing B and C while C also imports B — re-merges the stored analysis
+/// instead of skipping the file and losing its symbols (which used to
+/// produce "undefined symbol" in the second importer). A path on the stack is
+/// a genuine cycle and is an error.
+///
+/// The BSS cursor is shared as well, so mutable statics from every module
+/// come from one global address space and never collide, regardless of
+/// declaration or import order.
+pub struct ImportContext {
+    /// Every fully analyzed module, by canonical path, with its items (needed
+    /// to replay the codegen item list without re-reading the file).
+    modules: HashMap<PathBuf, (Rc<SemanticAnalyzer>, Vec<Spanned<Item>>)>,
+    /// The import chain from the root to the module being analyzed. A path
+    /// already here is a true cycle (A -> B -> A).
+    stack: Vec<PathBuf>,
+    /// Global BSS high-water mark for mutable statics (see `bss_alloc`).
+    bss_cursor: Option<u16>,
+}
+
+impl ImportContext {
+    fn new() -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self {
+            modules: HashMap::default(),
+            stack: Vec::new(),
+            bss_cursor: None,
+        }))
+    }
+}
 
 pub struct SemanticAnalyzer {
     pub table: SymbolTable,
@@ -54,7 +89,7 @@ pub struct SemanticAnalyzer {
     pub(super) type_registry: TypeRegistry,
     pub(super) imported_items: Vec<Spanned<Item>>,
     pub(super) base_path: Option<PathBuf>,
-    pub(super) imported_files: HashSet<PathBuf>,
+    pub(super) import_context: Rc<RefCell<ImportContext>>,
     pub(super) const_env: ConstEnv,
     pub(super) loop_depth: usize,
     /// Track variable usage for unused variable warnings (per-function, cleared after each function)
@@ -95,10 +130,6 @@ pub struct SemanticAnalyzer {
     /// their hidden bound slots can share zero-page bytes; nested loops find
     /// the list empty (the outer slot is still held) and allocate fresh.
     pub(super) loop_bound_free: Vec<(u8, u8)>,
-    /// Next free address in the BSS (RAM) section for mutable `static` globals.
-    /// None until the first static is allocated. Unlike frames, BSS is never
-    /// reused or colored: statics live for the whole program.
-    pub(super) bss_cursor: Option<u16>,
     /// Startup values for mutable statics, in declaration order.
     pub(super) static_inits: Vec<crate::sema::StaticInit>,
     /// Per-function frame size in bytes (params + locals), the high-water mark of
@@ -151,7 +182,7 @@ impl SemanticAnalyzer {
             type_registry: TypeRegistry::new(),
             imported_items: Vec::with_capacity(8),
             base_path: None,
-            imported_files: HashSet::default(),
+            import_context: ImportContext::new(),
             const_env: ConstEnv::default(),
             loop_depth: 0,
             used_variables: HashSet::default(),
@@ -170,7 +201,6 @@ impl SemanticAnalyzer {
             current_function: None,
             frame_cursor: 0,
             loop_bound_free: Vec::new(),
-            bss_cursor: None,
             static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
             function_signatures: HashMap::default(),
@@ -198,7 +228,7 @@ impl SemanticAnalyzer {
             type_registry: TypeRegistry::new(),
             imported_items: Vec::with_capacity(8),
             base_path: Some(base_path),
-            imported_files: HashSet::default(),
+            import_context: ImportContext::new(),
             const_env: ConstEnv::default(),
             loop_depth: 0,
             used_variables: HashSet::default(),
@@ -217,7 +247,6 @@ impl SemanticAnalyzer {
             current_function: None,
             frame_cursor: 0,
             loop_bound_free: Vec::new(),
-            bss_cursor: None,
             static_inits: Vec::new(),
             frame_sizes: HashMap::default(),
             function_signatures: HashMap::default(),

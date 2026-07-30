@@ -1,0 +1,14 @@
+// Fixture for diamond-import tests: A imports B and C, and C also imports B.
+// Both orders must compile — B's symbols must reach C however the imports
+// are ordered.
+pub const BASE: u8 = 10;
+
+static BCOUNT: u8 = 41;
+
+pub fn bump(x: u8) -> u8 {
+    return x + 1;
+}
+
+pub fn read_bcount() -> u8 {
+    return BCOUNT;
+}

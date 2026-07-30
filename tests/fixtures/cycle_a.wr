@@ -1,0 +1,7 @@
+// Fixture for the cycle test: cycle_a imports cycle_b, cycle_b imports
+// cycle_a. Must be rejected as a circular import, not silently skipped.
+import { cb } from "cycle_b.wr";
+
+pub fn ca(x: u8) -> u8 {
+    return cb(x);
+}

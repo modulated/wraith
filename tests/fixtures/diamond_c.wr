@@ -1,0 +1,9 @@
+import { BASE, bump, read_bcount } from "diamond_b.wr";
+
+pub fn use_b(x: u8) -> u8 {
+    return bump(x) + BASE;
+}
+
+pub fn c_read() -> u8 {
+    return read_bcount();
+}
