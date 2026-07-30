@@ -26,11 +26,6 @@ impl StructDef {
     pub fn get_field(&self, name: &str) -> Option<&FieldInfo> {
         self.fields.iter().find(|f| f.name == name)
     }
-
-    /// Calculate total size of the struct
-    pub fn calculate_size(fields: &[FieldInfo]) -> usize {
-        fields.iter().map(|f| f.ty.size()).sum()
-    }
 }
 
 /// Information about an enum variant with computed tag and data
@@ -64,21 +59,6 @@ impl EnumDef {
     /// Get variant by name
     pub fn get_variant(&self, name: &str) -> Option<&VariantInfo> {
         self.variants.iter().find(|v| v.name == name)
-    }
-
-    /// Calculate total size of the enum (tag + largest variant)
-    pub fn calculate_size(variants: &[VariantInfo]) -> usize {
-        let max_data_size = variants
-            .iter()
-            .map(|v| match &v.data {
-                VariantData::Unit => 0,
-                VariantData::Tuple(types) => types.iter().map(|t| t.size()).sum(),
-                VariantData::Struct(fields) => StructDef::calculate_size(fields),
-            })
-            .max()
-            .unwrap_or(0);
-
-        1 + max_data_size // 1 byte for tag + data
     }
 }
 

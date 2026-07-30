@@ -58,7 +58,6 @@ impl ImportContext {
 
 pub struct SemanticAnalyzer {
     pub table: SymbolTable,
-    pub errors: Vec<SemaError>,
     pub warnings: Vec<Warning>,
     pub(super) current_return_type: Option<Type>,
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
@@ -167,7 +166,6 @@ impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
             table: SymbolTable::new(),
-            errors: Vec::with_capacity(16),
             warnings: Vec::with_capacity(16),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
@@ -213,7 +211,6 @@ impl SemanticAnalyzer {
     pub fn with_base_path(base_path: PathBuf) -> Self {
         Self {
             table: SymbolTable::new(),
-            errors: Vec::with_capacity(16),
             warnings: Vec::with_capacity(16),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
@@ -309,10 +306,6 @@ impl SemanticAnalyzer {
         // Second pass: Analyze function bodies
         for item in &source.items {
             self.analyze_item(item)?;
-        }
-
-        if !self.errors.is_empty() {
-            return Err(self.errors[0].clone());
         }
 
         // Check for unused imports after all analysis is complete. Unused
