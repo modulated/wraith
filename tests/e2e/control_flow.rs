@@ -401,3 +401,46 @@ fn a_large_match_assembles_and_picks_the_right_arm() {
     assert_eq!(pick(19), 119, "last literal arm");
     assert_eq!(pick(25), 0, "wildcard");
 }
+
+#[test]
+fn an_empty_if_block_is_not_a_struct_literal() {
+    // `if a == b { }` parsed `b { }` as an empty struct literal and then
+    // failed at the *next* statement — the struct-init-vs-block ambiguity
+    // resolved the wrong way in condition position.
+    assert_eq!(
+        eval("let a: u8 = 1; let b: u8 = 2;
+              if a == b { }
+              if a != b { OUT = 3; }"),
+        3
+    );
+}
+
+#[test]
+fn a_comment_only_if_block_parses_too() {
+    // Comments leave no tokens, so this is the same shape as `{ }`.
+    assert_eq!(
+        eval("let a: u8 = 1; let b: u8 = 2;
+              if a == b { // nothing to do
+              }
+              OUT = 7;"),
+        7
+    );
+}
+
+#[test]
+fn an_empty_struct_literal_still_parses_outside_conditions() {
+    // Gating `Name {}` in condition position must not remove it elsewhere:
+    // missing fields zero-fill.
+    let mut e = run(r#"
+        struct P { x: u8 }
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let p: P = P { };
+            OUT = p.x + 5;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 5);
+}
+

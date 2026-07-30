@@ -83,7 +83,7 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::If)?;
 
-        let condition = self.parse_expr()?;
+        let condition = self.parse_condition_expr()?;
         let then_branch = Box::new(self.parse_block()?);
 
         let else_branch = if self.check(&Token::Else) {
@@ -114,7 +114,7 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::While)?;
 
-        let condition = self.parse_expr()?;
+        let condition = self.parse_condition_expr()?;
         let body = Box::new(self.parse_block()?);
 
         let span = start.merge(self.previous_span());
@@ -177,14 +177,14 @@ impl Parser<'_> {
         self.expect(&Token::In)?;
 
         // Check if iterating over a range or a slice
-        let first_expr = self.parse_expr()?;
+        let first_expr = self.parse_condition_expr()?;
 
         // Check for range syntax: start..end or start..=end
         if self.check(&Token::DotDot) || self.check(&Token::DotDotEq) {
             let inclusive = self.check(&Token::DotDotEq);
             self.advance();
 
-            let end = self.parse_expr()?;
+            let end = self.parse_condition_expr()?;
             let body = Box::new(self.parse_block()?);
             let span = start.merge(self.previous_span());
 
@@ -224,7 +224,7 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::Match)?;
 
-        let expr = self.parse_expr()?;
+        let expr = self.parse_condition_expr()?;
         self.expect(&Token::LBrace)?;
 
         let mut arms = Vec::with_capacity(4);

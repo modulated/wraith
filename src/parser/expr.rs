@@ -97,7 +97,7 @@ impl Parser<'_> {
                 let mut args = Vec::new();
                 if !self.check(&Token::RParen) {
                     loop {
-                        args.push(self.parse_expr()?);
+                        args.push(self.parse_delimited_expr()?);
                         if self.check(&Token::Comma) {
                             self.advance();
                         } else {
@@ -116,13 +116,13 @@ impl Parser<'_> {
                 );
             } else if self.check(&Token::LBracket) {
                 self.advance();
-                let first = self.parse_expr()?;
+                let first = self.parse_delimited_expr()?;
 
                 // Check for slice syntax: arr[start..end] or arr[start..=end]
                 if self.check(&Token::DotDot) || self.check(&Token::DotDotEq) {
                     let inclusive = self.check(&Token::DotDotEq);
                     self.advance();
-                    let end = self.parse_expr()?;
+                    let end = self.parse_delimited_expr()?;
                     self.expect(&Token::RBracket)?;
                     let span = expr.span.merge(self.previous_span());
                     expr = Spanned::new(
@@ -228,7 +228,7 @@ impl Parser<'_> {
             // Parenthesized expression
             Some(Token::LParen) => {
                 self.advance();
-                let inner = self.parse_expr()?;
+                let inner = self.parse_delimited_expr()?;
                 self.expect(&Token::RParen)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Expr::Paren(Box::new(inner)), span))
@@ -354,7 +354,7 @@ impl Parser<'_> {
             ));
         }
 
-        let first = self.parse_expr()?;
+        let first = self.parse_delimited_expr()?;
 
         // Check if this is array fill syntax: [expr; count]
         if self.check(&Token::Semi) {
@@ -378,7 +378,7 @@ impl Parser<'_> {
             if self.check(&Token::RBracket) {
                 break; // trailing comma
             }
-            elements.push(self.parse_expr()?);
+            elements.push(self.parse_delimited_expr()?);
         }
 
         self.expect(&Token::RBracket)?;
@@ -403,7 +403,9 @@ impl Parser<'_> {
         if self.check(&Token::LBrace) {
             // Lookahead to see if this is really a struct init
             let is_struct_init = match self.peek_ahead(1) {
-                Some(Token::RBrace) => true, // Empty struct: x {}
+                // Empty struct: x {} — except in condition position, where
+                // the brace opens the statement's body block instead.
+                Some(Token::RBrace) => !self.no_empty_struct_literal,
                 Some(Token::Ident(_) | Token::Read | Token::Write) => {
                     // Check if ident is followed by colon: x { field: ... }
                     // `read`/`write` are contextual keywords and may be field names.
@@ -504,7 +506,7 @@ impl Parser<'_> {
         let mut args = Vec::with_capacity(4);
 
         while !self.check(&Token::RParen) {
-            args.push(self.parse_expr()?);
+            args.push(self.parse_delimited_expr()?);
             if !self.check(&Token::Comma) {
                 break;
             }
@@ -749,7 +751,7 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::Match)?;
 
-        let expr = self.parse_expr()?;
+        let expr = self.parse_condition_expr()?;
         self.expect(&Token::LBrace)?;
 
         let mut arms = Vec::with_capacity(4);

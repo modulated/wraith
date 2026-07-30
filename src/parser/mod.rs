@@ -21,6 +21,12 @@ pub struct Parser<'a> {
     /// File these tokens came from, stamped into every span produced. Byte
     /// offsets alone repeat across modules, and spans are used as map keys.
     file: u32,
+    /// Set while parsing a statement condition/scrutinee (`if`, `while`,
+    /// `for`, `match`), where the `{` after it opens the body block. An
+    /// identifier right before that brace is not an empty struct literal:
+    /// `if a == b { }` compares a and b — it does not construct a `b {}`
+    /// and then look for a body that isn't there.
+    no_empty_struct_literal: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -36,6 +42,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             errors: Vec::with_capacity(tokens.len() / 20),
             file,
+            no_empty_struct_literal: false,
         }
     }
 
@@ -208,6 +215,29 @@ impl<'a> Parser<'a> {
     /// Check if we have collected any errors
     fn has_errors(&self) -> bool {
         !self.errors.is_empty()
+    }
+
+    // === Expression context ===
+
+    /// Parse an expression in statement-condition position (`if`, `while`,
+    /// `for`, `match` scrutinee), where the `{` after it opens the body.
+    fn parse_condition_expr(&mut self) -> ParseResult<Spanned<crate::ast::Expr>> {
+        let saved = self.no_empty_struct_literal;
+        self.no_empty_struct_literal = true;
+        let result = self.parse_expr();
+        self.no_empty_struct_literal = saved;
+        result
+    }
+
+    /// Parse an expression inside fresh delimiters (parens, call arguments,
+    /// brackets), where a trailing `{ }` can only be an empty struct literal,
+    /// never a block — the condition-position restriction lifts.
+    fn parse_delimited_expr(&mut self) -> ParseResult<Spanned<crate::ast::Expr>> {
+        let saved = self.no_empty_struct_literal;
+        self.no_empty_struct_literal = false;
+        let result = self.parse_expr();
+        self.no_empty_struct_literal = saved;
+        result
     }
 }
 
