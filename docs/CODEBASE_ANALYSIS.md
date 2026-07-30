@@ -2,11 +2,13 @@
 
 _Date: 2026-07-28. Method: five parallel deep audits (sema, codegen/emitted-asm, front-end/perf, test infrastructure, repo/docs). Every CRITICAL and most HIGH findings were reproduced against the built compiler and, where relevant, assembled with `flatasm` and/or run on the mos6502 emulator. Suite at time of audit: 956 tests, all passing — every bug listed below slips through it._
 
+_Update: all 22 criticals and every HIGH item are now fixed (the struck-through entries), each with regression tests. MEDIUM and LOW items remain open._
+
 ## Executive summary
 
 The project is in genuinely good shape architecturally: the emulator-backed e2e harness is exceptional for a project this size, the peephole's flag-liveness fixpoint is principled, frame coloring is well engineered, and the bug-log discipline in ROADMAP/TODO/test-file headers is excellent.
 
-The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (**all 22 fixed after the audit** — see the struck-through entries; 5 front-end/HIGH items remain open further down). They cluster into a small number of root causes, which matters more than the count:
+The audit nonetheless found **22 verified critical miscompiles/crashes on valid code** (**all 22 fixed after the audit** — see the struck-through entries; **all HIGH items are fixed as of 2026-07-30**). They cluster into a small number of root causes, which matters more than the count:
 
 1. **Hand-enumerated AST walkers and merge lists miss new variants.** New expression forms (`ForEach`, `CallIndirect`, the `SliceLen`/`U16Low`/`U16High` accessor nodes) and new analyzer state (`accessor_fields`, `const_env`, `local_arrays`, `static_inits`, `unreachable_stmts`) were each added to *some* of the places that must know about them. This one pattern accounts for roughly half the criticals.
 2. **Zero-page scratch conventions are documented but not enforced.** The `$F0–$F3` "high pool" is both allocated through `TempAllocator` and written directly by string/struct/index paths; pool-exhaustion fallbacks silently reuse live slots (`unwrap_or(0xF2)`). Accounts for most of the rest. *(Substantially fixed: all demonstrated sites now allocate, spill, or error — see CG-C3/C5/C6.)*
@@ -17,8 +19,8 @@ The audit nonetheless found **22 verified critical miscompiles/crashes on valid 
 
 | # | Action | Kills |
 |---|--------|-------|
-| 1 | ~~All 22 audit criticals fixed~~ CI + sema-level fuzzer + doc-examples-compiled-in-tests | prevents the next crop |
-| 2 | CI + sema-level fuzzer + doc-examples-compiled-in-tests | keeps the fixed classes from regressing |
+| 1 | ~~All 22 audit criticals fixed~~ ~~CI + sema-level fuzzer~~ doc-examples-compiled-in-tests | prevents the next crop |
+| 2 | Doc-examples-compiled-in-tests + error-message golden tests | keeps the fixed classes from regressing |
 
 ---
 
@@ -103,33 +105,33 @@ The desugar still clones the target — semantically invisible for pure targets,
 
 - **~~SE-H1/H2. Escape analysis never descends into `for…in` bodies, and its expression walker misses several forms.~~ FIXED** — `walk_stmts` now covers `ForEach`; `walk_exprs_in_stmt` covers `For` bounds, `ForEach` iterables, and `Match` scrutinees; `walk_expr` covers `Match` arms, `StructInit`/`AnonStructInit` fields, `EnumVariant` data, `Slice`, `CallIndirect`, and the accessor nodes; `walk_calls` reports indirect calls so rule 4 sees their arguments (regression tests: `e2e::pointer_escape::{returning_a_local_pointer_from_a_for_each_body_is_rejected, address_of_a_local_in_a_for_bound_of_a_recursive_function_is_rejected}`).
 - **~~SE-H3. Escape rule 2 misses stores through accessor-named fields.~~ FIXED** — `stores_beyond_the_frame` and `addr_of_target` peel the accessor nodes via `accessor_fields` (regression test: `e2e::pointer_escape::storing_a_local_pointer_through_an_accessor_named_field_is_rejected`).
-- **SE-H4. Slice assignment to a `const` array bypasses the ROM-write check** (`stmt.rs:432-457`). `LUT[0..2] = [9, 9];` emits stores into ROM; `LUT[0] = 9;` is rejected. Peel `Expr::Slice` in `lvalue_root`.
-- **SE-H5. Struct literals are not validated** (`expr.rs:122-137, 1033-1073`). `Point { x: true, z: 5 }` compiles; in the ROM path a 1-byte value in a 2-byte field shifts every later field — layout corruption. Unknown names and wrong types should error, and field values should get `expected_type` so literals adopt field width. Same gap in enum struct-variants.
-- **SE-H6. `const` declarations never check the initializer against the declared type** (`register.rs:240-268`). `const C: u8 = "hello";` compiles; `const B: [u8; 2] = [300, 2];` silently truncates; `init.rs:168-174` truncates `[0; 5]` into `[u8; 2]` while `[0,0,0,0,0]` errors.
-- **SE-H7. `for i: u8 in 0..300` compiles and runs 44 iterations** (`stmt.rs:468-546`). Bounds never checked against the counter type, constant or runtime.
-- **SE-H8. `let x: i16 = -40000;` silently wraps to 25536** (`expr.rs:985-1009`) while `const X: i16 = -40000;` correctly errors.
-- **SE-H9/H10.** False "unused import" for types used only in type position (`resolve_type` never records a use); enum tuple-variant payloads don't get `expected_type` (`E::V(5)` for `V(u16)` errors while `f(5)` works).
-- **CG-H1. Interrupt save list omits `$E0–$EF`** (`item.rs:79-96`) — an NMI between indirect-arg staging and the callee's prologue copy destroys in-flight args if the handler itself calls indirectly.
-- **CG-H2. Two peephole passes are flag-unsafe** (`peephole.rs:384-461`): `ORA #$00`/`AND #$FF`/`EOR #$00` and `TAX;TXA` removals don't consult flag liveness. Current codegen never emits the vulnerable sequences, but user `asm {}` flows through the same pipeline.
+- **~~SE-H4. Slice assignment to a `const` array bypasses the ROM-write check~~ FIXED** — `lvalue_root` now peels `Expr::Slice` with the same reference check as `Index`/`Field`, so `LUT[0..2] = [9, 9];` is rejected like `LUT[0] = 9;` (regression test: `e2e::aggregate_init::assigning_to_a_const_array_slice_is_rejected`).
+- **~~SE-H5. Struct literals are not validated~~ FIXED** — a shared `check_struct_init_fields` runs for named literals, anonymous literals and enum struct-variants: unknown field names and wrong types error, and each value is checked with the field's declared type as `expected_type` so literals adopt field width. The const/static flattener got the same checks for the path that never type-checks its initializer (regression tests: four in `e2e::aggregate_init`).
+- **~~SE-H6. `const` declarations never check the initializer against the declared type~~ FIXED** — a string under a scalar name is a `TypeMismatch` at declaration; the flattener range-checks every integer element against its type, rejects an oversized fill count (`[0; 5]` into `[u8; 2]`) instead of clamping, and rejects a bool literal for a non-bool/non-u8 type (regression tests: three in `e2e::consts`).
+- **~~SE-H7. `for i: u8 in 0..300` compiles and runs 44 iterations~~ FIXED** — constant bounds are checked by value and runtime bounds by type against the counter type (regression tests: `e2e::control_flow::for_loop_*`).
+- **~~SE-H8. `let x: i16 = -40000;` silently wraps to 25536~~ FIXED** — a negated literal that fits no signed type is an error, matching the `const` form (regression test: `e2e::types::a_negative_let_initializer_beyond_i16_is_rejected`).
+- **~~SE-H9/H10.~~ FIXED** — `resolve_type` records a use (`all_used_symbols`), so a type named only in type position is no longer a false "unused import"; enum tuple-variant payloads get `expected_type`, so `E::V(5)` for `V(u16)` works like `f(5)` (regression tests: `e2e::imports::a_type_used_only_in_type_position_is_not_an_unused_import`, `e2e::enums::tuple_variant_small_literal_adopts_the_payload_width`).
+- **~~CG-H1. Interrupt save list omits `$E0–$EF`~~ FIXED** — the indirect-arg staging block is saved/restored under `save_scratch` (regression test: `e2e::interrupts::interrupt_handler_preserves_the_indirect_arg_staging_block`).
+- **~~CG-H2. Two peephole passes are flag-unsafe~~ FIXED** — `ORA #$00`/`AND #$FF`/`EOR #$00` and the transfer-pair removals now consult the flag-liveness fixpoint (unit tests: four in `codegen::peephole::tests`).
 - **~~CG-H3. Silent `$20/$21` fallback in index assignment.~~ FIXED** — now a `CodegenError::Internal`; the `$20/$21` fallback was the very temp the adjacent comment explained could not hold the value.
-- **CG-H4. Silent `$20-$23` hardcoding in slice materialization (runtime bounds)** (`stmt.rs:1757-1763`) — the comment admits complex bounds may clobber the parked `end`. Either restrict bounds to simple exprs with a hard error, or stage via the allocator.
-- **CG-H5. Matches with ~15–20+ arms emit out-of-range branches** — fails at `flatasm` time (loud, good) but the compiler should invert-over-JMP like it does for `if`.
-- **CG-H6. Tracking invalidation is per-callsite convention, not structural.** CG-C4 was the demonstrated instance and is fixed (`emit_inst` invalidates on `JSR`); raw `LDX`/`LDY` sites (`unary.rs:163,168`, `literal.rs:42-43`) have the same shape with no live instance demonstrated. Remaining work: invalidate by mnemonic for the load/store class too, or add tracked variants for every load/store and forbid raw ones outside the emitter.
-- **FE-H1. Unary `-`/`!`/`~` don't bind postfix operators** (`parser/expr.rs:173-190`) — `-p.x` fails with "cannot apply '-' to type P". Self-acknowledged in a comment; `&`/`*` already do it right via `parse_postfix_with`.
-- **FE-H2. Array sizes never range-checked** — `[u8; 4294967296]` hangs the compiler >2 min (static) or silently truncates to 0 bytes (local). The BSS-overflow machinery exists; the check must happen before materialization.
-- **FE-H3. One statement error cascades into thousands.** Recovery exists only at item level; `synchronize()` stops *inside* the function body. Add statement-level recovery in `parse_block` and cap total errors.
-- **FE-H4. Error carets miscount columns after multi-byte characters** (`span.rs:204-222` — char indices vs byte offsets).
-- **DOCS-H1. The spec's shadowing section (`specification.md:333-354`) documents a feature the compiler rejects** (`duplicate symbol`). Also broken verbatim: `let LED: addr` at global scope (:283-306), `const PI_TIMES_100: u8 = 314;` (:209), uninitialized `let result: u8;` throughout the inline-asm chapter (:1987-2080), `array.length` (:1806), `fn process(data: [u8])` (:1709), and the string-comparison example (:1560-1565).
-- **DOCS-H2. Parser bug found via doc verification: `if a == b { }` with an empty (or comment-only) block followed by another `if` fails to parse** — struct-literal-vs-block ambiguity, reproducible with `u8` variables. File and fix.
-- **DOCS-H3. Struct-variant matching is documented as NOT IMPLEMENTED in three places but works and is tested** (spec :1004-1016, :1068, :1157 vs ROADMAP :192).
-- **DOCS-H4. `std/README.md` documents pre-pointer signatures (`u16` instead of `&u8`) and a phantom `wait_for_interrupt()`**; omits 9 shipped functions.
+- **~~CG-H4. Silent `$20-$23` hardcoding in slice materialization (runtime bounds)~~ FIXED** — both bounds are spilled to the software stack immediately after evaluation, so a complex bound can't clobber the parked one; `$20-$23` only appear in the straight-line arithmetic after both are final (regression test: `e2e::strings_slices::slice_with_complex_runtime_bounds_keeps_both`, verified to fail with the fix reverted: length wrapped to 253).
+- **~~CG-H5. Matches with ~15–20+ arms emit out-of-range branches~~ FIXED** — arm-ward branches in sequential matches invert over a JMP, the same shape `if` uses (regression test: `e2e::control_flow::a_large_match_assembles_and_picks_the_right_arm`, verified to fail pre-fix: "branch out of range (delta 129)").
+- **~~CG-H6. Tracking invalidation is per-callsite convention, not structural.~~ FIXED** — `emit_inst` now mirrors every instruction's effect in the register tracker (loads set the parsed belief, stores invalidate the location, transfers transfer, arithmetic marks A unknown), so a raw `emit_inst("LDX", ...)` can no longer leave a stale belief; the tracked wrappers only refine it (unit tests: four in `codegen::emitter::tests`).
+- **~~FE-H1. Unary `-`/`!`/`~` don't bind postfix operators~~ FIXED** — the operand now takes postfix suffixes via `parse_postfix_with`, like `&`/`*`; `as` still binds looser (`-x as i16` stays `(-x) as i16`) (regression tests: `e2e::operators::unary_*`).
+- **~~FE-H2. Array sizes never range-checked~~ FIXED** — the parser caps element count at 65535 (the address space is 64 KiB), `resolve_type` checks total bytes, and an inline local larger than a frame slot errors instead of being clamped (regression tests: three in `e2e::types`).
+- **~~FE-H3. One statement error cascades into thousands.~~ FIXED** — `parse_block` recovers per statement (record, synchronize, guaranteed progress) and total errors are capped at 50 (unit tests: two in `parser::tests`).
+- **~~FE-H4. Error carets miscount columns after multi-byte characters~~ FIXED** — `offset_to_line_col` walks `char_indices()` (byte offsets) instead of counting chars against a byte offset (unit test: `ast::span::tests::carets_count_columns_past_multibyte_characters`).
+- **~~DOCS-H1. The spec's shadowing section documents a feature the compiler rejects~~ FIXED** — the shadowing section now documents the duplicate-symbol rejection and why; the verbatim broken examples are fixed (`const LED: addr`, `PI_TIMES_100: u16`, `fn process(data: &[u8])`, `array.len`, initialized `let result: u8 = 0`). The string-comparison example compiles as of the CG-C5 fix.
+- **~~DOCS-H2. Parser bug: `if a == b { }` with an empty block followed by another `if` fails to parse~~ FIXED** — a `no_empty_struct_literal` flag marks condition/scrutinee position (`if`/`while`/`for`/`match`), where a trailing `{` can only open the body; fresh delimiters (parens, call args, brackets) restore the literal reading (regression tests: three in `e2e::control_flow`).
+- **~~DOCS-H3. Struct-variant matching is documented as NOT IMPLEMENTED but works and is tested~~ FIXED** — spec updated, including the stale "experimental" note on tuple-variant matching.
+- **~~DOCS-H4. `std/README.md` documents pre-pointer signatures and a phantom `wait_for_interrupt()`~~ FIXED** — signatures corrected to `&u8`, the phantom removed, and the 13 omitted shipped functions documented.
 
 ### Tests
 
-- **T-H1. Multidimensional arrays: spec claims support (`specification.md:1291-1311`), compiler rejects them, zero tests notice.** Either the spec or the implementation is wrong and the suite has no opinion.
-- **T-H2. No CI whatsoever.** 956 tests and the fuzzer run only when someone remembers.
-- **T-H3. Fuzzing covers only lex+parse** — the phases least likely to panic. A sema fuzzer (drive `wraith::sema::analyze` on parser-accepted input) is the highest-value addition; FE-C1 is exactly the class it would find.
-- **T-H4. Error-message assertions too loose to catch regressions** (`"type"`, `"expected"`). `import_diagnostics.rs` (exact file:line:col) is the model; the rest should follow it or use golden snapshots.
+- **~~T-H1. Multidimensional arrays: spec claims support, compiler rejects, zero tests notice.~~ FIXED (by documentation + pinning)** — the spec now marks arrays of arrays NOT IMPLEMENTED with the flattened-indexing workaround, and `e2e::types::multidimensional_arrays_are_rejected_loudly` keeps the rejection loud. Implementing them remains a feature, not a fix.
+- **~~T-H2. No CI whatsoever.~~ FIXED** — `.github/workflows/ci.yml` runs `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and a compile check of the fuzz targets (they link only under `cargo afl`, so a real campaign stays local).
+- **~~T-H3. Fuzzing covers only lex+parse~~ FIXED** — `fuzz/fuzz_targets/fuzz_sema.rs` drives `sema::analyze` on parser-accepted input, the phase where the panics actually live.
+- **~~T-H4. Error-message assertions too loose to catch regressions~~ FIXED (for the weakest cases)** — the `"undefined"`/phase-only assertions in `error_tests.rs` now pin the exact message and line:col position, following `import_diagnostics.rs`. A full golden-snapshot migration for the top ~20 diagnostics remains a good follow-up.
 
 ---
 
@@ -185,8 +187,8 @@ The desugar still clones the target — semantically invisible for pure targets,
 
 ## Appendix: process recommendations
 
-1. **CI (highest-value process change).** A single GitHub Actions workflow running `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and a `cargo fuzz run` smoke pass would gate everything above.
+1. ~~CI (highest-value process change).~~ **Done** — `.github/workflows/ci.yml` runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and a fuzz-target compile check on every push and PR.
 2. **Compile the spec's examples as tests.** A doc-test-style harness that extracts ```rust blocks from specification.md and asserts they compile would have caught 8 of the HIGH doc bugs automatically, permanently.
-3. **Sema-level fuzzing.** Point the existing cargo-fuzz harness at `sema::analyze` and at const-eval (string slicing in particular).
+3. ~~Sema-level fuzzing.~~ **Done** — `fuzz/fuzz_targets/fuzz_sema.rs` points the existing AFL harness at `sema::analyze` (const-eval included, string slicing in particular).
 4. ~~Add a size-integrity assertion in codegen.~~ **Done** — `generate_function` now hard-errors when the real pass emits more than the measuring pass reserved.
 5. **Error-message golden tests** following `import_diagnostics.rs`'s exact-position style for the top ~20 diagnostics.
