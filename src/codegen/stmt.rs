@@ -592,12 +592,21 @@ pub fn generate_stmt(
                     // Only emit RTS if we're not in an inline context
                     if !emitter.is_inlining() {
                         emitter.emit_inst("RTS", "");
+                    } else if let Some(end) = emitter.inline_end_label() {
+                        // An inline expansion has no frame to return from; an
+                        // early return jumps past the rest of the body so the
+                        // value just computed survives.
+                        let end = end.to_string();
+                        emitter.emit_inst("JMP", &end);
                     }
                 }
             } else {
                 // Return with no value
                 if !emitter.is_inlining() {
                     emitter.emit_inst("RTS", "");
+                } else if let Some(end) = emitter.inline_end_label() {
+                    let end = end.to_string();
+                    emitter.emit_inst("JMP", &end);
                 }
             }
             Ok(())

@@ -338,3 +338,57 @@ fn memcmp_of_zero_length_is_equal() {
     "#);
     assert_eq!(e.mem(0x0900), 1, "nothing to compare, so equal");
 }
+
+// ---------------------------------------------------------------------------
+// std/math.wr — bit helpers (NMOS-legal, no scratch-pool clobber)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_bit_sets_only_the_named_bit() {
+    // The 65C02 SMB version could not even assemble on the NMOS target and
+    // staged through zp $20 — the compiler's own scratch pool.
+    let mut e = run(r#"
+        import { set_bit } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            R0 = set_bit(0, 3);
+            R1 = set_bit(0xF0, 1);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x08, 0xF2));
+}
+
+#[test]
+fn clear_bit_clears_only_the_named_bit() {
+    let mut e = run(r#"
+        import { clear_bit } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            R0 = clear_bit(0xFF, 7);
+            R1 = clear_bit(0xFF, 0);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x7F, 0xFE));
+}
+
+#[test]
+fn test_bit_reports_set_and_clear() {
+    let mut e = run(r#"
+        import { test_bit } from "std/math.wr";
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            R0 = test_bit(0x10, 4);
+            R1 = test_bit(0x10, 5);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (1, 0));
+}

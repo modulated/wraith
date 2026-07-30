@@ -744,6 +744,11 @@ fn generate_inline_call(
     // Push inline context so return statements won't emit RTS
     emitter.push_inline();
 
+    // Early returns jump here (see push_inline_end): setting A and falling
+    // through would let a later statement overwrite the returned value.
+    let end_label = format!("inline_{}_end", emitter.inline_label_suffix().unwrap_or(0));
+    emitter.push_inline_end(end_label.clone());
+
     // The body about to be emitted belongs to the *callee*, even though it lands
     // in the caller's output. Anything that scopes a lookup by "current function"
     // — inline-asm `{param}` substitution above all, which matches a symbol's
@@ -775,7 +780,9 @@ fn generate_inline_call(
         {
             use crate::codegen::stmt::generate_stmt;
             let r = generate_stmt(body, emitter, info, string_collector);
+            emitter.emit_label(&end_label);
             emitter.restore_current_function(saved_function);
+            emitter.pop_inline_end();
             emitter.pop_inline();
             return r;
         }
@@ -824,8 +831,10 @@ fn generate_inline_call(
         )));
     };
 
-    // Pop inline context
+    // The early-return jump target, then pop inline context
+    emitter.emit_label(&end_label);
     emitter.restore_current_function(saved_function);
+    emitter.pop_inline_end();
     emitter.pop_inline();
 
     result

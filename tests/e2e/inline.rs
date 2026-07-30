@@ -373,3 +373,52 @@ fn a_string_argument_arrives_as_a_whole_pointer() {
     "#;
     assert_eq!(run(src).mem(0x0900), 2);
 }
+
+#[test]
+fn an_early_return_inside_an_inline_function_wins() {
+    // An inline body has no frame to RTS from, so `return` just set A and
+    // execution fell through into the rest of the body — the trailing
+    // `return 0` overwrote the `return 1`.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        #[inline]
+        fn test_bit(value: u8, bit: u8) -> u8 {
+            if (value & (1 << bit)) != 0 {
+                return 1;
+            }
+            return 0;
+        }
+        #[reset]
+        fn main() {
+            OUT = test_bit(0x10, 4);
+            loop {}
+        }
+    "#;
+    assert_eq!(run(src).mem(0x0900), 1);
+}
+
+#[test]
+fn an_early_return_inside_a_nested_inline_call_wins() {
+    // Inline expansions nest; the end labels must too.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        #[inline]
+        fn is_set(v: u8) -> u8 {
+            if v != 0 { return 1; }
+            return 0;
+        }
+        #[inline]
+        fn both(a: u8, b: u8) -> u8 {
+            if is_set(a) == 1 {
+                if is_set(b) == 1 { return 7; }
+            }
+            return 3;
+        }
+        #[reset]
+        fn main() {
+            OUT = both(5, 0);
+            loop {}
+        }
+    "#;
+    assert_eq!(run(src).mem(0x0900), 3);
+}

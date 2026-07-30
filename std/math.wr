@@ -58,178 +58,35 @@ pub fn clamp(value: u8, min_val: u8, max_val: u8) -> u8 {
 }
 
 // ============================================================================
-// Bit Manipulation (65C02 SMB/RMB/BBS instructions)
+// Bit Manipulation
 // ============================================================================
 
-/// Set a specific bit (0-7) in a byte using 65C02 SMB instructions
-/// Cycles: ~18-20
-/// Note: Uses zero page $20 for temporary storage
+/// Set a specific bit (0-7) in a byte.
+///
+/// Plain Wraith on purpose: the old 65C02 SMB version could not even
+/// assemble on an NMOS target, and it staged through zp $20, inside the
+/// compiler's scratch pool.
 #[inline]
 pub fn set_bit(value: u8, bit: u8) -> u8 {
-
-    asm {
-        "LDA {value}",
-        "STA $20",
-
-        "LDX {bit}",
-        "CPX #$00",
-        "BEQ bit0_s",
-        "CPX #$01",
-        "BEQ bit1_s",
-        "CPX #$02",
-        "BEQ bit2_s",
-        "CPX #$03",
-        "BEQ bit3_s",
-        "CPX #$04",
-        "BEQ bit4_s",
-        "CPX #$05",
-        "BEQ bit5_s",
-        "CPX #$06",
-        "BEQ bit6_s",
-        "SMB7 $20",
-        "JMP done_s",
-        "bit0_s:",
-        "SMB0 $20",
-        "JMP done_s",
-        "bit1_s:",
-        "SMB1 $20",
-        "JMP done_s",
-        "bit2_s:",
-        "SMB2 $20",
-        "JMP done_s",
-        "bit3_s:",
-        "SMB3 $20",
-        "JMP done_s",
-        "bit4_s:",
-        "SMB4 $20",
-        "JMP done_s",
-        "bit5_s:",
-        "SMB5 $20",
-        "JMP done_s",
-        "bit6_s:",
-        "SMB6 $20",
-        "JMP done_s",
-        "done_s:",
-        "LDA $20",
-
-    }
-
+    return value | (1 << bit);
 }
 
-/// Clear a specific bit (0-7) in a byte using 65C02 RMB instructions
-/// Cycles: ~18-20
-/// Note: Uses zero page $20 for temporary storage
+/// Clear a specific bit (0-7) in a byte.
 #[inline]
 pub fn clear_bit(value: u8, bit: u8) -> u8 {
-
-    asm {
-        "LDA {value}",
-        "STA $20",
-
-        "LDX {bit}",
-        "CPX #$00",
-        "BEQ bit0_c",
-        "CPX #$01",
-        "BEQ bit1_c",
-        "CPX #$02",
-        "BEQ bit2_c",
-        "CPX #$03",
-        "BEQ bit3_c",
-        "CPX #$04",
-        "BEQ bit4_c",
-        "CPX #$05",
-        "BEQ bit5_c",
-        "CPX #$06",
-        "BEQ bit6_c",
-        "RMB7 $20",
-        "JMP done_c",
-        "bit0_c:",
-        "RMB0 $20",
-        "JMP done_c",
-        "bit1_c:",
-        "RMB1 $20",
-        "JMP done_c",
-        "bit2_c:",
-        "RMB2 $20",
-        "JMP done_c",
-        "bit3_c:",
-        "RMB3 $20",
-        "JMP done_c",
-        "bit4_c:",
-        "RMB4 $20",
-        "JMP done_c",
-        "bit5_c:",
-        "RMB5 $20",
-        "JMP done_c",
-        "bit6_c:",
-        "RMB6 $20",
-        "JMP done_c",
-        "done_c:",
-        "LDA $20",
-
-    }
-
+    return value & ~(1 << bit);
 }
 
-/// Test if a specific bit (0-7) is set using 65C02 BBS instructions
-/// Cycles: ~20-22
-/// Returns: 1 if bit is set, 0 if clear
-/// Note: Uses zero page $20 for temporary storage
+/// Test if a specific bit (0-7) is set.
+/// Returns: 1 if the bit is set, 0 if clear
 #[inline]
 pub fn test_bit(value: u8, bit: u8) -> u8 {
-
-    asm {
-        "LDA {value}",
-        "STA $20",
-
-        "LDX {bit}",
-        "CPX #$00",
-        "BEQ bit0_t",
-        "CPX #$01",
-        "BEQ bit1_t",
-        "CPX #$02",
-        "BEQ bit2_t",
-        "CPX #$03",
-        "BEQ bit3_t",
-        "CPX #$04",
-        "BEQ bit4_t",
-        "CPX #$05",
-        "BEQ bit5_t",
-        "CPX #$06",
-        "BEQ bit6_t",
-        "BBS7 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit0_t:",
-        "BBS0 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit1_t:",
-        "BBS1 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit2_t:",
-        "BBS2 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit3_t:",
-        "BBS3 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit4_t:",
-        "BBS4 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit5_t:",
-        "BBS5 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit6_t:",
-        "BBS6 $20,bit_set_t",
-        "JMP bit_clear_t",
-        "bit_set_t:",
-        "LDA #$01",
-        "JMP done_t",
-        "bit_clear_t:",
-        "LDA #$00",
-        "done_t:",
-
+    if (value & (1 << bit)) != 0 {
+        return 1;
     }
-
+    return 0;
 }
+
 
 // ============================================================================
 // Saturating Arithmetic

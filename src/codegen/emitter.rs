@@ -32,6 +32,8 @@ pub struct Emitter {
     inline_depth: u32,
     /// Suffix for uniquifying labels in current inline expansion
     inline_label_suffix: Option<usize>,
+    /// End labels of in-progress inline expansions (a stack: inlines nest).
+    inline_end_labels: Vec<String>,
     /// Current byte count (tracks code size during generation)
     byte_count: u16,
     /// Track if the last instruction was a terminal instruction (RTS, RTI, or unconditional JMP)
@@ -69,6 +71,7 @@ impl Emitter {
             loop_stack: Vec::new(),
             inline_depth: 0,
             inline_label_suffix: None,
+            inline_end_labels: Vec::new(),
             byte_count: 0,
             last_was_terminal: false,
             verbosity,
@@ -590,6 +593,24 @@ impl Emitter {
     /// Get the current inline label suffix (if inlining)
     pub fn inline_label_suffix(&self) -> Option<usize> {
         self.inline_label_suffix
+    }
+
+    /// Push the end label of the inline expansion being generated. A `return`
+    /// inside an inline body jumps here instead of emitting RTS — otherwise
+    /// an early `return` just sets A and falls through into the *rest of the
+    /// body* (which usually ends in another return, overwriting the value).
+    pub fn push_inline_end(&mut self, label: String) {
+        self.inline_end_labels.push(label);
+    }
+
+    /// Pop the current inline expansion's end label.
+    pub fn pop_inline_end(&mut self) {
+        self.inline_end_labels.pop();
+    }
+
+    /// The innermost inline expansion's end label, if any.
+    pub fn inline_end_label(&self) -> Option<&str> {
+        self.inline_end_labels.last().map(|s| s.as_str())
     }
 
     // ========================================================================

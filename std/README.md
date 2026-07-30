@@ -49,9 +49,7 @@ pointers; plain addresses are `u16` values.
 
 ### math.wr
 
-Mathematical operations. The bit-manipulation helpers (`set_bit`/`clear_bit`/`test_bit`)
-use 65C02-only instructions (SMB/RMB/BBS) and zero page `$20`; the rest run on a
-plain NMOS 6502.
+Mathematical operations, all NMOS 6502-legal.
 
 #### Comparison Operations
 
@@ -59,13 +57,11 @@ plain NMOS 6502.
 -   `max(a: u8, b: u8) -> u8` - Return the maximum of two values
 -   `clamp(value: u8, min_val: u8, max_val: u8) -> u8` - Clamp value between bounds
 
-#### Bit Manipulation (65C02)
+#### Bit Manipulation
 
-Uses 65C02 SMB/RMB/BBS instructions for atomic bit operations. All functions use zero page $20 for temporary storage.
-
--   `set_bit(value: u8, bit: u8) -> u8` - Set bit (0-7) using SMB instructions
--   `clear_bit(value: u8, bit: u8) -> u8` - Clear bit (0-7) using RMB instructions
--   `test_bit(value: u8, bit: u8) -> u8` - Test if bit is set using BBS instructions (returns 1 if set, 0 if clear)
+-   `set_bit(value: u8, bit: u8) -> u8` - Set bit (0-7)
+-   `clear_bit(value: u8, bit: u8) -> u8` - Clear bit (0-7)
+-   `test_bit(value: u8, bit: u8) -> u8` - Test if bit is set (returns 1 if set, 0 if clear)
 
 #### Saturating Arithmetic
 
