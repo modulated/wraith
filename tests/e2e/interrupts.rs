@@ -114,3 +114,20 @@ fn interrupt_handler_preserves_the_indirect_arg_staging_block() {
     assert_asm_contains(&asm, "LDA $E0");
     assert_asm_contains(&asm, "LDA $EF");
 }
+
+#[test]
+fn the_generic_interrupt_attribute_is_rejected() {
+    // #[interrupt] got a full handler prologue and RTI but was never
+    // installed in any vector — a handler that silently never runs.
+    let err = match crate::common::harness::compile(
+        r#"
+        #[interrupt]
+        fn handler() {}
+        fn main() {}
+    "#,
+    ) {
+        crate::common::harness::CompileResult::SemaError(e) => e,
+        other => panic!("expected a sema error, got {other:?}"),
+    };
+    assert!(err.contains("#[irq]"), "should point at the real attributes: {err}");
+}

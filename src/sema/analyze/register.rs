@@ -111,6 +111,25 @@ impl SemanticAnalyzer {
             .insert(name.clone(), info.ty.clone());
         self.table.insert(name.clone(), info);
 
+        // `#[interrupt]` is a silent trap: the function gets a full handler
+        // prologue and RTI, but nothing installs it in any vector, so it
+        // never runs. Reject it until a generic vector exists; the real
+        // attributes are `#[irq]` and `#[nmi]`.
+        if func
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, crate::ast::FnAttribute::Interrupt))
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "'{}': #[interrupt] is not supported — the handler would never be \
+                     installed in a vector and never run; use #[irq] or #[nmi]",
+                    name
+                ),
+                span: func.name.span,
+            });
+        }
+
         // Extract org and section attributes if present
         let org_address = func.attributes.iter().find_map(|attr| {
             if let crate::ast::FnAttribute::Org(addr) = attr {
