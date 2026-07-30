@@ -56,6 +56,9 @@ impl ImportContext {
     }
 }
 
+/// Adding a field? Decide how it crosses an import in
+/// `merge_imported` (register.rs) — analyzer state an imported function's
+/// codegen needs but that nobody merged has been a recurring bug class.
 pub struct SemanticAnalyzer {
     pub table: SymbolTable,
     pub warnings: Vec<Warning>,
@@ -209,48 +212,11 @@ impl SemanticAnalyzer {
     }
 
     pub fn with_base_path(base_path: PathBuf) -> Self {
-        Self {
-            table: SymbolTable::new(),
-            warnings: Vec::with_capacity(16),
-            current_return_type: None,
-            resolved_symbols: HashMap::default(),
-            function_metadata: HashMap::default(),
-            folded_constants: HashMap::default(),
-            loop_bound_slots: HashMap::default(),
-            local_arrays: HashMap::default(),
-            enum_blocks: HashMap::default(),
-            array_block_sizes: HashMap::default(),
-            array_cursor: 0,
-            resolved_types: HashMap::default(),
-            type_registry: TypeRegistry::new(),
-            imported_items: Vec::with_capacity(8),
-            base_path: Some(base_path),
-            import_context: ImportContext::new(),
-            const_env: ConstEnv::default(),
-            loop_depth: 0,
-            used_variables: HashSet::default(),
-            all_used_symbols: HashSet::default(),
-            declared_variables: Vec::with_capacity(16),
-            declared_parameters: Vec::with_capacity(8),
-            imported_symbols: Vec::with_capacity(8),
-            declared_functions: Vec::with_capacity(16),
-            called_functions: HashSet::default(),
-            unreachable_stmts: HashSet::default(),
-            checking_assignment_target: false,
-            expected_type: None,
-            resolved_struct_names: HashMap::default(),
-            accessor_fields: HashSet::default(),
-            memory_config: crate::config::MemoryConfig::load_or_default(),
-            current_function: None,
-            frame_cursor: 0,
-            loop_bound_free: Vec::new(),
-            static_inits: Vec::new(),
-            frame_sizes: HashMap::default(),
-            function_signatures: HashMap::default(),
-            call_edges: HashMap::default(),
-            address_taken_functions: HashSet::default(),
-            symbol_refs: HashMap::default(),
-        }
+        // One field off the default; duplicating the whole initializer meant
+        // every new field had to be added twice (and once wasn't, forever).
+        let mut analyzer = Self::new();
+        analyzer.base_path = Some(base_path);
+        analyzer
     }
 
     /// Get the standard library path

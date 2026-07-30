@@ -874,6 +874,33 @@ impl SemanticAnalyzer {
             }
         }
 
+        self.merge_imported(&imported_analyzer, is_replay);
+
+        Ok(())
+    }
+
+    /// Merge an imported module's analyzer state into this one.
+    ///
+    /// THE merge: there is one of these on purpose. Analyzer state that an
+    /// imported function's codegen depends on but that wasn't merged here has
+    /// been a recurring bug class (const_env, accessor_fields, local_arrays,
+    /// static_inits all slipped once). When you add state to
+    /// SemanticAnalyzer, decide here how it crosses an import.
+    ///
+    /// Deliberately NOT merged:
+    /// - the symbol table (only the import's *requested* names come in, in
+    ///   process_import, with pub checks) and function_signatures (idem, per
+    ///   item, sibling-inclusive);
+    /// - per-file warning state (declared_variables/used_variables/
+    ///   declared_functions/imported_symbols): an unused local in an imported
+    ///   function was already warned about when the module was analyzed;
+    /// - transient analysis state (current_function, current_return_type,
+    ///   expected_type, checking_assignment_target, loop_depth, frame_cursor,
+    ///   array_cursor, loop_bound_free) — meaningless outside the body being
+    ///   analyzed;
+    /// - configuration (memory_config, base_path, import_context): the
+    ///   importer's governs the whole program.
+    fn merge_imported(&mut self, imported_analyzer: &SemanticAnalyzer, is_replay: bool) {
         // Merge the child's whole type registry, not just the types the import
         // names: an imported function may use a struct or enum internally (a
         // local, a field type) that the importing module never mentions, and
@@ -1011,8 +1038,6 @@ impl SemanticAnalyzer {
                 .or_default()
                 .extend(refs.iter().cloned());
         }
-
-        Ok(())
     }
 
     pub(super) fn register_struct(
