@@ -56,7 +56,7 @@ pub enum Literal {
     /// Boolean literal
     Bool(bool),
     /// String literal: "Hello, world!"
-    /// Stored as length-prefixed byte array (u16 little-endian length + data)
+    /// Stored as a length-prefixed byte array (u8 length + data, max 255 bytes)
     String(String),
     /// Array literal: [1, 2, 3, 4, 5]
     Array(Vec<Spanned<Expr>>),
