@@ -146,10 +146,7 @@ impl SemanticAnalyzer {
                     });
                 }
 
-                // Type check each field value
-                for field in fields {
-                    self.check_expr(&field.value)?;
-                }
+                self.check_struct_init_fields(&name.node, fields)?;
 
                 Type::Named(name.node.clone())
             }
@@ -1023,8 +1020,20 @@ impl SemanticAnalyzer {
                     // No usable context: pick the signed width from the magnitude.
                     if (-128..=127).contains(&neg) {
                         Ok(Type::Primitive(PrimitiveType::I8))
-                    } else {
+                    } else if (-32768..=32767).contains(&neg) {
                         Ok(Type::Primitive(PrimitiveType::I16))
+                    } else {
+                        // Past i16 there is no type that holds the value:
+                        // `let x: i16 = -40000;` used to claim i16 here and
+                        // wrap to 25536 at codegen, while the `const` form of
+                        // the same declaration correctly errored.
+                        Err(SemaError::Custom {
+                            message: format!(
+                                "integer literal {} is out of range (min -32768 for i16)",
+                                neg
+                            ),
+                            span,
+                        })
                     }
                 } else {
                     Ok(operand_ty)
@@ -1080,15 +1089,55 @@ impl SemanticAnalyzer {
             });
         }
 
-        // Type check each field value
-        for field in fields {
-            self.check_expr(&field.value)?;
-        }
+        self.check_struct_init_fields(&struct_name, fields)?;
 
         // Store the resolved struct name for codegen
         self.resolved_struct_names.insert(span, struct_name.clone());
 
         Ok(Type::Named(struct_name))
+    }
+
+    /// Check a struct literal's fields against the definition: every named
+    /// field must exist, and each value is checked with the field's declared
+    /// type as its expected type, so a literal adopts the field's width and a
+    /// value of the wrong type errors. An omitted field is fine — the
+    /// flattener zero-fills it.
+    fn check_struct_init_fields(
+        &mut self,
+        struct_name: &str,
+        fields: &[crate::ast::FieldInit],
+    ) -> Result<(), SemaError> {
+        let def = self
+            .type_registry
+            .structs
+            .get(struct_name)
+            .expect("checked by the caller")
+            .clone();
+
+        for field in fields {
+            let field_info =
+                def.get_field(&field.name.node)
+                    .ok_or_else(|| SemaError::FieldNotFound {
+                        struct_name: struct_name.to_string(),
+                        field_name: field.name.node.clone(),
+                        span: field.name.span,
+                    })?;
+
+            let saved = self.expected_type.take();
+            self.expected_type = Some(field_info.ty.clone());
+            let value_ty = self.check_expr(&field.value);
+            self.expected_type = saved;
+            let value_ty = value_ty?;
+
+            if !value_ty.is_implicitly_convertible_to(&field_info.ty) {
+                return Err(SemaError::TypeMismatch {
+                    expected: field_info.ty.display_name(),
+                    found: value_ty.display_name(),
+                    span: field.value.span,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn check_enum_variant(
@@ -1144,8 +1193,16 @@ impl SemanticAnalyzer {
                 // Clone field types to avoid borrowing issues
                 let expected_types = field_types.clone();
                 for (value_expr, expected_ty) in values.iter().zip(expected_types.iter()) {
-                    let value_ty = self.check_expr(value_expr)?;
-                    if &value_ty != expected_ty {
+                    // The payload type is the value's expected type, so a
+                    // literal adopts it: `E::V(5)` for `V(u16)` works the way
+                    // `f(5)` for `f(x: u16)` does.
+                    let saved = self.expected_type.take();
+                    self.expected_type = Some(expected_ty.clone());
+                    let value_ty = self.check_expr(value_expr);
+                    self.expected_type = saved;
+                    let value_ty = value_ty?;
+
+                    if !value_ty.is_implicitly_convertible_to(expected_ty) {
                         return Err(SemaError::TypeMismatch {
                             expected: expected_ty.display_name(),
                             found: value_ty.display_name(),
@@ -1160,8 +1217,6 @@ impl SemanticAnalyzer {
 
                 // Type check struct variant fields
                 for field_init in field_inits {
-                    let value_ty = self.check_expr(&field_init.value)?;
-
                     // Find the expected type for this field
                     let field_info = field_info_vec
                         .iter()
@@ -1172,7 +1227,13 @@ impl SemanticAnalyzer {
                             span: field_init.name.span,
                         })?;
 
-                    if value_ty != field_info.ty {
+                    let saved = self.expected_type.take();
+                    self.expected_type = Some(field_info.ty.clone());
+                    let value_ty = self.check_expr(&field_init.value);
+                    self.expected_type = saved;
+                    let value_ty = value_ty?;
+
+                    if !value_ty.is_implicitly_convertible_to(&field_info.ty) {
                         return Err(SemaError::TypeMismatch {
                             expected: field_info.ty.display_name(),
                             found: value_ty.display_name(),

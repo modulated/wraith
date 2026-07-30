@@ -460,3 +460,15 @@ fn array_element_out_of_range_still_errors() {
         "300 does not fit a u8 element"
     );
 }
+
+#[test]
+fn a_negative_let_initializer_beyond_i16_is_rejected() {
+    // The unary-minus typing claimed i16 for any magnitude that didn't fit a
+    // context, so this compiled and stored 25536 — while the `const` form of
+    // the same declaration correctly errored.
+    let r = crate::common::compile("fn main() { let x: i16 = -40000; }");
+    assert!(
+        !matches!(r, crate::common::harness::CompileResult::Success(..)),
+        "-40000 fits no 16-bit type"
+    );
+}

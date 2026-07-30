@@ -469,7 +469,9 @@ impl SemanticAnalyzer {
         loop {
             match &cur.node {
                 Expr::Variable(name) => return Some(name),
-                Expr::Index { object, .. } | Expr::Field { object, .. } => {
+                Expr::Index { object, .. }
+                | Expr::Field { object, .. }
+                | Expr::Slice { object, .. } => {
                     if self.denotes_a_reference(object) {
                         return None;
                     }
@@ -581,6 +583,12 @@ impl SemanticAnalyzer {
             self.check_expr(&range.end)?;
         }
 
+        // The bounds must be representable in the counter type: a wider
+        // constant truncates at the compare (`for i: u8 in 0..300` ran 44
+        // iterations), and a wider runtime bound wraps the counter.
+        self.check_for_bound(&range.start, &var_ty)?;
+        self.check_for_bound(&range.end, &var_ty)?;
+
         // A non-constant range end must survive the whole loop body, which may
         // itself run nested loops, scratch-clobbering expressions, or calls.
         // Give it a hidden frame slot (colored with the call graph like any
@@ -621,6 +629,66 @@ impl SemanticAnalyzer {
 
         self.table.exit_scope();
 
+        Ok(())
+    }
+
+    /// A for-loop bound must be representable in the counter's type. Constant
+    /// bounds are checked by value; a runtime bound is checked by type, so a
+    /// u16 expression driving a u8 counter is rejected rather than compared
+    /// against its own low byte.
+    fn check_for_bound(&self, bound: &Spanned<Expr>, counter_ty: &Type) -> Result<(), SemaError> {
+        let fits_by_value = |v: i64| match counter_ty {
+            Type::Primitive(PrimitiveType::U8) => (0..=255).contains(&v),
+            Type::Primitive(PrimitiveType::I8) => (-128..=127).contains(&v),
+            Type::Primitive(PrimitiveType::U16) => (0..=65535).contains(&v),
+            _ => true,
+        };
+
+        if let Ok(val) = eval_const_expr_with_env(bound, &self.const_env)
+            && let Some(v) = val.as_integer()
+        {
+            if fits_by_value(v) {
+                return Ok(());
+            }
+            return Err(SemaError::Custom {
+                message: format!(
+                    "for loop bound {} does not fit in counter type {}",
+                    v,
+                    counter_ty.display_name()
+                ),
+                span: bound.span,
+            });
+        }
+
+        if let Some(bound_ty) = self.resolved_types.get(&bound.span) {
+            let too_wide = matches!(
+                (counter_ty, bound_ty),
+                (
+                    Type::Primitive(PrimitiveType::U8),
+                    Type::Primitive(PrimitiveType::U16)
+                ) | (
+                    Type::Primitive(PrimitiveType::U8),
+                    Type::Primitive(PrimitiveType::I16)
+                ) | (
+                    Type::Primitive(PrimitiveType::I8),
+                    Type::Primitive(PrimitiveType::U16)
+                ) | (
+                    Type::Primitive(PrimitiveType::I8),
+                    Type::Primitive(PrimitiveType::I16)
+                )
+            );
+            if too_wide {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "for loop bound of type {} does not fit in counter type {}; \
+                         widen the counter or narrow the bound with a cast",
+                        bound_ty.display_name(),
+                        counter_ty.display_name()
+                    ),
+                    span: bound.span,
+                });
+            }
+        }
         Ok(())
     }
 

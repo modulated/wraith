@@ -142,6 +142,44 @@ fn for_loop_with_continue() {
 }
 
 #[test]
+fn for_loop_bound_beyond_the_counter_type_is_rejected() {
+    // This compiled and ran 44 iterations: 300 truncated to its low byte at
+    // the compare.
+    assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { for i: u8 in 0..300 { OUT = i; } loop {} }
+    "#,
+        "does not fit in counter type u8",
+    );
+}
+
+#[test]
+fn for_loop_runtime_bound_wider_than_the_counter_is_rejected() {
+    // A u16 bound expression against a u8 counter compared only the low byte.
+    assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        fn top() -> u16 { return 300; }
+        #[reset]
+        fn main() { for i: u8 in 0..top() { OUT = i; } loop {} }
+    "#,
+        "does not fit in counter type u8",
+    );
+}
+
+#[test]
+fn for_loop_with_a_wide_counter_counts_past_255() {
+    // The u16 form of the same loop, which is the fix the error points at.
+    assert_eq!(
+        eval("let n: u16 = 0; for i: u16 in 0..300 { n = i; } OUT = n.low;"),
+        43,
+        "ran to 299 (low byte 43) — counted, not truncated"
+    );
+}
+
+#[test]
 fn nested_loop_break_exits_inner_only() {
     // 3 outer iterations x 2 inner (break at j == 2) = 6.
     assert_eq!(

@@ -135,6 +135,28 @@ fn tuple_variant_u16_payload_keeps_both_bytes() {
 }
 
 #[test]
+fn tuple_variant_small_literal_adopts_the_payload_width() {
+    // Payloads never received expected_type, so `Ok(5)` for `Ok(u16)` inferred
+    // u8 and errored "expected u16, found u8" — while `f(5)` for `f(x: u16)`
+    // compiled. Both bytes must arrive.
+    let src = r#"
+        enum Result16 { Err(u8), Ok(u16) }
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let r: Result16 = Result16::Ok(5);
+            match r {
+                Result16::Ok(v)  => { LO = v.low; HI = v.high; }
+                Result16::Err(e) => { LO = e; HI = 0; }
+            }
+            loop {}
+        }
+    "#;
+    assert_eq!(run(src).mem16(0x0900), 5);
+}
+
+#[test]
 fn tuple_variant_mixed_width_fields() {
     // A u8 followed by a u16: the second field's offset depends on the first
     // field's width, so a wrong stride reads the boundary between them.

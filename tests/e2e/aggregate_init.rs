@@ -27,6 +27,82 @@ fn expect_error(src: &str) -> String {
 }
 
 // ============================================================================
+// Struct literals are validated against the definition
+// ============================================================================
+
+#[test]
+fn a_struct_literal_with_an_unknown_field_is_rejected() {
+    // Field values were checked in a vacuum: `Point { x: true, z: 5 }`
+    // compiled. The unknown name now errors.
+    let err = expect_error(
+        r#"
+        struct Point { x: u16, y: u16 }
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() { let p: Point = Point { x: 1, z: 5 }; R0 = 0; loop {} }
+    "#,
+    );
+    assert!(err.contains("z"), "the field should be named: {err}");
+}
+
+#[test]
+fn a_struct_literal_field_of_the_wrong_type_is_rejected() {
+    // A value that can't convert to the field's type must error. Before, in
+    // the ROM path a 1-byte value in a 2-byte field shifted every later
+    // field — silent layout corruption.
+    let err = expect_error(
+        r#"
+        struct Point { x: u16, y: u16 }
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() { let p: Point = Point { x: true, y: 5 }; R0 = 0; loop {} }
+    "#,
+    );
+    assert!(
+        err.contains("u16"),
+        "the expected type should be given: {err}"
+    );
+}
+
+#[test]
+fn a_struct_literal_field_of_the_wrong_type_is_rejected_in_a_rom_table() {
+    let err = expect_error(
+        r#"
+        struct Entry { start: u16, flags: u8 }
+        const TBL: [Entry; 1] = [Entry { start: true, flags: 1 }];
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() { R0 = TBL[0].flags; loop {} }
+    "#,
+    );
+    assert!(err.contains("u16"), "{err}");
+}
+
+#[test]
+fn a_struct_literal_adopts_the_field_width_for_literals() {
+    // Without expected_type, `start: 0x1234` inferred u8 and the flattener's
+    // truncation shifted `flags` out of its slot. Both must read back.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        const R2: addr = 0x0902;
+        struct Entry { start: u16, flags: u8 }
+        const TBL: [Entry; 1] = [Entry { start: 4660, flags: 7 }];
+        #[reset]
+        fn main() {
+            R0 = TBL[0].start.low;
+            R1 = TBL[0].start.high;
+            R2 = TBL[0].flags;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (0x34, 0x12, 7)
+    );
+}
+
+// ============================================================================
 // A `static` table in RAM
 // ============================================================================
 
@@ -301,6 +377,22 @@ fn assigning_to_a_const_struct_field_is_rejected() {
     "#,
     );
     assert!(err.contains("ROM"), "{err}");
+}
+
+#[test]
+fn assigning_to_a_const_array_slice_is_rejected() {
+    // The ROM-write check peeled Index and Field but not Slice, so
+    // `LUT[0..2] = [9, 9]` compiled and emitted stores into ROM while the
+    // element form was rejected.
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        const LUT: [u8; 4] = [1, 2, 3, 4];
+        #[reset]
+        fn main() { LUT[0..2] = [9, 9]; R0 = 0; loop {} }
+    "#,
+    );
+    assert!(err.contains("ROM"), "the reason should be given: {err}");
 }
 
 #[test]

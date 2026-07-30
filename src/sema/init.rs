@@ -17,7 +17,7 @@
 //! zeros. Zero remains the fallback only for a scalar, where it is the meaning
 //! of BSS and the common `= 0` case.
 
-use crate::ast::{Expr, Literal, Span, Spanned};
+use crate::ast::{Expr, Literal, PrimitiveType, Span, Spanned};
 use crate::sema::InitByte;
 use crate::sema::type_defs::TypeRegistry;
 use crate::sema::types::Type;
@@ -111,6 +111,20 @@ fn pad_to(out: &mut Vec<InitByte>, target: usize) {
     }
 }
 
+/// Whether `value` is representable in `ty`. Only the plain integer types
+/// are checked: pointers, `&`-addresses and function labels have their own
+/// arms above, and BCD values carry their own validation in const_eval.
+fn fits_in_type(value: i64, ty: &Type) -> bool {
+    match ty {
+        Type::Primitive(PrimitiveType::U8) => (0..=255).contains(&value),
+        Type::Primitive(PrimitiveType::I8) => (-128..=127).contains(&value),
+        Type::Primitive(PrimitiveType::U16) => (0..=65535).contains(&value),
+        Type::Primitive(PrimitiveType::I16) => (-32768..=32767).contains(&value),
+        Type::Primitive(PrimitiveType::Bool) => (0..=1).contains(&value),
+        _ => true,
+    }
+}
+
 fn push_int(out: &mut Vec<InitByte>, value: i64, width: usize) {
     for i in 0..width {
         out.push(InitByte::Byte(((value >> (i * 8)) & 0xFF) as u8));
@@ -166,7 +180,16 @@ fn flatten_array(
             Ok(())
         }
         Expr::Literal(Literal::ArrayFill { value, count }) => {
-            for i in 0..(*count).min(len) {
+            if *count > len {
+                return Err(InitError::fatal(
+                    format!(
+                        "this fill initializer repeats {} times but the array holds {}",
+                        count, len
+                    ),
+                    expr.span,
+                ));
+            }
+            for i in 0..*count {
                 pad_to(out, base + i * elem_size);
                 flatten_inner(out, value, element, ctx).map_err(InitError::required)?;
             }
@@ -210,6 +233,17 @@ fn flatten_struct(
         .expect("checked by the caller");
     let base = out.len();
 
+    // A name the definition doesn't have would be skipped silently by the
+    // walk below.
+    for init in fields {
+        if !def.fields.iter().any(|f| f.name == init.name.node) {
+            return Err(InitError::fatal(
+                format!("struct '{}' has no field '{}'", struct_name, init.name.node),
+                init.name.span,
+            ));
+        }
+    }
+
     // Walk the *definition*, not the initializer, so fields land at their
     // declared offsets whatever order they were written in. An omitted field is
     // left as the zeros `pad_to` supplies.
@@ -251,11 +285,28 @@ fn flatten_scalar(
     }
 
     if let Expr::Literal(Literal::Bool(b)) = &expr.node {
+        // Matches the implicit-conversion rules: a bool can stand in for a
+        // u8, but not for a wider or signed type.
+        if !matches!(
+            ty,
+            Type::Primitive(PrimitiveType::Bool) | Type::Primitive(PrimitiveType::U8)
+        ) {
+            return Err(InitError::fatal(
+                format!("a boolean literal cannot initialize {}", ty.display_name()),
+                expr.span,
+            ));
+        }
         out.push(InitByte::Byte(*b as u8));
         return Ok(());
     }
 
     if let Some(v) = ctx.integer(expr) {
+        if !fits_in_type(v, ty) {
+            return Err(InitError::fatal(
+                format!("{} does not fit in {}", v, ty.display_name()),
+                expr.span,
+            ));
+        }
         push_int(out, v, width);
         return Ok(());
     }

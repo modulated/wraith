@@ -1,0 +1,6 @@
+// Fixture module for the type-only-import test in tests/e2e/imports.rs.
+
+pub struct Point {
+    x: u8,
+    y: u8,
+}

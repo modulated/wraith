@@ -258,6 +258,27 @@ impl SemanticAnalyzer {
         if !stat.mutable {
             match eval_const_expr_with_env(&stat.init, &self.const_env) {
                 Ok(val) => {
+                    // A scalar const folds into const_env and is substituted
+                    // at its use sites, so the value's kind must be the
+                    // type's kind: `const C: u8 = "hello"` would otherwise
+                    // fold a string into byte contexts.
+                    let kind_fits = match &declared_ty {
+                        Type::String => matches!(val, ConstValue::String(_)),
+                        Type::Primitive(_) => !matches!(val, ConstValue::String(_)),
+                        _ => true,
+                    };
+                    if !kind_fits {
+                        let found = match &val {
+                            ConstValue::Integer(_) => "an integer",
+                            ConstValue::Bool(_) => "a boolean",
+                            ConstValue::String(_) => "a string",
+                        };
+                        return Err(SemaError::TypeMismatch {
+                            expected: declared_ty.display_name(),
+                            found: found.to_string(),
+                            span: stat.init.span,
+                        });
+                    }
                     // Check that the constant value fits within the declared type
                     if let Some(int_val) = val.as_integer() {
                         // Check overflow based on type

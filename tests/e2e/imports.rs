@@ -447,3 +447,31 @@ fn a_true_cycle_is_an_error_not_a_silent_skip() {
     };
     assert!(err.contains("circular import"), "{err}");
 }
+
+#[test]
+fn a_type_used_only_in_type_position_is_not_an_unused_import() {
+    // resolve_type never recorded a use, so naming an imported struct only in
+    // annotations warned "unused import" for a program that uses it
+    // throughout.
+    let result = compile(
+        r#"
+        import { Point } from "tests/fixtures/shapes.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let p: Point = Point { x: 1, y: 2 };
+            OUT = p.x + p.y;
+            loop {}
+        }
+    "#,
+    );
+    match result {
+        CompileResult::Success(warnings, _) => {
+            assert!(
+                !warnings.contains("unused import"),
+                "Point is used in type position: {warnings}"
+            );
+        }
+        other => panic!("expected success, got {other:?}"),
+    }
+}

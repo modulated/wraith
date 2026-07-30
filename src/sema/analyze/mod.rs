@@ -575,7 +575,7 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
-    pub(super) fn resolve_type(&self, ty: &TypeExpr) -> Result<Type, SemaError> {
+    pub(super) fn resolve_type(&mut self, ty: &TypeExpr) -> Result<Type, SemaError> {
         match ty {
             TypeExpr::Primitive(p) => Ok(Type::Primitive(*p)),
             TypeExpr::Named(name) => {
@@ -583,6 +583,10 @@ impl SemanticAnalyzer {
                 if name == "str" {
                     return Ok(Type::String);
                 }
+
+                // A name in type position is still a use: an imported struct
+                // or enum named only in annotations is not an unused import.
+                self.all_used_symbols.insert(name.clone());
 
                 // Check if it's a known type (struct or enum)
                 if self.type_registry.structs.contains_key(name)
@@ -628,7 +632,7 @@ impl SemanticAnalyzer {
         }
     }
 
-    pub(super) fn resolve_function_type(&self, func: &Function) -> Result<Type, SemaError> {
+    pub(super) fn resolve_function_type(&mut self, func: &Function) -> Result<Type, SemaError> {
         let mut param_types = Vec::with_capacity(func.params.len());
         for param in &func.params {
             param_types.push(self.resolve_type(&param.ty.node)?);

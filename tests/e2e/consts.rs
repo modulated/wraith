@@ -82,6 +82,50 @@ fn a_const_of_struct_type_is_rejected() {
 }
 
 #[test]
+fn a_string_initializer_for_a_scalar_const_is_rejected() {
+    // The value's kind was never checked against the declared type: this
+    // compiled and folded a string into byte contexts.
+    let err = expect_error(
+        r#"
+        const C: u8 = "hello";
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(err.contains("u8"), "{err}");
+}
+
+#[test]
+fn an_out_of_range_array_element_is_rejected() {
+    // The flattener truncated each element to the element width: [300, 2]
+    // became [44, 2] with nothing said.
+    let err = expect_error(
+        r#"
+        const B: [u8; 2] = [300, 2];
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() { R0 = B[0]; loop {} }
+    "#,
+    );
+    assert!(err.contains("u8"), "{err}");
+}
+
+#[test]
+fn an_oversized_fill_initializer_is_rejected() {
+    // `[0; 5]` into `[u8; 2]` was silently clamped to two repetitions while
+    // the equivalent five-element list errored.
+    let err = expect_error(
+        r#"
+        const B: [u8; 2] = [0; 5];
+        const R0: addr = 0x0900;
+        #[reset]
+        fn main() { R0 = B[0]; loop {} }
+    "#,
+    );
+    assert!(err.contains('5'), "{err}");
+}
+
+#[test]
 fn an_addr_read_under_a_cast_is_not_folded_to_its_address() {
     // `V as u16 + 1` used to fold to the *address* 0x0902 and never read the
     // register at all. Runtime: 5 + 1 = 6.
