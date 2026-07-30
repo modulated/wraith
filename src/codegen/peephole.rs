@@ -171,6 +171,10 @@ pub fn optimize(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
         result = eliminate_nop_operations(&result);
         result = eliminate_redundant_transfers(&result);
         result = eliminate_unreachable_after_terminator(&result);
+        result = eliminate_jmp_to_next(&result);
+        result = collapse_boolean_compares(&result);
+        result = fold_literal_operand(&result);
+        result = eliminate_nop_carry_pairs(&result);
         result = eliminate_redundant_cmp_zero(&result);
         result = eliminate_redundant_ldy_zero(&result);
         // DISABLED: eliminate_branch_over_jump breaks while loops with large bodies
@@ -463,6 +467,359 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
         i += 1;
     }
 
+    result
+}
+
+/// Eliminate `CLC; ADC #$00` / `SEC; SBC #$00` pairs.
+///
+/// With the carry forced, both are value no-ops — but they DO write flags,
+/// so the pair is removable only when no flag is live afterwards. (The old
+/// CLC/ADC pass was disabled for removing these unconditionally: codegen
+/// used to lean on the flags. Liveness makes it safe.)
+fn eliminate_nop_carry_pairs(lines: &[Line]) -> Vec<Line> {
+    let live_out = compute_flag_liveness(lines);
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        if i + 1 < lines.len()
+            && let (
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: None,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: Some(op),
+                    ..
+                },
+            ) = (&lines[i], &lines[i + 1])
+        {
+            let pair = matches!(
+                (m1.as_str(), m2.as_str(), op.as_str()),
+                ("CLC", "ADC", "#$00") | ("SEC", "SBC", "#$00")
+            );
+            if pair && live_out[i + 1] & FLAG_ALL == 0 {
+                i += 2;
+                continue;
+            }
+        }
+
+        result.push(lines[i].clone());
+        i += 1;
+    }
+
+    result
+}
+
+/// Fold a literal right operand that round-trips through `$20`:
+///
+/// ```text
+///     LDA #$03
+///     STA $20
+///     LDA x        (and an optional CLC/SEC)
+///     OP $20
+/// ```
+///
+/// becomes `LDA x; OP #$03` — the store, the zp read, and 6 cycles gone.
+/// OP must have an immediate form (ADC/SBC/AND/ORA/EOR/CMP).
+///
+/// The store is only dead if nothing reads the staged `$20` afterwards, so
+/// scan forward: the next touch of `$20` must be a write, with no label
+/// (control could arrive from elsewhere) or call in between.
+fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
+    const IMM_OPS: [&str; 6] = ["ADC", "SBC", "AND", "ORA", "EOR", "CMP"];
+
+    // Significant-line indices, as in collapse_boolean_compares.
+    let significant: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !matches!(l, Line::Comment(_) | Line::Empty))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Would the staged $20 be read before it is next written? Only a read of
+    // $20 (a match's scrutinee, a ($20),Y indirection) or a call (the callee
+    // may stage its own values there) makes the store live. Reaching a
+    // write, a function end, or the end of the stream means it's dead.
+    let staged_value_is_dead = |from_sig_pos: usize| {
+        for &idx in significant.iter().skip(from_sig_pos) {
+            match &lines[idx] {
+                Line::Directive { .. } => return true,
+                Line::Instruction {
+                    mnemonic, operand, ..
+                } => {
+                    match mnemonic.as_str() {
+                        "JSR" => return false,
+                        "RTS" | "RTI" | "BRK" => return true,
+                        _ => {}
+                    }
+                    if let Some(op) = operand {
+                        if op == "$20" {
+                            // First touch: a plain write kills the staged
+                            // value (safe); anything else reads it (unsafe).
+                            return matches!(
+                                mnemonic.as_str(),
+                                "STA" | "STX" | "STY" | "INC" | "DEC"
+                            );
+                        }
+                        if op.contains("$20") {
+                            return false; // ($20),Y and friends read it
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    };
+
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    // The instruction at significant position p, if it is one.
+    let inst = |p: usize| -> Option<(String, Option<String>)> {
+        significant.get(p).and_then(|&idx| match &lines[idx] {
+            Line::Instruction {
+                mnemonic, operand, ..
+            } => Some((mnemonic.clone(), operand.clone())),
+            _ => None,
+        })
+    };
+
+    while i < lines.len() {
+        let sig_pos = significant.iter().position(|&idx| idx == i);
+        let applied = sig_pos.and_then(|p| {
+            let (m0, imm) = inst(p)?;
+            let (m1, st) = inst(p + 1)?;
+            let (m2, src) = inst(p + 2)?;
+
+            // Either [LDA #imm, STA $20, LDA src, OP $20] or the same with a
+            // CLC/SEC before the op.
+            let (m3, _) = inst(p + 3)?;
+            let (mid, op_mnemonic, op_operand, op_pos): (
+                Option<String>,
+                String,
+                Option<String>,
+                usize,
+            ) = if IMM_OPS.contains(&m3.as_str()) {
+                let (_, op) = inst(p + 3)?;
+                (None, m3, op, p + 3)
+            } else if matches!(m3.as_str(), "CLC" | "SEC") {
+                let (m4, op4) = inst(p + 4)?;
+                if IMM_OPS.contains(&m4.as_str()) {
+                    (Some(m3), m4, op4, p + 4)
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
+
+            if m0 == "LDA"
+                && imm.as_deref().is_some_and(|s| s.starts_with("#$"))
+                && m1 == "STA"
+                && st.as_deref() == Some("$20")
+                && m2 == "LDA"
+                && src.as_deref() != Some("$20")
+                && op_operand.as_deref() == Some("$20")
+                && staged_value_is_dead(op_pos + 1)
+            {
+                result.push(Line::Instruction {
+                    mnemonic: "LDA".to_string(),
+                    operand: src,
+                    comment: None,
+                });
+                if let Some(flag_op) = mid {
+                    result.push(Line::Instruction {
+                        mnemonic: flag_op,
+                        operand: None,
+                        comment: None,
+                    });
+                }
+                result.push(Line::Instruction {
+                    mnemonic: op_mnemonic,
+                    operand: imm,
+                    comment: None,
+                });
+                i = significant[op_pos] + 1;
+                return Some(());
+            }
+            None
+        });
+
+        if applied.is_some() {
+            continue;
+        }
+
+        result.push(lines[i].clone());
+        i += 1;
+    }
+
+    result
+}
+
+/// Collapse a materialized boolean that a condition immediately re-tests:
+///
+/// ```text
+///     Bcc true_N          (an 8-bit comparison's tail)
+///     LDA #$00
+///     JMP end_M
+/// true_N:
+///     LDA #$01
+/// end_M:
+///     CMP #$00
+///     BNE then_X          (the if/while dispatch)
+/// ```
+///
+/// becomes `Bcc then_X` — the boolean never exists. This is the hottest
+/// pattern in the language (`if (x > 3)`), worth 6 instructions per site.
+///
+/// Safe only when the labels are used nowhere else (so the removed region
+/// has no other entrants) and no flags are live after the BNE: the rewrite
+/// leaves the original compare's flags, not `CMP #$00`'s, on the fall-through
+/// path.
+fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
+    // How many times `label` appears as an operand or a definition.
+    let uses = |lines: &[Line], label: &str| {
+        lines
+            .iter()
+            .filter(|l| match l {
+                Line::Label(name) => name == label,
+                Line::Instruction { operand, .. } => operand.as_deref() == Some(label),
+                _ => false,
+            })
+            .count()
+    };
+
+    let live_out = compute_flag_liveness(lines);
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    // Match over the significant (non-comment, non-empty) lines: codegen
+    // interleaves comments freely, and they don't affect the semantics.
+    let significant: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !matches!(l, Line::Comment(_) | Line::Empty))
+        .map(|(i, _)| i)
+        .collect();
+
+    while i < lines.len() {
+        // Significant-line window starting at i.
+        let win: Option<[usize; 8]> = significant
+            .iter()
+            .position(|&idx| idx == i)
+            .and_then(|p| significant.get(p..p + 8).map(|w| w.try_into().unwrap()));
+
+        if let Some(w) = win
+            && let (
+                Line::Instruction {
+                    mnemonic: br,
+                    operand: Some(true_target),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: Some(a1),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: Some(end_target),
+                    ..
+                },
+                Line::Label(true_label),
+                Line::Instruction {
+                    mnemonic: m4,
+                    operand: Some(a4),
+                    ..
+                },
+                Line::Label(end_label),
+                Line::Instruction {
+                    mnemonic: m6,
+                    operand: Some(a6),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m7,
+                    operand: Some(then_target),
+                    ..
+                },
+            ) = (
+                &lines[w[0]],
+                &lines[w[1]],
+                &lines[w[2]],
+                &lines[w[3]],
+                &lines[w[4]],
+                &lines[w[5]],
+                &lines[w[6]],
+                &lines[w[7]],
+            )
+        {
+            let is_cond_branch = matches!(
+                br.as_str(),
+                "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS"
+            );
+            if is_cond_branch
+                && true_target == true_label
+                && m1 == "LDA"
+                && a1 == "#$00"
+                && m2 == "JMP"
+                && end_target == end_label
+                && m4 == "LDA"
+                && a4 == "#$01"
+                && m6 == "CMP"
+                && a6 == "#$00"
+                && m7 == "BNE"
+                && uses(lines, true_label) == 2
+                && uses(lines, end_label) == 2
+                && live_out[w[7]] == 0
+            {
+                result.push(Line::Instruction {
+                    mnemonic: br.clone(),
+                    operand: Some(then_target.clone()),
+                    comment: None,
+                });
+                // Skip everything up to and including the BNE; comments in
+                // the middle go with it.
+                i = w[7] + 1;
+                continue;
+            }
+        }
+
+        result.push(lines[i].clone());
+        i += 1;
+    }
+
+    result
+}
+
+/// Remove `JMP L` where L is the next real line — the jump is a no-op.
+/// (`if` without `else` emits one of these at the end of the then-body.)
+/// Labels and comments between the JMP and its target don't change
+/// fall-through; a directive or instruction would, so stop there.
+fn eliminate_jmp_to_next(lines: &[Line]) -> Vec<Line> {
+    let mut result = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Line::Instruction {
+            mnemonic,
+            operand: Some(op),
+            ..
+        } = line
+            && mnemonic == "JMP"
+        {
+            let target_is_next = lines[i + 1..]
+                .iter()
+                .find(|l| !matches!(l, Line::Comment(_) | Line::Empty))
+                .is_some_and(|next| matches!(next, Line::Label(name) if name == op));
+            if target_is_next {
+                continue;
+            }
+        }
+        result.push(line.clone());
+    }
     result
 }
 
@@ -1802,5 +2159,50 @@ mod tests {
             matches!(&optimized[0], Line::Instruction { mnemonic, operand, .. }
             if mnemonic == "JMP" && operand.as_deref() == Some("subroutine"))
         );
+    }
+}
+
+#[cfg(test)]
+mod jmp_next_tests {
+    use super::*;
+
+    #[test]
+    fn jmp_to_the_next_line_is_removed() {
+        let asm = "    LDA $40\n    JMP end_1\nend_1:\n    RTS\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_jmp_to_next(&lines);
+        assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn jmp_past_an_instruction_stays() {
+        let asm = "    JMP end_1\n    LDA $40\nend_1:\n    RTS\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_jmp_to_next(&lines);
+        assert_eq!(optimized.len(), 4);
+    }
+
+    #[test]
+    fn jmp_past_a_directive_stays() {
+        let asm = "    JMP end_1\n.BYTE 1\nend_1:\n    RTS\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_jmp_to_next(&lines);
+        assert_eq!(optimized.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod fold_literal_tests {
+    use super::*;
+
+    #[test]
+    fn debug_fold() {
+        let asm = "    LDA #$03\n    STA $20\n    LDA $40\n    CLC\n    ADC $20\n    STA $41\n    LDA #$01\n    STA $20\n";
+        let lines = parse_assembly(asm);
+        let out = fold_literal_operand(&lines);
+        for l in &out {
+            eprintln!("{}", l);
+        }
+        assert_eq!(out.len(), 6, "LDA $40; CLC; ADC #$03 + trailing");
     }
 }

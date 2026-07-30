@@ -94,21 +94,39 @@ fn eliminate_dead_store() {
 // ============================================================================
 
 #[test]
-fn eliminate_nop_operations() {
+fn adding_zero_is_free() {
+    // `x = x + 0` used to hide its operand in $20 (STA $20; LDA x; ADC $20).
+    // The value now folds to immediate form and the carry pair is removed
+    // wherever flags are dead. Either way the program must compute x.
     let asm = compile_success(
         r#"
+        const OUT: addr = 0x6000;
         fn main() {
             let x: u8 = 0;
-            x = x + 0;  // Adding zero is a NOP
+            x = x + 0;
+            OUT = x;
+            loop {}
         }
     "#,
     );
-
-    // Adding zero should be optimized away
-    // Should not have redundant ADC #$00
     assert!(
-        !asm.contains("ADC #$00") || asm.lines().filter(|l| l.contains("ADC #$00")).count() == 0
+        !asm.contains("ADC $20"),
+        "the literal must not round-trip through $20:\n{asm}"
     );
+
+    let mut e = crate::common::exec::run(
+        r#"
+        const OUT: addr = 0x6000;
+        #[reset]
+        fn main() {
+            let x: u8 = 7;
+            x = x + 0;
+            OUT = x;
+            loop {}
+        }
+    "#,
+    );
+    assert_eq!(e.mem(0x6000), 7);
 }
 
 #[test]
@@ -215,15 +233,30 @@ fn multiple_optimizations() {
             let x: u8 = 10 + 5;  // Constant fold
             OUT1 = x;
             OUT2 = x;  // Eliminate redundant load
-            x = x + 0;  // Eliminate NOP
+            x = x + 0;
         }
     "#,
     );
 
     // Should have constant folded to 15
     assert_asm_contains(&asm, "LDA #$0F");
-    // Should not have ADC #$00
-    assert!(!asm.contains("ADC #$00"));
+    // The literal add must not round-trip through $20; the folded immediate
+    // form (ADC #$00) is fine and flag-safe to keep.
+    assert!(!asm.contains("ADC $20"));
+
+    let mut e = crate::common::exec::run(
+        r#"
+        const OUT1: addr = 0x6000;
+        #[reset]
+        fn main() {
+            let x: u8 = 10 + 5;
+            x = x + 0;
+            OUT1 = x;
+            loop {}
+        }
+    "#,
+    );
+    assert_eq!(e.mem(0x6000), 15);
 }
 
 #[test]

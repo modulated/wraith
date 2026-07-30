@@ -295,10 +295,13 @@ fn test_codegen_comparison_eq() {
     let (asm, _) = generate(&ast, &program, CommentVerbosity::Normal).unwrap();
 
     // Comparison should:
-    // 1. Load operands and compare
+    // 1. Load operands and compare (a literal operand folds to immediate form)
     // 2. Branch on condition
     // 3. Set result to 0 or 1
-    assert!(asm.contains("CMP $20"), "Should compare with TEMP");
+    assert!(
+        asm.contains("CMP #$05"),
+        "Should compare with the immediate"
+    );
     assert!(asm.contains("BEQ et_"), "Should branch if equal");
     assert!(asm.contains("LDA #$00"), "Should load false value");
     assert!(asm.contains("LDA #$01"), "Should load true value");
