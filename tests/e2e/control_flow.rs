@@ -377,3 +377,27 @@ fn foreach_at_the_limits_still_works() {
     "#);
     assert_eq!(e.mem(0x0900), 255);
 }
+
+#[test]
+fn a_large_match_assembles_and_picks_the_right_arm() {
+    // Sequential matches branched to arm bodies with BEQ/BCC: past ~127 bytes
+    // of compare section the branch overflowed and flatasm failed. Arm-ward
+    // branches now invert over a JMP, so any arm count assembles — and the
+    // first and last arms must still be the ones that run.
+    let arms: String = (0..20)
+        .map(|k| format!("{} => {{ OUT = {}; }}", k, k + 100))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pick = |v: u8| {
+        eval(&format!(
+            "let x: u8 = {v};
+             match x {{
+                 {arms}
+                 _ => {{ OUT = 0; }}
+             }}"
+        ))
+    };
+    assert_eq!(pick(0), 100, "first arm, the furthest branch");
+    assert_eq!(pick(19), 119, "last literal arm");
+    assert_eq!(pick(25), 0, "wildcard");
+}

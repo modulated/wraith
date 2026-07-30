@@ -2412,10 +2412,28 @@ fn generate_match(
     }
 }
 
+/// A conditional branch to an arm body. The compare section and the bodies
+/// are emitted as two blocks, so the target can sit arbitrarily far away —
+/// past every other arm's body — and a plain conditional branch overflows its
+/// ±127-byte range once a match has enough (or large enough) arms. Emit the
+/// inverse branch over a JMP instead: the hop is always 3 bytes.
+fn emit_far_arm_branch(emitter: &mut Emitter, cond: &str, arm_label: &str, skip_label: &str) {
+    let inv = match cond {
+        "BEQ" => "BNE",
+        "BCC" => "BCS",
+        "BMI" => "BPL",
+        other => unreachable!("not an invertible branch: {}", other),
+    };
+    emitter.emit_inst(inv, skip_label);
+    emitter.emit_inst("JMP", arm_label);
+    emitter.emit_label(skip_label);
+}
+
 /// Generate match statement using sequential CMP/BEQ comparisons
 ///
 /// Used for small matches (1-2 arms) or non-enum patterns.
-/// May fail for large matches if arm bodies exceed BEQ branch distance (127 bytes).
+/// Arm-ward branches go through emit_far_arm_branch so arm bodies may be any
+/// size and any number.
 fn generate_match_sequential(
     expr: &Spanned<crate::ast::Expr>,
     arms: &[crate::ast::MatchArm],
@@ -2496,12 +2514,22 @@ fn generate_match_sequential(
                         emitter.emit_inst("BNE", &skip);
                         emitter.emit_inst("LDA", "$21");
                         emitter.emit_inst("CMP", &format!("#${:02X}", ((*val as u16) >> 8) & 0xFF));
-                        emitter.emit_inst("BEQ", &arm_label);
+                        emit_far_arm_branch(
+                            emitter,
+                            "BEQ",
+                            &arm_label,
+                            &format!("match_{}_arm_{}_hifar", match_id, i),
+                        );
                         emitter.emit_label(&skip);
                     } else {
                         emitter.emit_inst("LDA", "$20");
                         emitter.emit_inst("CMP", &format!("#${:02X}", (*val as u16) & 0xFF));
-                        emitter.emit_inst("BEQ", &arm_label);
+                        emit_far_arm_branch(
+                            emitter,
+                            "BEQ",
+                            &arm_label,
+                            &format!("match_{}_arm_{}_far", match_id, i),
+                        );
                     }
                 }
             }
@@ -2528,10 +2556,26 @@ fn generate_match_sequential(
                         // it avoids emitting `SEC; SBC #$00`, which the peephole
                         // eliminates as a value no-op even though its flags matter.
                         let emit_signed_lt =
-                            |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
+                            |emitter: &mut Emitter,
+                             bound: i64,
+                             target: &str,
+                             tag: &str,
+                             far: bool| {
                                 emitter.emit_inst("LDA", "$20");
+                                let branch = |emitter: &mut Emitter, target: &str, tag: &str| {
+                                    if far {
+                                        emit_far_arm_branch(
+                                            emitter,
+                                            "BMI",
+                                            target,
+                                            &format!("match_{}_arm_{}_{}far", match_id, i, tag),
+                                        );
+                                    } else {
+                                        emitter.emit_inst("BMI", target);
+                                    }
+                                };
                                 if bound == 0 {
-                                    emitter.emit_inst("BMI", target); // value < 0 == sign set
+                                    branch(emitter, target, tag); // value < 0 == sign set
                                 } else {
                                     let nov = format!("match_{}_arm_{}_{}", match_id, i, tag);
                                     emitter.emit_inst("SEC", "");
@@ -2539,11 +2583,11 @@ fn generate_match_sequential(
                                     emitter.emit_inst("BVC", &nov);
                                     emitter.emit_inst("EOR", "#$80");
                                     emitter.emit_label(&nov);
-                                    emitter.emit_inst("BMI", target);
+                                    branch(emitter, target, tag);
                                 }
                             };
-                        emit_signed_lt(emitter, *start_val, &skip_label, "v1"); // < start -> skip
-                        emit_signed_lt(emitter, upper_bound, &arm_label, "v2"); // <= end -> match
+                        emit_signed_lt(emitter, *start_val, &skip_label, "v1", false); // < start -> skip
+                        emit_signed_lt(emitter, upper_bound, &arm_label, "v2", true); // <= end -> match
                     } else {
                         emitter.emit_inst("LDA", "$20");
                         // Check if value < start, skip this arm
@@ -2551,7 +2595,12 @@ fn generate_match_sequential(
                         emitter.emit_inst("BCC", &skip_label);
                         // Check if value <= end (or < end+1)
                         emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
-                        emitter.emit_inst("BCC", &arm_label);
+                        emit_far_arm_branch(
+                            emitter,
+                            "BCC",
+                            &arm_label,
+                            &format!("match_{}_arm_{}_far", match_id, i),
+                        );
                     }
 
                     emitter.emit_label(&skip_label);
@@ -2627,7 +2676,12 @@ fn generate_match_sequential(
                 // Compare the tag with the expected variant tag
                 emitter.emit_inst("LDA", &format!("${:02X}", ptr_base + 2)); // Load stored tag
                 emitter.emit_inst("CMP", &format!("#${:02X}", variant_info.tag));
-                emitter.emit_inst("BEQ", &format!("match_{}_arm_{}", match_id, i));
+                emit_far_arm_branch(
+                    emitter,
+                    "BEQ",
+                    &format!("match_{}_arm_{}", match_id, i),
+                    &format!("match_{}_arm_{}_far", match_id, i),
+                );
 
                 // If bindings are present, we'll extract them in the arm body
                 // For now, we just check the tag - bindings will be handled later
