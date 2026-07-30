@@ -472,3 +472,32 @@ fn a_negative_let_initializer_beyond_i16_is_rejected() {
         "-40000 fits no 16-bit type"
     );
 }
+
+#[test]
+fn an_absurd_array_size_is_rejected_at_parse() {
+    // This used to hang the compiler for minutes (static flattening looped
+    // over the count) or truncate to a 0-byte local.
+    crate::common::assert_error_contains(
+        "fn main() { let a: [u8; 4294967296] = [0; 4294967296]; }",
+        "64 KB",
+    );
+}
+
+#[test]
+fn an_array_whose_bytes_exceed_the_address_space_is_rejected() {
+    // The count fits the parse cap; the bytes do not fit the machine.
+    crate::common::assert_error_contains(
+        "static BIG: [u16; 40000] = [0; 40000];\nfn main() {}",
+        "64 KB",
+    );
+}
+
+#[test]
+fn a_local_struct_array_larger_than_a_frame_slot_is_rejected() {
+    // The inline allocation was clamped to 255 bytes, so the array's tail
+    // aliased whatever the frame handed out next.
+    crate::common::assert_error_contains(
+        "struct E { a: u16, b: u16, c: u16 }\nfn main() { let t: [E; 100] = [E { a: 0, b: 0, c: 0 }; 100]; }",
+        "at most 255",
+    );
+}

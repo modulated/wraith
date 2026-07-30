@@ -601,7 +601,22 @@ impl SemanticAnalyzer {
             }
             TypeExpr::Array { element, size } => {
                 let element_type = self.resolve_type(&element.node)?;
-                Ok(Type::Array(Box::new(element_type), *size))
+                let ty = Type::Array(Box::new(element_type), *size);
+                // The parser caps the element count at 65535, but bytes are
+                // what the machine runs out of: `[u16; 40000]` passes the
+                // count check and still cannot exist. Multiplication is done
+                // by size_of, which knows named element sizes.
+                let total = crate::sema::init::size_of(&ty, &self.type_registry);
+                if total > 65535 {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "array of {} bytes exceeds the 64 KB address space",
+                            total
+                        ),
+                        span: element.span,
+                    });
+                }
+                Ok(ty)
             }
             TypeExpr::Slice {
                 element,

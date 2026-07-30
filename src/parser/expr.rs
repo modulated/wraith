@@ -169,32 +169,35 @@ impl Parser<'_> {
         let start = self.current_span();
 
         match self.peek().cloned() {
-            // Unary operators
+            // Unary operators. The operand takes its postfix suffixes first,
+            // so `-p.x` negates the field and `~arr[i]` complements the
+            // element — the same rule `&` and `*` already follow. `as` is left
+            // for the caller, so `-x as i16` stays `(-x) as i16`.
             Some(Token::Minus) => {
                 self.advance();
-                let operand = self.parse_prefix_expr()?;
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix_with(inner, false)?;
                 let span = start.merge(operand.span);
                 Ok(Spanned::new(Expr::unary(UnaryOp::Neg, operand), span))
             }
             Some(Token::Bang) => {
                 self.advance();
-                let operand = self.parse_prefix_expr()?;
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix_with(inner, false)?;
                 let span = start.merge(operand.span);
                 Ok(Spanned::new(Expr::unary(UnaryOp::Not, operand), span))
             }
             Some(Token::Tilde) => {
                 self.advance();
-                let operand = self.parse_prefix_expr()?;
+                let inner = self.parse_prefix_expr()?;
+                let operand = self.parse_postfix_with(inner, false)?;
                 let span = start.merge(operand.span);
                 Ok(Spanned::new(Expr::unary(UnaryOp::BitNot, operand), span))
             }
 
-            // `&x` and `*p`. Unlike the arms above, the operand takes its
+            // `&x` and `*p`. Like the arms above, the operand takes its
             // postfix suffixes first, so `&x[0]` is the address of the element
-            // and `*p.next` dereferences the field — matching C and Rust. The
-            // arms above do not (`-x.f` parses as `(-x).f`), which is a
-            // separate pre-existing bug; copying it here would make `&x[0]`
-            // mean `(&x)[0]`, which is meaningless.
+            // and `*p.next` dereferences the field — matching C and Rust.
             //
             // `as` is the exception: it is left for the caller so that
             // `&x as u16` is `(&x) as u16` rather than the address of a cast.
@@ -309,6 +312,34 @@ impl Parser<'_> {
         }
     }
 
+    /// Parse an array element count (`[T; N]` or `[v; N]`). The most
+    /// elements an array can ever have on a 6502 is 65535 — the whole address
+    /// space is 64 KiB — so a larger count is impossible for any element
+    /// type. Checking here keeps an absurd count from reaching
+    /// materialization, where it either hung (a static's flatten loop ran
+    /// `count` times) or truncated (the byte size `as u16` came out 0).
+    fn parse_array_size(&mut self) -> ParseResult<usize> {
+        const MAX_ARRAY_ELEMENTS: i64 = 65535;
+        match self.peek().cloned() {
+            Some(Token::Integer(n)) => {
+                let span = self.current_span();
+                self.advance();
+                if !(0..=MAX_ARRAY_ELEMENTS).contains(&n) {
+                    return Err(ParseError::custom(
+                        span,
+                        format!("array size {} exceeds the 64 KB address space", n),
+                    ));
+                }
+                Ok(n as usize)
+            }
+            tok => Err(ParseError::unexpected_token(
+                self.current_span(),
+                "array size",
+                tok,
+            )),
+        }
+    }
+
     /// Parse array literal: [1, 2, 3] or [0; 10]
     fn parse_array_literal(&mut self) -> ParseResult<Spanned<Expr>> {
         let start = self.current_span();
@@ -328,25 +359,16 @@ impl Parser<'_> {
         // Check if this is array fill syntax: [expr; count]
         if self.check(&Token::Semi) {
             self.advance();
-            let count_tok = self.peek().cloned();
-            if let Some(Token::Integer(count)) = count_tok {
-                self.advance();
-                self.expect(&Token::RBracket)?;
-                let span = start.merge(self.previous_span());
-                return Ok(Spanned::new(
-                    Expr::Literal(Literal::ArrayFill {
-                        value: Box::new(first),
-                        count: count as usize,
-                    }),
-                    span,
-                ));
-            } else {
-                return Err(ParseError::unexpected_token(
-                    self.current_span(),
-                    "array size",
-                    count_tok,
-                ));
-            }
+            let count = self.parse_array_size()?;
+            self.expect(&Token::RBracket)?;
+            let span = start.merge(self.previous_span());
+            return Ok(Spanned::new(
+                Expr::Literal(Literal::ArrayFill {
+                    value: Box::new(first),
+                    count,
+                }),
+                span,
+            ));
         }
 
         // Regular array literal: [expr, expr, ...]
@@ -617,19 +639,7 @@ impl Parser<'_> {
                 self.advance();
                 let element = self.parse_type()?;
                 self.expect(&Token::Semi)?;
-                let size = match self.peek().cloned() {
-                    Some(Token::Integer(n)) => {
-                        self.advance();
-                        n as usize
-                    }
-                    tok => {
-                        return Err(ParseError::unexpected_token(
-                            self.current_span(),
-                            "array size",
-                            tok,
-                        ));
-                    }
-                };
+                let size = self.parse_array_size()?;
                 self.expect(&Token::RBracket)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(TypeExpr::array(element, size), span))

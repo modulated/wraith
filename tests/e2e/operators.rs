@@ -355,3 +355,35 @@ fn compound_assignment_through_a_pure_index_still_works() {
     "#);
     assert_eq!(e.mem(0x0900), 26);
 }
+
+#[test]
+fn unary_minus_binds_postfix_field_access() {
+    // `-p.x` failed to parse as a field negation ("cannot apply '-' to type
+    // P") because unary minus never consumed postfix suffixes.
+    let mut e = run(r#"
+        struct P { x: i8 }
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let p: P = P { x: 5 };
+            let v: i8 = -p.x;
+            OUT = v as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0xFB, "-5 as two's complement");
+}
+
+#[test]
+fn unary_bitnot_binds_postfix_index() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: [u8; 2] = [0x0F, 0];
+            OUT = ~a[0];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0xF0);
+}

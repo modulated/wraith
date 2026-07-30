@@ -235,7 +235,7 @@ impl SemanticAnalyzer {
             // the variable's address so arr[i].field addresses statically); other
             // arrays are a 2-byte pointer to (ROM) element data.
             Type::Array(elem, n) if matches!(&**elem, Type::Named(t) if self.type_registry.get_struct(t).is_some()) => {
-                (self.type_size(elem) * n).min(255)
+                self.type_size(elem) * n
             }
             Type::Array(_, _) => 2, // Array pointer (data lives in RAM, below)
             Type::String => 2,      // String pointer (16-bit address)
@@ -257,6 +257,18 @@ impl SemanticAnalyzer {
             }
             _ => 1,
         };
+        // A frame offset is one byte; a larger inline value used to be
+        // clamped or truncated (`as u8`), so the variable's tail aliased
+        // whatever the frame handed out next.
+        if alloc_size > 255 {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "local '{}' needs {} bytes; a variable stored inline in the frame holds at most 255",
+                    name.node, alloc_size
+                ),
+                span: name.span,
+            });
+        }
         let offset = self.frame_alloc(alloc_size as u8);
         let location = SymbolLocation::FrameOffset(offset);
 
