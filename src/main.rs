@@ -108,6 +108,24 @@ fn main() {
     };
     let start_time = Instant::now();
 
+    // `-o/--out` takes a directory, but a file path is a natural mistake:
+    // `-o build/main.asm` would otherwise create a directory literally called
+    // `main.asm` and write `main.asm` inside it. Take the intent (the parent
+    // directory) and say so.
+    let out_dir = out_dir.map(|d| {
+        let resolved = out_dir_or_file_parent(&d);
+        if resolved != d {
+            eprintln!(
+                "{}Warning:{} -o/--out expects a directory, not a file name: '{}'",
+                YELLOW,
+                RESET,
+                d.display()
+            );
+            eprintln!("       using '{}' instead", resolved.display());
+        }
+        resolved.to_path_buf()
+    });
+
     // Read source file
     println!("{}{:>12}{} {}", YELLOW, "Compiling", RESET, file);
     let source = match fs::read_to_string(&file) {
@@ -248,6 +266,24 @@ fn output_path(input: &str, out_dir: Option<&Path>) -> PathBuf {
     }
 }
 
+/// `-o/--out` takes a directory. A value that names the `.asm` file itself
+/// (`build/main.asm`) is a file path, not a directory — return the directory
+/// part so the caller can warn and proceed with what was meant. A bare file
+/// name (`main.asm`, no parent) maps to the current directory. Only `.asm`
+/// triggers this: dotted directory names (`build/v1.2`) are legitimate.
+fn out_dir_or_file_parent(dir: &Path) -> &Path {
+    if dir
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("asm"))
+    {
+        dir.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+    } else {
+        dir
+    }
+}
+
 fn print_usage(program: &str) {
     eprintln!("Usage: {} [OPTIONS] <input.wr>", program);
     eprintln!();
@@ -307,6 +343,35 @@ mod tests {
         assert_eq!(
             output_path("main", Some(Path::new("build"))),
             PathBuf::from("build/main.asm")
+        );
+    }
+
+    #[test]
+    fn an_asm_file_as_out_dir_is_taken_as_its_parent() {
+        // `-o build/main.asm` means `build/`, not a directory called main.asm.
+        assert_eq!(
+            out_dir_or_file_parent(Path::new("build/main.asm")),
+            Path::new("build")
+        );
+        assert_eq!(
+            out_dir_or_file_parent(Path::new("main.asm")),
+            Path::new(".")
+        );
+        assert_eq!(
+            out_dir_or_file_parent(Path::new("build/MAIN.ASM")),
+            Path::new("build")
+        );
+    }
+
+    #[test]
+    fn dotted_directory_names_are_not_mistaken_for_files() {
+        assert_eq!(
+            out_dir_or_file_parent(Path::new("build/v1.2")),
+            Path::new("build/v1.2")
+        );
+        assert_eq!(
+            out_dir_or_file_parent(Path::new("build")),
+            Path::new("build")
         );
     }
 
