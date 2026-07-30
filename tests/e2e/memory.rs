@@ -293,3 +293,19 @@ fn addr_read_modify_write() {
     "#);
     assert_eq!(e.mem(0x0905), 15);
 }
+
+#[test]
+#[should_panic(expected = "store into ROM")]
+fn a_wild_store_into_rom_fails_loudly_on_the_emulator() {
+    // TestBus used to be 64 KB of writable RAM: this store succeeded silently,
+    // exactly as it would NOT on real hardware. Sema can't see through a
+    // pointer, so the emulator itself refuses the write.
+    run(r#"
+        #[reset]
+        fn main() {
+            let p: &u8 = 0xD000 as &u8;
+            *p = 42;
+            loop {}
+        }
+    "#);
+}

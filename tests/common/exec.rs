@@ -42,6 +42,11 @@ pub struct TestBus {
     ram: Vec<u8>,
     irq: bool,
     nmi: bool,
+    /// Address ranges treated as ROM: a store into one panics, because on
+    /// real hardware it silently does nothing. Matches the default config's
+    /// CODE and DATA sections (where the compiler places code and const
+    /// data); a program has no business writing either.
+    rom_ranges: Vec<(u16, u16)>,
     /// Memory-mapped devices. Addresses they claim bypass RAM entirely, so a
     /// read can have side effects (consuming a FIFO byte, clearing a flag).
     pub devices: super::devices::Devices,
@@ -53,6 +58,7 @@ impl TestBus {
             ram: vec![0u8; 65536],
             irq: false,
             nmi: false,
+            rom_ranges: vec![(0x8000, 0xBFFF), (0xD000, 0xEFFF)],
             devices: super::devices::Devices::default(),
         }
     }
@@ -66,9 +72,18 @@ impl Bus for TestBus {
         }
     }
     fn set_byte(&mut self, address: u16, value: u8) {
-        if !self.devices.write(address, value) {
-            self.ram[address as usize] = value;
+        if self.devices.write(address, value) {
+            return;
         }
+        assert!(
+            !self
+                .rom_ranges
+                .iter()
+                .any(|&(lo, hi)| (lo..=hi).contains(&address)),
+            "store into ROM at ${address:04X} — a no-op on real hardware that \
+             the emulator's flat RAM would silently accept"
+        );
+        self.ram[address as usize] = value;
     }
     fn irq_pending(&mut self) -> bool {
         // Either the harness pulsed the line, or a device is asserting it.
@@ -239,11 +254,26 @@ pub fn run(source: &str) -> Exec {
 /// devices attached. Device reads/writes have real side effects (FIFOs drain,
 /// flags clear, timers count), so drivers can be exercised end to end.
 ///
-/// Unlike [`run`], execution stops as soon as the program reaches its idle
-/// `loop {}` *or* the step budget runs out — a driver that spins waiting on a
-/// device the test has not fed would otherwise never halt. Inspect
-/// [`Exec::halted`] when that distinction matters.
+/// Like [`run`], this panics if the program does not halt within the step
+/// budget. A driver that legitimately spins waiting on a device the test
+/// never feeds should use [`run_with_devices_expect_spin`] — silence on a
+/// hang is indistinguishable from success otherwise.
 pub fn run_with_devices(source: &str, devices: super::devices::Devices) -> Exec {
+    run_with_devices_impl(source, devices, true)
+}
+
+/// [`run_with_devices`] without the halt assertion, for programs that are
+/// *meant* to be left spinning (a driver blocked on a FIFO the test refills
+/// via [`Exec::resume`]). Check [`Exec::halted`] yourself.
+pub fn run_with_devices_expect_spin(source: &str, devices: super::devices::Devices) -> Exec {
+    run_with_devices_impl(source, devices, false)
+}
+
+fn run_with_devices_impl(
+    source: &str,
+    devices: super::devices::Devices,
+    require_halt: bool,
+) -> Exec {
     let asm = compile_success(source);
     let image = assemble(&asm);
 
@@ -277,8 +307,9 @@ pub fn run_with_devices(source: &str, devices: super::devices::Devices) -> Exec 
         }
     }
     assert!(
-        halted || cpu.memory.devices.uart.is_some() || cpu.memory.devices.via.is_some(),
-        "program did not halt within {} steps (possible infinite loop or missing `loop {{}}`)",
+        halted || !require_halt,
+        "program did not halt within {} steps (possible infinite loop or missing `loop {{}}`; \
+         if it is meant to spin on a device, use run_with_devices_expect_spin)",
         BUDGET
     );
 
