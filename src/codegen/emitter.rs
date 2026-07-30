@@ -136,6 +136,108 @@ impl Emitter {
         if mnemonic == "JSR" {
             self.reg_state.invalidate_all();
         }
+
+        self.track_effect(mnemonic, operand);
+    }
+
+    /// Mirror an instruction's effect in the register tracker.
+    ///
+    /// The tracked load/store methods set a precise belief right after
+    /// emit_inst returns, so anything done here is overwritten wherever a
+    /// caller knows better — this is the floor, not the ceiling. It exists so
+    /// a *raw* `emit_inst("LDX", ...)` site cannot leave a stale belief
+    /// behind: a stale belief is a miscompile (the JSR case above was one),
+    /// while a conservative Unknown merely costs a redundant load.
+    fn track_effect(&mut self, mnemonic: &str, operand: &str) {
+        // What a plain (unindexed, unindirected) operand puts in a register.
+        // Indexed forms, labels and symbols say nothing precise.
+        let load_value = || {
+            let hex = operand
+                .strip_prefix('#')
+                .unwrap_or(operand)
+                .strip_prefix('$')?;
+            match hex.len() {
+                2 => u8::from_str_radix(hex, 16).ok().map(|v| {
+                    if operand.starts_with('#') {
+                        RegisterValue::Immediate(v as i64)
+                    } else {
+                        RegisterValue::ZeroPage(v)
+                    }
+                }),
+                4 if !operand.starts_with('#') => u16::from_str_radix(hex, 16)
+                    .ok()
+                    .map(RegisterValue::Variable),
+                _ => None,
+            }
+        };
+        // The location a plain store operand rewrites, as (is_zero_page, addr).
+        let store_addr = || {
+            let hex = operand.strip_prefix('$')?;
+            match hex.len() {
+                2 => u8::from_str_radix(hex, 16).ok().map(|v| (true, v as u16)),
+                4 => u16::from_str_radix(hex, 16).ok().map(|v| (false, v)),
+                _ => None,
+            }
+        };
+        let invalidate_store = |reg_state: &mut RegisterState, is_zp: bool, addr: u16| {
+            if is_zp {
+                reg_state.invalidate_zero_page(addr as u8);
+            } else {
+                reg_state.invalidate_memory(addr);
+            }
+        };
+
+        match mnemonic {
+            "LDA" => self
+                .reg_state
+                .set_a(load_value().unwrap_or(RegisterValue::Unknown)),
+            "LDX" => self
+                .reg_state
+                .set_x(load_value().unwrap_or(RegisterValue::Unknown)),
+            "LDY" => self
+                .reg_state
+                .set_y(load_value().unwrap_or(RegisterValue::Unknown)),
+            "TAX" => self.reg_state.transfer_a_to_x(),
+            "TAY" => self.reg_state.transfer_a_to_y(),
+            "TXA" => self.reg_state.transfer_x_to_a(),
+            "TYA" => self.reg_state.transfer_y_to_a(),
+            "TSX" => self.reg_state.modify_x(),
+            "INX" | "DEX" => self.reg_state.modify_x(),
+            "INY" | "DEY" => self.reg_state.modify_y(),
+            "ADC" | "SBC" | "AND" | "ORA" | "EOR" | "PLA" => self.reg_state.modify_a(),
+            "ASL" | "LSR" | "ROL" | "ROR" => {
+                // The accumulator form rewrites A; the memory form rewrites
+                // the location and leaves A alone.
+                if operand.is_empty() || operand == "A" {
+                    self.reg_state.modify_a();
+                } else if let Some((is_zp, addr)) = store_addr() {
+                    invalidate_store(&mut self.reg_state, is_zp, addr);
+                }
+            }
+            "INC" | "DEC" => {
+                if let Some((is_zp, addr)) = store_addr() {
+                    invalidate_store(&mut self.reg_state, is_zp, addr);
+                }
+            }
+            "STA" | "STX" | "STY" => {
+                if let Some((is_zp, addr)) = store_addr() {
+                    invalidate_store(&mut self.reg_state, is_zp, addr);
+                    // Afterwards the stored register mirrors the location.
+                    let mirrored = if is_zp {
+                        RegisterValue::ZeroPage(addr as u8)
+                    } else {
+                        RegisterValue::Variable(addr)
+                    };
+                    match mnemonic {
+                        "STA" => self.reg_state.set_a(mirrored),
+                        "STX" => self.reg_state.set_x(mirrored),
+                        _ => self.reg_state.set_y(mirrored),
+                    }
+                }
+            }
+            "PLP" | "RTI" => self.reg_state.invalidate_all(),
+            _ => {}
+        }
     }
 
     pub fn emit_comment(&mut self, comment: &str) {
@@ -658,5 +760,57 @@ impl Emitter {
         }
 
         self.reg_state.invalidate_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_raw_load_replaces_the_registers_belief() {
+        // Tracking used to be a per-callsite convention: a raw
+        // emit_inst("LDX", ...) left the tracker believing X still held the
+        // old value. The belief is now replaced at the mnemonic level.
+        let mut e = Emitter::default();
+        e.emit_ldx_immediate(7);
+        e.emit_inst("LDX", "$20"); // raw, no tracked wrapper
+        assert_eq!(e.reg_state.x_reg, RegisterValue::ZeroPage(0x20));
+        e.emit_inst("LDX", "label,X"); // unparseable: conservative Unknown
+        assert_eq!(e.reg_state.x_reg, RegisterValue::Unknown);
+    }
+
+    #[test]
+    fn a_raw_store_invalidates_mirrored_beliefs() {
+        // A believed A == ZeroPage($20) must not survive a raw STA to $20
+        // from a different value — and after the store, A does mirror $20.
+        let mut e = Emitter::default();
+        e.emit_lda_immediate(5);
+        e.emit_inst("STA", "$20");
+        assert_eq!(e.reg_state.a_reg, RegisterValue::ZeroPage(0x20));
+
+        // A raw STX to the same address drops A's mirror belief.
+        e.emit_inst("LDX", "#$09");
+        e.emit_inst("STX", "$20");
+        assert_eq!(e.reg_state.a_reg, RegisterValue::Unknown);
+        assert_eq!(e.reg_state.x_reg, RegisterValue::ZeroPage(0x20));
+    }
+
+    #[test]
+    fn a_raw_arithmetic_op_marks_a_unknown() {
+        let mut e = Emitter::default();
+        e.emit_lda_immediate(5);
+        e.emit_inst("ADC", "#$01");
+        assert_eq!(e.reg_state.a_reg, RegisterValue::Unknown);
+    }
+
+    #[test]
+    fn a_memory_form_shift_keeps_a_but_drops_the_location() {
+        let mut e = Emitter::default();
+        e.emit_lda_immediate(5);
+        e.emit_inst("ASL", "$20");
+        assert_eq!(e.reg_state.a_reg, RegisterValue::Immediate(5));
+        e.emit_inst("ASL", "A");
+        assert_eq!(e.reg_state.a_reg, RegisterValue::Unknown);
     }
 }
