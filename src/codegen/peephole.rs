@@ -382,24 +382,25 @@ fn eliminate_dead_stores(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line
 }
 
 /// Eliminate no-op operations: ORA #$00, AND #$FF, etc.
+///
+/// These leave A unchanged but DO write N and Z from A, so removing one is
+/// sound only when nothing downstream reads those flags before they are
+/// overwritten — decided by flags liveness, like the CMP #$00 pass.
 fn eliminate_nop_operations(lines: &[Line]) -> Vec<Line> {
+    let live_out = compute_flag_liveness(lines);
     lines
         .iter()
-        .filter(|line| {
+        .enumerate()
+        .filter(|(i, line)| {
             if let Line::Instruction {
                 mnemonic, operand, ..
             } = line
             {
-                // ORA #$00 is a no-op
-                if mnemonic == "ORA" && operand.as_deref() == Some("#$00") {
-                    return false;
-                }
-                // AND #$FF is a no-op
-                if mnemonic == "AND" && operand.as_deref() == Some("#$FF") {
-                    return false;
-                }
-                // EOR #$00 is a no-op
-                if mnemonic == "EOR" && operand.as_deref() == Some("#$00") {
+                let value_nop = matches!(
+                    (mnemonic.as_str(), operand.as_deref()),
+                    ("ORA", Some("#$00")) | ("AND", Some("#$FF")) | ("EOR", Some("#$00"))
+                );
+                if value_nop && live_out[*i] & (FLAG_N | FLAG_Z) == 0 {
                     return false;
                 }
                 // ADC #$00 with carry clear is a no-op (but we can't always know carry state)
@@ -407,12 +408,16 @@ fn eliminate_nop_operations(lines: &[Line]) -> Vec<Line> {
             }
             true
         })
-        .cloned()
+        .map(|(_, line)| line.clone())
         .collect()
 }
 
 /// Eliminate redundant register transfers: TAX; TXA → (nothing, unless A is modified between)
+///
+/// Both transfers write N and Z from the transferred value, so removing the
+/// pair is sound only when those flags are dead afterwards.
 fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
+    let live_out = compute_flag_liveness(lines);
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -430,6 +435,7 @@ fn eliminate_redundant_transfers(lines: &[Line]) -> Vec<Line> {
                     ..
                 },
             ) = (&lines[i], &lines[i + 1])
+            && live_out[i + 1] & (FLAG_N | FLAG_Z) == 0
         {
             // TAX; TXA → nothing (if no X usage between)
             if m1 == "TAX" && m2 == "TXA" {
@@ -1416,6 +1422,42 @@ mod tests {
         let optimized = eliminate_redundant_cmp_zero(&lines);
         // CMP #$05 should NOT be removed
         assert_eq!(optimized.len(), 3);
+    }
+
+    #[test]
+    fn test_nop_removed_when_flags_are_dead() {
+        let asm = "    LDA $40\n    ORA #$00\n    STA $50\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_nop_operations(&lines);
+        assert_eq!(optimized.len(), 2, "ORA #$00 removable when N/Z are dead");
+    }
+
+    #[test]
+    fn test_nop_kept_when_a_branch_reads_the_flags() {
+        // LDX sets N/Z from X; the ORA re-establishes them from A for the BEQ.
+        // Removing it makes the branch test X instead of A.
+        let asm = "    LDA $40\n    LDX #$00\n    ORA #$00\n    BEQ label\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_nop_operations(&lines);
+        assert_eq!(optimized.len(), 5, "ORA #$00 feeds the BEQ's Z flag");
+    }
+
+    #[test]
+    fn test_transfer_pair_removed_when_flags_are_dead() {
+        let asm = "    LDA $40\n    TAX\n    TXA\n    STA $50\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_transfers(&lines);
+        assert_eq!(optimized.len(), 2, "TAX;TXA removable when N/Z are dead");
+    }
+
+    #[test]
+    fn test_transfer_pair_kept_when_a_branch_reads_the_flags() {
+        // Removing TAX;TXA leaves the BEQ testing the LDY's flags (Y's value),
+        // not A's.
+        let asm = "    LDA $40\n    LDY $20\n    TAX\n    TXA\n    BEQ label\nlabel:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_redundant_transfers(&lines);
+        assert_eq!(optimized.len(), 6, "the pair feeds the BEQ's Z flag");
     }
 
     #[test]

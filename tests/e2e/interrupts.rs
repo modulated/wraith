@@ -91,3 +91,26 @@ fn all_interrupt_vectors() {
     assert_asm_contains(&asm, ".WORD reset_handler");
     assert_asm_contains(&asm, ".WORD irq_handler");
 }
+
+#[test]
+fn interrupt_handler_preserves_the_indirect_arg_staging_block() {
+    // An NMI landing between indirect-arg staging ($E0-$EF) and the callee's
+    // prologue copy used to destroy the in-flight args when the handler
+    // itself called indirectly: the save list skipped the block.
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x400;
+        fn run_op(f: fn(u8) -> u8, v: u8) -> u8 { return f(v); }
+        fn id(x: u8) -> u8 { return x; }
+        #[nmi]
+        fn nmi_handler() {
+            OUT = run_op(id, 1);
+        }
+        fn main() {
+            OUT = run_op(id, 2);
+        }
+    "#,
+    );
+    assert_asm_contains(&asm, "LDA $E0");
+    assert_asm_contains(&asm, "LDA $EF");
+}

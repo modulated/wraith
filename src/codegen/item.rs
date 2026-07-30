@@ -81,6 +81,10 @@ pub(super) fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8>
     if let Some(si) = info.interrupt_save_info.get(name) {
         if si.save_scratch {
             addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
+            addrs.extend(0xE0u8..=0xEF); // indirect-arg staging block: an NMI
+            // landing between staging and the callee's prologue copy would
+            // otherwise destroy in-flight args when the handler itself calls
+            // indirectly
             addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
         }
         if si.save_math {
