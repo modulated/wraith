@@ -271,3 +271,32 @@ fn via_timer_interrupt_reaches_handler() {
     e.resume(2000);
     assert_eq!(e.mem(0x0400), 1, "handler ran and counted the tick");
 }
+
+// ---------------------------------------------------------------------------
+// The monitor example, end to end against the 16550 model.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn monitor_example_answers_a_read_command() {
+    // examples/monitor_standalone.wr drives a 16550 at $E000: boot banner,
+    // then a polled getline. Feeding "R 0300\r" must echo the input and
+    // print the memory value at $0400.
+    let src = std::fs::read_to_string("examples/monitor_standalone.wr").expect("monitor example");
+    // The monitor's init resets the UART FIFOs, so feed only after boot.
+    let mut e = crate::common::exec::run_with_devices_expect_spin(
+        &src,
+        Devices::default().with_uart(0xE000),
+    );
+    e.uart_feed(b"R 0400\r");
+    e.resume(2_000_000);
+
+    let out = e.uart_output();
+    assert!(
+        out.contains("Wraith Monitor"),
+        "boot banner expected, got:\n{out}"
+    );
+    assert!(
+        out.contains("0400: 00"),
+        "read command should print the (zero) byte at $0400, got:\n{out}"
+    );
+}

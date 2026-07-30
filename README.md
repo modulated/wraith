@@ -87,6 +87,12 @@ directory, which keeps generated assembly out of the source tree:
 wraith --out build src/main.wr    # writes build/main.asm
 ```
 
+### Environment variables
+
+- `WRAITH_STD_PATH` — where non-relative imports (`import {memcpy} from
+  "mem.wr"`) look for the standard library. Defaults to `std/` relative to
+  the working directory.
+
 ### Shell completion
 
 Completion covers the flags, their argument values (verbosity levels, shell

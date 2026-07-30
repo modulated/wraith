@@ -1,7 +1,9 @@
 {
   "name": "Wraith",
   "scopeName": "source.wraith",
-  "fileTypes": ["wr"],
+  "fileTypes": [
+    "wr"
+  ],
   "patterns": [
     {
       "include": "#comments"
@@ -72,19 +74,23 @@
       "patterns": [
         {
           "name": "keyword.control.wraith",
-          "match": "\\b(if|else|while|for|loop|break|continue|return|in)\\b"
+          "match": "\\b(if|else|while|for|loop|match|break|continue|return|in)\\b"
         },
         {
           "name": "keyword.declaration.wraith",
-          "match": "\\b(fn|let|static|addr|struct|enum|asm)\\b"
+          "match": "\\b(fn|let|const|static|addr|struct|enum|asm|import|from|as)\\b"
         },
         {
           "name": "storage.modifier.wraith",
-          "match": "\\b(mut|zp|pub)\\b"
+          "match": "\\b(pub|read|write)\\b"
         },
         {
           "name": "constant.language.wraith",
-          "match": "\\b(true|false)\\b"
+          "match": "\\b(true|false|carry|zero|overflow|negative)\\b"
+        },
+        {
+          "name": "storage.type.wraith",
+          "match": "\\b(u8|i8|u16|i16|b8|b16|bool|str)\\b"
         }
       ]
     },

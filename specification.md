@@ -33,7 +33,7 @@ A systems programming language designed specifically for the 6502 processor, tak
 
 Wraith is a systems programming language designed specifically for the 6502 processor family. The language philosophy prioritizes:
 
-1. **Explicitness over Convenience** - No type inference, no implicit conversions. Every operation must be explicit.
+1. **Explicitness over Convenience** - Every variable's type is declared, and narrowing or signedness changes must be written out with `as`. The only quiet conversions are the lossless ones: `u8` → `u16`, `i8` → `i16`, `bool` → `u8`, and integer literals adopting the type the context expects.
 2. **Trust the Programmer** - Variables are mutable by default, no borrow checker, direct memory access.
 3. **Zero Overhead** - Direct compilation to hand-optimized assembly with no runtime or hidden allocations.
 4. **Hardware-Aware** - Language features map directly to 6502 capabilities (BCD types, interrupt handlers, zero page).
@@ -47,7 +47,7 @@ Wraith uses a multi-stage compilation process:
 2. **Semantic Analysis** - Type checking, constant evaluation, scope resolution
 3. **Optimization** - Tail call optimization, dead code elimination, constant folding
 4. **Code Generation** - Direct emission of 6502 assembly code
-5. **Output** - Generates `.asm` file ready for your chosen 6502 assembler (ca65, DASM, etc.)
+5. **Output** - Generates a flat, fully-placed `.ORG` `.asm` image, assembled by the bundled `flatasm` (or your own assembler; note the output is absolute, not relocatable — `ca65`'s linker model does not apply)
 
 **Key Characteristics:**
 - Compile-time constant evaluation and overflow checking
@@ -90,8 +90,8 @@ bool    // Boolean (represented as u8: 0 or 1)
 ### Type Characteristics
 
 - All types must be explicitly declared
-- No type inference
-- No implicit conversions (must use `as` keyword)
+- No type inference (beyond literals adopting the declared type)
+- Narrowing and signedness changes require an explicit `as` cast; lossless widening (`u8`→`u16`, `i8`→`i16`, `bool`→`u8`) is implicit
 
 ### Binary Coded Decimal (BCD) Types
 
@@ -850,19 +850,22 @@ let x_pos: u8 = enemies[3].x;
 
 ### Passing Structs to Functions
 
-Small structs (1-2 bytes) passed in registers/zero page, larger structs via pointer or stack:
+All structs are passed **by reference**: the callee receives a 2-byte pointer
+to the caller's storage (see [Calling Convention](#appendix-c-calling-convention)).
+Field writes through a struct parameter modify the *caller's* struct:
 
 ```rust
-// Small struct - passed efficiently
-fn move_point(p: Point, dx: u8, dy: u8) -> Point {
-    p.x = p.x + dx;
-    p.y = p.y + dy;
-    return p;
-}
-
-// Large struct - typically passed by reference in real usage
 fn update_entity(e: Entity) {
-    e.health = e.health - 1;
+    e.health = e.health - 1;  // mutates the caller's Entity
+}
+```
+
+To work on a copy, bind a local and copy field by field (or return a fresh
+struct):
+
+```rust
+fn move_point(p: Point, dx: u8, dy: u8) -> Point {
+    return Point { x: p.x + dx, y: p.y + dy };
 }
 ```
 
@@ -1645,7 +1648,6 @@ const LOCAL: str = "Error";  // Shares storage with MSG
 - Maximum string length: 255 bytes
 - No runtime string mutation
 - No runtime string concatenation (concatenation is compile-time only)
-- String comparisons must be done manually (element by element)
 - No built-in string search/replace operations
 
 These limitations are intentional for the 6502 platform - strings are designed for static data like messages, labels, and constants rather than dynamic text processing.
@@ -1844,7 +1846,7 @@ let unsigned: u8 = signed as u8;  // Results in 246
 let addr: u16 = 0x1000;
 ```
 
-**No implicit conversions** - all casts must be explicit.
+**Only lossless widening is implicit** (`u8` → `u16`, `i8` → `i16`, `bool` → `u8`); everything else needs an explicit `as` cast.
 **No error checking** - casts that are invalid will overflow/underflow.
 
 ### Integer Literals in Binary Operations
@@ -2395,6 +2397,15 @@ import {bar} from "../lib/helper.wr";
 
 ```rust
 import {memcpy} from "mem.wr";  // Searches stdlib first
+```
+
+The standard library directory defaults to `std/` relative to the working
+directory and can be overridden with the `WRAITH_STD_PATH` environment
+variable — useful when building from another directory or with a vendored
+copy of the library:
+
+```bash
+WRAITH_STD_PATH=/opt/wraith/std wraith main.wr
 ```
 
 ### Circular Import Detection
@@ -3206,15 +3217,15 @@ if result == 0xFFFF {
 
 ## Reserved Keywords
 
-The following **37 keywords** are reserved in Wraith and cannot be used as identifiers:
+The following **38 keywords** are reserved in Wraith and cannot be used as identifiers:
 
 ```
 addr      as        asm       b8        b16       bool      break
 carry     const     continue  else      enum      false     fn
 for       from      i8        i16       if        import    in
 let       loop      match     negative  overflow  pub       read
-return    str       struct    true      u8        u16       while
-write     zero
+return    static    str       struct    true      u8        u16
+while     write     zero
 ```
 
 ### Keywords by Category
@@ -3225,9 +3236,9 @@ if        else      while     loop      for
 match     return    break     continue
 ```
 
-**Variable Declaration (2 keywords):**
+**Variable Declaration (3 keywords):**
 ```
-let       const
+let       const     static
 ```
 
 **Type Keywords (8 keywords):**

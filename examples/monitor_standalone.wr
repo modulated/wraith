@@ -32,15 +32,24 @@ const ASCII_CR: u8 = 0x0D;
 const ASCII_LF: u8 = 0x0A;
 const ASCII_BS: u8 = 0x08;
 
-// Monitor storage
-const CMD_BUFFER: u16 = 0x0200;
+// Monitor storage. The buffer lives at $0300, clear of the zero page, the
+// hardware stack ($0100-$01FF) and the compiler's software-stack page
+// ($0200-$02FF, used for recursion saves and operand spills — u16 math in
+// the parser would clobber a command mid-read).
+const CMD_BUFFER: u16 = 0x0300;
 const CMD_MAX_LEN: u8 = 64;
 
-const TEMP_ADDR_LO: addr = 0x00F0;
-const TEMP_ADDR_HI: addr = 0x00F1;
-const TEMP_VAL: addr = 0x00F2;
-const TEMP_ADDR2_LO: addr = 0x00F3;
-const TEMP_ADDR2_HI: addr = 0x00F4;
+// Working values shared between the command parser and handlers. (An addr
+// const at $00F2 used to serve here — inside the compiler's arg-pool
+// scratch region, where any call could destroy it.)
+static TEMP_VAL: u8 = 0;
+static TEMP_ADDR: u16 = 0;
+static TEMP_ADDR2: u16 = 0;
+
+fn set_temp_addr(a: u16) { TEMP_ADDR = a; }
+fn get_temp_addr() -> u16 { return TEMP_ADDR; }
+fn set_temp_addr2(a: u16) { TEMP_ADDR2 = a; }
+fn get_temp_addr2() -> u16 { return TEMP_ADDR2; }
 
 // ============================================================================
 // String Constants using str type
@@ -85,6 +94,98 @@ fn mem_jump(address: u16) {
 }
 
 // ============================================================================
+// UART Driver (16550, polled)
+// ============================================================================
+
+fn uart_init() {
+    UART_IER = 0x00;         // polled I/O, no interrupts
+    UART_LCR = UART_LCR_DLAB;
+    UART_DLL = 12;           // BAUD_9600 low
+    UART_DLM = 0;            // BAUD_9600 high
+    UART_LCR = UART_LCR_WLS0 | UART_LCR_WLS1;  // 8 data bits, no parity
+    UART_FCR = UART_FCR_ENABLE | UART_FCR_RFRST | UART_FCR_TFRST;
+}
+
+fn uart_putc(ch: u8) {
+    loop {
+        if (UART_LSR & UART_LSR_THRE) != 0 { break; }
+    }
+    UART_THR = ch;
+}
+
+fn uart_getc() -> u8 {
+    loop {
+        if (UART_LSR & UART_LSR_DR) != 0 { break; }
+    }
+    return UART_RBR;
+}
+
+fn uart_puts(s: str) {
+    for c in s {
+        uart_putc(c);
+    }
+}
+
+fn uart_space() { uart_putc(ASCII_SPACE); }
+
+fn uart_newline() {
+    uart_putc(ASCII_CR);
+    uart_putc(ASCII_LF);
+}
+
+fn nibble_to_hex(n: u8) -> u8 {
+    if n < 10 { return 0x30 + n; }   // '0'
+    return 0x41 + (n - 10);          // 'A'
+}
+
+fn uart_puthex_byte(v: u8) {
+    uart_putc(nibble_to_hex(v >> 4));
+    uart_putc(nibble_to_hex(v & 0x0F));
+}
+
+fn uart_puthex_word(w: u16) {
+    uart_puthex_byte(w.high);
+    uart_puthex_byte(w.low);
+}
+
+fn print_ok() { uart_puts(OK); }
+
+fn print_error() { uart_puts(ERROR); }
+
+fn print_help() {
+    uart_puts(HELP_HEADER);
+    uart_puts(HELP_READ);
+    uart_puts(HELP_WRITE);
+    uart_puts(HELP_GO);
+    uart_puts(HELP_DUMP);
+}
+
+fn print_welcome() { uart_puts(WELCOME); }
+
+fn print_prompt() { uart_puts(PROMPT); }
+
+fn uart_getline(max: u8) -> u8 {
+    let len: u8 = 0;
+    loop {
+        let ch: u8 = uart_getc();
+        if ch == ASCII_CR {
+            uart_newline();
+            return len;
+        }
+        if ch == ASCII_BS {
+            if len > 0 {
+                len = len - 1;
+                uart_putc(ASCII_BS);
+            }
+        } else if len < max {
+            mem_write(CMD_BUFFER + (len as u16), ch);
+            len = len + 1;
+            uart_putc(ch);  // echo
+        }
+    }
+}
+
+// ============================================================================
 // Command Parser
 // ============================================================================
 
@@ -93,12 +194,7 @@ fn skip_spaces(pos: u8) -> u8 {
     let done: u8 = 0;
     loop {
         if done != 0 { break; }
-        let ch: u8 = 0;
-        asm {
-            "LDX {p}",
-            "LDA $0200,X",
-            "STA {ch}"
-        }
+        let ch: u8 = mem_read(CMD_BUFFER + (p as u16));
         if ch == ASCII_SPACE {
             p = p + 1;
         } else {
@@ -108,18 +204,26 @@ fn skip_spaces(pos: u8) -> u8 {
     return p;
 }
 
+fn hex_to_nibble(ch: u8) -> u8 {
+    if ch >= 0x30 && ch <= 0x39 {  // '0'..'9'
+        return ch - 0x30;
+    }
+    if ch >= 0x41 && ch <= 0x46 {  // 'A'..'F'
+        return ch - 0x41 + 10;
+    }
+    if ch >= 0x61 && ch <= 0x66 {  // 'a'..'f'
+        return ch - 0x61 + 10;
+    }
+    return 0xFF;  // not a hex digit
+}
+
 fn parse_hex_word(pos: u8) -> u8 {
     let p: u8 = pos;
     let result: u16 = 0 as u16;
     let i: u8 = 0;
     loop {
         if i >= 4 { break; }
-        let ch: u8 = 0;
-        asm {
-            "LDX {p}",
-            "LDA $0200,X",
-            "STA {ch}"
-        }
+        let ch: u8 = mem_read(CMD_BUFFER + (p as u16));
         let nibble: u8 = hex_to_nibble(ch);
         if nibble == 0xFF {
             return 0xFF;
@@ -135,20 +239,21 @@ fn parse_hex_word(pos: u8) -> u8 {
 
 fn parse_hex_byte(pos: u8) -> u8 {
     let p: u8 = pos;
-    let ch1: u8 = 0;
-    let ch2: u8 = 0;
-    asm {
-        "LDX {p}",
-        "LDA $0200,X",
-        "STA {ch1}",
-        "INX",
-        "LDA $0200,X",
-        "STA {ch2}"
-    }
+    let ch1: u8 = mem_read(CMD_BUFFER + (p as u16));
+    let ch2: u8 = mem_read(CMD_BUFFER + ((p + 1) as u16));
 
     let result: u8 = hex_to_byte(ch1, ch2);
     TEMP_VAL = result;
     return p + 2;
+}
+
+fn hex_to_byte(hi: u8, lo: u8) -> u8 {
+    let h: u8 = hex_to_nibble(hi);
+    let l: u8 = hex_to_nibble(lo);
+    if h == 0xFF || l == 0xFF {
+        return 0;
+    }
+    return (h << 4) | l;
 }
 
 // ============================================================================
@@ -217,11 +322,7 @@ fn cmd_dump() {
 fn process_command(len: u8) {
     if len == 0 { return; }
 
-    let cmd: u8 = 0;
-    asm {
-        "LDA $0200",
-        "STA {cmd}"
-    }
+    let cmd: u8 = mem_read(CMD_BUFFER);
 
     if cmd >= 0x61 && cmd <= 0x7A {
         cmd = cmd - 0x20;
@@ -292,7 +393,7 @@ fn main() {
 
     loop {
         print_prompt();
-        let len: u8 = uart_getline(CMD_BUFFER, CMD_MAX_LEN);
+        let len: u8 = uart_getline(CMD_MAX_LEN);
         process_command(len);
     }
 }
