@@ -8,9 +8,6 @@ afl = "0.18"
 wraith = { path = ".." }
 
 [[bin]]
-name = "fuzz_parser"
-path = "fuzz_targets/fuzz_parser.rs"
+name = "fuzz_full_stack"
+path = "fuzz_targets/fuzz_full_stack.rs"
 
-[[bin]]
-name = "fuzz_sema"
-path = "fuzz_targets/fuzz_sema.rs"

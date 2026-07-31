@@ -7,12 +7,14 @@ This directory contains fuzzing harnesses for testing Wraith with AFL++ (America
 ### 1. Install Dependencies
 
 **macOS:**
+
 ```bash
 brew install afl++
 cargo install cargo-afl
 ```
 
 **Linux:**
+
 ```bash
 sudo apt install afl++
 cargo install cargo-afl
@@ -40,6 +42,7 @@ cargo afl fuzz -i seeds -o out target/release/fuzz_parser
 ### 4. Monitor Progress
 
 AFL++ will show a live dashboard with:
+
 - **total paths**: Unique execution paths discovered
 - **crashes**: Number of crashes found
 - **hangs**: Number of hangs detected
@@ -50,16 +53,19 @@ Press `Ctrl+C` to stop fuzzing.
 ## Viewing Results
 
 ### Crashes
+
 ```bash
 ls -la out/default/crashes/
 ```
 
 ### Reproduce a crash
+
 ```bash
 cat out/default/crashes/id:000000* | cargo run --
 ```
 
 ### Minimize a crashing input
+
 ```bash
 cargo afl tmin -i out/default/crashes/id:000000* -o minimized.wr -- target/release/fuzz_parser
 ```
@@ -102,55 +108,18 @@ This is already enabled in our fuzz target!
 
 ### Custom Dictionary
 
-Create `fuzz/dict.txt` with Wraith keywords to guide fuzzing:
-
-```
-# Keywords
-"fn"
-"struct"
-"enum"
-"return"
-"if"
-"else"
-"while"
-"for"
-
-# Types
-"u8"
-"u16"
-"i8"
-"i16"
-
-# Operators
-"+"
-"-"
-"*"
-"/"
-"=="
-"!="
-```
-
+Create `fuzz/dict.txt` with Wraith keywords to guide fuzzing.
 Then run with:
+
 ```bash
 cargo afl fuzz -i seeds -o out -x dict.txt target/release/fuzz_parser
 ```
 
 ## Targets
 
-### `fuzz_parser`
-Fuzzes the lexer and parser to find:
-- Parser crashes
-- Lexer bugs
-- Panic conditions
-- Stack overflows
-- Infinite loops
+### fuzz_full_stack
 
-### Future Targets
-
-Consider adding:
-- `fuzz_sema`: Test semantic analysis
-- `fuzz_codegen`: Test code generation
-- `fuzz_e2e`: Full end-to-end compilation
+- runs lexer, parser, sema, codegen in sequence
 
 ## Tips
 
@@ -165,11 +134,13 @@ Consider adding:
 Combine with sanitizers for better bug detection:
 
 ### AddressSanitizer
+
 ```bash
 RUSTFLAGS="-Z sanitizer=address" cargo afl build --release
 ```
 
 ### UndefinedBehaviorSanitizer
+
 ```bash
 RUSTFLAGS="-Z sanitizer=undefined" cargo afl build --release
 ```
