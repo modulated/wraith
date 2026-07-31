@@ -441,35 +441,23 @@ pub fn validate_bcd_cast(
 ) -> Result<(), SemaError> {
     use crate::ast::PrimitiveType;
 
-    if let Some(n) = value.as_integer() {
-        match target_prim {
-            PrimitiveType::B8 => {
-                if decimal_to_bcd(n, 2).is_none() {
-                    return Err(SemaError::Custom {
-                        message: format!(
-                            "value {} is out of range for BCD type b8 (valid range: 0-99)",
-                            n
-                        ),
-                        span,
-                    });
-                }
-            }
-            PrimitiveType::B16 => {
-                if decimal_to_bcd(n, 4).is_none() {
-                    return Err(SemaError::Custom {
-                        message: format!(
-                            "value {} is out of range for BCD type b16 (valid range: 0-9999)",
-                            n
-                        ),
-                        span,
-                    });
-                }
-            }
-            _ => {}
-        }
+    match (value.as_integer(), target_prim) {
+        (Some(n), PrimitiveType::B8) if decimal_to_bcd(n, 2).is_none() => Err(SemaError::Custom {
+            message: format!(
+                "value {} is out of range for BCD type b8 (valid range: 0-99)",
+                n
+            ),
+            span,
+        }),
+        (Some(n), PrimitiveType::B16) if decimal_to_bcd(n, 4).is_none() => Err(SemaError::Custom {
+            message: format!(
+                "value {} is out of range for BCD type b16 (valid range: 0-9999)",
+                n
+            ),
+            span,
+        }),
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
 /// Apply type cast to a constant value

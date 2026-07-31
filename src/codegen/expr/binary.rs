@@ -295,21 +295,19 @@ pub(super) fn generate_binary(
 
             // Optimization: x % 256 → x.low (unsigned u16 only; a signed
             // remainder takes the dividend's sign).
-            crate::ast::BinaryOp::Mod => {
-                if is_u16 && !is_signed && val_u64 == 256 {
-                    if emitter.is_verbose() {
-                        emitter.emit_comment("Strength reduction: x % 256 → x.low");
-                    }
-
-                    // Generate left operand (result in A=low, Y=high)
-                    generate_expr(left, emitter, info, string_collector)?;
-
-                    // Low byte is already in A, just clear Y to indicate u8 result
-                    if emitter.is_verbose() {
-                        emitter.emit_comment("Low byte already in A");
-                    }
-                    return Ok(());
+            crate::ast::BinaryOp::Mod if is_u16 && !is_signed && val_u64 == 256 => {
+                if emitter.is_verbose() {
+                    emitter.emit_comment("Strength reduction: x % 256 → x.low");
                 }
+
+                // Generate left operand (result in A=low, Y=high)
+                generate_expr(left, emitter, info, string_collector)?;
+
+                // Low byte is already in A, just clear Y to indicate u8 result
+                if emitter.is_verbose() {
+                    emitter.emit_comment("Low byte already in A");
+                }
+                return Ok(());
             }
 
             _ => {}

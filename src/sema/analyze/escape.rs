@@ -320,25 +320,24 @@ impl SemanticAnalyzer {
                     }
                 }
                 // Rule 2: nor stored anywhere that outlives the frame.
-                Stmt::Assign { target, value } => {
+                Stmt::Assign { target, value }
                     if self.is_pointer_expr(value)
                         && self.provenance_of(value, facts) == Provenance::Local
                         && stores_beyond_the_frame(
                             &self.resolved_symbols,
                             &self.accessor_fields,
                             target,
-                        )
-                    {
-                        fail(
-                            SemaError::EscapingPointer {
-                                reason: "storing a pointer to a local in a global outlives the \
+                        ) =>
+                {
+                    fail(
+                        SemaError::EscapingPointer {
+                            reason: "storing a pointer to a local in a global outlives the \
                                          frame it names"
-                                    .to_string(),
-                                span: value.span,
-                            },
-                            &mut error,
-                        );
-                    }
+                                .to_string(),
+                            span: value.span,
+                        },
+                        &mut error,
+                    );
                 }
                 _ => {}
             }
