@@ -18,14 +18,15 @@
 "from"
 "addr"
 "const"
-"mut"
-"zp"
+"static"
 "asm"
 
 # Attributes
 "#[inline]"
 "#[org]"
 "#[section]"
+"#[irq]"
+"#[nmi]"
 
 # Types
 "u8"
