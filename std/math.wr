@@ -58,6 +58,35 @@ pub fn clamp(value: u8, min_val: u8, max_val: u8) -> u8 {
 }
 
 // ============================================================================
+// Absolute Value
+// ============================================================================
+
+/// Absolute value of a signed 8-bit integer.
+///
+/// Edge case: `abs(-128)` is `-128` (0x80). The magnitude 128 does not fit in
+/// an i8, so the two's-complement negation wraps back to the same value — the
+/// same behaviour as Rust's `i8::wrapping_abs`.
+#[inline]
+pub fn abs(x: i8) -> i8 {
+    if x < 0 {
+        return -x;
+    }
+    return x;
+}
+
+/// Absolute value of a signed 16-bit integer.
+///
+/// Edge case: `abs16(-32768)` is `-32768` (0x8000), for the same
+/// magnitude-does-not-fit reason as `abs`.
+#[inline]
+pub fn abs16(x: i16) -> i16 {
+    if x < 0 {
+        return -x;
+    }
+    return x;
+}
+
+// ============================================================================
 // Bit Manipulation
 // ============================================================================
 

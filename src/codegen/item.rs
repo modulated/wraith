@@ -17,6 +17,7 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
             PrimitiveType::I8 => "i8".to_string(),
             PrimitiveType::I16 => "i16".to_string(),
             PrimitiveType::Bool => "bool".to_string(),
+            PrimitiveType::Char => "char".to_string(),
             PrimitiveType::B8 => "b8".to_string(),
             PrimitiveType::B16 => "b16".to_string(),
             PrimitiveType::Addr => "addr".to_string(),
@@ -33,6 +34,7 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
         }
         TypeExpr::Pointer { pointee } => format!("&{}", format_type(pointee)),
         TypeExpr::Named(name) => name.clone(),
+        TypeExpr::StringBuf { capacity } => format!("str<{}>", capacity),
         TypeExpr::Function { params, ret } => {
             let params = params
                 .iter()

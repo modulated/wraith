@@ -46,6 +46,7 @@ fn simple_expr_name(expr: &Spanned<Expr>) -> String {
         Expr::Literal(lit) => match lit {
             Literal::Integer(n) => n.to_string(),
             Literal::Bool(b) => b.to_string(),
+            Literal::Char(c) => format!("'{}'", (*c as char).escape_default()),
             _ => "value".to_string(),
         },
         _ => "value".to_string(),

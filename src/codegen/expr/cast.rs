@@ -170,7 +170,7 @@ pub(super) fn generate_type_cast(
                         "cannot cast to addr type (addr is only for memory-mapped I/O declarations)".to_string()
                     ));
                 }
-                PrimitiveType::U8 | PrimitiveType::I8 => {
+                PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::Char => {
                     // Casting to 8-bit: Just truncate (A already has the value)
                     emitter.emit_comment(&format!("Cast to {:?} (truncate)", target_prim));
                     // For u16/i16 -> u8, we just keep A (low byte), discard high byte

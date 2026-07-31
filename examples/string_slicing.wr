@@ -50,9 +50,9 @@ fn main() {
     OUT_DOMAIN = domain_len as u8;
     OUT_EXTENSION = ext_len as u8;
     
-    // Access individual characters from sliced strings
-    let first_char: u8 = GREETING[0];  // 'H'
-    let last_char: u8 = NAME[4];       // 'd'
+    // Access individual characters from sliced strings (a string is [char])
+    let first_char: char = GREETING[0];  // 'H'
+    let last_char: char = NAME[4];       // 'd'
 }
 
 // Expected results:

@@ -205,6 +205,7 @@ fn eval_literal(lit: &Literal) -> Result<ConstValue, SemaError> {
     match lit {
         Literal::Integer(n) => Ok(ConstValue::Integer(*n)),
         Literal::Bool(b) => Ok(ConstValue::Bool(*b)),
+        Literal::Char(c) => Ok(ConstValue::Integer(i64::from(*c))),
         Literal::String(s) => Ok(ConstValue::String(s.clone())),
         _ => Err(SemaError::Custom {
             message: "literal cannot be evaluated as constant".to_string(),
@@ -488,6 +489,18 @@ fn apply_type_cast(
                 } else {
                     Err(SemaError::Custom {
                         message: "cannot cast to u8".to_string(),
+                        span,
+                    })
+                }
+            }
+            PrimitiveType::Char => {
+                // Truncate to an 8-bit ASCII byte (unchecked, like every other
+                // narrowing cast in the language).
+                if let Some(n) = value.as_integer() {
+                    Ok(ConstValue::Integer(i64::from(n as u8)))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to char".to_string(),
                         span,
                     })
                 }

@@ -87,6 +87,8 @@ pub enum Token {
     I16,
     #[token("bool")]
     Bool,
+    #[token("char")]
+    Char,
     #[token("str")]
     Str,
     #[token("b8")]
@@ -213,6 +215,9 @@ pub enum Token {
     })]
     String(String),
 
+    #[regex(r"'([^'\\]|\\.)'", |lex| parse_char_literal(lex.slice()))]
+    CharLit(u8),
+
     // === Identifier ===
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
@@ -257,6 +262,30 @@ fn unescape_string(s: &str) -> String {
         }
     }
     result
+}
+
+/// Resolve a char literal (including its surrounding quotes) to its ASCII byte.
+///
+/// Returns `None` — which logos turns into a lex error — for a non-ASCII
+/// character or an unknown escape, so `'é'` or `'\x'` are rejected at the
+/// lexer rather than silently truncated. The regex already guarantees exactly
+/// one logical character between the quotes.
+fn parse_char_literal(s: &str) -> Option<u8> {
+    let inner = &s[1..s.len() - 1];
+    let mut chars = inner.chars();
+    let ch = match chars.next()? {
+        '\\' => match chars.next()? {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '\\' => '\\',
+            '\'' => '\'',
+            '0' => '\0',
+            _ => return None,
+        },
+        c => c,
+    };
+    if ch.is_ascii() { Some(ch as u8) } else { None }
 }
 
 /// A token with its span in the source
@@ -329,6 +358,31 @@ mod tests {
         assert_eq!(tokens[2].token, Token::U16);
         assert_eq!(tokens[3].token, Token::I16);
         assert_eq!(tokens[4].token, Token::Bool);
+    }
+
+    #[test]
+    fn test_char_literals() {
+        let tokens = lex(r"'A' '0' '\n' '\t' '\\' '\'' '\0'").unwrap();
+        assert_eq!(tokens[0].token, Token::CharLit(0x41));
+        assert_eq!(tokens[1].token, Token::CharLit(0x30));
+        assert_eq!(tokens[2].token, Token::CharLit(b'\n'));
+        assert_eq!(tokens[3].token, Token::CharLit(b'\t'));
+        assert_eq!(tokens[4].token, Token::CharLit(b'\\'));
+        assert_eq!(tokens[5].token, Token::CharLit(b'\''));
+        assert_eq!(tokens[6].token, Token::CharLit(0));
+    }
+
+    #[test]
+    fn test_char_type_keyword() {
+        let tokens = lex("char").unwrap();
+        assert_eq!(tokens[0].token, Token::Char);
+    }
+
+    #[test]
+    fn test_non_ascii_char_is_rejected() {
+        // A non-ASCII character has no single-byte ASCII value; reject it at the
+        // lexer rather than silently truncating the UTF-8 bytes.
+        assert!(lex("'é'").is_err());
     }
 
     #[test]

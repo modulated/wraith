@@ -24,7 +24,7 @@ fn sum_chars(s: str) -> u16 {
 }
 
 /// Count occurrences of a character in a string
-fn count_char(s: str, target: u8) -> u8 {
+fn count_char(s: str, target: char) -> u8 {
     let count: u8 = 0;
     
     // Simple iteration
@@ -38,7 +38,7 @@ fn count_char(s: str, target: u8) -> u8 {
 }
 
 /// Find first occurrence of a character
-fn find_first(s: str, target: u8) -> u8 {
+fn find_first(s: str, target: char) -> u8 {
     // Iteration with index: for (i, c) in string
     for (i, c) in s {
         if c == target {
@@ -53,12 +53,12 @@ fn find_first(s: str, target: u8) -> u8 {
 fn copy_with_positions(source: str, dest: [u8; 32]) {
     // Iteration with index - useful for copying to specific positions
     for (i, c) in source {
-        dest[i] = c;
+        dest[i] = c as u8;
     }
 }
 
 /// Find the last position of a specific character
-fn find_last(s: str, target: u8) -> u8 {
+fn find_last(s: str, target: char) -> u8 {
     let last_pos: u8 = 0xFF;
     
     // Track last position during iteration
@@ -79,15 +79,15 @@ fn main() {
     OUT_SUM = sum as u8;
     
     // Example 2: Count 'l' in "Hello" - should be 2
-    let count: u8 = count_char(MESSAGE, 0x6C);  // 'l' = 0x6C
+    let count: u8 = count_char(MESSAGE, 'l');  // 'l' = 0x6C
     OUT_COUNT = count;
     
     // Example 3: Find first 'l' in "Hello" - should be 2
-    let first: u8 = find_first(MESSAGE, 0x6C);
+    let first: u8 = find_first(MESSAGE, 'l');
     OUT_FIRST = first;
     
     // Example 4: Find last 'l' in "Hello" - should be 3
-    let last: u8 = find_last(MESSAGE, 0x6C);
+    let last: u8 = find_last(MESSAGE, 'l');
     OUT_LAST = last;
 }
 

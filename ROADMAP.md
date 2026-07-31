@@ -37,18 +37,19 @@ Pointers are in place now, so a driver can be handed a caller's buffer.
 
 ### 2. Standard library gaps
 
-Present: `mul16`, `div16`, `divmod`, `mul_wide`, `memcpy`/`memcpy16`,
-`memset`/`memset16`, `memcmp`, `str_copy`, PRNG (`rand`, `rand16`, `srand`), bit
-helpers, saturating arithmetic.
+Present: `mul16`, `div16`, `divmod`, `mul_wide`, `abs`/`abs16`,
+`memcpy`/`memcpy16`, `memset`/`memset16`, `memcmp`, `str_copy`, PRNG (`rand`,
+`rand16`, `srand`), bit helpers, saturating arithmetic, ASCII `char` helpers
+(`std/char.wr`: `is_digit`/`is_alpha`/`is_upper`/`is_lower`/`is_alnum`/
+`is_whitespace`, `to_upper`/`to_lower`, `digit_value`).
 
 Still missing:
-- `abs(x: i8) -> i8` and `abs16(x: i16) -> i16`
-- `strlen` / `strcmp` for the length-prefixed `str` representation
+- `strlen` / `strcmp` — note `s.len` and `str == str` already cover the common
+  cases; a C-style ordering `strcmp` (-1/0/1) is the remaining gap
 - `bcd_to_string(value: b8) -> str`, `bcd16_to_string(value: b16) -> str`, and
   `string_to_bcd` — needed to display BCD counters on the console
 
-**Complexity**: Low for `abs`; Medium for the string conversions (6502 string
-building).
+**Complexity**: Medium for the string conversions (6502 string building).
 
 ---
 

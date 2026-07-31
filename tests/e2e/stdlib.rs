@@ -607,3 +607,155 @@ fn intrinsics_nop_is_a_no_op() {
     "#);
     assert_eq!(e.mem(0x0900), 8);
 }
+
+// ---------------------------------------------------------------------------
+// std/char.wr — ASCII classification and conversion. A string is an array of
+// `char`, so these are exercised over `str` indexing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn char_classification_over_a_string() {
+    // s = "a5 " : letter, digit, space.
+    let mut e = run(r#"
+        import { is_digit, is_alpha, is_upper, is_lower, is_alnum, is_whitespace } from "std/char.wr";
+        const D_A: addr = 0x0500; const D_5: addr = 0x0501; const D_SP: addr = 0x0502;
+        const AL_A: addr = 0x0503;
+        const UP_A: addr = 0x0504; const LO_A: addr = 0x0505;
+        const AN_5: addr = 0x0506; const AN_SP: addr = 0x0507;
+        const WS_SP: addr = 0x0508; const WS_A: addr = 0x0509;
+        #[reset]
+        fn main() {
+            let s: str = "a5 ";
+            D_A  = is_digit(s[0]) as u8;      // 'a' -> 0
+            D_5  = is_digit(s[1]) as u8;      // '5' -> 1
+            D_SP = is_digit(s[2]) as u8;      // ' ' -> 0
+            AL_A = is_alpha(s[0]) as u8;      // 'a' -> 1
+            UP_A = is_upper(s[0]) as u8;      // 'a' -> 0
+            LO_A = is_lower(s[0]) as u8;      // 'a' -> 1
+            AN_5 = is_alnum(s[1]) as u8;      // '5' -> 1
+            AN_SP= is_alnum(s[2]) as u8;      // ' ' -> 0
+            WS_SP= is_whitespace(s[2]) as u8; // ' ' -> 1
+            WS_A = is_whitespace(s[0]) as u8; // 'a' -> 0
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 0, "is_digit('a')");
+    assert_eq!(e.mem(0x0501), 1, "is_digit('5')");
+    assert_eq!(e.mem(0x0502), 0, "is_digit(' ')");
+    assert_eq!(e.mem(0x0503), 1, "is_alpha('a')");
+    assert_eq!(e.mem(0x0504), 0, "is_upper('a')");
+    assert_eq!(e.mem(0x0505), 1, "is_lower('a')");
+    assert_eq!(e.mem(0x0506), 1, "is_alnum('5')");
+    assert_eq!(e.mem(0x0507), 0, "is_alnum(' ')");
+    assert_eq!(e.mem(0x0508), 1, "is_whitespace(' ')");
+    assert_eq!(e.mem(0x0509), 0, "is_whitespace('a')");
+}
+
+#[test]
+fn char_case_conversion_is_idempotent_on_non_letters() {
+    let mut e = run(r#"
+        import { to_upper, to_lower } from "std/char.wr";
+        const U_a: addr = 0x0500;  // to_upper('a') = 'A'
+        const U_A: addr = 0x0501;  // to_upper('A') = 'A' (unchanged)
+        const U_5: addr = 0x0502;  // to_upper('5') = '5' (unchanged)
+        const L_Z: addr = 0x0503;  // to_lower('Z') = 'z'
+        const L_z: addr = 0x0504;  // to_lower('z') = 'z' (unchanged)
+        #[reset]
+        fn main() {
+            U_a = to_upper('a') as u8;
+            U_A = to_upper('A') as u8;
+            U_5 = to_upper('5') as u8;
+            L_Z = to_lower('Z') as u8;
+            L_z = to_lower('z') as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), b'A');
+    assert_eq!(e.mem(0x0501), b'A');
+    assert_eq!(e.mem(0x0502), b'5');
+    assert_eq!(e.mem(0x0503), b'z');
+    assert_eq!(e.mem(0x0504), b'z');
+}
+
+#[test]
+fn digit_value_parses_and_validates() {
+    let mut e = run(r#"
+        import { digit_value } from "std/char.wr";
+        const V0: addr = 0x0500; const V9: addr = 0x0501; const VX: addr = 0x0502;
+        #[reset]
+        fn main() {
+            V0 = digit_value('0');   // 0
+            V9 = digit_value('9');   // 9
+            VX = digit_value('x');   // 0xFF (not a digit)
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 0);
+    assert_eq!(e.mem(0x0501), 9);
+    assert_eq!(e.mem(0x0502), 0xFF);
+}
+
+#[test]
+fn digit_value_folds_a_string_into_a_number() {
+    // "123" -> 123. Digits are extracted by index then combined; this keeps the
+    // loop body small (a `for c in s` body with the inlined digit_value plus a
+    // multiply overflows the 6502's relative-branch range — a separate limit).
+    let mut e = run(r#"
+        import { digit_value } from "std/char.wr";
+        const OUT: addr = 0x0500;
+        #[reset]
+        fn main() {
+            let s: str = "123";
+            let d0: u8 = digit_value(s[0]);
+            let d1: u8 = digit_value(s[1]);
+            let d2: u8 = digit_value(s[2]);
+            OUT = d0 * 100 + d1 * 10 + d2;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 123);
+}
+
+// ---------------------------------------------------------------------------
+// std/math.wr — abs / abs16
+// ---------------------------------------------------------------------------
+
+#[test]
+fn abs_of_i8() {
+    let mut e = run(r#"
+        import { abs } from "std/math.wr";
+        const NEG: addr = 0x0500; const POS: addr = 0x0501; const ZERO: addr = 0x0502;
+        #[reset]
+        fn main() {
+            let n: i8 = -42;
+            NEG  = abs(n) as u8;      // 42
+            let p: i8 = 42;
+            POS  = abs(p) as u8;      // 42
+            let z: i8 = 0;
+            ZERO = abs(z) as u8;      // 0
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 42, "abs(-42)");
+    assert_eq!(e.mem(0x0501), 42, "abs(42)");
+    assert_eq!(e.mem(0x0502), 0, "abs(0)");
+}
+
+#[test]
+fn abs16_of_i16() {
+    // -300 = 0xFED4; abs is 300 = 0x012C.
+    let mut e = run(r#"
+        import { abs16 } from "std/math.wr";
+        const LO: addr = 0x0500; const HI: addr = 0x0501;
+        #[reset]
+        fn main() {
+            let n: i16 = 0 as i16 - 300 as i16;
+            let a: u16 = abs16(n) as u16;
+            LO = a as u8;             // 0x2C
+            HI = (a / 256 as u16) as u8;  // 0x01
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 0x2C, "low byte of |−300| = 300");
+    assert_eq!(e.mem(0x0501), 0x01, "high byte of 300");
+}

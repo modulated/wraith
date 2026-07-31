@@ -85,7 +85,23 @@ u16     // 16-bit unsigned integer (0 to 65535)
 i16     // 16-bit signed integer (-32768 to 32767)
 b16     // 16-bit binary coded decimal (0 to 9999)
 bool    // Boolean (represented as u8: 0 or 1)
+char    // ASCII character (an 8-bit value holding one ASCII codepoint, 0-127)
 ```
+
+A `char` literal is written with single quotes and supports the same escapes as
+strings: `'A'`, `'0'`, `'\n'`, `'\t'`, `'\\'`, `'\''`, `'\0'`. Only ASCII
+characters are allowed — `'é'` is a compile error. A `char` is a distinct
+1-byte type: convert to and from `u8` with an explicit cast, and it
+zero-extends to `u16`/`i16` like any other unsigned byte.
+
+```rust
+let c: char = 'A';
+let code: u8 = c as u8;      // 0x41
+let back: char = 66 as char; // 'B'
+```
+
+A [string](#strings) is semantically an array of `char`: indexing a `str` yields
+a `char`, and iterating one binds a `char` per character.
 
 ### Type Characteristics
 
@@ -159,7 +175,7 @@ All types are naturally aligned to their size:
 
 | Type | Size | Alignment | Range |
 |------|------|-----------|-------|
-| `u8`, `i8`, `b8`, `bool` | 1 byte | 1 byte | See above |
+| `u8`, `i8`, `b8`, `bool`, `char` | 1 byte | 1 byte | See above |
 | `u16`, `i16`, `b16` | 2 bytes | 1 byte (6502 has no alignment requirements) | See above |
 | `addr` | 2 bytes | 1 byte | 0x0000-0xFFFF |
 
@@ -1516,6 +1532,42 @@ let empty: str = "";
 - Maximum length: 255 bytes (enforced at compile time)
 - A `str` value is a 2-byte pointer to this length-prefixed data
 
+A bare `str` is **immutable**: it may point at a string literal in ROM, so its
+bytes cannot be written. For runtime editing, use a string buffer (below).
+
+### Mutable String Buffers (`str<N>`)
+
+A `str<N>` is a fixed-capacity, mutable string that owns `N` bytes of RAM (plus
+the one-byte length prefix, so the backing block is `1 + N` bytes). `N` is a
+compile-time constant, `0`–`255`. At runtime a `str<N>` **is** a `str` — a
+2-byte pointer to `[len][bytes]` — so every `str` operation (`.len`, indexing,
+`==`, iteration, passing to a `fn(s: str)`) works on it unchanged.
+
+```rust
+fn main() {
+    let s: str<16> = "cat";   // capacity 16, current length 3, in RAM
+    s[0] = 'b';               // "bat"  — edit a character in place
+    s[2] = 'd';               // "bad"
+    let n: u16 = s.len;       // 3 (editing characters does not change the length)
+}
+```
+
+**Rules:**
+- Must be initialized with a string literal that fits within `N`
+  (a longer literal is a compile-time error).
+- `s[i] = value` writes one character; `value` is a `char` (a string is an array
+  of `char`). A numeric byte needs `as char`, e.g. `s[i] = 0x2E as char`.
+  A constant index past capacity is a compile error; a variable index is **not**
+  bounds-checked at runtime (same rule as [array indexing](#array-bounds-checking)).
+- Writing through a bare `str` (`s[i] = …` where `s: str`) is a compile error —
+  declare it as a `str<N>` buffer instead.
+- The backing RAM is colored by the call graph like local arrays, so a buffer
+  costs `1 + N` bytes in the BSS section for the duration of its scope.
+
+Editing the length (append/truncate) and higher-level helpers (`push`, `append`,
+`copy_from`) are intended to live in the standard library, built on top of
+`s[i] = …`; the byte-level write is the compiler primitive.
+
 ### String Literals
 
 String literals support escape sequences:
@@ -1538,12 +1590,15 @@ let len: u16 = msg.len;      // Get length (5)
 
 ### String Indexing
 
-Access individual characters by index:
+A string is semantically an array of `char`, so indexing yields a `char`. Use
+`as u8` when you want the raw byte value (for arithmetic or a hardware register):
 
 ```rust
 let msg: str = "ABC";
-let first: u8 = msg[0];    // 'A' (0x41)
-let second: u8 = msg[1];   // 'B' (0x42)
+let first: char = msg[0];       // 'A'
+let second: char = msg[1];      // 'B'
+if first == 'A' { /* ... */ }   // compare chars directly
+let byte: u8 = msg[0] as u8;    // 0x41, for byte-level work
 ```
 
 **Bounds checking** follows the same rules as [array indexing](#array-bounds-checking): a constant index out of range is a compile-time error, while a variable index is **not** bounds-checked at runtime (reading past the end yields undefined data). It is the programmer's responsibility to keep variable indices within `msg.len`.
@@ -1600,14 +1655,14 @@ Iterate over characters in a string:
 ```rust
 // Simple iteration
 for c in message {
-    // c is u8 (each character)
+    // c is char (each character)
     process_char(c);
 }
 
 // With index
 for (i, c) in message {
-    // i is u8 (index), c is u8 (character)
-    buffer[i] = c;
+    // i is u8 (index), c is char (character)
+    buffer[i] = c as u8;   // buffer is [u8; N], so cast the char to its byte
 }
 ```
 

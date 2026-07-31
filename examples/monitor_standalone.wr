@@ -122,7 +122,7 @@ fn uart_getc() -> u8 {
 
 fn uart_puts(s: str) {
     for c in s {
-        uart_putc(c);
+        uart_putc(c as u8);
     }
 }
 

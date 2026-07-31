@@ -15,6 +15,9 @@ pub enum PrimitiveType {
     I16,
     /// Boolean (actually u8: 0 or 1)
     Bool,
+    /// ASCII character: an 8-bit value holding a single ASCII codepoint
+    /// (0-127). Distinct from u8 for type safety; cast with `as u8` / `as char`.
+    Char,
     /// Binary Coded Decimal: 8-bit (0-99, packed two digits)
     B8,
     /// Binary Coded Decimal: 16-bit (0-9999, packed four digits)
@@ -30,6 +33,7 @@ impl PrimitiveType {
             PrimitiveType::U8
             | PrimitiveType::I8
             | PrimitiveType::Bool
+            | PrimitiveType::Char
             | PrimitiveType::B8
             | PrimitiveType::Addr => 1,
             PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 => 2,
@@ -59,6 +63,13 @@ pub enum TypeExpr {
 
     /// A named type (struct or enum name)
     Named(String),
+
+    /// A fixed-capacity, mutable string buffer: `str<N>`. At runtime it is a
+    /// `str` (a 2-byte pointer to `[u8 len][bytes…]`), but it owns `N` bytes of
+    /// RAM so its contents can be edited in place. `N` is the maximum content
+    /// length (0-255); the backing block is `1 + N` bytes. Resolves to
+    /// `Type::String`, so every `str` read operation applies unchanged.
+    StringBuf { capacity: usize },
 
     /// Fixed-size array: [T; N]
     Array {

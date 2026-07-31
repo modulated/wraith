@@ -35,8 +35,8 @@ fn count_printable(s: str) -> u8 {
     
     // Iteration with index
     for (i, c) in s {
-        // Count non-space printable characters
-        if c >= 0x21 && c <= 0x7E {
+        // Count non-space printable characters ('!'..='~')
+        if c >= '!' && c <= '~' {
             count = count + 1;
         }
     }
@@ -91,7 +91,7 @@ fn to_uppercase(source: str, dest: [u8; 32]) -> u8 {
     let len: u8 = source.len as u8;
     
     while i < len {
-        let c: u8 = source[i];
+        let c: u8 = source[i] as u8;
         // Convert lowercase to uppercase
         if c >= 0x61 && c <= 0x7A {  // 'a' to 'z'
             c = c - 0x20;  // Convert to uppercase
@@ -149,7 +149,7 @@ fn main() {
     OUT_FOUND = pos;
     
     // Test 7: Access individual characters
-    let first: u8 = title[0];  // 'W'
+    let first: char = title[0];  // 'W'
     let len: u16 = title.len;  // Length of full title
     
     OUT_STATUS = 0x01;  // Success

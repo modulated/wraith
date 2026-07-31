@@ -55,6 +55,8 @@ pub enum Literal {
     Integer(i64),
     /// Boolean literal
     Bool(bool),
+    /// ASCII character literal: 'A' (stored as its ASCII byte, 0-127)
+    Char(u8),
     /// String literal: "Hello, world!"
     /// Stored as a length-prefixed byte array (u8 length + data, max 255 bytes)
     String(String),

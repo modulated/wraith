@@ -42,6 +42,100 @@ fn nested_u16_adds_do_not_reuse_a_live_save_slot() {
 }
 
 #[test]
+fn foreach_over_a_string_survives_a_multiply_in_the_body() {
+    // The loop counter was kept only in X, and a u8 multiply in the body uses X
+    // as its 8-iteration shift counter — zeroing the loop counter every pass, so
+    // the loop never terminated. The counter now lives in a hidden zero-page
+    // slot, reloaded into X at each loop head, so the body may clobber X freely.
+    // "111" folds to a number: 0*3+1=1, 1*3+1=4, 4*3+1=13.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let s: str = "111";
+            let acc: u8 = 0;
+            for c in s {
+                acc = acc * 3 + (c as u8 - 48);
+            }
+            OUT = acc;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 13);
+}
+
+#[test]
+fn foreach_over_an_array_survives_a_multiply_in_the_body() {
+    // Same corruption, array iterable: the compile-time-sized counter is in X
+    // and the body's multiply zeroed it. Sum of 1..=4 each tripled: 3+6+9+12=30.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: [u8; 4] = [1, 2, 3, 4];
+            let acc: u8 = 0;
+            for v in a {
+                acc = acc + v * 3;
+            }
+            OUT = acc;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 30);
+}
+
+#[test]
+fn indexed_foreach_survives_a_multiply_in_the_body() {
+    // The `for (i, c)` form stores the index from X at the loop head; the fix
+    // reloads X from the counter slot there, so a body multiply that clobbers X
+    // does not corrupt either the index or the iteration. dst[i] = i*2 over 4
+    // chars writes 0,2,4,6.
+    let mut e = run(r#"
+        const D0: addr = 0x0900; const D1: addr = 0x0901;
+        const D2: addr = 0x0902; const D3: addr = 0x0903;
+        #[reset]
+        fn main() {
+            let s: str = "wxyz";
+            let dst: [u8; 4] = [0; 4];
+            for (i, c) in s {
+                dst[i] = i * 2;
+            }
+            D0 = dst[0]; D1 = dst[1]; D2 = dst[2]; D3 = dst[3];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (0, 2, 4, 6)
+    );
+}
+
+#[test]
+fn nested_foreach_over_strings_keeps_both_counters() {
+    // The inner loop's counter is also X; without a per-loop memory counter the
+    // inner loop would leave X at the inner length and the outer INX would
+    // resume from there. Each of the 2 outer chars pairs with 3 inner chars, so
+    // the body runs 6 times.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let outer: str = "AB";
+            let inner: str = "xyz";
+            let n: u8 = 0;
+            for c in outer {
+                for d in inner {
+                    n = n + 1;
+                }
+            }
+            OUT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 6);
+}
+
+#[test]
 fn foreach_over_a_string_survives_an_index_assignment_in_the_body() {
     // The string pointer was staged at $F0/$F1 for the whole loop, and the
     // body's `arr[1] = c` parked its value at exactly $F0 — iteration 2 read
@@ -54,7 +148,7 @@ fn foreach_over_a_string_survives_an_index_assignment_in_the_body() {
             let arr: [u8; 2] = [0, 0];
             let sum: u8 = 0;
             for c in s {
-                arr[1] = c;
+                arr[1] = c as u8;
                 sum = sum + arr[1];
             }
             OUT = sum;
@@ -76,7 +170,7 @@ fn string_index_with_len_and_multiply_in_the_index() {
         fn main() {
             let s: str = "cdef";
             let i: u8 = 1;
-            OUT = s[i * s.len as u8 - i];
+            OUT = s[i * s.len as u8 - i] as u8;
             loop {}
         }
     "#);
@@ -131,7 +225,7 @@ fn string_equality_with_a_call_on_the_right() {
         const OUT: addr = 0x0900;
         fn mk() -> str {
             let t: str = "AB";
-            let c: u8 = t[0];
+            let c: u8 = t[0] as u8;
             return t;
         }
         #[reset]

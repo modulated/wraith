@@ -143,6 +143,46 @@ pub fn generate_stmt(
                 use crate::sema::table::SymbolKind;
                 use crate::sema::types::Type;
 
+                // A `str<N>` buffer: fill its RAM block from the literal, then
+                // point the frame slot at the block. Downstream, the slot reads
+                // as a 2-byte pointer to `[len][bytes]` — identical to a str
+                // literal binding — so every str read path works unchanged. The
+                // difference is the data lives in RAM and can be edited.
+                if let Some(buf) = info.string_buffers.get(&name.span)
+                    && let crate::sema::table::SymbolLocation::ZeroPage(slot) = sym.location
+                {
+                    let bytes: Vec<u8> = match &init.node {
+                        crate::ast::Expr::Literal(crate::ast::Literal::String(s)) => {
+                            s.as_bytes().to_vec()
+                        }
+                        // sema requires a string-literal initializer for a buffer
+                        _ => Vec::new(),
+                    };
+                    let len = bytes.len() as u8;
+                    emitter.emit_comment(&format!(
+                        "str<{}> buffer {} @ ${:04X} ({}/{} bytes, RAM)",
+                        buf.size - 1,
+                        name.node,
+                        buf.addr,
+                        len,
+                        buf.size - 1
+                    ));
+                    // Length prefix, then each content byte as an immediate store.
+                    emitter.emit_inst("LDA", &format!("#${:02X}", len));
+                    emitter.emit_inst("STA", &format!("${:04X}", buf.addr));
+                    for (i, b) in bytes.iter().enumerate() {
+                        emitter.emit_inst("LDA", &format!("#${:02X}", b));
+                        emitter.emit_inst("STA", &format!("${:04X}", buf.addr as usize + 1 + i));
+                    }
+                    // Point the frame slot at the block.
+                    emitter.emit_inst("LDA", &format!("#${:02X}", buf.addr & 0xFF));
+                    emitter.emit_inst("STA", &format!("${:02X}", slot));
+                    emitter.emit_inst("LDA", &format!("#${:02X}", buf.addr >> 8));
+                    emitter.emit_inst("STA", &format!("${:02X}", slot + 1));
+                    emitter.invalidate_registers();
+                    return Ok(());
+                }
+
                 // Check if this is a struct variable initialized with a struct literal
                 // Use runtime initialization for struct literals only (not enum variants)
                 if let Type::Named(struct_name) = &sym.ty {
@@ -1268,11 +1308,25 @@ pub fn generate_stmt(
                 return Ok(());
             }
 
-            // Initialize counter to 0 in X register
-            emitter.emit_inst("LDX", "#$00");
-            emitter
-                .reg_state
-                .set_x(crate::codegen::regstate::RegisterValue::Immediate(0));
+            // The loop counter lives in a hidden zero-page slot, not just in X,
+            // so the body may clobber X freely (a u8 multiply uses it as a bit
+            // counter, a nested loop as its own counter) without corrupting the
+            // iteration. X is reloaded from the slot at each loop head and the
+            // slot is advanced with INC at continue.
+            let counter = match info
+                .loop_bound_slots
+                .get(&iterable.span)
+                .map(|s| &s.location)
+            {
+                Some(crate::sema::table::SymbolLocation::ZeroPage(a)) => *a,
+                _ => {
+                    return Err(CodegenError::Internal(
+                        "string/array foreach: counter slot was not allocated".to_string(),
+                    ));
+                }
+            };
+            emitter.emit_inst("LDA", "#$00");
+            emitter.emit_inst("STA", &format!("${:02X}", counter));
 
             // For arrays the size is a compile-time constant. Strings and
             // slices have a runtime length, staged (with the string pointer)
@@ -1292,6 +1346,12 @@ pub fn generate_stmt(
 
             // Loop start
             emitter.emit_label(&loop_label);
+
+            // Reload the counter into X. The loop head is a branch target (entry
+            // and back-edge), and the body may have left anything in X, so no
+            // prior belief holds and X must come from the slot.
+            emitter.invalidate_registers();
+            emitter.emit_inst("LDX", &format!("${:02X}", counter));
 
             // String/slice staging ($F0-$F2) lives only from here to the
             // element read — never across the body, which is arbitrary code
@@ -1426,7 +1486,9 @@ pub fn generate_stmt(
                 })?;
             }
 
-            // Restore counter from stack (it's still in X, so no need)
+            // The body is arbitrary code; drop all register beliefs before it.
+            // The counter of record is the memory slot, reloaded into X at the
+            // next loop head, so the body clobbering X is harmless.
             emitter.reg_state.invalidate_all();
 
             // Execute loop body
@@ -1435,10 +1497,11 @@ pub fn generate_stmt(
             // Pop loop context
             emitter.pop_loop();
 
-            // Continue target: advance the index, then re-test at the loop head.
+            // Continue target: advance the counter in memory, then re-test at
+            // the loop head (which reloads X from it). Advancing the slot rather
+            // than X is what lets a body that clobbers X iterate correctly.
             emitter.emit_label(&continue_label);
-            emitter.emit_inst("INX", "");
-            emitter.reg_state.modify_x();
+            emitter.emit_inst("INC", &format!("${:02X}", counter));
 
             emitter.emit_inst("JMP", &loop_label);
             emitter.emit_label(&end_label);
@@ -1530,21 +1593,29 @@ fn generate_index_assignment(
     // A pointer's slot holds a base address just as a local array's does, so
     // `p[i] = v` is the same indirect store scaled by the element width. The
     // pointer carries no length, so there is nothing to bounds-check.
-    let element_type = match object_type {
-        Type::Array(elem_ty, ..) | Type::Pointer(elem_ty) => elem_ty,
+    //
+    // A `str<N>` buffer's slot likewise holds a pointer, but to `[len][bytes]`:
+    // `s[i]` writes one byte at offset i+1, past the length prefix. It has u8
+    // elements, so it rides the same single-byte indirect store path with the
+    // index nudged by one (handled after the index is in Y). Sema has already
+    // rejected writing through a plain (possibly ROM) `str`.
+    let is_string = matches!(object_type, Type::String);
+    let element_type: Option<&Type> = match object_type {
+        Type::Array(elem_ty, ..) | Type::Pointer(elem_ty) => Some(elem_ty),
+        Type::String => None,
         _ => {
             return Err(CodegenError::UnsupportedOperation(
-                "Can only index arrays and pointers".to_string(),
+                "Can only index arrays, pointers, and string buffers".to_string(),
             ));
         }
     };
 
-    let is_multibyte = matches!(
-        &**element_type,
-        Type::Primitive(PrimitiveType::U16)
-            | Type::Primitive(PrimitiveType::I16)
-            | Type::Primitive(PrimitiveType::B16)
-    );
+    let is_multibyte = element_type.is_some_and(|t| {
+        matches!(
+            t,
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+        )
+    });
 
     // Step 2: Evaluate the value expression
     emitter.emit_comment("Evaluate value to assign");
@@ -1576,6 +1647,14 @@ fn generate_index_assignment(
 
     // Step 5: Transfer index to Y register
     emitter.emit_inst("TAY", "");
+
+    // A string buffer's data starts one byte past the length prefix, so s[i]
+    // lands at offset i+1. u8 elements only, so there is no index scaling to
+    // interact with this nudge.
+    if is_string {
+        emitter.emit_comment("Skip str length prefix: index += 1");
+        emitter.emit_inst("INY", "");
+    }
 
     // Step 6: Get array base address
     // For now, only support simple variable arrays

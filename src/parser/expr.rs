@@ -298,6 +298,11 @@ impl Parser<'_> {
                 Ok(Spanned::new(Expr::Literal(Literal::String(s)), start))
             }
 
+            Some(Token::CharLit(c)) => {
+                self.advance();
+                Ok(Spanned::new(Expr::Literal(Literal::Char(c)), start))
+            }
+
             // Match expression
             Some(Token::Match) => self.parse_match_expr(),
 
@@ -727,10 +732,49 @@ impl Parser<'_> {
                     start,
                 ))
             }
+            Some(Token::Char) => {
+                self.advance();
+                Ok(Spanned::new(
+                    TypeExpr::primitive(crate::ast::PrimitiveType::Char),
+                    start,
+                ))
+            }
             Some(Token::Str) => {
                 self.advance();
-                // Use named type that semantic analyzer will recognize
-                Ok(Spanned::new(TypeExpr::named("str"), start))
+                // `str<N>` is a fixed-capacity, mutable string buffer; a bare
+                // `str` is the immutable pointer-to-length-prefixed-data type.
+                if self.check(&Token::Lt) {
+                    self.advance(); // consume '<'
+                    let cap_span = self.current_span();
+                    let capacity = match self.peek().cloned() {
+                        Some(Token::Integer(n)) => {
+                            self.advance();
+                            if !(0..=255).contains(&n) {
+                                return Err(ParseError::custom(
+                                    cap_span,
+                                    format!(
+                                        "string buffer capacity {} is out of range (0-255); \
+                                         the length prefix is a single byte",
+                                        n
+                                    ),
+                                ));
+                            }
+                            n as usize
+                        }
+                        tok => {
+                            return Err(ParseError::unexpected_token(
+                                self.current_span(),
+                                "string buffer capacity",
+                                tok,
+                            ));
+                        }
+                    };
+                    self.expect(&Token::Gt)?;
+                    Ok(Spanned::new(TypeExpr::StringBuf { capacity }, start))
+                } else {
+                    // Use named type that semantic analyzer will recognize
+                    Ok(Spanned::new(TypeExpr::named("str"), start))
+                }
             }
 
             // Named type

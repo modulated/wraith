@@ -443,7 +443,7 @@ fn string_foreach_sum() {
             let s: str = "AB";
             let sum: u8 = 0;
             for c in s {
-                sum = sum + c;
+                sum = sum + (c as u8);
             }
             OUT = sum;
             loop {}

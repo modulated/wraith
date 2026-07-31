@@ -899,6 +899,10 @@ pub struct ProgramInfo {
     /// Where each enum-typed local's data lives in RAM, keyed like
     /// `local_arrays`; see `SemanticAnalyzer::enum_blocks`.
     pub enum_blocks: HashMap<Span, LocalArray>,
+    /// Where each `str<N>` buffer's `[len][bytes]` block lives, keyed by the
+    /// declaration's name span. `size` is the full block (`1 + capacity`).
+    /// Presence marks the string as writable; see `analyze_var_decl`.
+    pub string_buffers: HashMap<Span, LocalArray>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
     /// Map of expression spans to their resolved types

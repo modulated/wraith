@@ -81,6 +81,12 @@ pub struct SemanticAnalyzer {
     /// into this block; without it every variable points into shared codegen
     /// scratch and two live enums alias.
     pub(super) enum_blocks: HashMap<Span, crate::sema::LocalArray>,
+    /// Where each `str<N>` buffer's `[len][bytes]` block lives, keyed and
+    /// rebased exactly like `local_arrays`. `size` is the whole block
+    /// (`1 + capacity`); the buffer's capacity is `size - 1`. Membership also
+    /// marks the declaration as a *writable* string, which is what lets
+    /// `s[i] = c` past the "can't write a str literal" guard.
+    pub(super) string_buffers: HashMap<Span, crate::sema::LocalArray>,
     /// Bytes of local-array data each function needs, consumed by
     /// `finalize_frames` to lay the blocks out in RAM.
     pub(super) array_block_sizes: HashMap<String, u16>,
@@ -177,6 +183,7 @@ impl SemanticAnalyzer {
             loop_bound_slots: HashMap::default(),
             local_arrays: HashMap::default(),
             enum_blocks: HashMap::default(),
+            string_buffers: HashMap::default(),
             array_block_sizes: HashMap::default(),
             array_cursor: 0,
             resolved_types: HashMap::default(),
@@ -316,6 +323,7 @@ impl SemanticAnalyzer {
             loop_bound_slots: self.loop_bound_slots.clone(),
             local_arrays: self.local_arrays.clone(),
             enum_blocks: self.enum_blocks.clone(),
+            string_buffers: self.string_buffers.clone(),
             type_registry: self.type_registry.clone(),
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),
@@ -537,6 +545,12 @@ impl SemanticAnalyzer {
     pub(super) fn resolve_type(&mut self, ty: &TypeExpr) -> Result<Type, SemaError> {
         match ty {
             TypeExpr::Primitive(p) => Ok(Type::Primitive(*p)),
+            // A `str<N>` buffer is a `str` at runtime (2-byte pointer to
+            // length-prefixed data); its capacity is recorded separately, per
+            // declaration, in `string_buffers`. Resolving to `Type::String`
+            // means every str read op (index, `.len`, `==`, iteration, passing)
+            // works on a buffer with no extra plumbing.
+            TypeExpr::StringBuf { .. } => Ok(Type::String),
             TypeExpr::Named(name) => {
                 // Special case: "str" maps to Type::String
                 if name == "str" {

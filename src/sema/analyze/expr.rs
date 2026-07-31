@@ -356,6 +356,7 @@ impl SemanticAnalyzer {
                 }
             }
             crate::ast::Literal::Bool(_) => Ok(Type::Primitive(PrimitiveType::Bool)),
+            crate::ast::Literal::Char(_) => Ok(Type::Primitive(PrimitiveType::Char)),
             crate::ast::Literal::String(s) => {
                 // Validate string length (256 byte limit for 6502)
                 if s.len() > 255 {
@@ -1402,8 +1403,29 @@ impl SemanticAnalyzer {
                 Ok((**element_ty).clone())
             }
             Type::String => {
-                // String indexing returns u8 (a single byte)
-                Ok(Type::Primitive(PrimitiveType::U8))
+                // For a `str<N>` buffer we know the capacity, so a constant
+                // index past it is a compile-time error (a plain `str` carries
+                // no capacity in its type, so it is left unchecked as before).
+                if let Expr::Variable(name) = &object.node
+                    && let Some(cap) = self
+                        .table
+                        .lookup(name)
+                        .and_then(|sym| sym.decl_span)
+                        .and_then(|ds| self.string_buffers.get(&ds))
+                        .map(|buf| buf.size.saturating_sub(1) as usize)
+                    && let Ok(const_val) = eval_const_expr_with_env(index, &self.const_env)
+                    && let Some(index_value) = const_val.as_integer()
+                    && (index_value < 0 || index_value as usize >= cap)
+                {
+                    return Err(SemaError::ArrayIndexOutOfBounds {
+                        index: index_value,
+                        array_size: cap,
+                        span: index.span,
+                    });
+                }
+                // A string is semantically an array of chars, so indexing
+                // yields a `char`. Cast with `as u8` for the raw byte.
+                Ok(Type::Primitive(PrimitiveType::Char))
             }
             _ => Err(SemaError::TypeMismatch {
                 expected: "array, slice, pointer, or string".to_string(),

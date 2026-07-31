@@ -65,6 +65,10 @@ pub(super) fn generate_literal(
             emitter.emit_lda_immediate(v);
             Ok(())
         }
+        crate::ast::Literal::Char(c) => {
+            emitter.emit_lda_immediate(i64::from(*c));
+            Ok(())
+        }
         crate::ast::Literal::String(s) => {
             // Register string with collector (deduplicated automatically)
             let str_label = string_collector.add_string(s.clone());

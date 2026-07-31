@@ -26,9 +26,9 @@ fn main() {
     OUT1 = path_len as u8;
     OUT2 = error_len as u8;
     
-    // Access individual characters
-    let first_char: u8 = GREETING[0];  // 'H' (0x48)
-    let space_pos: u8 = GREETING[6];   // ' ' (0x20)
+    // Access individual characters (a string is an array of `char`)
+    let first_char: char = GREETING[0];  // 'H' (0x48)
+    let space_pos: char = GREETING[6];   // ' ' (0x20)
 }
 
 // Expected results in memory:

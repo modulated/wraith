@@ -47,6 +47,28 @@ pointers; plain addresses are `u16` values.
 -   `mem_jump(address: u16)` - Jump to machine code at an absolute address (does not return)
 -   `str_copy(dest: &u8, dest_size: u16, s: str) -> u16` - Copy a string into a buffer; returns bytes written
 
+### char.wr
+
+ASCII character classification and conversion. A string is an array of `char`,
+so these pair directly with `str` indexing and `for c in s` iteration. Every
+function is pure and `#[inline]`, so a call compiles to the test itself with no
+call overhead.
+
+**Classification** (all return `bool`):
+
+-   `is_digit(c: char)` - '0'..='9'
+-   `is_upper(c: char)` - 'A'..='Z'
+-   `is_lower(c: char)` - 'a'..='z'
+-   `is_alpha(c: char)` - an ASCII letter
+-   `is_alnum(c: char)` - a letter or digit
+-   `is_whitespace(c: char)` - space, tab, newline, or carriage return
+
+**Conversion:**
+
+-   `to_upper(c: char) -> char` - uppercase a letter (non-letters unchanged)
+-   `to_lower(c: char) -> char` - lowercase a letter (non-letters unchanged)
+-   `digit_value(c: char) -> u8` - value of '0'..='9' (0-9); `0xFF` for non-digits
+
 ### math.wr
 
 Mathematical operations, all NMOS 6502-legal.
@@ -56,6 +78,11 @@ Mathematical operations, all NMOS 6502-legal.
 -   `min(a: u8, b: u8) -> u8` - Return the minimum of two values
 -   `max(a: u8, b: u8) -> u8` - Return the maximum of two values
 -   `clamp(value: u8, min_val: u8, max_val: u8) -> u8` - Clamp value between bounds
+
+#### Absolute Value
+
+-   `abs(x: i8) -> i8` - Absolute value of an i8 (`abs(-128)` wraps to -128)
+-   `abs16(x: i16) -> i16` - Absolute value of an i16 (`abs16(-32768)` wraps)
 
 #### Bit Manipulation
 

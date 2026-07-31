@@ -1,0 +1,82 @@
+// Wraith Standard Library
+// ASCII character classification and conversion.
+//
+// A string is an array of `char` (see the language spec), so these pair
+// directly with string indexing and `for c in s` iteration. Everything here is
+// pure and `#[inline]`, so a call compiles to the comparison itself with no
+// function-call overhead.
+
+// ============================================================================
+// Classification
+// ============================================================================
+
+/// True if `c` is an ASCII decimal digit, '0'..='9'.
+#[inline]
+pub fn is_digit(c: char) -> bool {
+    return c >= '0' && c <= '9';
+}
+
+/// True if `c` is an ASCII uppercase letter, 'A'..='Z'.
+#[inline]
+pub fn is_upper(c: char) -> bool {
+    return c >= 'A' && c <= 'Z';
+}
+
+/// True if `c` is an ASCII lowercase letter, 'a'..='z'.
+#[inline]
+pub fn is_lower(c: char) -> bool {
+    return c >= 'a' && c <= 'z';
+}
+
+/// True if `c` is an ASCII letter (upper- or lowercase).
+#[inline]
+pub fn is_alpha(c: char) -> bool {
+    return is_upper(c) || is_lower(c);
+}
+
+/// True if `c` is an ASCII letter or decimal digit.
+#[inline]
+pub fn is_alnum(c: char) -> bool {
+    return is_alpha(c) || is_digit(c);
+}
+
+/// True if `c` is ASCII whitespace: space, tab, newline, or carriage return.
+#[inline]
+pub fn is_whitespace(c: char) -> bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// ============================================================================
+// Conversion
+// ============================================================================
+
+/// Uppercase an ASCII letter. Non-letters are returned unchanged.
+///
+/// 'a'..='z' differ from 'A'..='Z' by exactly 0x20, so lowercasing is a
+/// subtract done on the raw byte and cast back to `char`.
+#[inline]
+pub fn to_upper(c: char) -> char {
+    if is_lower(c) {
+        return (c as u8 - 32) as char;
+    }
+    return c;
+}
+
+/// Lowercase an ASCII letter. Non-letters are returned unchanged.
+#[inline]
+pub fn to_lower(c: char) -> char {
+    if is_upper(c) {
+        return (c as u8 + 32) as char;
+    }
+    return c;
+}
+
+/// Numeric value of a decimal digit '0'..='9' (0..=9). Returns 0xFF for any
+/// non-digit, so a caller can both parse and validate in one step.
+#[inline]
+pub fn digit_value(c: char) -> u8 {
+    if is_digit(c) {
+        return c as u8 - 48; // '0' is 0x30
+    }
+    return 0xFF;
+}

@@ -39,7 +39,7 @@ fn main() {
 
     loop {
         if i >= len { break; }
-        buffer[i] = TEST_STRING[i];
+        buffer[i] = TEST_STRING[i] as u8;
         i += 1;
     }
 

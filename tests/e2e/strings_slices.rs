@@ -32,7 +32,7 @@ fn string_param_after_u16_params() {
     // low-byte load, passing the previous argument's value instead.
     let mut e = run(r#"
         const OUT: addr = 0x0400;
-        fn pick(a: u16, b: u16, s: str) -> u8 { return s[1]; }
+        fn pick(a: u16, b: u16, s: str) -> u8 { return s[1] as u8; }
         #[reset]
         fn main() {
             let s: str = "XYZ";
@@ -445,7 +445,203 @@ fn a_const_slice_at_a_character_boundary_works() {
         const T: str = S[0..3];
         const OUT: addr = 0x0900;
         #[reset]
-        fn main() { OUT = T[1]; loop {} }
+        fn main() { OUT = T[1] as u8; loop {} }
     "#);
     assert_eq!(e.mem(0x0900), 0xC3);
+}
+
+// ============================================================================
+// Mutable string buffers: `str<N>` owns RAM, so its bytes can be edited at
+// runtime. It reads back through every existing `str` operation because it is
+// a `str` (pointer to `[len][bytes]`) at runtime.
+// ============================================================================
+
+#[test]
+fn str_buffer_init_len_and_index() {
+    let mut e = run(r#"
+        const LEN: addr = 0x0900;
+        const C0: addr = 0x0901;
+        const C1: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let s: str<16> = "Hi";
+            LEN = s.len as u8;
+            C0 = s[0] as u8;
+            C1 = s[1] as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0900),
+        2,
+        "buffer .len reflects the initializer length"
+    );
+    assert_eq!(e.mem(0x0901), 0x48, "s[0] == 'H'");
+    assert_eq!(e.mem(0x0902), 0x69, "s[1] == 'i'");
+}
+
+#[test]
+fn str_buffer_edit_constant_index() {
+    let mut e = run(r#"
+        const C0: addr = 0x0900;
+        const C1: addr = 0x0901;
+        const C2: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let s: str<8> = "cat";
+            s[0] = 'b';           // char literal, no cast: a str is [char]
+            s[2] = 't';
+            C0 = s[0] as u8;
+            C1 = s[1] as u8;
+            C2 = s[2] as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x62, "s[0] edited to 'b'");
+    assert_eq!(e.mem(0x0901), 0x61, "s[1] untouched 'a'");
+    assert_eq!(e.mem(0x0902), 0x74, "s[2] edited to 't'");
+}
+
+#[test]
+fn str_buffer_edit_variable_index() {
+    // A runtime index must land past the one-byte length prefix.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let s: str<8> = "____";
+            let i: u8 = 3;
+            s[i] = 'Z';
+            OUT = s[3] as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0900),
+        0x5A,
+        "s[i] with a runtime index edits the right byte"
+    );
+}
+
+#[test]
+fn str_buffer_length_prefix_is_preserved_after_edit() {
+    // Editing content must not disturb the length byte the pointer targets.
+    let mut e = run(r#"
+        const LEN: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let s: str<8> = "abcd";
+            s[0] = '.';
+            LEN = s.len as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 4, "editing a byte leaves .len unchanged");
+}
+
+#[test]
+fn str_buffer_initializer_longer_than_capacity_is_an_error() {
+    let result = crate::common::harness::compile(
+        r#"
+        #[reset]
+        fn main() {
+            let s: str<3> = "toolong";
+            loop {}
+        }
+    "#,
+    );
+    match result {
+        crate::common::harness::CompileResult::SemaError(e) => {
+            assert!(e.contains("capacity"), "{e}")
+        }
+        other => panic!("expected a sema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn writing_through_a_plain_str_is_rejected() {
+    // A bare `str` may point at a ROM literal; index-writing it would be a dead
+    // store on real hardware, so it is a compile error.
+    let result = crate::common::harness::compile(
+        r#"
+        #[reset]
+        fn main() {
+            let s: str = "cat";
+            s[0] = 'b';
+            loop {}
+        }
+    "#,
+    );
+    match result {
+        crate::common::harness::CompileResult::SemaError(e) => {
+            assert!(e.contains("str<") || e.contains("buffer"), "{e}")
+        }
+        other => panic!("expected a sema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn str_buffer_constant_index_past_capacity_is_an_error() {
+    let result = crate::common::harness::compile(
+        r#"
+        #[reset]
+        fn main() {
+            let s: str<4> = "ab";
+            s[4] = '.';
+            loop {}
+        }
+    "#,
+    );
+    match result {
+        crate::common::harness::CompileResult::SemaError(e) => {
+            assert!(e.contains("out of bounds") || e.contains("bounds"), "{e}")
+        }
+        other => panic!("expected a sema error, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// A string is semantically an array of `char`: iteration binds a `char`, and a
+// `char` flows straight into a `str<N>` buffer write with no cast.
+// ============================================================================
+
+#[test]
+fn string_iteration_binds_char_and_compares_to_char_literal() {
+    let mut e = run(r#"
+        const COUNT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let s: str = "banana";
+            let n: u8 = 0;
+            for c in s {
+                if c == 'a' { n = n + 1; }   // c is a char, compared to a char
+            }
+            COUNT = n;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 3, "'banana' has three 'a' characters");
+}
+
+#[test]
+fn char_from_iteration_copies_into_a_buffer_without_a_cast() {
+    // `dst[i] = ch` type-checks because both sides are `char` — the payoff of
+    // strings being arrays of char.
+    let mut e = run(r#"
+        const C0: addr = 0x0900;
+        const C2: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let src: str = "dog";
+            let dst: str<8> = "___";
+            for (i, ch) in src {
+                dst[i] = ch;
+            }
+            C0 = dst[0] as u8;
+            C2 = dst[2] as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x64, "dst[0] copied to 'd'");
+    assert_eq!(e.mem(0x0901), 0x67, "dst[2] copied to 'g'");
 }

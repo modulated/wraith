@@ -251,8 +251,8 @@ fn string_len_and_index() {
         fn main() {
             let s: str = "hello";
             LEN = s.len as u8;
-            C0 = s[0];
-            C4 = s[4];
+            C0 = s[0] as u8;
+            C4 = s[4] as u8;
             loop {}
         }
     "#);

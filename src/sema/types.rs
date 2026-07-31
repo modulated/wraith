@@ -67,6 +67,7 @@ impl Type {
                 PrimitiveType::U16 => "u16".to_string(),
                 PrimitiveType::I16 => "i16".to_string(),
                 PrimitiveType::Bool => "bool".to_string(),
+                PrimitiveType::Char => "char".to_string(),
                 PrimitiveType::B8 => "b8".to_string(),
                 PrimitiveType::B16 => "b16".to_string(),
                 PrimitiveType::Addr => "addr".to_string(),

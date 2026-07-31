@@ -324,6 +324,50 @@ impl SemanticAnalyzer {
             }
         }
 
+        // A `str<N>` buffer owns a `[u8 len][N bytes]` block in RAM so its
+        // contents can be edited in place. Reserve it in the same call-graph-
+        // colored region arrays and enums use; recording it here also marks the
+        // declaration as a writable string (see `analyze_assign`).
+        if let crate::ast::TypeExpr::StringBuf { capacity } = &ty.node {
+            let cap = *capacity;
+            // The buffer must start from a string literal that fits. Runtime
+            // initialization (from another `str`) is a later addition; for now
+            // the source is a literal so the fit is checked at compile time.
+            if let Expr::Literal(crate::ast::Literal::String(s)) = &init.node {
+                if s.len() > cap {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "string literal is {} bytes but the buffer capacity is {}",
+                            s.len(),
+                            cap
+                        ),
+                        span: init.span,
+                    });
+                }
+            } else {
+                return Err(SemaError::Custom {
+                    message: "a `str<N>` buffer must be initialized with a string literal"
+                        .to_string(),
+                    span: init.span,
+                });
+            }
+            let bytes = cap as u16 + 1; // length prefix + content
+            if let Some(f) = self.current_function.clone() {
+                let at = self.array_cursor;
+                self.array_cursor += bytes;
+                self.string_buffers.insert(
+                    name.span,
+                    crate::sema::LocalArray {
+                        addr: at,
+                        size: bytes,
+                        function: f.clone(),
+                    },
+                );
+                let entry = self.array_block_sizes.entry(f).or_insert(0);
+                *entry = (*entry).max(self.array_cursor);
+            }
+        }
+
         let info = SymbolInfo {
             name: name.node.clone(),
             kind: SymbolKind::Variable,
@@ -355,6 +399,28 @@ impl SemanticAnalyzer {
         self.checking_assignment_target = true;
         let target_ty = self.check_expr(target)?;
         self.checking_assignment_target = false;
+
+        // Writing an element into a `str` is only meaningful for a `str<N>`
+        // buffer, which owns editable RAM. A plain `str` may point at a ROM
+        // literal, so the store would silently do nothing on real hardware —
+        // reject it here rather than emit a dead write.
+        if let Expr::Index { object, .. } = &target.node
+            && matches!(self.resolved_types.get(&object.span), Some(Type::String))
+        {
+            let is_buffer = self
+                .lvalue_root(target)
+                .and_then(|root| self.table.lookup(root))
+                .and_then(|sym| sym.decl_span)
+                .is_some_and(|ds| self.string_buffers.contains_key(&ds));
+            if !is_buffer {
+                return Err(SemaError::Custom {
+                    message: "cannot write through a `str`; declare it as a `str<N>` \
+                              buffer to edit its bytes in place"
+                        .to_string(),
+                    span: target.span,
+                });
+            }
+        }
         // Give the value the target type as its expected type so a literal (or
         // negative literal) infers against the destination, e.g. `RESULT = -10`
         // storing 246 into a u8, or `x = 127` into an i8.
@@ -722,7 +788,7 @@ impl SemanticAnalyzer {
         let element_ty = match &iterable_ty {
             Type::Array(elem_ty, _size) => (**elem_ty).clone(),
             Type::Slice(elem_ty) => (**elem_ty).clone(),
-            Type::String => Type::Primitive(PrimitiveType::U8), // String elements are u8
+            Type::String => Type::Primitive(PrimitiveType::Char), // a string is an array of chars
             _ => {
                 return Err(SemaError::TypeMismatch {
                     expected: "array, slice, or string".to_string(),
@@ -823,28 +889,39 @@ impl SemanticAnalyzer {
         // Add to resolved_symbols so codegen can find it
         self.resolved_symbols.insert(var_name.span, info);
 
-        // Iterating a slice uses a 16-bit loop counter (slices can exceed 255
-        // elements). It must survive the whole body, so give it a hidden frame
-        // slot (colored with the call graph) keyed by the iterable's span, in
-        // the same map the for-range loop uses for non-constant bounds.
-        if matches!(iterable_ty, Type::Slice(_)) {
-            let counter_off = self.frame_alloc(2);
-            self.loop_bound_slots.insert(
-                iterable.span,
-                SymbolInfo {
-                    name: format!("<slice iter counter for {}>", var_name.node),
-                    kind: SymbolKind::Variable,
-                    ty: Type::Primitive(PrimitiveType::U16),
-                    location: SymbolLocation::FrameOffset(counter_off),
-                    mutable: true,
-                    access_mode: None,
-                    is_pub: false,
-                    containing_function: self.current_function.clone(),
-                    is_param: false,
-                    decl_span: None,
+        // The loop counter must survive the whole body: the body is arbitrary
+        // code that may clobber X (a u8 multiply uses it as a bit counter, a
+        // nested loop as its own counter), so a counter kept only in X gets
+        // corrupted. Give every foreach a hidden counter slot (colored with the
+        // call graph) keyed by the iterable's span, in the same map the
+        // for-range loop uses for non-constant bounds. A slice needs 16 bits
+        // (it can exceed 255 elements); a string or array is bounded to 255, so
+        // one byte is enough.
+        let counter_size: u8 = if matches!(iterable_ty, Type::Slice(_)) {
+            2
+        } else {
+            1
+        };
+        let counter_off = self.frame_alloc(counter_size);
+        self.loop_bound_slots.insert(
+            iterable.span,
+            SymbolInfo {
+                name: format!("<iter counter for {}>", var_name.node),
+                kind: SymbolKind::Variable,
+                ty: if counter_size == 2 {
+                    Type::Primitive(PrimitiveType::U16)
+                } else {
+                    Type::Primitive(PrimitiveType::U8)
                 },
-            );
-        }
+                location: SymbolLocation::FrameOffset(counter_off),
+                mutable: true,
+                access_mode: None,
+                is_pub: false,
+                containing_function: self.current_function.clone(),
+                is_param: false,
+                decl_span: None,
+            },
+        );
 
         // Analyze body
         self.loop_depth += 1;
