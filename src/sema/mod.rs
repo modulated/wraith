@@ -142,6 +142,40 @@ pub enum SemaError {
 }
 
 impl SemaError {
+    /// The primary source span this error points at, if it has one.
+    ///
+    /// A few errors describe the whole program rather than a location — a
+    /// circular import, or the colored frames not fitting zero page — and have
+    /// no single span. Tooling should fall back to the file start for those.
+    pub fn span(&self) -> Option<Span> {
+        use SemaError::*;
+        match self {
+            UndefinedSymbol { span, .. }
+            | TypeMismatch { span, .. }
+            | InvalidBinaryOp { span, .. }
+            | InvalidUnaryOp { span, .. }
+            | ArityMismatch { span, .. }
+            | ImmutableAssignment { span, .. }
+            | ReturnTypeMismatch { span, .. }
+            | ReturnOutsideFunction { span }
+            | BreakOutsideLoop { span }
+            | DuplicateSymbol { span, .. }
+            | FieldNotFound { span, .. }
+            | EscapingPointer { span, .. }
+            | ImportError { span, .. }
+            | OutOfZeroPage { span }
+            | InstructionConflict { span, .. }
+            | Custom { span, .. }
+            | ConstantOverflow { span, .. }
+            | WriteOnlyRead { span, .. }
+            | ReadOnlyWrite { span, .. }
+            | InvalidAddrUsage { span, .. }
+            | ArrayIndexOutOfBounds { span, .. } => Some(*span),
+            InModule { import_span, .. } => Some(*import_span),
+            CircularImport { .. } | FrameRegionOverflow { .. } => None,
+        }
+    }
+
     /// Format error with source code context showing the actual line and error marker
     pub fn format_with_source(&self, source: &str) -> String {
         self.format_with_source_and_file(source, None)
@@ -702,7 +736,20 @@ pub enum Warning {
 impl Warning {
     /// Format warning with source context (similar to error formatting)
     pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
-        let (message, span) = match self {
+        let (message, span) = self.parts();
+        format!(
+            "warning: {}\n{}",
+            message,
+            span.format_error_context(source, filename, &message)
+        )
+    }
+
+    /// The warning's one-line message and the span it points at, without any
+    /// source-context rendering. Tooling (the language server) needs the raw
+    /// pieces so it can place a diagnostic at a precise range and let the editor
+    /// draw its own context.
+    pub fn parts(&self) -> (String, &Span) {
+        match self {
             Warning::UnusedVariable { name, span } => {
                 (format!("unused variable: `{}`", name), span)
             }
@@ -772,13 +819,17 @@ impl Warning {
                 ),
                 span,
             ),
-        };
+        }
+    }
 
-        format!(
-            "warning: {}\n{}",
-            message,
-            span.format_error_context(source, filename, &message)
-        )
+    /// The span the warning points at.
+    pub fn span(&self) -> Span {
+        *self.parts().1
+    }
+
+    /// The warning's one-line message.
+    pub fn message(&self) -> String {
+        self.parts().0
     }
 }
 
