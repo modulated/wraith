@@ -1,3 +1,11 @@
+[workspace]
+# The compiler (root package) and the language server share one workspace so the
+# server can depend on the compiler as a library. The server's LSP dependencies
+# (lsp-server, lsp-types, …) live only in `crates/wraith-lsp` and never enter the
+# compiler's own build.
+members = ["crates/wraith-lsp"]
+resolver = "3"
+
 [package]
 name = "wraith"
 version = "0.5.0"

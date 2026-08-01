@@ -1,0 +1,78 @@
+{
+  "name": "wraith-language",
+  "displayName": "Wraith Language Support",
+  "description": "Syntax highlighting and language server (diagnostics, completion, hover) for the Wraith programming language",
+  "version": "0.2.0",
+  "publisher": "wraith-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modulated/wraith"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "wraith",
+    "6502",
+    "assembly",
+    "embedded",
+    "retro"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:wraith"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "wraith",
+        "aliases": [
+          "Wraith",
+          "wraith"
+        ],
+        "extensions": [
+          ".wr"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "wraith",
+        "scopeName": "source.wraith",
+        "path": "./wraith.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Wraith",
+      "properties": {
+        "wraith.server.path": {
+          "type": "string",
+          "default": "wraith-lsp",
+          "description": "Path to the wraith-lsp language server binary. If left as the default, it is looked up on PATH. Build it with `cargo build --release -p wraith-lsp` (the binary lands in target/release/wraith-lsp)."
+        },
+        "wraith.server.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the Wraith language server (diagnostics, completion, hover). Turn off to keep syntax highlighting only."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}
