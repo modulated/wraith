@@ -4,6 +4,11 @@
 # (lsp-server, lsp-types, …) live only in `crates/wraith-lsp` and never enter the
 # compiler's own build.
 members = ["crates/wraith-lsp"]
+# `fuzz/` is an afl harness, built on its own (`cargo check --manifest-path
+# fuzz/Cargo.toml`) with its own toolchain needs. Keep it out of the workspace
+# so a plain `cargo build`/`test` never pulls in the fuzz dependencies — and so
+# it does not error as an unlisted package now that the root is a workspace.
+exclude = ["fuzz"]
 resolver = "3"
 
 [package]
