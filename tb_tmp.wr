@@ -1,7 +1,0 @@
-import { test_bit } from "std/math.wr";
-const R0: addr = 0x0900;
-#[reset]
-fn main() {
-    R0 = test_bit(0x10, 4);
-    loop {}
-}
