@@ -75,6 +75,31 @@ fn compound_div_assign() {
 }
 
 #[test]
+fn u8_divide_and_modulo_by_zero_are_defined() {
+    // The zero path used to read an uninitialized temp ("leave A as-is" was a
+    // lie). Both now yield a defined 0xFF, matching div16/mod16's 0xFFFF.
+    assert_eq!(
+        eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a / b;"),
+        0xFF,
+        "u8 x / 0 -> 0xFF"
+    );
+    assert_eq!(
+        eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a % b;"),
+        0xFF,
+        "u8 x % 0 -> 0xFF"
+    );
+}
+
+#[test]
+fn u8_divide_and_modulo_still_correct_for_nonzero() {
+    // The div-by-zero restructure must not disturb the normal path.
+    assert_eq!(eval_u8("let a: u8 = 23; let b: u8 = 5; OUT = a / b;"), 4);
+    assert_eq!(eval_u8("let a: u8 = 23; let b: u8 = 5; OUT = a % b;"), 3);
+    assert_eq!(eval_u8("let a: u8 = 100; let b: u8 = 10; OUT = a / b;"), 10);
+    assert_eq!(eval_u8("let a: u8 = 7; let b: u8 = 8; OUT = a % b;"), 7);
+}
+
+#[test]
 fn compound_bitwise_and_assign() {
     assert_eq!(eval_u8("let x: u8 = 0xFF; x &= 0x0F; OUT = x;"), 0x0F);
 }

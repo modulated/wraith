@@ -35,21 +35,20 @@ Pointers are in place now, so a driver can be handed a caller's buffer.
 
 ## 🟡 HIGH PRIORITY
 
-### 2. Standard library gaps
+### 2. Standard library gaps — ✅ closed
 
-Present: `mul16`, `div16`, `divmod`, `mul_wide`, `abs`/`abs16`,
-`memcpy`/`memcpy16`, `memset`/`memset16`, `memcmp`, `str_copy`, PRNG (`rand`,
-`rand16`, `srand`), bit helpers, saturating arithmetic, ASCII `char` helpers
-(`std/char.wr`: `is_digit`/`is_alpha`/`is_upper`/`is_lower`/`is_alnum`/
-`is_whitespace`, `to_upper`/`to_lower`, `digit_value`).
+The previously-missing pieces now ship:
+- `abs`/`abs16` (`std/math.wr`).
+- ASCII `char` helpers (`std/char.wr`): `is_digit`/`is_alpha`/`is_upper`/
+  `is_lower`/`is_alnum`/`is_whitespace`, `to_upper`/`to_lower`, `digit_value`.
+- `strcmp` (`std/string.wr`) — C-style −1/0/1 ordering (`s.len` and `str == str`
+  already covered length and equality).
+- `bcd_to_string`, `bcd16_to_string`, `string_to_bcd` (`std/string.wr`) — write
+  a length-prefixed `[len][digits]` block into a caller `&u8` buffer / parse
+  digits back to BCD, for displaying BCD counters on the console.
 
-Still missing:
-- `strlen` / `strcmp` — note `s.len` and `str == str` already cover the common
-  cases; a C-style ordering `strcmp` (-1/0/1) is the remaining gap
-- `bcd_to_string(value: b8) -> str`, `bcd16_to_string(value: b16) -> str`, and
-  `string_to_bcd` — needed to display BCD counters on the console
-
-**Complexity**: Medium for the string conversions (6502 string building).
+With these done, **bitfield access syntax (item 3) is the top remaining
+priority** — device registers the driver work touches are almost all bitfields.
 
 ---
 

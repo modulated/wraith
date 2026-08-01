@@ -1380,7 +1380,12 @@ pub fn generate_stmt(
                 // Compare X against known array size
                 emitter.emit_inst("CPX", &format!("#${:02X}", size));
             }
-            emitter.emit_inst("BCS", &end_label); // Branch if X >= size
+            // Exit when X >= length. end_label sits past the whole body, so a
+            // plain `BCS end_label` overflows its ±127 range once the body is
+            // large (an inlined call, say). Route the far jump through a JMP and
+            // let the conditional branch hop only over it.
+            let fe_body = emitter.next_label("feb");
+            emit_far_arm_branch(emitter, "BCS", &end_label, &fe_body);
 
             // Push loop context for break/continue. `continue` must land on the
             // increment (continue_label), NOT the loop head — otherwise the index
@@ -2012,15 +2017,21 @@ fn generate_foreach_slice(
     // belief from a previous iteration is valid here.
     emitter.invalidate_registers();
 
-    // Exit when counter >= length (unsigned 16-bit compare).
+    // Exit when counter >= length (unsigned 16-bit compare). end_label is past
+    // the whole body, so the two exit branches route through a nearby JMP: the
+    // conditional branches all hop short distances and only the JMP is far,
+    // which keeps a large body from overflowing the ±127 branch range.
     let body_label = emitter.next_label("fsb");
+    let exit_label = emitter.next_label("fsx");
     emitter.emit_inst("LDA", &format!("${:02X}", counter + 1));
     emitter.emit_inst("CMP", &format!("${:02X}", slot + 3));
-    emitter.emit_inst("BCC", &body_label); // counter.hi < len.hi
-    emitter.emit_inst("BNE", end_label); // counter.hi > len.hi -> done
+    emitter.emit_inst("BCC", &body_label); // counter.hi < len.hi -> body
+    emitter.emit_inst("BNE", &exit_label); // counter.hi > len.hi -> exit
     emitter.emit_inst("LDA", &format!("${:02X}", counter));
     emitter.emit_inst("CMP", &format!("${:02X}", slot + 2));
-    emitter.emit_inst("BCS", end_label); // counter.lo >= len.lo -> done
+    emitter.emit_inst("BCC", &body_label); // counter.lo < len.lo -> body
+    emitter.emit_label(&exit_label);
+    emitter.emit_inst("JMP", end_label);
     emitter.emit_label(&body_label);
 
     emitter.push_loop(continue_label.to_string(), end_label.to_string());
@@ -2508,8 +2519,13 @@ fn generate_match(
 fn emit_far_arm_branch(emitter: &mut Emitter, cond: &str, arm_label: &str, skip_label: &str) {
     let inv = match cond {
         "BEQ" => "BNE",
+        "BNE" => "BEQ",
         "BCC" => "BCS",
+        "BCS" => "BCC",
         "BMI" => "BPL",
+        "BPL" => "BMI",
+        "BVC" => "BVS",
+        "BVS" => "BVC",
         other => unreachable!("not an invertible branch: {}", other),
     };
     emitter.emit_inst(inv, skip_label);

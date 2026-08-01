@@ -928,10 +928,14 @@ fn generate_divide(
     let loop_label = emitter.next_label("dl");
     let end_label = emitter.next_label("dx");
 
-    // Check for division by zero
+    // Check for division by zero. The old zero path branched to end_label and
+    // loaded `quotient_addr`, which is only initialized *below* the check — so
+    // it read an uninitialized temp (the "leave A as-is" comment was wrong).
+    // Yield a defined 0xFF instead, matching div16's 0xFFFF all-ones sentinel.
+    let zero_label = emitter.next_label("dz");
     emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("CPX", "#$00");
-    emitter.emit_inst("BEQ", &end_label); // Result undefined, leave A as-is
+    emitter.emit_inst("BEQ", &zero_label);
 
     // Initialize quotient to 0
     emitter.emit_inst("LDX", "#$00");
@@ -955,8 +959,13 @@ fn generate_divide(
     emitter.emit_inst("INC", &format!("${:02X}", quotient_addr));
     emitter.emit_inst("JMP", &loop_label);
 
+    let done_label = emitter.next_label("dd");
     emitter.emit_label(&end_label);
     emitter.emit_inst("LDA", &format!("${:02X}", quotient_addr));
+    emitter.emit_inst("JMP", &done_label);
+    emitter.emit_label(&zero_label);
+    emitter.emit_inst("LDA", "#$FF"); // division by zero -> defined 0xFF
+    emitter.emit_label(&done_label);
 
     // Free temp storage
     emitter.temp_alloc.free_primary(quotient_addr, 2);
@@ -1025,10 +1034,13 @@ fn generate_modulo(
     let loop_label = emitter.next_label("md");
     let end_label = emitter.next_label("mx");
 
-    // Check for division by zero
+    // Check for modulo by zero. Same latent bug as u8 divide: the zero path
+    // used to fall into end_label and load `dividend_addr` before it was
+    // stored. Yield a defined 0xFF, matching mod16's 0xFFFF sentinel.
+    let zero_label = emitter.next_label("mz");
     emitter.emit_inst("LDX", &format!("${:02X}", emitter.memory_layout.temp_reg()));
     emitter.emit_inst("CPX", "#$00");
-    emitter.emit_inst("BEQ", &end_label); // Result undefined, leave A as-is
+    emitter.emit_inst("BEQ", &zero_label);
 
     // Store dividend
     emitter.emit_inst("STA", &format!("${:02X}", dividend_addr));
@@ -1045,8 +1057,13 @@ fn generate_modulo(
     emitter.emit_inst("STA", &format!("${:02X}", dividend_addr));
     emitter.emit_inst("JMP", &loop_label);
 
+    let done_label = emitter.next_label("mdn");
     emitter.emit_label(&end_label);
     emitter.emit_inst("LDA", &format!("${:02X}", dividend_addr));
+    emitter.emit_inst("JMP", &done_label);
+    emitter.emit_label(&zero_label);
+    emitter.emit_inst("LDA", "#$FF"); // modulo by zero -> defined 0xFF
+    emitter.emit_label(&done_label);
 
     // Free temp storage
     emitter.temp_alloc.free_primary(dividend_addr, 1);

@@ -697,19 +697,20 @@ fn digit_value_parses_and_validates() {
 
 #[test]
 fn digit_value_folds_a_string_into_a_number() {
-    // "123" -> 123. Digits are extracted by index then combined; this keeps the
-    // loop body small (a `for c in s` body with the inlined digit_value plus a
-    // multiply overflows the 6502's relative-branch range — a separate limit).
+    // "123" -> 123 via the natural accumulate-in-a-loop idiom. The body (inlined
+    // digit_value plus a multiply) is large enough that the foreach exit branch
+    // is far; the invert-over-JMP loop exit keeps it in range.
     let mut e = run(r#"
         import { digit_value } from "std/char.wr";
         const OUT: addr = 0x0500;
         #[reset]
         fn main() {
             let s: str = "123";
-            let d0: u8 = digit_value(s[0]);
-            let d1: u8 = digit_value(s[1]);
-            let d2: u8 = digit_value(s[2]);
-            OUT = d0 * 100 + d1 * 10 + d2;
+            let acc: u8 = 0;
+            for c in s {
+                acc = acc * 10 + digit_value(c);
+            }
+            OUT = acc;
             loop {}
         }
     "#);
@@ -758,4 +759,160 @@ fn abs16_of_i16() {
     "#);
     assert_eq!(e.mem(0x0500), 0x2C, "low byte of |−300| = 300");
     assert_eq!(e.mem(0x0501), 0x01, "high byte of 300");
+}
+
+// ---------------------------------------------------------------------------
+// std/string.wr — strcmp (ordering; `==`/`!=` already handle equality)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strcmp_orders_strings_lexicographically() {
+    // Returned i8 is read back as its byte: -1 is 0xFF.
+    let cmp = |a: &str, b: &str| {
+        let src = format!(
+            r#"
+            import {{ strcmp }} from "std/string.wr";
+            const OUT: addr = 0x0500;
+            #[reset]
+            fn main() {{
+                OUT = strcmp("{a}", "{b}") as u8;
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0500)
+    };
+    assert_eq!(cmp("abc", "abc"), 0, "equal strings");
+    assert_eq!(cmp("abc", "abd"), 0xFF, "a < b at last char -> -1");
+    assert_eq!(cmp("abd", "abc"), 1, "a > b at last char -> 1");
+    assert_eq!(cmp("ab", "abc"), 0xFF, "a is a proper prefix -> -1");
+    assert_eq!(cmp("abc", "ab"), 1, "b is a proper prefix -> 1");
+    assert_eq!(cmp("", ""), 0, "two empty strings");
+    assert_eq!(cmp("", "x"), 0xFF, "empty sorts before non-empty");
+    assert_eq!(
+        cmp("Z", "a"),
+        0xFF,
+        "uppercase 'Z'(0x5A) < lowercase 'a'(0x61)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// std/string.wr — BCD <-> string
+// ---------------------------------------------------------------------------
+
+/// Format `bcd_lit` (a BCD literal like "42 as b8") and return (len, buf bytes).
+fn bcd8_str(bcd_lit: &str) -> (u8, [u8; 3]) {
+    let src = format!(
+        r#"
+        import {{ bcd_to_string }} from "std/string.wr";
+        const L: addr = 0x0500;
+        const B0: addr = 0x0501; const B1: addr = 0x0502; const B2: addr = 0x0503;
+        #[reset]
+        fn main() {{
+            let buf: [u8; 3] = [0; 3];
+            let n: u16 = bcd_to_string({bcd_lit}, &buf);
+            L = n.low; B0 = buf[0]; B1 = buf[1]; B2 = buf[2];
+            loop {{}}
+        }}
+    "#
+    );
+    let mut e = run(&src);
+    (e.mem(0x0500), [e.mem(0x0501), e.mem(0x0502), e.mem(0x0503)])
+}
+
+#[test]
+fn bcd_to_string_formats_a_bcd_byte() {
+    // buf[0] is the length prefix; buf[1..] are ASCII digits.
+    assert_eq!(bcd8_str("42 as b8"), (2, [2, b'4', b'2']));
+    assert_eq!(
+        bcd8_str("5 as b8"),
+        (1, [1, b'5', 0]),
+        "single digit, no leading 0"
+    );
+    assert_eq!(bcd8_str("0 as b8"), (1, [1, b'0', 0]), "zero yields \"0\"");
+    assert_eq!(bcd8_str("99 as b8"), (2, [2, b'9', b'9']));
+    assert_eq!(
+        bcd8_str("10 as b8"),
+        (2, [2, b'1', b'0']),
+        "trailing zero kept"
+    );
+}
+
+/// Format `bcd_lit` (a b16 literal) and return (len, first 5 buf bytes).
+fn bcd16_str(bcd_lit: &str) -> (u8, [u8; 5]) {
+    let src = format!(
+        r#"
+        import {{ bcd16_to_string }} from "std/string.wr";
+        const L: addr = 0x0500;
+        const B0: addr = 0x0501; const B1: addr = 0x0502; const B2: addr = 0x0503;
+        const B3: addr = 0x0504; const B4: addr = 0x0505;
+        #[reset]
+        fn main() {{
+            let buf: [u8; 5] = [0; 5];
+            let n: u16 = bcd16_to_string({bcd_lit}, &buf);
+            L = n.low;
+            B0 = buf[0]; B1 = buf[1]; B2 = buf[2]; B3 = buf[3]; B4 = buf[4];
+            loop {{}}
+        }}
+    "#
+    );
+    let mut e = run(&src);
+    (
+        e.mem(0x0500),
+        [
+            e.mem(0x0501),
+            e.mem(0x0502),
+            e.mem(0x0503),
+            e.mem(0x0504),
+            e.mem(0x0505),
+        ],
+    )
+}
+
+#[test]
+fn bcd16_to_string_formats_a_bcd_word() {
+    assert_eq!(bcd16_str("1234 as b16"), (4, [4, b'1', b'2', b'3', b'4']));
+    assert_eq!(
+        bcd16_str("1024 as b16"),
+        (4, [4, b'1', b'0', b'2', b'4']),
+        "interior zero is kept"
+    );
+    assert_eq!(
+        bcd16_str("7 as b16"),
+        (1, [1, b'7', 0, 0, 0]),
+        "leading zeros suppressed"
+    );
+    assert_eq!(bcd16_str("50 as b16"), (2, [2, b'5', b'0', 0, 0]));
+    assert_eq!(
+        bcd16_str("0 as b16"),
+        (1, [1, b'0', 0, 0, 0]),
+        "zero yields \"0\""
+    );
+    assert_eq!(bcd16_str("9999 as b16"), (4, [4, b'9', b'9', b'9', b'9']));
+}
+
+#[test]
+fn string_to_bcd_round_trips_through_bcd16_to_string() {
+    // Parse a decimal string to BCD, format it back, and confirm the digits.
+    let src = r#"
+        import { string_to_bcd, bcd16_to_string } from "std/string.wr";
+        const L: addr = 0x0500;
+        const B1: addr = 0x0501; const B2: addr = 0x0502;
+        const B3: addr = 0x0503; const B4: addr = 0x0504;
+        #[reset]
+        fn main() {
+            let v: b16 = string_to_bcd("2048");
+            let buf: [u8; 5] = [0; 5];
+            let n: u16 = bcd16_to_string(v, &buf);
+            L = n.low;
+            B1 = buf[1]; B2 = buf[2]; B3 = buf[3]; B4 = buf[4];
+            loop {}
+        }
+    "#;
+    let mut e = run(src);
+    assert_eq!(e.mem(0x0500), 4, "\"2048\" is four digits");
+    assert_eq!(
+        [e.mem(0x0501), e.mem(0x0502), e.mem(0x0503), e.mem(0x0504)],
+        [b'2', b'0', b'4', b'8']
+    );
 }

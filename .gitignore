@@ -8,3 +8,6 @@
 # Local agent/editor config
 .claude/
 .opencode/
+
+# macOS finder metadata
+.DS_Store

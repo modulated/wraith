@@ -403,6 +403,52 @@ fn a_large_match_assembles_and_picks_the_right_arm() {
 }
 
 #[test]
+fn a_string_foreach_with_a_large_body_assembles_and_counts_right() {
+    // The foreach exit (BCS end) jumped over the whole body; past ~127 bytes it
+    // overflowed and flatasm failed with "branch out of range". The exit now
+    // inverts over a JMP, so any body size assembles — and the loop must still
+    // run exactly once per character. The multiplies bulk the body well past
+    // the branch limit (run() panics if the image does not assemble).
+    let pad: String = (0..8)
+        .map(|k| format!("t = t * 2 + {};", k % 2))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let n = eval(&format!(
+        "let s: str = \"ABCDE\";
+         let n: u8 = 0;
+         let t: u8 = 0;
+         for c in s {{
+             n = n + 1;
+             {pad}
+         }}
+         OUT = n;"
+    ));
+    assert_eq!(n, 5, "one iteration per character despite a large body");
+}
+
+#[test]
+fn a_slice_foreach_with_a_large_body_assembles_and_counts_right() {
+    // Same fix on the slice foreach path (a 16-bit-counter loop): its two exit
+    // branches to end_label now route through a single nearby JMP.
+    let pad: String = (0..8)
+        .map(|k| format!("t = t * 2 + {};", k % 2))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let n = eval(&format!(
+        "let a: [u8; 5] = [1, 2, 3, 4, 5];
+         let sl: &[u8] = a[0..5];
+         let n: u8 = 0;
+         let t: u8 = 0;
+         for v in sl {{
+             n = n + 1;
+             {pad}
+         }}
+         OUT = n;"
+    ));
+    assert_eq!(n, 5, "one iteration per slice element despite a large body");
+}
+
+#[test]
 fn an_empty_if_block_is_not_a_struct_literal() {
     // `if a == b { }` parsed `b { }` as an empty struct literal and then
     // failed at the *next* statement — the struct-init-vs-block ambiguity

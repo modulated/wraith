@@ -35,7 +35,7 @@ fn main() {
                 return;
             }
             "--help" | "-h" => {
-                print_usage(&args[0]);
+                print_usage(&args[0], true);
                 return;
             }
             "--completions" => {
@@ -93,7 +93,7 @@ fn main() {
             }
             unknown => {
                 eprintln!("{}Error:{} unknown option: {}", RED, RESET, unknown);
-                print_usage(&args[0]);
+                print_usage(&args[0], false);
                 std::process::exit(1);
             }
         }
@@ -102,7 +102,7 @@ fn main() {
     let file = match input_file {
         Some(f) => f,
         None => {
-            print_usage(&args[0]);
+            print_usage(&args[0], false);
             std::process::exit(1);
         }
     };
@@ -290,18 +290,28 @@ fn out_dir_or_file_parent(dir: &Path) -> &Path {
     }
 }
 
-fn print_usage(program: &str) {
-    eprintln!("Usage: {} [OPTIONS] <input.wr>", program);
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  -h, --help              Print this help message");
-    eprintln!("  -v, --version           Print version information");
-    eprintln!("  -c, --comments LEVEL    Set comment verbosity in generated assembly");
-    eprintln!("                          LEVEL: minimal, normal (default), verbose");
-    eprintln!("  -o, --out DIR           Write the .asm output to DIR instead of");
-    eprintln!("                          alongside the source. DIR is created if needed.");
-    eprintln!("      --completions SHELL Print a shell completion script and exit");
-    eprintln!("                          SHELL: bash, zsh, fish");
+/// Render the usage text. `to_stdout` is true when help was explicitly asked
+/// for (`--help`/`-h`) — help on request is normal output and belongs on
+/// stdout; usage printed alongside an error stays on stderr.
+fn print_usage(program: &str, to_stdout: bool) {
+    let usage = format!(
+        "Usage: {program} [OPTIONS] <input.wr>\n\
+         \n\
+         Options:\n\
+         \x20 -h, --help              Print this help message\n\
+         \x20 -v, --version           Print version information\n\
+         \x20 -c, --comments LEVEL    Set comment verbosity in generated assembly\n\
+         \x20                         LEVEL: minimal, normal (default), verbose\n\
+         \x20 -o, --out DIR           Write the .asm output to DIR instead of\n\
+         \x20                         alongside the source. DIR is created if needed.\n\
+         \x20     --completions SHELL Print a shell completion script and exit\n\
+         \x20                         SHELL: bash, zsh, fish"
+    );
+    if to_stdout {
+        println!("{usage}");
+    } else {
+        eprintln!("{usage}");
+    }
 }
 
 #[cfg(test)]

@@ -47,6 +47,25 @@ pointers; plain addresses are `u16` values.
 -   `mem_jump(address: u16)` - Jump to machine code at an absolute address (does not return)
 -   `str_copy(dest: &u8, dest_size: u16, s: str) -> u16` - Copy a string into a buffer; returns bytes written
 
+### string.wr
+
+String-value helpers over the length-prefixed `str` type. (`str == str` /
+`str != str` already handle equality.)
+
+-   `strcmp(a: str, b: str) -> i8` - Lexicographic comparison, clamped to -1/0/1
+    (like C's `strcmp`): -1 if `a` sorts before `b`, 1 if after, 0 if equal. A
+    prefix sorts before the longer string.
+
+**BCD ↔ string** (for displaying BCD counters). The `*_to_string` functions
+write a length-prefixed `[u8 len][ASCII digits]` block into a caller `[u8; N]`
+buffer passed by `&` (so the buffer is a valid `str`), returning the digit
+count. Leading zeros are suppressed; zero still yields "0".
+
+-   `bcd_to_string(value: b8, dest: &u8) -> u16` - format a BCD byte 0-99 (needs 3 bytes)
+-   `bcd16_to_string(value: b16, dest: &u8) -> u16` - format a BCD word 0-9999 (needs 5 bytes)
+-   `string_to_bcd(s: str) -> b16` - parse up to 4 ASCII digits into a BCD word
+    (validate with `char.wr`'s `is_digit` first)
+
 ### char.wr
 
 ASCII character classification and conversion. A string is an array of `char`,

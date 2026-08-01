@@ -174,11 +174,11 @@ pub fn eval_const_expr_with_env(
                     // Extract substring
                     let result = s[start_usize..end_usize].to_string();
 
-                    // Validate 256-byte limit
+                    // Validate 255-byte limit
                     if result.len() > 255 {
                         return Err(SemaError::Custom {
                             message: format!(
-                                "string slice result exceeds 256 byte limit: {} bytes",
+                                "string slice result exceeds 255 byte limit: {} bytes",
                                 result.len()
                             ),
                             span: expr.span,
@@ -297,11 +297,11 @@ fn eval_binary_with_env(
         match op {
             BinaryOp::Add => {
                 let result = format!("{}{}", l, r);
-                // Validate 256-byte limit
+                // Validate 255-byte limit
                 if result.len() > 255 {
                     return Err(SemaError::Custom {
                         message: format!(
-                            "string concatenation exceeds 256 byte limit: {} bytes",
+                            "string concatenation exceeds 255 byte limit: {} bytes",
                             result.len()
                         ),
                         span,

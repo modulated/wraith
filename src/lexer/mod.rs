@@ -203,9 +203,12 @@ pub enum Token {
     Hash,
 
     // === Literals ===
-    #[regex(r"0x[0-9a-fA-F]+", |lex| parse_hex(lex.slice()))]
-    #[regex(r"0b[01]+", |lex| parse_binary(lex.slice()))]
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    // Underscores may separate digits (`1_000`, `0xFF_FF`, `0b1010_0101`) and
+    // are stripped before parsing. A literal must still start with a digit, so
+    // `_x` stays an identifier.
+    #[regex(r"0x[0-9a-fA-F_]+", |lex| parse_hex(lex.slice()))]
+    #[regex(r"0b[01_]+", |lex| parse_binary(lex.slice()))]
+    #[regex(r"[0-9][0-9_]*", |lex| lex.slice().replace('_', "").parse::<i64>().ok())]
     Integer(i64),
 
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
@@ -229,11 +232,11 @@ pub enum Token {
 }
 
 fn parse_hex(s: &str) -> Option<i64> {
-    i64::from_str_radix(&s[2..], 16).ok()
+    i64::from_str_radix(&s[2..].replace('_', ""), 16).ok()
 }
 
 fn parse_binary(s: &str) -> Option<i64> {
-    i64::from_str_radix(&s[2..], 2).ok()
+    i64::from_str_radix(&s[2..].replace('_', ""), 2).ok()
 }
 
 /// Process escape sequences in a string literal
@@ -391,6 +394,22 @@ mod tests {
         assert_eq!(tokens[0].token, Token::Integer(42));
         assert_eq!(tokens[1].token, Token::Integer(255));
         assert_eq!(tokens[2].token, Token::Integer(10));
+    }
+
+    #[test]
+    fn test_integers_with_underscore_separators() {
+        let tokens = lex("1_000 0xFF_FF 0b1010_0101 1_2_3").unwrap();
+        assert_eq!(tokens[0].token, Token::Integer(1000));
+        assert_eq!(tokens[1].token, Token::Integer(0xFFFF));
+        assert_eq!(tokens[2].token, Token::Integer(0b1010_0101));
+        assert_eq!(tokens[3].token, Token::Integer(123));
+    }
+
+    #[test]
+    fn test_leading_underscore_is_an_identifier_not_a_number() {
+        // A literal must start with a digit; `_000` stays an identifier.
+        let tokens = lex("_000").unwrap();
+        assert_eq!(tokens[0].token, Token::Ident("_000".to_string()));
     }
 
     #[test]

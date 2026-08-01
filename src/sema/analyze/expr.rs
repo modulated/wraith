@@ -358,11 +358,11 @@ impl SemanticAnalyzer {
             crate::ast::Literal::Bool(_) => Ok(Type::Primitive(PrimitiveType::Bool)),
             crate::ast::Literal::Char(_) => Ok(Type::Primitive(PrimitiveType::Char)),
             crate::ast::Literal::String(s) => {
-                // Validate string length (256 byte limit for 6502)
+                // Validate string length (255 byte limit for 6502)
                 if s.len() > 255 {
                     return Err(SemaError::Custom {
                         message: format!(
-                            "string literal exceeds 256 byte limit: {} bytes",
+                            "string literal exceeds 255 byte limit: {} bytes",
                             s.len()
                         ),
                         span,
@@ -982,7 +982,21 @@ impl SemanticAnalyzer {
                 // result: `-5` is i8, not u8. `5` on its own infers as u8, so
                 // without this the operand type would leak through and code like
                 // `let x: i8 = -5;` would fail to type-check.
-                if !operand_ty.is_primitive() {
+                // Negation is arithmetic, so `bool` and `char` are rejected —
+                // `-true` used to pass because both are primitives. The integer
+                // and BCD types (and `addr`, a byte MMIO value) still negate.
+                if !matches!(
+                    operand_ty,
+                    Type::Primitive(
+                        PrimitiveType::U8
+                            | PrimitiveType::I8
+                            | PrimitiveType::U16
+                            | PrimitiveType::I16
+                            | PrimitiveType::B8
+                            | PrimitiveType::B16
+                            | PrimitiveType::Addr
+                    )
+                ) {
                     return Err(SemaError::InvalidUnaryOp {
                         op: "-".to_string(),
                         operand_ty: operand_ty.display_name(),
@@ -1609,11 +1623,11 @@ impl SemanticAnalyzer {
                         // Extract substring
                         let result = &s[start_usize..end_usize];
 
-                        // Validate 256-byte limit
+                        // Validate 255-byte limit
                         if result.len() > 255 {
                             return Err(SemaError::Custom {
                                 message: format!(
-                                    "string slice result exceeds 256 byte limit: {} bytes",
+                                    "string slice result exceeds 255 byte limit: {} bytes",
                                     result.len()
                                 ),
                                 span,

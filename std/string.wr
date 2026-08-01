@@ -1,0 +1,123 @@
+// Wraith Standard Library
+// String-value helpers over the length-prefixed `str` type.
+//
+// `str == str` / `str != str` already test equality; this module adds the
+// ordering comparison. (Raw-buffer copies live in `std/mem.wr` as `str_copy`.)
+
+/// Lexicographic comparison of two strings, like C's `strcmp` clamped to
+/// -1/0/1: returns -1 if `a` sorts before `b`, 1 if after, 0 if equal.
+///
+/// Characters are compared by ASCII byte value; if one string is a prefix of
+/// the other, the shorter one sorts first. A `str` is at most 255 bytes, so the
+/// length and index both fit in a `u8`.
+pub fn strcmp(a: str, b: str) -> i8 {
+    let la: u8 = a.len as u8;
+    let lb: u8 = b.len as u8;
+
+    // Compare over the shorter length.
+    let n: u8 = la;
+    if lb < n {
+        n = lb;
+    }
+
+    let i: u8 = 0;
+    while i < n {
+        let ca: u8 = a[i] as u8;
+        let cb: u8 = b[i] as u8;
+        if ca < cb {
+            return -1;
+        }
+        if ca > cb {
+            return 1;
+        }
+        i = i + 1;
+    }
+
+    // Common prefix is equal: the shorter string sorts first.
+    if la < lb {
+        return -1;
+    }
+    if la > lb {
+        return 1;
+    }
+    return 0;
+}
+
+// ============================================================================
+// BCD <-> string
+//
+// The `*_to_string` functions write a length-prefixed `[u8 len][ASCII digits]`
+// block into a caller buffer (a `[u8; N]` passed by `&`), so the buffer is a
+// valid `str` and the return value is the digit count. Leading zeros are
+// suppressed, but a zero value still yields "0". Same shape as `str_copy`.
+// ============================================================================
+
+/// Format a BCD byte (0-99) as ASCII decimal into `dest`. Returns the digit
+/// count (1 or 2). `dest` needs room for 1 + 2 = 3 bytes.
+pub fn bcd_to_string(value: b8, dest: &u8) -> u16 {
+    let packed: u8 = value as u8;
+    let tens: u8 = (packed >> 4) & 0x0F;
+    let ones: u8 = packed & 0x0F;
+
+    if tens != 0 {
+        dest[0] = 2; // length prefix
+        dest[1] = tens + 48; // '0' is 48
+        dest[2] = ones + 48;
+        return 2 as u16;
+    }
+    dest[0] = 1;
+    dest[1] = ones + 48;
+    return 1 as u16;
+}
+
+/// Format a 16-bit BCD value (0-9999) as ASCII decimal into `dest`. Returns the
+/// digit count (1-4). `dest` needs room for 1 + 4 = 5 bytes.
+pub fn bcd16_to_string(value: b16, dest: &u8) -> u16 {
+    let packed: u16 = value as u16;
+    let d3: u8 = (packed >> 12) as u8 & 0x0F; // thousands
+    let d2: u8 = (packed >> 8) as u8 & 0x0F; // hundreds
+    let d1: u8 = (packed >> 4) as u8 & 0x0F; // tens
+    let d0: u8 = packed as u8 & 0x0F; // ones
+
+    // Write the most-significant non-zero digit first, then every digit after
+    // it (so interior zeros like the 0 in "1024" are kept). `n` counts digits
+    // written; the data starts at dest[1], past the length prefix.
+    let n: u8 = 0;
+    if d3 != 0 {
+        dest[1 + n] = d3 + 48;
+        n = n + 1;
+    }
+    if d2 != 0 || n != 0 {
+        dest[1 + n] = d2 + 48;
+        n = n + 1;
+    }
+    if d1 != 0 || n != 0 {
+        dest[1 + n] = d1 + 48;
+        n = n + 1;
+    }
+    // Ones digit is always written, so a zero value yields "0".
+    dest[1 + n] = d0 + 48;
+    n = n + 1;
+
+    dest[0] = n;
+    return n as u16;
+}
+
+/// Parse a string of ASCII decimal digits (up to 4) into a 16-bit BCD value.
+///
+/// Each digit becomes one BCD nibble directly, so the accumulator is already in
+/// BCD layout — the final `as b16` is a bit-pattern retype, not a decimal
+/// conversion. Non-digit characters are not validated; keep the input to
+/// '0'..='9' (see `std/char.wr`'s `is_digit`). Digits past the fourth overflow
+/// out the top of the 16-bit value.
+pub fn string_to_bcd(s: str) -> b16 {
+    let acc: u16 = 0 as u16;
+    let len: u8 = s.len as u8;
+    let i: u8 = 0;
+    while i < len {
+        let d: u8 = s[i] as u8 - 48; // '0' is 48
+        acc = (acc << 4) | (d as u16);
+        i = i + 1;
+    }
+    return acc as b16;
+}

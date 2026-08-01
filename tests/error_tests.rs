@@ -92,6 +92,34 @@ fn test_type_error_invalid_operation() {
 }
 
 #[test]
+fn test_negating_a_bool_is_an_error() {
+    // `-true` used to type-check as bool because bool is a primitive. Negation
+    // is arithmetic, so it is rejected now.
+    assert_error_contains(
+        r#"
+        fn main() {
+            let b: bool = true;
+            let x: i8 = -b;
+        }
+        "#,
+        "cannot apply '-' to type bool",
+    );
+}
+
+#[test]
+fn test_negating_a_char_is_an_error() {
+    assert_error_contains(
+        r#"
+        fn main() {
+            let c: char = 'a';
+            let x: i8 = -c;
+        }
+        "#,
+        "cannot apply '-' to type char",
+    );
+}
+
+#[test]
 fn test_type_error_function_arity() {
     let src = r#"
         fn add(a: u8, b: u8) -> u8 {
