@@ -6,6 +6,7 @@ mod aggregate_init;
 mod bcd;
 mod bcd_validation;
 mod bitfields;
+mod cmos;
 mod complex_features;
 mod consts;
 mod control_flow;

@@ -37,8 +37,13 @@ enum Mode {
     Rel,
 }
 
-/// Official NMOS 6502 opcode for a (mnemonic, addressing-mode) pair. Also
-/// handles the 65C02 Rockwell bit set/reset instructions.
+/// Opcode for a (mnemonic, addressing-mode) pair.
+///
+/// Covers the NMOS 6502 set plus the WDC 65C02 additions the compiler may emit
+/// when targeting `--cpu 65c02`: `STZ`, `BRA`, `PHX`/`PLX`/`PHY`/`PLY`,
+/// accumulator `INC A`/`DEC A`, `TSB`/`TRB`, and the Rockwell `SMB`/`RMB` bit
+/// ops. The assembler does not gate these on a target — codegen decides whether
+/// to emit them; the assembler just needs to encode whatever it is handed.
 fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
     use Mode::*;
     // 65C02 Rockwell RMB0-7 / SMB0-7: zero-page only, bit number in the
@@ -87,6 +92,7 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
         "BMI" => m(Rel, 0x30),
         "BNE" => m(Rel, 0xD0),
         "BPL" => m(Rel, 0x10),
+        "BRA" => m(Rel, 0x80), // 65C02
         "BRK" => m(Imp, 0x00),
         "BVC" => m(Rel, 0x50),
         "BVS" => m(Rel, 0x70),
@@ -104,7 +110,8 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(IndY, 0xD1)),
         "CPX" => m(Imm, 0xE0).or(m(Zp, 0xE4)).or(m(Abs, 0xEC)),
         "CPY" => m(Imm, 0xC0).or(m(Zp, 0xC4)).or(m(Abs, 0xCC)),
-        "DEC" => m(Zp, 0xC6)
+        "DEC" => m(Acc, 0x3A) // 65C02 accumulator form
+            .or(m(Zp, 0xC6))
             .or(m(ZpX, 0xD6))
             .or(m(Abs, 0xCE))
             .or(m(AbsX, 0xDE)),
@@ -118,7 +125,8 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(AbsY, 0x59))
             .or(m(IndX, 0x41))
             .or(m(IndY, 0x51)),
-        "INC" => m(Zp, 0xE6)
+        "INC" => m(Acc, 0x1A) // 65C02 accumulator form
+            .or(m(Zp, 0xE6))
             .or(m(ZpX, 0xF6))
             .or(m(Abs, 0xEE))
             .or(m(AbsX, 0xFE)),
@@ -160,8 +168,12 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(IndY, 0x11)),
         "PHA" => m(Imp, 0x48),
         "PHP" => m(Imp, 0x08),
+        "PHX" => m(Imp, 0xDA), // 65C02
+        "PHY" => m(Imp, 0x5A), // 65C02
         "PLA" => m(Imp, 0x68),
         "PLP" => m(Imp, 0x28),
+        "PLX" => m(Imp, 0xFA), // 65C02
+        "PLY" => m(Imp, 0x7A), // 65C02
         "ROL" => m(Acc, 0x2A)
             .or(m(Zp, 0x26))
             .or(m(ZpX, 0x36))
@@ -194,8 +206,14 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(IndY, 0x91)),
         "STX" => m(Zp, 0x86).or(m(ZpY, 0x96)).or(m(Abs, 0x8E)),
         "STY" => m(Zp, 0x84).or(m(ZpX, 0x94)).or(m(Abs, 0x8C)),
+        "STZ" => m(Zp, 0x64)
+            .or(m(ZpX, 0x74))
+            .or(m(Abs, 0x9C))
+            .or(m(AbsX, 0x9E)), // 65C02
         "TAX" => m(Imp, 0xAA),
         "TAY" => m(Imp, 0xA8),
+        "TRB" => m(Zp, 0x14).or(m(Abs, 0x1C)), // 65C02
+        "TSB" => m(Zp, 0x04).or(m(Abs, 0x0C)), // 65C02
         "TSX" => m(Imp, 0xBA),
         "TXA" => m(Imp, 0x8A),
         "TXS" => m(Imp, 0x9A),
@@ -256,7 +274,7 @@ fn split_label(s: &str) -> (String, i32) {
 fn is_branch(mnem: &str) -> bool {
     matches!(
         mnem,
-        "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS"
+        "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS" | "BRA"
     )
 }
 
@@ -643,6 +661,43 @@ mod tests {
     fn rockwell_bit_ops_reject_a_non_zero_page_operand() {
         // SMB/RMB have no absolute form.
         assert!(assemble(".ORG $8000\n    SMB0 $1234\n").is_err());
+    }
+
+    #[test]
+    fn base_65c02_opcodes_encode() {
+        let mem = assemble(
+            ".ORG $8000\n\
+             STZ $12\n\
+             STZ $1234\n\
+             STZ $12,X\n\
+             STZ $1234,X\n\
+             PHX\n    PHY\n    PLX\n    PLY\n\
+             INC A\n    DEC A\n\
+             TSB $12\n    TRB $1234\n",
+        )
+        .unwrap();
+        assert_eq!(
+            &mem[0x8000..0x8000 + 21],
+            &[
+                0x64, 0x12, // STZ $12
+                0x9C, 0x34, 0x12, // STZ $1234
+                0x74, 0x12, // STZ $12,X
+                0x9E, 0x34, 0x12, // STZ $1234,X
+                0xDA, 0x5A, 0xFA, 0x7A, // PHX PHY PLX PLY
+                0x1A, 0x3A, // INC A / DEC A
+                0x04, 0x12, // TSB $12
+                0x1C, 0x34, 0x12, // TRB $1234
+            ]
+        );
+    }
+
+    #[test]
+    fn bra_is_a_relative_branch() {
+        // BRA $8005 from $8000: opcode 0x80, displacement +3 (target − end).
+        let mem =
+            assemble(".ORG $8000\n    BRA there\n    NOP\n    NOP\nthere:\n    RTS\n").unwrap();
+        assert_eq!(mem[0x8000], 0x80);
+        assert_eq!(mem[0x8001], 0x02); // $8005 − $8002 (next-instruction address)
     }
 
     #[test]
