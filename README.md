@@ -113,7 +113,7 @@ Completion applies to the installed `wraith` binary, not to `cargo run`.
 
 ## Documentation
 
-For complete language specification including syntax, types, and standard library, see [the spec](specification.md).
+For complete language specification including syntax, types, and standard library, see [docs/specification.md](docs/specification.md).
 
 ## Configuration
 
@@ -231,4 +231,4 @@ Check the `examples/` directory for sample programs demonstrating:
 
 ## Contributing
 
-See [ROADMAP.md](ROADMAP.md) for planned features and development priorities.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for planned features and development priorities.

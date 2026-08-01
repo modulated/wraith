@@ -187,7 +187,7 @@ fn address_of_binds_tighter_than_as() {
     // `&x as u16` is `(&x) as u16` — the address as a number — matching C and
     // Rust. `as` is the one postfix suffix the `&` arm leaves to its caller;
     // taking it would give the address of a cast, which is a temporary and
-    // therefore has no address at all. `specification.md` has documented this
+    // therefore has no address at all. `docs/specification.md` has documented this
     // spelling since before it parsed.
     assert_compiles(
         "static SLOT: u8 = 0; \

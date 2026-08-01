@@ -10,7 +10,7 @@ const lowercaseConst: u8 = 42;  // WARNING: constant name should be uppercase
 fn main() {
     // Local variables must be declared with 'let'. Every local is
     // automatically allocated to zero page - there is no separate keyword
-    // or opt-in for it (see "Zero Page Allocation" in specification.md).
+    // or opt-in for it (see "Zero Page Allocation" in docs/specification.md).
     let x: u8 = 10;
     let y: u16 = 1000;
 
