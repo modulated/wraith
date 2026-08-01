@@ -5,25 +5,25 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 ## Key Features
 
 - **Direct 6502 Assembly Generation** - Compiles to compiler-optimized 6502 assembly code, not a generic bytecode
-- **65C02 Support** - Targets the 65C02 by default (`--cpu 6502` for NMOS); bitfield ops lower to `SMB`/`RMB` where available
-- **Bitfield Access** - `flags.set_bit(7)` / `clear_bit` / `toggle_bit` / `.bit(n)` on any integer, constant-folded to a mask
+- **65C02 Support** - Targets the 65C02 by default (`--cpu 6502` for NMOS);
 - **Opinionated** - Designed specifically for 6502 architecture with no runtime or abstraciton overhead
-- **Low-Level Control** - Memory-mapped I/O, inline assembly, and explicit memory management if required
-- **Modern Syntax** - Rust-inspired syntax with explicit types and pattern matching
+- **Low-Level Control** - Memory-mapped I/O, inline assembly, and explicit memory management
+- **Modern Syntax** - Rust-inspired syntax with explicit types, AST and pattern matching
 - **Tail Call Optimization** - Recursive functions optimized to loops when possible
 - **Module System** - No more header files, no more macros
-- **Configurable Memory Sections** - Control code, data and RAM placement for different memory layouts
+- **Configurable Memory Sections** - Control code, data and RAM placement for different memory layouts in your bespoke 6502 computer
 - **Mutable Globals** - `static` state in RAM, shareable between interrupt handlers and main code
 - **Function Pointers & Vtables** - Call through struct fields (`device.read(reg)`) for driver-style dispatch
 - **Slices** - `&[T]` views over arrays with runtime length, passable to and returnable from functions
 - **Pointers** - `&x`, `*p`, `p[i]`, `p.field`, with an escape analysis that rejects a pointer outliving what it names
+- **Bitfield Access** - `flags.set_bit(7)` / `clear_bit` / `toggle_bit` / `.bit(n)` on any integer, constant-folded to a mask
 
 ## Quick Setup
 
 ### Prerequisites
 
-- Rust toolchain (cargo) — builds the compiler and the bundled `flatasm`
-  assembler; no external 6502 assembler is required
+- Rust toolchain (cargo) — builds the compiler, `wraith`, and the bundled
+  assembler, `flatasm`; no external 6502 assembler is required
 
 ### Build and Run
 
@@ -35,36 +35,8 @@ cargo build --release
 cargo run --release my_program.wr
 
 # Assemble the output into a flat ROM image
-cargo run --release --bin flatasm -- my_program.asm -o my_program.rom --rom
+cargo run --release --bin flatasm -- my_program.asm --rom
 ```
-
-### Assembling to a binary (`flatasm`)
-
-Wraith emits **absolute** assembly: every function is placed with `.ORG` at its
-final address and the interrupt vector table is written directly at
-`$FFFA`-`$FFFF`. That is a flat-image model, not the relocatable-segment model
-that `ca65`/`ld65` (and a linker `.cfg`) assume — `ca65`'s `.ORG` only moves the
-logical program counter, it does not seek or pad the output, so it packs the
-`.ORG` blocks together and drops the vectors, producing a broken image. Use the
-bundled `flatasm` instead; it honours `.ORG` as an absolute seek and shares its
-implementation with the compiler's own test harness.
-
-```bash
-# Full 64 KB image (byte i = memory address i)
-flatasm my_program.asm -o my_program.bin
-
-# $8000-$FFFF ROM image (32 KB), e.g. for a ROM at the top of memory
-flatasm my_program.asm -o my_program.rom --rom
-
-# An arbitrary address range
-flatasm my_program.asm -o my_program.bin --start 0x8000 --end 0xFFFF
-```
-
-`flatasm` prints the resolved reset vector (`$FFFC`) on completion as a sanity
-check and exits non-zero with a message on malformed input (undefined label,
-out-of-range branch, unknown mnemonic). Run it via `cargo run --bin flatasm --`
-from the source tree, or use the `flatasm` binary from `cargo build --release`
-(`target/release/flatasm`).
 
 ### Command-line options
 
@@ -84,17 +56,39 @@ Usage: wraith [OPTIONS] <input.wr>
 ```
 
 By default the assembly is written next to its source, so `src/main.wr`
-produces `src/main.asm`. `--out` keeps the file name but replaces the
+produces `src/main.asm`. Use `-o` or `--out` to specify a build
 directory, which keeps generated assembly out of the source tree:
 
 ```bash
 wraith --out build src/main.wr    # writes build/main.asm
 ```
 
+### Assembling to a binary (`flatasm`)
+
+Wraith emits **absolute** assembly: every function is placed with `.ORG` at its
+final address and the interrupt vector table is written directly at
+`$FFFA`-`$FFFF`. That is a flat-image model, not the relocatable-segment model
+that other assemblers (eg `ca65`/`ld65`).
+
+```bash
+# Full 64 KB image (byte i = memory address i)
+flatasm my_program.asm
+
+# $8000-$FFFF ROM image (32 KB), e.g. for a ROM at the top of memory
+flatasm my_program.asm --rom
+
+# An arbitrary address range
+flatasm my_program.asm --start 0x8000 --end 0xFFFF
+```
+
+`flatasm` prints the resolved reset vector (`$FFFC`) on completion as a sanity
+check and exits non-zero with a message on malformed input (undefined label,
+out-of-range branch, unknown mnemonic).
+
 ### Environment variables
 
 - `WRAITH_STD_PATH` — where non-relative imports (`import {memcpy} from
-  "mem.wr"`) look for the standard library. Defaults to `std/` relative to
+"mem.wr"`) look for the standard library. Defaults to `std/` relative to
   the working directory.
 
 ### Shell completion
@@ -119,7 +113,7 @@ Completion applies to the installed `wraith` binary, not to `cargo run`.
 
 ## Documentation
 
-For complete language specification including syntax, types, and standard library, see [specification.md](specification.md).
+For complete language specification including syntax, types, and standard library, see [the spec](specification.md).
 
 ## Configuration
 
@@ -204,9 +198,7 @@ Things to keep in mind when choosing the range:
   declaration falls inside `BSS`, since a `static` allocated there would collide
   with the device register.
 - **Size it for your data.** Overflowing the region is a compile error naming the
-  range. A text framebuffer is often the largest consumer (an 80×25 screen is
-  2000 bytes — more than the 1 KB default), so either enlarge `BSS`, use a
-  smaller geometry, or map video memory separately with `addr`.
+  range.
 - If a config omits `BSS` entirely, the compiler falls back to `$0400-$07FF`.
 
 ### The STACK section
