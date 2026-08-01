@@ -46,18 +46,23 @@ Single-bit access ships (`x.bit(n)`, `x.set_bit(n)`, `x.clear_bit(n)`,
   them yet.
 - **`SMB`/`RMB` on field/index targets** — currently a plain variable only.
 
-### Inline data directive
+### Const attributes (consider later)
 
-Lookup tables and sprite data colocated with the code that uses them, rather than
-hoisted to a `static`:
+`const` arrays always land in the `DATA` section. There is no known need to
+change that today, but if one arises — say, keeping a small lookup table in the
+same ROM region as the function that uses it under a bank-switched map — the
+right shape is a placement attribute on `const`, reusing the `#[section("…")]`
+mechanism functions already have:
 
 ```rust
-data lookup_table: [u8; 16] = [0x00, 0x01, 0x04, 0x09, /* … */];
+#[section("CODE")]
+const lookup_table: [u8; 16] = [0x00, 0x01, 0x04, 0x09, /* … */];
 ```
 
-Low complexity: const arrays and string literals already allocate from `DATA`
-through `SectionAllocator`; inline data should do the same, so it stays visible
-to `#[org]` conflict detection.
+(This replaces an earlier "inline `data` directive" idea, which was a new keyword
+for the same effect. On a 6502 there is no cache, so placement buys no locality —
+only memory-map control — and an attribute delivers that without a new concept.
+Not worth building until a concrete need appears.)
 
 ---
 
