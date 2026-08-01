@@ -40,6 +40,8 @@ pub struct Emitter {
     last_was_terminal: bool,
     /// Comment verbosity level
     pub verbosity: CommentVerbosity,
+    /// The CPU being targeted (governs 65C02-only instruction use).
+    pub target: crate::codegen::TargetCpu,
     /// Current function being generated (for tail call detection)
     current_function: Option<String>,
     /// Track if mul16 stdlib function is needed
@@ -75,6 +77,7 @@ impl Emitter {
             byte_count: 0,
             last_was_terminal: false,
             verbosity,
+            target: crate::codegen::TargetCpu::default(),
             current_function: None,
             needs_mul16: false,
             needs_div16: false,

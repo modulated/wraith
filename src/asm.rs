@@ -37,9 +37,26 @@ enum Mode {
     Rel,
 }
 
-/// Official NMOS 6502 opcode for a (mnemonic, addressing-mode) pair.
+/// Official NMOS 6502 opcode for a (mnemonic, addressing-mode) pair. Also
+/// handles the 65C02 Rockwell bit set/reset instructions.
 fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
     use Mode::*;
+    // 65C02 Rockwell RMB0-7 / SMB0-7: zero-page only, bit number in the
+    // mnemonic. RMBn = 0x07 | n<<4, SMBn = 0x87 | n<<4.
+    if let Some(bit) = mnem.strip_prefix("RMB").and_then(|d| d.parse::<u8>().ok()) {
+        return if bit <= 7 && mode == Zp {
+            Some(0x07 | (bit << 4))
+        } else {
+            None
+        };
+    }
+    if let Some(bit) = mnem.strip_prefix("SMB").and_then(|d| d.parse::<u8>().ok()) {
+        return if bit <= 7 && mode == Zp {
+            Some(0x87 | (bit << 4))
+        } else {
+            None
+        };
+    }
     let m = |want: Mode, op: u8| if mode == want { Some(op) } else { None };
     match mnem {
         "ADC" => m(Imm, 0x69)
@@ -609,6 +626,23 @@ mod tests {
         // Every reference used to land on whichever definition came last.
         let err = assemble(".ORG $8000\nfoo:\nfoo:\n    RTS\n").unwrap_err();
         assert!(err.contains("duplicate label 'foo'"), "{err}");
+    }
+
+    #[test]
+    fn rockwell_bit_set_reset_opcodes() {
+        // RMBn = 0x07 | n<<4, SMBn = 0x87 | n<<4, all zero-page (2 bytes each).
+        let mem = assemble(".ORG $8000\n    RMB0 $12\n    RMB7 $34\n    SMB0 $12\n    SMB7 $34\n")
+            .unwrap();
+        assert_eq!(
+            &mem[0x8000..0x8008],
+            &[0x07, 0x12, 0x77, 0x34, 0x87, 0x12, 0xF7, 0x34]
+        );
+    }
+
+    #[test]
+    fn rockwell_bit_ops_reject_a_non_zero_page_operand() {
+        // SMB/RMB have no absolute form.
+        assert!(assemble(".ORG $8000\n    SMB0 $1234\n").is_err());
     }
 
     #[test]

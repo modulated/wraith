@@ -285,6 +285,8 @@ impl SemanticAnalyzer {
                 }
                 unified
             }
+
+            Expr::BitOp { object, kind, bit } => self.check_bitop(object, *kind, bit, expr.span)?,
         };
 
         // Store the resolved type for this expression so codegen can access it
@@ -1447,6 +1449,98 @@ impl SemanticAnalyzer {
                 span: object.span,
             }),
         }
+    }
+
+    /// `x.bit(n)` / `x.set_bit(n)` / `x.clear_bit(n)` / `x.toggle_bit(n)`. The
+    /// bit index is a compile-time constant bounded by the value's width; a read
+    /// yields a `bool`, a mutation writes back and yields nothing.
+    fn check_bitop(
+        &mut self,
+        object: &Spanned<Expr>,
+        kind: crate::ast::BitOpKind,
+        bit: &Spanned<Expr>,
+        span: crate::ast::Span,
+    ) -> Result<Type, SemaError> {
+        let obj_ty = self.check_expr(object)?;
+        let width: i64 = match &obj_ty {
+            Type::Primitive(
+                PrimitiveType::U8
+                | PrimitiveType::I8
+                | PrimitiveType::Bool
+                | PrimitiveType::Char
+                | PrimitiveType::B8
+                | PrimitiveType::Addr,
+            ) => 8,
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16) => 16,
+            _ => {
+                return Err(SemaError::TypeMismatch {
+                    expected: "an integer".to_string(),
+                    found: obj_ty.display_name(),
+                    span: object.span,
+                });
+            }
+        };
+
+        // A runtime bit index has no single-instruction lowering; require a
+        // constant and point at the std functions for the dynamic case.
+        self.check_expr(bit)?;
+        let Some(n) = eval_const_expr_with_env(bit, &self.const_env)
+            .ok()
+            .and_then(|v| v.as_integer())
+        else {
+            return Err(SemaError::Custom {
+                message: "bit index must be a compile-time constant; use std/math.wr's \
+                          set_bit/clear_bit/test_bit for a runtime index"
+                    .to_string(),
+                span: bit.span,
+            });
+        };
+        if !(0..width).contains(&n) {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "bit index {} is out of range for a {}-bit value (valid: 0..{})",
+                    n, width, width
+                ),
+                span: bit.span,
+            });
+        }
+
+        if !kind.is_mutation() {
+            return Ok(Type::Primitive(PrimitiveType::Bool));
+        }
+
+        // A mutation writes back, so the target must be a plain, assignable
+        // variable (a local, a static, or a writable addr register). Field or
+        // index targets are a later extension.
+        let Expr::Variable(root) = &object.node else {
+            return Err(SemaError::Custom {
+                message: "a bit mutation needs a plain variable target, e.g. `x.set_bit(3)`"
+                    .to_string(),
+                span: object.span,
+            });
+        };
+        let root = root.clone();
+        if let Some(info) = self.table.lookup(&root) {
+            if info.kind == SymbolKind::Constant {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "cannot modify a bit of '{}': a const lives in ROM, so the write \
+                         would do nothing on real hardware",
+                        root
+                    ),
+                    span,
+                });
+            }
+            if info.kind == SymbolKind::Address
+                && matches!(info.access_mode, Some(crate::ast::AccessMode::Read))
+            {
+                return Err(SemaError::ReadOnlyWrite { name: root, span });
+            }
+            if !info.mutable {
+                return Err(SemaError::ImmutableAssignment { symbol: root, span });
+            }
+        }
+        Ok(Type::Void)
     }
 
     fn check_slice(

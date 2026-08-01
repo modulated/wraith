@@ -11,6 +11,7 @@ use crate::sema::table::SymbolLocation;
 // Submodules
 mod aggregate;
 mod binary;
+mod bitop;
 mod call;
 mod cast;
 mod compare;
@@ -162,6 +163,9 @@ pub fn generate_expr(
         }
         Expr::Field { object, field } => {
             generate_field_access(object, field, emitter, info, string_collector)
+        }
+        Expr::BitOp { object, kind, bit } => {
+            bitop::generate_bitop(object, *kind, bit, emitter, info, string_collector)
         }
         Expr::EnumVariant {
             enum_name,

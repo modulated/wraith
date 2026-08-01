@@ -4000,6 +4000,9 @@ fn expr_references_name(expr: &crate::ast::Expr, name: &str) -> bool {
                 .iter()
                 .any(|f| expr_references_name(&f.value.node, name)),
         },
+        E::BitOp { object, bit, .. } => {
+            expr_references_name(&object.node, name) || expr_references_name(&bit.node, name)
+        }
         E::SliceLen(e) | E::U16Low(e) | E::U16High(e) | E::Paren(e) => {
             expr_references_name(&e.node, name)
         }

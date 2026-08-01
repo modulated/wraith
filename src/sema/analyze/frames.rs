@@ -508,6 +508,13 @@ impl SemanticAnalyzer {
 
             Expr::Paren(inner) => self.scan_expr_for_scratch(inner, needs),
 
+            // A bit op is a load/AND/store (or a single SMB/RMB) — no scratch
+            // pool of its own; only its subexpressions might use one.
+            Expr::BitOp { object, bit, .. } => {
+                self.scan_expr_for_scratch(object, needs);
+                self.scan_expr_for_scratch(bit, needs);
+            }
+
             Expr::Binary { op, left, right } => {
                 needs.0 = true; // operand staging ($F0 pool / $20)
                 if matches!(op, BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) {

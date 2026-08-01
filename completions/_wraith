@@ -11,6 +11,7 @@ _wraith() {
         '(- *)'{-h,--help}'[Print help information]' \
         '(- *)'{-v,--version}'[Print version information]' \
         '(-c --comments)'{-c,--comments}'[Comment verbosity in generated assembly]:level:(minimal normal verbose)' \
+        '--cpu[Target CPU (default: 65c02)]:target:(65c02 6502)' \
         '(-o --out)'{-o,--out}'[Write the .asm output to this directory]:directory:_files -/' \
         '(- *)--completions[Print a shell completion script]:shell:(bash zsh fish)' \
         '1:source file:_files -g "*.wr"'

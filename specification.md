@@ -3422,6 +3422,29 @@ All items completed.
 &   |   ^   ~         // AND, OR, XOR, NOT
 ```
 
+### Bitfield Access
+
+Individual bits of an integer are read and written with built-in methods, where
+`n` is a compile-time constant in range for the value's width (0-7 for an 8-bit
+value, 0-15 for a 16-bit one):
+
+```rust
+let flags: u8 = 0;
+flags.set_bit(7);        // set bit 7  -> 0x80
+flags.clear_bit(3);      // clear bit 3
+flags.toggle_bit(0);     // flip bit 0
+if flags.bit(7) { }      // read bit 7 as a bool
+```
+
+- `x.bit(n) -> bool` reads a bit; `set_bit`/`clear_bit`/`toggle_bit` mutate `x`
+  in place and need a plain variable target (a local, `static`, or writable
+  `addr` register).
+- The bit index must be a **compile-time constant**. For a runtime index, use
+  `std/math.wr`'s `set_bit`/`clear_bit`/`test_bit`.
+- On the **65C02** target, a zero-page `set_bit`/`clear_bit` compiles to a single
+  `SMB`/`RMB` instruction; on NMOS **6502**, or for an absolute/`addr` target, it
+  is an `ORA`/`AND` read-modify-write. `toggle_bit` is always `EOR`.
+
 ### Assignment
 
 ```rust

@@ -5,6 +5,8 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 ## Key Features
 
 - **Direct 6502 Assembly Generation** - Compiles to compiler-optimized 6502 assembly code, not a generic bytecode
+- **65C02 Support** - Targets the 65C02 by default (`--cpu 6502` for NMOS); bitfield ops lower to `SMB`/`RMB` where available
+- **Bitfield Access** - `flags.set_bit(7)` / `clear_bit` / `toggle_bit` / `.bit(n)` on any integer, constant-folded to a mask
 - **Opinionated** - Designed specifically for 6502 architecture with no runtime or abstraciton overhead
 - **Low-Level Control** - Memory-mapped I/O, inline assembly, and explicit memory management if required
 - **Modern Syntax** - Rust-inspired syntax with explicit types and pattern matching
@@ -73,6 +75,8 @@ Usage: wraith [OPTIONS] <input.wr>
   -v, --version           Print version information
   -c, --comments LEVEL    Comment verbosity in the generated assembly
                           LEVEL: minimal, normal (default), verbose
+      --cpu TARGET        Target CPU (default: 65c02)
+                          TARGET: 65c02, 6502
   -o, --out DIR           Write the .asm output to DIR instead of alongside
                           the source. DIR is created if it does not exist.
       --completions SHELL Print a shell completion script and exit

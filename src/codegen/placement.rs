@@ -56,11 +56,13 @@ const VECTOR_TABLE_START: u16 = 0xFFFA;
 ///
 /// `items` is the full generation order — imported modules first, then the root
 /// module — filtered to the functions that will actually be emitted.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     imported: &[Spanned<Item>],
     root: &SourceFile,
     program: &ProgramInfo,
     verbosity: CommentVerbosity,
+    target: crate::codegen::TargetCpu,
     layout: &crate::codegen::memory_layout::MemoryLayout,
     section_alloc: &mut SectionAllocator,
     string_collector: &mut StringCollector,
@@ -95,7 +97,7 @@ pub fn plan(
         if seen.insert(func.name.node.clone(), ()).is_some() {
             continue;
         }
-        let size = measure(func, program, verbosity, layout, string_collector)?;
+        let size = measure(func, program, verbosity, target, layout, string_collector)?;
         sizes.push((func, size));
     }
 
@@ -249,6 +251,7 @@ fn measure(
     func: &Function,
     info: &ProgramInfo,
     verbosity: CommentVerbosity,
+    target: crate::codegen::TargetCpu,
     layout: &crate::codegen::memory_layout::MemoryLayout,
     string_collector: &mut StringCollector,
 ) -> Result<u16, CodegenError> {
@@ -267,6 +270,7 @@ fn measure(
     };
 
     let mut e = Emitter::new(verbosity);
+    e.target = target;
     e.memory_layout = layout.clone();
     e.set_current_function(name.clone());
 

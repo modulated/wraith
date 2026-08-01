@@ -16,6 +16,10 @@ _wraith() {
             COMPREPLY=( $(compgen -W "minimal normal verbose" -- "$cur") )
             return 0
             ;;
+        --cpu)
+            COMPREPLY=( $(compgen -W "65c02 6502" -- "$cur") )
+            return 0
+            ;;
         -o|--out)
             COMPREPLY=( $(compgen -d -- "$cur") )
             return 0
@@ -27,7 +31,7 @@ _wraith() {
     esac
 
     if [[ "$cur" == -* ]]; then
-        opts="-h --help -v --version -c --comments -o --out --completions"
+        opts="-h --help -v --version -c --comments --cpu -o --out --completions"
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
         return 0
     fi

@@ -12,6 +12,8 @@ complete -c wraith -s v -l version -d 'Print version information'
 
 complete -c wraith -s c -l comments -x -a 'minimal normal verbose' \
     -d 'Comment verbosity in generated assembly'
+complete -c wraith -l cpu -x -a '65c02 6502' \
+    -d 'Target CPU (default: 65c02)'
 complete -c wraith -s o -l out -x -a '(__fish_complete_directories)' \
     -d 'Write the .asm output to this directory'
 complete -c wraith -l completions -x -a 'bash zsh fish' \

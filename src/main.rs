@@ -24,6 +24,7 @@ fn main() {
 
     // Parse arguments
     let mut verbosity = codegen::CommentVerbosity::Normal;
+    let mut target = codegen::TargetCpu::default();
     let mut input_file: Option<String> = None;
     let mut out_dir: Option<PathBuf> = None;
 
@@ -80,6 +81,23 @@ fn main() {
                     i += 2;
                 } else {
                     eprintln!("{}Error:{} --comments requires an argument", RED, RESET);
+                    std::process::exit(1);
+                }
+            }
+            "--cpu" => {
+                if i + 1 < args.len() {
+                    target = match args[i + 1].as_str() {
+                        "65c02" | "65C02" | "cmos" => codegen::TargetCpu::Cmos65C02,
+                        "6502" | "nmos" => codegen::TargetCpu::Nmos6502,
+                        other => {
+                            eprintln!("{}Error:{} unknown CPU target: {}", RED, RESET, other);
+                            eprintln!("       valid options: 65c02 (default), 6502");
+                            std::process::exit(1);
+                        }
+                    };
+                    i += 2;
+                } else {
+                    eprintln!("{}Error:{} --cpu requires an argument", RED, RESET);
                     std::process::exit(1);
                 }
             }
@@ -191,7 +209,7 @@ fn main() {
     }
 
     // Code generation
-    let (code, section_alloc) = match codegen::generate(&ast, &program_info, verbosity) {
+    let (code, section_alloc) = match codegen::generate(&ast, &program_info, verbosity, target) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));
@@ -302,6 +320,8 @@ fn print_usage(program: &str, to_stdout: bool) {
          \x20 -v, --version           Print version information\n\
          \x20 -c, --comments LEVEL    Set comment verbosity in generated assembly\n\
          \x20                         LEVEL: minimal, normal (default), verbose\n\
+         \x20     --cpu TARGET        Target CPU (default: 65c02)\n\
+         \x20                         TARGET: 65c02, 6502\n\
          \x20 -o, --out DIR           Write the .asm output to DIR instead of\n\
          \x20                         alongside the source. DIR is created if needed.\n\
          \x20     --completions SHELL Print a shell completion script and exit\n\

@@ -54,22 +54,20 @@ priority** — device registers the driver work touches are almost all bitfields
 
 ## 🟢 MEDIUM PRIORITY
 
-### 3. Bitfield access syntax
+### 3. Bitfield access syntax — ✅ done (single-bit)
 
-Manual shifts and masks today. Device registers are almost entirely bitfields, so
-this is the ergonomic gap the OS work runs into most often.
+Single-bit access ships: `x.bit(n)` (read → bool), `x.set_bit(n)`,
+`x.clear_bit(n)`, `x.toggle_bit(n)`, with a constant bit index. A target switch
+(`--cpu 65c02` default, `--cpu 6502` for NMOS) governs the lowering: on the
+65C02 a zero-page set/clear is a single `SMB`/`RMB`; otherwise it is an
+`ORA`/`AND` read-modify-write. The emulator test harness runs the W65C02S
+variant so the Rockwell ops execute.
 
-```rust
-status.bit(7)              // read bit 7
-status.set_bit(7)          // set bit 7
-status.clear_bit(7)        // clear bit 7
-flags.bits[7:4]            // the high nibble
-```
-
-On a 65C02 target these lower to `BBR`/`BBS`/`SMB`/`RMB` directly (see
-[TODO.md](TODO.md)).
-
-**Complexity**: Medium (parser + codegen).
+Still open (follow-ups):
+- **Bit-range slice** `flags.bits[7:4]` — extract/insert a contiguous field.
+- **`BBR`/`BBS` fusion** — fold `if x.bit(n)` into a single bit-test-branch on
+  the 65C02 (assembler needs the zero-page-relative addressing mode).
+- **`SMB`/`RMB` on field/index targets** — currently a plain variable only.
 
 ---
 

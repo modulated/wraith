@@ -202,6 +202,47 @@ pub enum Expr {
         expr: Box<Spanned<Expr>>,
         arms: Vec<ExprMatchArm>,
     },
+
+    /// Bitfield access on an integer lvalue: `x.bit(n)` reads bit n (a `bool`);
+    /// `x.set_bit(n)` / `x.clear_bit(n)` / `x.toggle_bit(n)` mutate it. `n` is a
+    /// compile-time constant 0-7 (or 0-15 for a u16). On a 65C02 a zero-page
+    /// set/clear lowers to a single `SMB`/`RMB`.
+    BitOp {
+        object: Box<Spanned<Expr>>,
+        kind: BitOpKind,
+        bit: Box<Spanned<Expr>>,
+    },
+}
+
+/// Which bitfield operation `Expr::BitOp` performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitOpKind {
+    /// `x.bit(n)` — read bit n as a bool.
+    Get,
+    /// `x.set_bit(n)` — set bit n to 1.
+    Set,
+    /// `x.clear_bit(n)` — clear bit n to 0.
+    Clear,
+    /// `x.toggle_bit(n)` — flip bit n.
+    Toggle,
+}
+
+impl BitOpKind {
+    /// Recognize a `.method` name as a bitfield operation.
+    pub fn from_method(name: &str) -> Option<BitOpKind> {
+        match name {
+            "bit" => Some(BitOpKind::Get),
+            "set_bit" => Some(BitOpKind::Set),
+            "clear_bit" => Some(BitOpKind::Clear),
+            "toggle_bit" => Some(BitOpKind::Toggle),
+            _ => None,
+        }
+    }
+
+    /// True for the mutating operations (everything but `Get`).
+    pub fn is_mutation(self) -> bool {
+        !matches!(self, BitOpKind::Get)
+    }
 }
 
 /// A match arm for match expressions (body is an expression)

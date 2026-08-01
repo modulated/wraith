@@ -17,6 +17,26 @@ use item::generate_item;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use section_allocator::{AllocationSource, SectionAllocator};
 
+/// The 6502 family member being targeted. Governs whether codegen may use the
+/// 65C02's extra instructions — most relevantly the Rockwell bit ops
+/// `SMB`/`RMB`/`BBR`/`BBS`, which turn a zero-page bit set/clear into a single
+/// instruction. NMOS falls back to `ORA`/`AND`/`EOR` masks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TargetCpu {
+    /// Original NMOS 6502 — base instruction set only.
+    Nmos6502,
+    /// WDC 65C02 with the Rockwell bit-manipulation instructions.
+    #[default]
+    Cmos65C02,
+}
+
+impl TargetCpu {
+    /// True on a 65C02, where `SMB`/`RMB`/`BBR`/`BBS` are available.
+    pub fn has_rockwell_bit_ops(self) -> bool {
+        matches!(self, TargetCpu::Cmos65C02)
+    }
+}
+
 /// Controls the verbosity level of generated assembly comments
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommentVerbosity {
@@ -618,11 +638,13 @@ pub fn generate(
     ast: &SourceFile,
     program: &ProgramInfo,
     verbosity: CommentVerbosity,
+    target: TargetCpu,
 ) -> Result<(String, SectionAllocator), CodegenError> {
     use crate::sema::table::{SymbolKind, SymbolLocation};
     use rustc_hash::FxHashMap as HashMap;
 
     let mut emitter = Emitter::new(verbosity);
+    emitter.target = target;
     // Place the software stack where the board's config says RAM is, rather than
     // baking a page into the compiler. Only its size and zero-page pointer are fixed.
     if let Some(stack) = program.memory_config.get_section("STACK") {
@@ -641,6 +663,7 @@ pub fn generate(
         ast,
         program,
         verbosity,
+        target,
         &emitter.memory_layout.clone(),
         &mut section_alloc,
         &mut string_collector,

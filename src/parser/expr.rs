@@ -73,6 +73,27 @@ impl Parser<'_> {
                 let field_name = self.expect_ident()?;
                 let span = expr.span.merge(self.previous_span());
 
+                // Built-in bitfield methods: `x.bit(n)` / `set_bit` / `clear_bit`
+                // / `toggle_bit`, recognized only when followed by an argument
+                // list so a struct field of the same name is unaffected.
+                if let Some(kind) = crate::ast::BitOpKind::from_method(&field_name.node)
+                    && self.check(&Token::LParen)
+                {
+                    self.advance(); // consume '('
+                    let bit = self.parse_delimited_expr()?;
+                    self.expect(&Token::RParen)?;
+                    let span = expr.span.merge(self.previous_span());
+                    expr = Spanned::new(
+                        Expr::BitOp {
+                            object: Box::new(expr),
+                            kind,
+                            bit: Box::new(bit),
+                        },
+                        span,
+                    );
+                    continue;
+                }
+
                 // Check for special built-in accessors
                 if field_name.node == "len" {
                     expr = Spanned::new(Expr::SliceLen(Box::new(expr)), span);

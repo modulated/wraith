@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use mos6502::cpu::CPU;
-use mos6502::instruction::Nmos6502;
+use mos6502::instruction::{Mos65C02, W65C02S};
 use mos6502::memory::Bus;
 
 use super::compile_success;
@@ -96,7 +96,7 @@ impl Bus for TestBus {
 
 /// Result of running a compiled Wraith program on the emulator.
 pub struct Exec {
-    cpu: CPU<TestBus, Nmos6502>,
+    cpu: CPU<TestBus, W65C02S>,
     /// Address of the terminating `loop {}` (JMP-to-self) the program settled
     /// into. Interrupt pulses run the handler and return control here.
     idle_pc: u16,
@@ -282,7 +282,7 @@ fn run_with_devices_impl(
     // Load the full 64 KB image directly: the default Bus::set_bytes truncates
     // its length to u16 (65536 -> 0), so it would copy nothing.
     bus.ram.copy_from_slice(&image);
-    let mut cpu = CPU::new(bus, Nmos6502);
+    let mut cpu = CPU::new(bus, Mos65C02::<true, true>);
     cpu.reset();
 
     const BUDGET: usize = 20_000_000;

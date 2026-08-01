@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use wraith::ast::SourceFile;
-use wraith::codegen::{CommentVerbosity, generate};
+use wraith::codegen::{CommentVerbosity, TargetCpu, generate};
 use wraith::lex;
 use wraith::parser::Parser;
 use wraith::sema::{ProgramInfo, analyze, analyze_with_path};
@@ -22,6 +22,11 @@ pub enum CompileResult {
 
 /// Compile a Wraith source string through all phases
 pub fn compile(source: &str) -> CompileResult {
+    compile_with_target(source, TargetCpu::default())
+}
+
+/// Like [`compile`], but for a specific CPU target (the default is 65C02).
+pub fn compile_with_target(source: &str, target: TargetCpu) -> CompileResult {
     // Lex
     let tokens = match lex(source) {
         Ok(tokens) => tokens,
@@ -49,7 +54,7 @@ pub fn compile(source: &str) -> CompileResult {
         .join("\n");
 
     // Code generation
-    match generate(&ast, &program, CommentVerbosity::Normal) {
+    match generate(&ast, &program, CommentVerbosity::Normal, target) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }
@@ -85,7 +90,12 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
         .join("\n");
 
     // Code generation
-    match generate(&ast, &program, CommentVerbosity::Normal) {
+    match generate(
+        &ast,
+        &program,
+        CommentVerbosity::Normal,
+        TargetCpu::default(),
+    ) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }
@@ -93,7 +103,12 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
 
 /// Compile source and return assembly, panicking on any error
 pub fn compile_success(source: &str) -> String {
-    match compile(source) {
+    compile_success_with_target(source, TargetCpu::default())
+}
+
+/// [`compile_success`] for a specific CPU target.
+pub fn compile_success_with_target(source: &str, target: TargetCpu) -> String {
+    match compile_with_target(source, target) {
         CompileResult::Success(_warnings, asm) => asm,
         CompileResult::LexError(e) => panic!("Lex error: {}", e),
         CompileResult::ParseError(e) => panic!("Parse error: {}", e),
