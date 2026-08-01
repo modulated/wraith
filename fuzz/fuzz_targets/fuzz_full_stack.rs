@@ -10,8 +10,13 @@ fn main() {
                 if let Ok(ast) = wraith::Parser::parse(&tokens) {
                     // Drive all of sema.
                     if let Ok(prog_info) = wraith::sema::analyze(&ast) {
-                        // Code gen
-                        let _ = wraith::codegen::generate(&ast, &prog_info, wraith::codegen::CommentVerbosity::Normal);
+                        // Code gen. Target the compiler's default CPU, as the CLI does.
+                        let _ = wraith::codegen::generate(
+                            &ast,
+                            &prog_info,
+                            wraith::codegen::CommentVerbosity::Normal,
+                            wraith::codegen::TargetCpu::default(),
+                        );
                     }
                 }
             }
