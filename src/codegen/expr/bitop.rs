@@ -113,6 +113,33 @@ pub(super) fn generate_bitop(
     Ok(())
 }
 
+/// Resolve a `x.bit(n)` read to a zero-page byte plus the bit within it, when
+/// the target lives in zero page.
+///
+/// This is the enabling query for the 65C02 `BBRn`/`BBSn` fusion: `if x.bit(n)`
+/// can fold into a single bit-test-branch only when the byte is zero-page
+/// addressable (the Rockwell ops have no absolute form). Returns `None` for an
+/// absolute/MMIO byte, a ROM constant, an indirect target, or a non-constant
+/// bit index — the caller then falls back to the mask-and-compare read.
+pub(crate) fn bit_test_zp(
+    object: &Spanned<Expr>,
+    bit: &Spanned<Expr>,
+    info: &ProgramInfo,
+) -> Option<(u8, u8)> {
+    let n = crate::sema::const_eval::eval_const_expr(bit)
+        .ok()
+        .and_then(|v| v.as_integer())? as u8;
+    if n >= 16 {
+        return None;
+    }
+    let byte_off: u16 = (n / 8) as u16;
+    let bit_in_byte = n % 8;
+    match resolve_bit_target(object, byte_off, info) {
+        Ok(ByteLoc::Zp(addr)) => Some((addr, bit_in_byte)),
+        _ => None,
+    }
+}
+
 /// Resolve the byte holding the target bit for a *mutation*.
 ///
 /// A plain variable comes straight from its symbol (and an `addr` register keeps

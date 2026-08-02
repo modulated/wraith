@@ -37,6 +37,8 @@ enum Mode {
     /// Absolute indexed indirect `(abs,X)` — 65C02, `JMP` only.
     AbsIndX,
     Rel,
+    /// Zero-page + relative `$zp,label` — 65C02 `BBRn`/`BBSn` (3 bytes).
+    ZpRel,
 }
 
 /// Opcode for a (mnemonic, addressing-mode) pair.
@@ -60,6 +62,22 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
     if let Some(bit) = mnem.strip_prefix("SMB").and_then(|d| d.parse::<u8>().ok()) {
         return if bit <= 7 && mode == Zp {
             Some(0x87 | (bit << 4))
+        } else {
+            None
+        };
+    }
+    // 65C02 Rockwell BBR0-7 / BBS0-7: zero-page byte plus a relative branch,
+    // bit number in the mnemonic. BBRn = 0x0F | n<<4, BBSn = 0x8F | n<<4.
+    if let Some(bit) = mnem.strip_prefix("BBR").and_then(|d| d.parse::<u8>().ok()) {
+        return if bit <= 7 && mode == ZpRel {
+            Some(0x0F | (bit << 4))
+        } else {
+            None
+        };
+    }
+    if let Some(bit) = mnem.strip_prefix("BBS").and_then(|d| d.parse::<u8>().ok()) {
+        return if bit <= 7 && mode == ZpRel {
+            Some(0x8F | (bit << 4))
         } else {
             None
         };
@@ -228,7 +246,7 @@ fn instr_len(mode: Mode) -> u16 {
     match mode {
         Mode::Imp | Mode::Acc => 1,
         Mode::Imm | Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY | Mode::Rel => 2,
-        Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind | Mode::AbsIndX => 3,
+        Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind | Mode::AbsIndX | Mode::ZpRel => 3,
     }
 }
 
@@ -248,6 +266,12 @@ enum ValueExpr {
     LabelLow(String, i32),
     /// high byte of (label + offset)
     LabelHigh(String, i32),
+    /// zero-page byte plus a branch target label — 65C02 `BBRn`/`BBSn`.
+    ZpRel {
+        zp: u8,
+        label: String,
+        off: i32,
+    },
 }
 
 /// Parse a numeric term like `$4E`, `$0200`, `42`, or `$4E+1` -> value.
@@ -280,6 +304,15 @@ fn is_branch(mnem: &str) -> bool {
     )
 }
 
+/// A 65C02 Rockwell bit-test-branch: `BBRn`/`BBSn`, taking `$zp,label`.
+fn is_bit_branch(mnem: &str) -> bool {
+    (mnem
+        .strip_prefix("BBR")
+        .or_else(|| mnem.strip_prefix("BBS")))
+    .and_then(|d| d.parse::<u8>().ok())
+    .is_some_and(|bit| bit <= 7)
+}
+
 /// Parse a mnemonic's operand string into an addressing mode + value.
 fn parse_operand(mnem: &str, operand: Option<&str>) -> Result<ParsedOperand, String> {
     let po = |mode, value| Ok(ParsedOperand { mode, value });
@@ -299,6 +332,19 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> Result<ParsedOperand, Str
     }
     if op == "A" {
         return po(Mode::Acc, ValueExpr::None);
+    }
+
+    // 65C02 bit-test-branch `BBRn $zp,label` / `BBSn $zp,label`.
+    if is_bit_branch(mnem) {
+        let (zp_str, label) = op
+            .split_once(',')
+            .ok_or_else(|| format!("{mnem} expects `$zp,label`, got: {op}"))?;
+        let zp = parse_num(zp_str.trim())
+            .filter(|v| *v <= 0xFF)
+            .ok_or_else(|| format!("bad zero-page operand for {mnem}: {op}"))?
+            as u8;
+        let (l, off) = split_label(label);
+        return po(Mode::ZpRel, ValueExpr::ZpRel { zp, label: l, off });
     }
 
     // Immediate
@@ -457,6 +503,11 @@ fn resolve(labels: &HashMap<String, u16>, v: &ValueExpr) -> Result<u16, String> 
         ValueExpr::Label(l, off) => (base(l)? as i32 + off) as u16,
         ValueExpr::LabelLow(l, off) => ((base(l)? as i32 + off) as u16) & 0xFF,
         ValueExpr::LabelHigh(l, off) => (((base(l)? as i32 + off) as u16) >> 8) & 0xFF,
+        // A bit-test-branch is emitted directly (it needs the instruction
+        // address for its relative offset), never resolved to a single value.
+        ValueExpr::ZpRel { .. } => {
+            return Err("internal: BBR/BBS operand resolved as a scalar".to_string());
+        }
     })
 }
 
@@ -641,6 +692,25 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                         emit(&mut mem, &mut addr, (v & 0xFF) as u8)?;
                         emit(&mut mem, &mut addr, (v >> 8) as u8)?;
                     }
+                    Mode::ZpRel => {
+                        // `BBRn $zp,label` / `BBSn $zp,label`: the zero-page byte
+                        // then a branch offset relative to the address after the
+                        // 3-byte instruction.
+                        let ValueExpr::ZpRel { zp, label, off } = &parsed.value else {
+                            return Err(format!("{mnem} has a malformed operand"));
+                        };
+                        emit(&mut mem, &mut addr, *zp)?;
+                        let target =
+                            resolve(&labels, &ValueExpr::Label(label.clone(), *off))? as i32;
+                        let next = instr_addr as i32 + 3;
+                        let delta = target - next;
+                        if !(-128..=127).contains(&delta) {
+                            return Err(format!(
+                                "bit-branch out of range: {instr_addr:#06X} -> {target:#06X} (delta {delta})"
+                            ));
+                        }
+                        emit(&mut mem, &mut addr, (delta as i8) as u8)?;
+                    }
                 }
             }
         }
@@ -728,6 +798,43 @@ mod tests {
             assemble(".ORG $8000\n    BRA there\n    NOP\n    NOP\nthere:\n    RTS\n").unwrap();
         assert_eq!(mem[0x8000], 0x80);
         assert_eq!(mem[0x8001], 0x02); // $8005 − $8002 (next-instruction address)
+    }
+
+    #[test]
+    fn rockwell_bit_branch_opcodes() {
+        // BBRn = 0x0F | n<<4, BBSn = 0x8F | n<<4: opcode, zero-page byte, then a
+        // branch offset relative to the address after the 3-byte instruction.
+        let mem = assemble(
+            ".ORG $8000\n\
+             BBR0 $12,there\n\
+             BBS7 $34,there\n\
+             NOP\n\
+             there:\n    RTS\n",
+        )
+        .unwrap();
+        // BBR0 at $8000: 0x0F, $12, and `there` = $8007, so delta = 7 − 3 = 4.
+        assert_eq!(&mem[0x8000..0x8003], &[0x0F, 0x12, 0x04]);
+        // BBS7 at $8003: 0x8F | 7<<4 = 0xFF, $34, delta = $8007 − $8006 = 1.
+        assert_eq!(&mem[0x8003..0x8006], &[0xFF, 0x34, 0x01]);
+    }
+
+    #[test]
+    fn a_bit_branch_can_reach_backwards() {
+        // A negative displacement: the target is before the instruction.
+        let mem = assemble(
+            ".ORG $8000\n\
+             back:\n    NOP\n\
+             BBR3 $40,back\n",
+        )
+        .unwrap();
+        // back = $8000; BBR3 at $8001: opcode 0x3F, $40, delta = $8000 − $8004 = −4.
+        assert_eq!(&mem[0x8001..0x8004], &[0x3F, 0x40, (-4i8) as u8]);
+    }
+
+    #[test]
+    fn a_bit_branch_rejects_a_non_zero_page_operand() {
+        let err = assemble(".ORG $8000\n    BBR0 $1234,there\nthere:\n    RTS\n").unwrap_err();
+        assert!(err.contains("zero-page"), "{err}");
     }
 
     #[test]

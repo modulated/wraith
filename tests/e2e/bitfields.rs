@@ -166,6 +166,114 @@ fn a_6502_local_set_clear_uses_ora_and_masks() {
 }
 
 // ---------------------------------------------------------------------------
+// BBR/BBS fusion: `if x.bit(n)` folds into a single bit-test-branch on the 65C02
+// ---------------------------------------------------------------------------
+
+#[test]
+fn if_bit_set_folds_to_bbs_on_cmos() {
+    let src = r#"
+        #[reset]
+        fn main() { let f: u8 = 0x80; if f.bit(7) { loop {} } loop {} }
+    "#;
+    let asm = compile_success_with_target(src, TargetCpu::Cmos65C02);
+    assert!(asm.contains("BBS7 "), "if f.bit(7) -> BBS7:\n{asm}");
+}
+
+#[test]
+fn if_not_bit_folds_to_bbr_on_cmos() {
+    let src = r#"
+        #[reset]
+        fn main() { let f: u8 = 0; if !f.bit(3) { loop {} } loop {} }
+    "#;
+    let asm = compile_success_with_target(src, TargetCpu::Cmos65C02);
+    assert!(asm.contains("BBR3 "), "if !f.bit(3) -> BBR3:\n{asm}");
+}
+
+#[test]
+fn if_bit_does_not_fold_on_nmos() {
+    let src = r#"
+        #[reset]
+        fn main() { let f: u8 = 0x80; if f.bit(7) { loop {} } loop {} }
+    "#;
+    let asm = compile_success_with_target(src, TargetCpu::Nmos6502);
+    assert!(!asm.contains("BBS"), "NMOS must not use BBS:\n{asm}");
+    assert!(!asm.contains("BBR"), "NMOS must not use BBR");
+    // The mask-and-compare read is used instead.
+    assert!(asm.contains("AND #$80"), "NMOS masks the bit:\n{asm}");
+}
+
+#[test]
+fn fused_bit_test_runs_correctly() {
+    // bit 5 of 0x20 is set -> then-branch writes 0xAA.
+    assert_eq!(
+        eval("let f: u8 = 0x20; OUT = 0; if f.bit(5) { OUT = 0xAA; }"),
+        0xAA
+    );
+    // bit 6 of 0x20 is clear -> then-branch skipped, else path leaves OUT.
+    assert_eq!(
+        eval("let f: u8 = 0x20; OUT = 0x11; if f.bit(6) { OUT = 0xAA; }"),
+        0x11
+    );
+}
+
+#[test]
+fn fused_negated_bit_test_runs_correctly() {
+    // !bit(0) is true when bit 0 is clear -> then-branch taken.
+    assert_eq!(
+        eval("let f: u8 = 0b1111_1110; OUT = 0; if !f.bit(0) { OUT = 0xCC; }"),
+        0xCC
+    );
+    // !bit(1) is false when bit 1 is set -> then-branch skipped.
+    assert_eq!(
+        eval("let f: u8 = 0b0000_0010; OUT = 0x22; if !f.bit(1) { OUT = 0xCC; }"),
+        0x22
+    );
+}
+
+#[test]
+fn fused_bit_test_takes_the_else_branch() {
+    // A full if/else through the fused branch: bit clear -> else.
+    assert_eq!(
+        eval("let f: u8 = 0; if f.bit(4) { OUT = 1; } else { OUT = 2; }"),
+        2
+    );
+    assert_eq!(
+        eval("let f: u8 = 0x10; if f.bit(4) { OUT = 1; } else { OUT = 2; }"),
+        1
+    );
+}
+
+#[test]
+fn fused_bit_test_on_a_high_byte() {
+    // bit 12 lives in the high byte of a u16; the fusion selects that byte.
+    assert_eq!(
+        eval("let w: u16 = 0x1000 as u16; OUT = 0; if w.bit(12) { OUT = 0x55; }"),
+        0x55
+    );
+    assert_eq!(
+        eval("let w: u16 = 0x1000 as u16; OUT = 0x66; if w.bit(13) { OUT = 0x55; }"),
+        0x66
+    );
+}
+
+#[test]
+fn fused_bit_test_on_a_struct_field() {
+    // A local struct field lives in the zero-page frame, so the test fuses.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        #[reset]
+        fn main() {
+            let c: Ctrl = Ctrl { flags: 0b0000_1000 };
+            R0 = 0;
+            if c.flags.bit(3) { R0 = 0x99; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0x99);
+}
+
+// ---------------------------------------------------------------------------
 // Rejections
 // ---------------------------------------------------------------------------
 

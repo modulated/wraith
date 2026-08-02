@@ -370,6 +370,12 @@ impl Emitter {
                 // Absolute indexed (3 bytes)
                 3
             }
+        } else if mnemonic.starts_with("BBR") || mnemonic.starts_with("BBS") {
+            // 65C02 bit-test-branch `BBRn $zp,label` / `BBSn $zp,label`: opcode,
+            // zero-page byte, relative offset (3 bytes). Its `$zp,label` operand
+            // has a comma but no index register, so it would otherwise fall to
+            // the generic branch arm below and be under-measured as 2 bytes.
+            3
         } else if mnemonic.starts_with('B') && mnemonic != "BIT" {
             // Branch instructions (2 bytes)
             2

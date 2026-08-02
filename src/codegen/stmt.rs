@@ -8,6 +8,53 @@ use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 use rustc_hash::FxHashMap as HashMap;
 
+/// Recognize an `if` condition that folds into a 65C02 bit-test-branch, and
+/// return the `(mnemonic, zero-page byte)` to test-and-branch-to-`then`.
+///
+/// `if x.bit(n)` takes the `then` branch when bit n is set — `BBSn`. `if
+/// !x.bit(n)` takes it when bit n is clear — `BBRn`. Both require the target
+/// byte to be zero-page addressable (the Rockwell ops have no absolute form);
+/// anything else (absolute/MMIO byte, ROM constant, indirect target, non-CMOS
+/// target) returns `None` and the caller emits the mask-and-compare read.
+fn fusible_bit_branch(
+    condition: &Spanned<crate::ast::Expr>,
+    emitter: &Emitter,
+    info: &ProgramInfo,
+) -> Option<(String, u8)> {
+    use crate::ast::{BitOpKind, Expr, UnaryOp};
+
+    if !emitter.target.has_rockwell_bit_ops() {
+        return None;
+    }
+
+    // `!x.bit(n)` -> BBRn (branch if the bit is reset/clear).
+    // `x.bit(n)`  -> BBSn (branch if the bit is set).
+    let (negated, bitop) = match &condition.node {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => (true, operand.as_ref()),
+        _ => (false, condition),
+    };
+
+    let Expr::BitOp {
+        object,
+        kind: BitOpKind::Get,
+        bit,
+    } = &bitop.node
+    else {
+        return None;
+    };
+
+    let (zp, bit_in_byte) = crate::codegen::expr::bit_test_zp(object, bit, info)?;
+    let mnem = if negated {
+        format!("BBR{}", bit_in_byte)
+    } else {
+        format!("BBS{}", bit_in_byte)
+    };
+    Some((mnem, zp))
+}
+
 /// Strategy for generating match statement code
 #[derive(Debug)]
 enum MatchStrategy {
@@ -1002,27 +1049,40 @@ pub fn generate_stmt(
             let else_label = emitter.next_label("else");
             let end_label = emitter.next_label("end");
 
-            // Condition
-            generate_expr(condition, emitter, info, string_collector)?;
+            // 65C02 fusion: `if x.bit(n)` and `if !x.bit(n)` on a zero-page byte
+            // fold the mask-and-compare read into a single bit-test-branch
+            // (`BBSn`/`BBRn`). The branch-over-jump shape below keeps the `then`
+            // target always within a few bytes, so the ±127 reach is never a
+            // concern and no range fallback is needed.
+            if let Some((mnem, zp)) = fusible_bit_branch(condition, emitter, info) {
+                if !emitter.is_minimal() {
+                    emitter.emit_comment("Bit-test branch to then");
+                }
+                emitter.emit_inst(&mnem, &format!("${:02X},{}", zp, then_label));
+                emitter.emit_inst("JMP", &else_label);
+            } else {
+                // Condition
+                generate_expr(condition, emitter, info, string_collector)?;
 
-            // For large if statements, we need to avoid forward branches
-            // that might exceed 127 bytes. Use this structure:
-            //   condition
-            //   BNE then      ; branch if true (short forward jump)
-            //   JMP else      ; jump if false
-            // then:
-            //   then_body
-            //   JMP end
-            // else:
-            //   else_body
-            // end:
+                // For large if statements, we need to avoid forward branches
+                // that might exceed 127 bytes. Use this structure:
+                //   condition
+                //   BNE then      ; branch if true (short forward jump)
+                //   JMP else      ; jump if false
+                // then:
+                //   then_body
+                //   JMP end
+                // else:
+                //   else_body
+                // end:
 
-            if !emitter.is_minimal() {
-                emitter.emit_comment("Branch to then if condition is true");
+                if !emitter.is_minimal() {
+                    emitter.emit_comment("Branch to then if condition is true");
+                }
+                emitter.emit_inst("CMP", "#$00");
+                emitter.emit_inst("BNE", &then_label);
+                emitter.emit_inst("JMP", &else_label);
             }
-            emitter.emit_inst("CMP", "#$00");
-            emitter.emit_inst("BNE", &then_label);
-            emitter.emit_inst("JMP", &else_label);
 
             // Then
             emitter.emit_label(&then_label);
