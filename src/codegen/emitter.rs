@@ -341,8 +341,17 @@ impl Emitter {
                 // Indirect indexed: (zp),Y (2 bytes)
                 2
             } else if operand.contains(",X)") || operand.contains(",x)") {
-                // Indexed indirect: (zp,X) (2 bytes)
-                2
+                // `(zp,X)` is 2 bytes, but the 65C02 `JMP (abs,X)` — whose base
+                // is a label or a 16-bit address, not `$XX` — is 3. Sizing it as
+                // 2 would under-measure the function and land the next `.ORG`
+                // inside it (the jump-table overlap class of bug).
+                let base = operand.trim_start_matches('(');
+                let base = base.split(',').next().unwrap_or("");
+                if base.starts_with('$') && base.trim_start_matches('$').len() <= 2 {
+                    2 // (zp,X)
+                } else {
+                    3 // JMP (abs,X)
+                }
             } else {
                 // Indirect: (addr) (3 bytes for JMP)
                 3

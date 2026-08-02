@@ -157,3 +157,46 @@ fn a_u16_increment_across_a_byte_boundary_keeps_its_carry() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x00, 0x01));
 }
+
+// ============================================================================
+// JMP (abs,X) — match jump-table dispatch
+// ============================================================================
+
+const MATCH_SRC: &str = r#"
+    enum Dir { North, South, East, West }
+    const R0: addr = 0x0900;
+    fn code(d: Dir) -> u8 {
+        match d {
+            Dir::North => { return 1; }
+            Dir::South => { return 2; }
+            Dir::East => { return 3; }
+            Dir::West => { return 4; }
+        }
+    }
+    #[reset]
+    fn main() { R0 = code(Dir::East); loop {} }
+"#;
+
+#[test]
+fn match_dispatch_uses_jmp_abs_x_on_cmos() {
+    let asm = compile_success(MATCH_SRC);
+    assert!(
+        asm.contains("JMP (match_"),
+        "expected absolute indexed-indirect dispatch:\n{asm}"
+    );
+}
+
+#[test]
+fn match_dispatch_uses_a_zero_page_vector_on_nmos() {
+    let asm = compile_success_with_target(MATCH_SRC, TargetCpu::Nmos6502);
+    assert!(!asm.contains("JMP (match_"), "NMOS has no (abs,X):\n{asm}");
+    // NMOS loads the target through a zero-page vector and jumps indirect.
+    assert!(asm.contains("JMP ($"), "{asm}");
+}
+
+#[test]
+fn match_dispatch_selects_the_right_arm() {
+    // Executes the 0x7C instruction on the W65C02S.
+    let mut e = run(MATCH_SRC);
+    assert_eq!(e.mem(0x0900), 3);
+}

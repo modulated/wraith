@@ -34,6 +34,8 @@ enum Mode {
     IndX,
     IndY,
     Ind,
+    /// Absolute indexed indirect `(abs,X)` — 65C02, `JMP` only.
+    AbsIndX,
     Rel,
 }
 
@@ -132,7 +134,7 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(AbsX, 0xFE)),
         "INX" => m(Imp, 0xE8),
         "INY" => m(Imp, 0xC8),
-        "JMP" => m(Abs, 0x4C).or(m(Ind, 0x6C)),
+        "JMP" => m(Abs, 0x4C).or(m(Ind, 0x6C)).or(m(AbsIndX, 0x7C)), // (abs,X) is 65C02
         "JSR" => m(Abs, 0x20),
         "LDA" => m(Imm, 0xA9)
             .or(m(Zp, 0xA5))
@@ -226,7 +228,7 @@ fn instr_len(mode: Mode) -> u16 {
     match mode {
         Mode::Imp | Mode::Acc => 1,
         Mode::Imm | Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY | Mode::Rel => 2,
-        Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind => 3,
+        Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind | Mode::AbsIndX => 3,
     }
 }
 
@@ -329,8 +331,20 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> Result<ParsedOperand, Str
             let v = parse_num(zp).ok_or_else(|| format!("bad (zp),Y operand: {op}"))?;
             return po(Mode::IndY, ValueExpr::Num(v));
         }
-        if let Some(zp) = inner.strip_suffix(",X)") {
-            let v = parse_num(zp).ok_or_else(|| format!("bad (zp,X) operand: {op}"))?;
+        if let Some(base) = inner.strip_suffix(",X)") {
+            // `JMP (abs,X)` is absolute indexed indirect (65C02); it is the only
+            // instruction that takes a 16-bit or label operand here. Everything
+            // else is the zero-page `(zp,X)` form.
+            if mnem == "JMP" {
+                return match parse_num(base) {
+                    Some(v) => po(Mode::AbsIndX, ValueExpr::Num(v)),
+                    None => {
+                        let (l, off) = split_label(base);
+                        po(Mode::AbsIndX, ValueExpr::Label(l, off))
+                    }
+                };
+            }
+            let v = parse_num(base).ok_or_else(|| format!("bad (zp,X) operand: {op}"))?;
             return po(Mode::IndX, ValueExpr::Num(v));
         }
         if let Some(addr) = inner.strip_suffix(')') {
@@ -622,7 +636,7 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                         }
                         emit(&mut mem, &mut addr, v as u8)?;
                     }
-                    Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind => {
+                    Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind | Mode::AbsIndX => {
                         let v = resolve(&labels, &parsed.value)?;
                         emit(&mut mem, &mut addr, (v & 0xFF) as u8)?;
                         emit(&mut mem, &mut addr, (v >> 8) as u8)?;
@@ -689,6 +703,22 @@ mod tests {
                 0x1C, 0x34, 0x12, // TRB $1234
             ]
         );
+    }
+
+    #[test]
+    fn jmp_absolute_indexed_indirect_is_three_bytes() {
+        // 65C02 JMP (abs,X) = 0x7C with a 16-bit operand (the table label).
+        let mem = assemble(".ORG $8000\n    JMP (tbl,X)\ntbl:\n    .WORD $9000\n").unwrap();
+        assert_eq!(mem[0x8000], 0x7C);
+        assert_eq!(mem[0x8001], 0x03); // tbl = $8003
+        assert_eq!(mem[0x8002], 0x80);
+    }
+
+    #[test]
+    fn zero_page_indexed_indirect_stays_two_bytes() {
+        // The NMOS `(zp,X)` form is unchanged by adding `JMP (abs,X)`.
+        let mem = assemble(".ORG $8000\n    LDA ($40,X)\n").unwrap();
+        assert_eq!(&mem[0x8000..0x8002], &[0xA1, 0x40]);
     }
 
     #[test]

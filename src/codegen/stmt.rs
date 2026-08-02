@@ -2849,11 +2849,18 @@ fn generate_match_jump_table(
     // 3. Load address and JMP indirect
     emitter.emit_inst("ASL", ""); // tag * 2
     emitter.emit_inst("TAX", ""); // Transfer to X for indexing
-    emitter.emit_inst("LDA", &format!("match_{}_jt,X", match_id));
-    emitter.emit_inst("STA", &format!("${:02X}", jump_ptr));
-    emitter.emit_inst("LDA", &format!("match_{}_jt+1,X", match_id));
-    emitter.emit_inst("STA", &format!("${:02X}", jump_ptr + 1));
-    emitter.emit_inst("JMP", &format!("(${:02X})", jump_ptr));
+    if emitter.target.is_cmos() {
+        // The 65C02 reads the target straight from the table with absolute
+        // indexed-indirect addressing — no zero-page vector, four fewer
+        // instructions, and no scratch pair to collide with anything.
+        emitter.emit_inst("JMP", &format!("(match_{}_jt,X)", match_id));
+    } else {
+        emitter.emit_inst("LDA", &format!("match_{}_jt,X", match_id));
+        emitter.emit_inst("STA", &format!("${:02X}", jump_ptr));
+        emitter.emit_inst("LDA", &format!("match_{}_jt+1,X", match_id));
+        emitter.emit_inst("STA", &format!("${:02X}", jump_ptr + 1));
+        emitter.emit_inst("JMP", &format!("(${:02X})", jump_ptr));
+    }
 
     // Emit jump table
     emit_jump_table(emitter, arms, info, match_id, max_tag, wildcard_arm_index)?;
