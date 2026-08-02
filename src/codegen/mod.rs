@@ -953,9 +953,10 @@ pub fn generate(
     }
 
     // Apply peephole optimizations
+    let target = emitter.target;
     let asm = emitter.finish();
     let lines = peephole::parse_assembly(&asm);
-    let optimized = peephole::optimize(&lines, &volatile);
+    let optimized = peephole::optimize(&lines, &volatile, target);
     let final_asm = peephole::lines_to_string(&optimized);
 
     Ok((final_asm, section_alloc))
