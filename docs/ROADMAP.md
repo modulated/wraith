@@ -74,20 +74,19 @@ or faster code for programs that already compile.
 ### 65C02 instruction selection
 
 The `--cpu 65c02` (default) / `--cpu 6502` switch and the `TargetCpu` plumbing
-exist. The CMOS path currently emits only the Rockwell bit ops (`SMB`/`RMB`).
-Still to gate on the target:
+exist, and the assembler encodes the full WDC 65C02 base set. The CMOS path
+already emits: the Rockwell `SMB`/`RMB` (single-bit set/clear); `STZ` for
+reset-time zeroing; `PHX`/`PHY`/`PLX`/`PLY` in the interrupt prologue/epilogue;
+accumulator `INC A`/`DEC A` (a flag-liveness-guarded fold of `CLC; ADC #$01` /
+`SEC; SBC #$01`); and `JMP (abs,X)` for match jump-table dispatch (no zero-page
+vector). Still to do:
 
-- **`JMP (addr,X)`** — indexed-indirect jump. Match dispatch
-  (`generate_match_jump_table`) loads the target through a zero-page vector; on a
-  65C02 this is one instruction and needs no zero-page pair.
-- **`STZ addr`** — store zero without disturbing A. Currently `LDA #$00; STA addr`,
-  common in the reset handler that zeroes every mutable `static`.
-- **`BRA rel`** — unconditional relative branch: 2 bytes against 3 for `JMP` within
-  −128..+127. Every loop back-edge and match-arm exit is a candidate.
-- **`PHX`/`PLX`, `PHY`/`PLY`** — currently `TXA; PHA` / `PLA; TAX`, which also
-  destroys A. The interrupt prologue/epilogue in `codegen/item.rs` do exactly this.
-- **`INC A` / `DEC A`** — currently `CLC; ADC #$01` / `SEC; SBC #$01`.
-- **`TSB`/`TRB addr`** — test-and-set/reset bits without a mask in A.
+- **`BRA rel`** — unconditional relative branch: 2 bytes against 3 for `JMP`
+  within −128..+127. Awkward because the length depends on range, which is not
+  known until placement, so it interacts with function-size measurement rather
+  than being a straight substitution.
+- **`TSB`/`TRB addr`** — test-and-set/reset bits without a mask in A. No obvious
+  codegen site yet; would pair with a "test then set" idiom.
 
 ### Branch optimization intelligence
 
