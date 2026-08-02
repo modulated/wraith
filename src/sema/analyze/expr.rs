@@ -1509,17 +1509,20 @@ impl SemanticAnalyzer {
             return Ok(Type::Primitive(PrimitiveType::Bool));
         }
 
-        // A mutation writes back, so the target must be a plain, assignable
-        // variable (a local, a static, or a writable addr register). Field or
-        // index targets are a later extension.
-        let Expr::Variable(root) = &object.node else {
+        // A mutation writes back, so the target must be assignable: a plain
+        // variable, a static, a writable addr register, or a field/array-element
+        // chain rooted at one of those. Its lvalue root is what has to be
+        // mutable. `lvalue_root` returns None where the chain passes through a
+        // pointer or a by-reference parameter — codegen cannot reach those with
+        // a static-address read-modify-write yet.
+        let Some(root) = self.lvalue_root(object).cloned() else {
             return Err(SemaError::Custom {
-                message: "a bit mutation needs a plain variable target, e.g. `x.set_bit(3)`"
+                message: "a bit mutation cannot go through a pointer yet; read the byte, \
+                          modify it, and write it back"
                     .to_string(),
                 span: object.span,
             });
         };
-        let root = root.clone();
         if let Some(info) = self.table.lookup(&root) {
             if info.kind == SymbolKind::Constant {
                 return Err(SemaError::Custom {

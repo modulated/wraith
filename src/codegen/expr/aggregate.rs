@@ -754,7 +754,7 @@ pub(crate) fn emit_array_struct_field_indexed(
 /// index. Returns None for by-reference parameters, runtime indices, or
 /// non-static forms. Generalizes resolve_static_struct_lvalue to non-struct
 /// field types (e.g. an array-of-struct field, needed for `a.b[i].c`).
-fn resolve_static_addr(
+pub(crate) fn resolve_static_addr(
     expr: &Spanned<crate::ast::Expr>,
     info: &ProgramInfo,
 ) -> Option<(StaticBase, crate::sema::types::Type)> {

@@ -38,13 +38,17 @@ material to be rewritten here rather than as working examples.
 
 Single-bit access ships (`x.bit(n)`, `x.set_bit(n)`, `x.clear_bit(n)`,
 `x.toggle_bit(n)`, constant bit index; lowered to `SMB`/`RMB` on the 65C02, an
-`ORA`/`AND` read-modify-write otherwise). Remaining:
+`ORA`/`AND` read-modify-write otherwise), including on struct-field and
+constant-index array-element targets that resolve to a fixed address
+(`DEV.ctrl.set_bit(3)`, `t[1].flags.clear_bit(0)`). Remaining:
 
 - **Bit-range slice** `flags.bits[7:4]` — extract/insert a contiguous field.
 - **`BBR`/`BBS` fusion** — fold `if x.bit(n)` into a single bit-test-branch on the
   65C02. The assembler already recognizes the mnemonics; codegen does not emit
   them yet.
-- **`SMB`/`RMB` on field/index targets** — currently a plain variable only.
+- **Bit mutation through a pointer or a runtime index** — `p.field.set_bit(n)`
+  and `arr[i].flags.set_bit(n)` are rejected with a clear error. They need an
+  indirect (`(zp),Y`) read-modify-write, where `SMB`/`RMB` do not apply.
 
 ### Const attributes (consider later)
 

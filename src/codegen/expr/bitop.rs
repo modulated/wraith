@@ -12,7 +12,7 @@ use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 use crate::sema::table::{SymbolKind, SymbolLocation};
 
-use super::generate_expr;
+use super::{StaticBase, generate_expr, resolve_static_addr};
 
 /// Where the byte holding the target bit lives, and how to address it.
 enum ByteLoc {
@@ -58,39 +58,9 @@ pub(super) fn generate_bitop(
         return Ok(());
     }
 
-    // A mutation. Resolve the target byte's location.
-    let Expr::Variable(name) = &object.node else {
-        return Err(CodegenError::UnsupportedOperation(
-            "bit mutation target must be a plain variable".to_string(),
-        ));
-    };
-    let sym = info
-        .resolved_symbols
-        .get(&object.span)
-        .or_else(|| info.table.lookup(name))
-        .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
-
-    let loc = match sym.location {
-        SymbolLocation::ZeroPage(addr) => ByteLoc::Zp(addr + byte_off as u8),
-        SymbolLocation::Absolute(addr) => {
-            if sym.kind == SymbolKind::Address {
-                // A byte MMIO register: address it by name (byte_off is 0).
-                ByteLoc::Sym(name.clone())
-            } else {
-                ByteLoc::Abs(addr + byte_off)
-            }
-        }
-        SymbolLocation::FrameOffset(_) => {
-            return Err(CodegenError::Internal(
-                "unresolved FrameOffset reached bit-op codegen".to_string(),
-            ));
-        }
-        SymbolLocation::None => {
-            return Err(CodegenError::UnsupportedOperation(
-                "bit mutation target has no storage".to_string(),
-            ));
-        }
-    };
+    // A mutation. Resolve the target byte's location and a name for comments.
+    let loc = resolve_bit_target(object, byte_off, info)?;
+    let name = render_target(object);
 
     // 65C02 fast path: a zero-page set/clear is a single instruction that leaves
     // the registers untouched.
@@ -141,6 +111,78 @@ pub(super) fn generate_bitop(
     store(&loc, emitter);
     emitter.invalidate_registers();
     Ok(())
+}
+
+/// Resolve the byte holding the target bit for a *mutation*.
+///
+/// A plain variable comes straight from its symbol (and an `addr` register keeps
+/// its symbolic name). A field or array element is resolved to a fixed address
+/// through the shared static-lvalue walk — the same one `p.field` codegen uses —
+/// so `FLAGS.enable.set_bit(3)` and `T[2].mode.clear_bit(1)` land on the right
+/// byte and still lower to `SMB`/`RMB` when it sits in zero page.
+///
+/// A pointer/parameter target (indirect) and a runtime array index are not
+/// reachable this way yet; both surface as a clear error rather than a wrong
+/// address.
+fn resolve_bit_target(
+    object: &Spanned<Expr>,
+    byte_off: u16,
+    info: &ProgramInfo,
+) -> Result<ByteLoc, CodegenError> {
+    if let Expr::Variable(name) = &object.node {
+        let sym = info
+            .resolved_symbols
+            .get(&object.span)
+            .or_else(|| info.table.lookup(name))
+            .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
+        return match sym.location {
+            SymbolLocation::ZeroPage(addr) => Ok(ByteLoc::Zp(addr + byte_off as u8)),
+            SymbolLocation::Absolute(addr) => {
+                if sym.kind == SymbolKind::Address {
+                    // A byte MMIO register: address it by name (byte_off is 0).
+                    Ok(ByteLoc::Sym(name.clone()))
+                } else {
+                    Ok(ByteLoc::Abs(addr + byte_off))
+                }
+            }
+            SymbolLocation::FrameOffset(_) => Err(CodegenError::Internal(
+                "unresolved FrameOffset reached bit-op codegen".to_string(),
+            )),
+            SymbolLocation::None => Err(CodegenError::UnsupportedOperation(
+                "bit mutation target has no storage".to_string(),
+            )),
+        };
+    }
+
+    match resolve_static_addr(object, info) {
+        Some((StaticBase::Addr(base), _)) => {
+            let byte = base.wrapping_add(byte_off);
+            Ok(if byte < 0x100 {
+                ByteLoc::Zp(byte as u8)
+            } else {
+                ByteLoc::Abs(byte)
+            })
+        }
+        Some((StaticBase::Label(..), _)) => Err(CodegenError::UnsupportedOperation(
+            "cannot modify a bit of constant (ROM) data".to_string(),
+        )),
+        None => Err(CodegenError::UnsupportedOperation(
+            "a bit mutation target must be a variable, static, or a field/element at a fixed \
+             address; a pointer target or a runtime index is not supported yet"
+                .to_string(),
+        )),
+    }
+}
+
+/// A readable name for the target, for the emitted comment only.
+fn render_target(object: &Spanned<Expr>) -> String {
+    match &object.node {
+        Expr::Variable(n) => n.clone(),
+        Expr::Field { object, field } => format!("{}.{}", render_target(object), field.node),
+        Expr::Index { object, .. } => format!("{}[..]", render_target(object)),
+        Expr::Paren(inner) => render_target(inner),
+        _ => "target".to_string(),
+    }
 }
 
 fn load(loc: &ByteLoc, emitter: &mut Emitter) {

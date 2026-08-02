@@ -197,3 +197,153 @@ fn setting_a_bit_of_a_const_is_rejected() {
         other => panic!("expected a sema error, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mutations on field and array-element targets
+// ---------------------------------------------------------------------------
+
+fn expect_error(src: &str) -> String {
+    use crate::common::harness::compile;
+    match compile(src) {
+        CompileResult::SemaError(e) | CompileResult::CodegenError(e) => e,
+        other => panic!("expected a compile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_and_clear_a_bit_of_a_local_struct_field() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { mode: u8, flags: u8 }
+        #[reset]
+        fn main() {
+            let c: Ctrl = Ctrl { mode: 0, flags: 0b0000_0001 };
+            c.flags.set_bit(3);
+            c.flags.clear_bit(0);
+            R0 = c.flags;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0b0000_1000);
+}
+
+#[test]
+fn a_local_struct_field_bit_set_lowers_to_smb_on_cmos() {
+    // A local struct lives in a zero-page frame, so the field byte is a single
+    // SMB on the 65C02.
+    let asm = compile_success_with_target(
+        r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        #[reset]
+        fn main() { let c: Ctrl = Ctrl { flags: 0 }; c.flags.set_bit(3); R0 = c.flags; loop {} }
+    "#,
+        TargetCpu::Cmos65C02,
+    );
+    assert!(asm.contains("SMB3"), "expected SMB3:\n{asm}");
+}
+
+#[test]
+fn set_a_bit_of_a_static_struct_field() {
+    // A static lives in BSS, so this is an absolute read-modify-write.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        static DEV: Ctrl = Ctrl { flags: 0 };
+        #[reset]
+        fn main() { DEV.flags.set_bit(5); R0 = DEV.flags; loop {} }
+    "#);
+    assert_eq!(e.mem(0x0900), 0b0010_0000);
+}
+
+#[test]
+fn set_a_bit_of_a_constant_index_array_element_field() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Ctrl { flags: u8 }
+        #[reset]
+        fn main() {
+            let t: [Ctrl; 3] = [ Ctrl { flags: 0 }, Ctrl { flags: 0 }, Ctrl { flags: 0 } ];
+            t[1].flags.set_bit(2);
+            R0 = t[1].flags;
+            R1 = t[0].flags;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (0b0000_0100, 0),
+        "only element 1 changed"
+    );
+}
+
+#[test]
+fn set_the_high_bit_of_a_u16_field() {
+    // The bit index selects the byte: bit 15 is the high byte.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Reg { value: u16 }
+        #[reset]
+        fn main() {
+            let r: Reg = Reg { value: 0x0001 };
+            r.value.set_bit(15);
+            R0 = r.value.low; R1 = r.value.high;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x01, 0x80));
+}
+
+#[test]
+fn a_bit_mutation_through_a_pointer_is_rejected() {
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        fn f(c: &Ctrl) { c.flags.set_bit(3); }
+        #[reset]
+        fn main() { let c: Ctrl = Ctrl { flags: 0 }; f(&c); R0 = c.flags; loop {} }
+    "#,
+    );
+    assert!(err.contains("pointer"), "{err}");
+}
+
+#[test]
+fn a_bit_mutation_of_a_const_array_element_is_rejected() {
+    // A const lives in ROM, so a bit write to one of its elements would be a
+    // silent no-op on real hardware. (A struct can't be `const` at all — only a
+    // const array reaches this path.)
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        const LUT: [u8; 4] = [1, 2, 3, 4];
+        #[reset]
+        fn main() { LUT[0].set_bit(3); R0 = 0; loop {} }
+    "#,
+    );
+    assert!(err.contains("ROM"), "{err}");
+}
+
+#[test]
+fn a_bit_mutation_with_a_runtime_index_is_rejected() {
+    let err = expect_error(
+        r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        #[reset]
+        fn main() {
+            let t: [Ctrl; 3] = [ Ctrl { flags: 0 }, Ctrl { flags: 0 }, Ctrl { flags: 0 } ];
+            let i: u8 = 1;
+            t[i].flags.set_bit(2);
+            R0 = 0;
+            loop {}
+        }
+    "#,
+    );
+    assert!(
+        err.contains("fixed address") || err.contains("runtime index"),
+        "{err}"
+    );
+}

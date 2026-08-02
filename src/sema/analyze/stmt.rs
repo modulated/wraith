@@ -542,7 +542,7 @@ impl SemanticAnalyzer {
     /// Returns None in those cases, leaving the write unconstrained. Nothing is
     /// lost by that: the check exists to catch a `const` root, and a `const` is
     /// never a parameter.
-    fn lvalue_root<'a>(&self, expr: &'a Spanned<Expr>) -> Option<&'a String> {
+    pub(super) fn lvalue_root<'a>(&self, expr: &'a Spanned<Expr>) -> Option<&'a String> {
         let mut cur = expr;
         loop {
             match &cur.node {
