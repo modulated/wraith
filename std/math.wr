@@ -361,6 +361,120 @@ pub fn srand(seed: u16) {
 }
 
 // ============================================================================
+// Pseudo-random number generator (32-bit xorshift)
+// ============================================================================
+//
+// Marsaglia's xorshift32 with the (13, 17, 5) triple: full period 2^32 - 1 over
+// any nonzero seed, and noticeably better quality than the 16-bit LFSR above at
+// the cost of a wider state and more work per draw. The language has no 32-bit
+// integer, so the state is four bytes at zero page $E8-$EB (little-endian,
+// reserved for this generator in the compiler memory map) and the draws are
+// exposed as u8/u16. It self-seeds to a fixed nonzero constant on first use, so
+// xrand()/xrand16() work without an explicit xsrand(); call xsrand() for a
+// chosen sequence.
+//
+// $D0-$D3 are used as a scratch copy of the state inside each advance. That band
+// is the stdlib math working storage (mul16/div16); it is dead here because
+// these routines call nothing, and the copy is not live past the asm block.
+
+/// Advance the xorshift32 generator and return the low 16 bits of the new state.
+pub fn xrand16() -> u16 {
+    asm {
+        // Self-seed on first use: a zero state would stay zero forever.
+        "LDA $E8",
+        "ORA $E9",
+        "ORA $EA",
+        "ORA $EB",
+        "BNE xs_have",
+        "LDA #$91",       // seed = $2545F491 (nonzero)
+        "STA $E8",
+        "LDA #$F4",
+        "STA $E9",
+        "LDA #$45",
+        "STA $EA",
+        "LDA #$25",
+        "STA $EB",
+        "xs_have:",
+        // x ^= x << 13
+        "LDA $E8", "STA $D0",
+        "LDA $E9", "STA $D1",
+        "LDA $EA", "STA $D2",
+        "LDA $EB", "STA $D3",
+        "LDX #13",
+        "xs_shl13:",
+        "ASL $D0", "ROL $D1", "ROL $D2", "ROL $D3",
+        "DEX",
+        "BNE xs_shl13",
+        "LDA $E8", "EOR $D0", "STA $E8",
+        "LDA $E9", "EOR $D1", "STA $E9",
+        "LDA $EA", "EOR $D2", "STA $EA",
+        "LDA $EB", "EOR $D3", "STA $EB",
+        // x ^= x >> 17
+        "LDA $E8", "STA $D0",
+        "LDA $E9", "STA $D1",
+        "LDA $EA", "STA $D2",
+        "LDA $EB", "STA $D3",
+        "LDX #17",
+        "xs_shr17:",
+        "LSR $D3", "ROR $D2", "ROR $D1", "ROR $D0",
+        "DEX",
+        "BNE xs_shr17",
+        "LDA $E8", "EOR $D0", "STA $E8",
+        "LDA $E9", "EOR $D1", "STA $E9",
+        "LDA $EA", "EOR $D2", "STA $EA",
+        "LDA $EB", "EOR $D3", "STA $EB",
+        // x ^= x << 5
+        "LDA $E8", "STA $D0",
+        "LDA $E9", "STA $D1",
+        "LDA $EA", "STA $D2",
+        "LDA $EB", "STA $D3",
+        "LDX #5",
+        "xs_shl5:",
+        "ASL $D0", "ROL $D1", "ROL $D2", "ROL $D3",
+        "DEX",
+        "BNE xs_shl5",
+        "LDA $E8", "EOR $D0", "STA $E8",
+        "LDA $E9", "EOR $D1", "STA $E9",
+        "LDA $EA", "EOR $D2", "STA $EA",
+        "LDA $EB", "EOR $D3", "STA $EB",
+        // Return the low 16 bits: low -> A, high -> Y.
+        "LDA $E8",
+        "LDY $E9",
+    }
+}
+
+/// Advance the xorshift32 generator and return the next pseudo-random byte.
+pub fn xrand() -> u8 {
+    // xrand16 leaves the low byte in A; truncating the u16 keeps it.
+    return xrand16() as u8;
+}
+
+/// Seed the xorshift32 generator with a full 32-bit state, given as two halves
+/// (`hi:lo`). An all-zero seed is replaced with 1, since xorshift32 is stuck at
+/// zero.
+pub fn xsrand(lo: u16, hi: u16) {
+    asm {
+        "LDA {lo}",
+        "STA $E8",
+        "LDA {lo}+1",
+        "STA $E9",
+        "LDA {hi}",
+        "STA $EA",
+        "LDA {hi}+1",
+        "STA $EB",
+        // state == 0? (OR all four bytes together)
+        "LDA $E8",
+        "ORA $E9",
+        "ORA $EA",
+        "ORA $EB",
+        "BNE xsrand_done",
+        "LDA #$01",
+        "STA $E8",
+        "xsrand_done:",
+    }
+}
+
+// ============================================================================
 // 16-bit Arithmetic Operations
 // ============================================================================
 

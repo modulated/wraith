@@ -129,6 +129,14 @@ Mathematical operations, all NMOS 6502-legal.
 
 #### Pseudo-Random Numbers
 
--   `rand() -> u8` - Next pseudo-random byte
--   `rand16() -> u16` - Next pseudo-random 16-bit value
--   `srand(seed: u16)` - Seed the generator
+A fast 16-bit LFSR and a higher-quality 32-bit xorshift. Both self-seed to a
+fixed nonzero constant on first use, so the `rand`/`xrand` calls work without an
+explicit seed; seed them for a chosen sequence.
+
+-   `rand() -> u8` - Next pseudo-random byte (16-bit Galois LFSR)
+-   `rand16() -> u16` - Next pseudo-random 16-bit value (LFSR)
+-   `srand(seed: u16)` - Seed the LFSR generator
+-   `xrand() -> u8` - Next pseudo-random byte (32-bit xorshift)
+-   `xrand16() -> u16` - Low 16 bits of the next xorshift state
+-   `xsrand(lo: u16, hi: u16)` - Seed the xorshift generator with a full 32-bit
+    state given as two halves (`hi:lo`)
