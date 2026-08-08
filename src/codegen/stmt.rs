@@ -1688,6 +1688,18 @@ fn generate_index_assignment(
         )
     });
 
+    // A runtime index into a fixed-size array whose scaled offset would exceed
+    // the 8-bit index register silently wraps (`ASL` drops its carry; `base,Y`
+    // reaches only base+255) — the same store-side hole the read path guards.
+    if let Type::Array(elem_ty, len) = object_type {
+        crate::codegen::expr::check_runtime_index_range(
+            crate::codegen::expr::type_byte_size(elem_ty, info),
+            *len,
+            index,
+            info,
+        )?;
+    }
+
     // Step 2: Evaluate the value expression
     emitter.emit_comment("Evaluate value to assign");
     generate_expr(value, emitter, info, string_collector)?;

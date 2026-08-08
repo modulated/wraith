@@ -309,3 +309,54 @@ fn a_wild_store_into_rom_fails_loudly_on_the_emulator() {
         }
     "#);
 }
+
+// ---------------------------------------------------------------------------
+// Runtime index range: the 8-bit index register caps runtime-indexable arrays
+// ---------------------------------------------------------------------------
+
+fn index_error(src: &str) -> String {
+    match compile(src) {
+        CompileResult::SemaError(e) | CompileResult::CodegenError(e) => e,
+        other => panic!("expected a compile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_runtime_index_into_a_large_two_byte_array_is_rejected() {
+    // [u16; 200] scaled by a runtime index overflows the 8-bit index register
+    // (offset 2*i wraps past 255); this used to read the wrong element silently.
+    let e = index_error(
+        r#"
+        const LO: addr = 0x0900;
+        static T: [u16; 200] = [0 as u16; 200];
+        #[reset]
+        fn main() { let i: u8 = 150; let r: u16 = T[i]; LO = r.low; loop {} }
+        "#,
+    );
+    assert!(e.contains("too large to index"), "{e}");
+}
+
+#[test]
+fn a_runtime_indexed_store_into_a_large_two_byte_array_is_rejected() {
+    let e = index_error(
+        r#"
+        static T: [u16; 200] = [0 as u16; 200];
+        #[reset]
+        fn main() { let i: u8 = 100; T[i] = 5 as u16; loop {} }
+        "#,
+    );
+    assert!(e.contains("too large to index"), "{e}");
+}
+
+#[test]
+fn a_runtime_index_into_a_128_element_two_byte_array_is_allowed() {
+    // 128 elements -> max offset 2*127 = 254, still within the 8-bit index.
+    let _asm = compile_success(
+        r#"
+        const LO: addr = 0x0900;
+        static T: [u16; 128] = [0 as u16; 128];
+        #[reset]
+        fn main() { let i: u8 = 100; let r: u16 = T[i]; LO = r.low; loop {} }
+        "#,
+    );
+}

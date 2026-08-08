@@ -32,6 +32,36 @@ pub(crate) fn type_byte_size(ty: &crate::sema::types::Type, info: &ProgramInfo) 
     }
 }
 
+/// Reject a *runtime* index into an array whose largest byte offset would
+/// exceed the 8-bit index register.
+///
+/// Indexed addressing (`base,Y` / `(zp),Y`) reaches at most `base+255`, and the
+/// pre-index `ASL` that scales a two-byte element drops its carry — so a runtime
+/// index into, say, `[u16; 200]` silently reads the wrong element. A
+/// compile-time-constant index is exempt: it is a fixed access whose offset is
+/// known, not scaled through the 8-bit register at runtime.
+pub(crate) fn check_runtime_index_range(
+    elem_size: usize,
+    len: usize,
+    index: &Spanned<Expr>,
+    info: &ProgramInfo,
+) -> Result<(), CodegenError> {
+    let max_offset = len.saturating_sub(1).saturating_mul(elem_size);
+    if max_offset > 0xFF
+        && crate::sema::const_eval::eval_const_expr(index).is_err()
+        && !info.folded_constants.contains_key(&index.span)
+    {
+        let max_elems = if elem_size == 0 { len } else { 256 / elem_size };
+        return Err(CodegenError::UnsupportedOperation(format!(
+            "array of {len} elements of {elem_size} bytes is too large to index by a \
+             runtime value: the scaled offset would exceed the 8-bit index register \
+             (at most {max_elems} elements are runtime-indexable). Use a \
+             compile-time-constant index or a smaller array."
+        )));
+    }
+    Ok(())
+}
+
 /// Load a value through a zero-page pointer at `ptr`, `offset` bytes in.
 ///
 /// `LDY #offset / LDA (ptr),Y`, plus the `PHA/INY/LDA/TAY/PLA` dance for a
@@ -92,6 +122,14 @@ fn emit_indexed_load(
                 | Type::Pointer(..)
         )
     );
+
+    // A fixed-size array whose scaled offset would exceed the 8-bit index is
+    // not runtime-indexable (a local array is frame-bounded well under this, but
+    // the invariant holds wherever this path is reached). Slices and pointers
+    // carry no length, so there is nothing to check.
+    if let Some(Type::Array(elem, len)) = info.resolved_types.get(&object.span) {
+        check_runtime_index_range(type_byte_size(elem, info), *len, index, info)?;
+    }
 
     // Index expression -> A.
     generate_expr(index, emitter, info, string_collector)?;
@@ -226,6 +264,9 @@ pub(super) fn generate_index(
                             | crate::sema::types::Type::Pointer(..)
                     )
                 );
+                if let crate::sema::types::Type::Array(elem, len) = &sym.ty {
+                    check_runtime_index_range(type_byte_size(elem, info), *len, index, info)?;
+                }
                 generate_expr(index, emitter, info, string_collector)?;
                 if is_multibyte {
                     emitter.emit_inst("ASL", "A"); // scale index x2 for u16 elements
