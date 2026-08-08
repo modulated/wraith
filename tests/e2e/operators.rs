@@ -453,3 +453,21 @@ fn a_prefix_operator_binds_tighter_than_a_cast() {
         "#[reset]\nfn main() { let x: u8 = 5; let a: u16 = &x as u16; let n: i16 = -x as i16; loop {} }",
     );
 }
+
+#[test]
+fn u16_bitwise_ops_combine_both_bytes() {
+    // Regression: u16 &/|/^ only combined the low byte, leaving the high byte
+    // of the result equal to the left operand's high byte.
+    assert_eq!(
+        eval_u16("let a: u16 = 0x0001; LO = (a | 0x8000).low; HI = (a | 0x8000).high;"),
+        0x8001
+    );
+    assert_eq!(
+        eval_u16("let a: u16 = 0xFFFF; LO = (a & 0x0F0F).low; HI = (a & 0x0F0F).high;"),
+        0x0F0F
+    );
+    assert_eq!(
+        eval_u16("let a: u16 = 0xFF00; LO = (a ^ 0x0FF0).low; HI = (a ^ 0x0FF0).high;"),
+        0xF0F0
+    );
+}

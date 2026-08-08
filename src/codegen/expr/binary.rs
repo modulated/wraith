@@ -548,14 +548,29 @@ pub(super) fn generate_binary(
             // Arithmetic modifies A, invalidate register tracking
             emitter.mark_a_unknown();
         }
-        crate::ast::BinaryOp::BitAnd => {
-            emitter.emit_inst("AND", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-        }
-        crate::ast::BinaryOp::BitOr => {
-            emitter.emit_inst("ORA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-        }
-        crate::ast::BinaryOp::BitXor => {
-            emitter.emit_inst("EOR", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+        crate::ast::BinaryOp::BitAnd
+        | crate::ast::BinaryOp::BitOr
+        | crate::ast::BinaryOp::BitXor => {
+            // Left is in A:Y (low:high), right in temp:temp+1. A `u16` bitwise op
+            // must combine *both* bytes — combining only the low byte (`A op
+            // temp`) left the high byte untouched, so e.g. `w | 0x8000` was a
+            // no-op on the high byte.
+            let mnem = match op {
+                crate::ast::BinaryOp::BitAnd => "AND",
+                crate::ast::BinaryOp::BitOr => "ORA",
+                crate::ast::BinaryOp::BitXor => "EOR",
+                _ => unreachable!(),
+            };
+            let temp = emitter.memory_layout.temp_reg();
+            emitter.emit_inst(mnem, &format!("${:02X}", temp)); // low byte
+            if is_u16 {
+                emitter.emit_inst("PHA", ""); // save low result
+                emitter.emit_inst("TYA", ""); // A = high byte
+                emitter.emit_inst(mnem, &format!("${:02X}", temp + 1)); // high byte
+                emitter.emit_inst("TAY", ""); // Y = high result
+                emitter.emit_inst("PLA", ""); // A = low result
+            }
+            emitter.mark_a_unknown();
         }
         crate::ast::BinaryOp::Shl => {
             generate_shift_left(emitter, is_u16)?;
