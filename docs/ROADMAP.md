@@ -254,11 +254,11 @@ error-recovery-codegen feature.
   `aggregate.rs` is false — runtime enum construction leaks pool bytes
   program-wide); `is_primary_free`, `TempAllocStats`,
   `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
-- **`-x as i16` precedence** parses as `(-x) as i16`; Rust/C parse `-(x as i16)`.
-  Align or document.
 - **Small diagnostic/CLI nits.** The string-limit error says 256 but the limit is
-  255; `-true` type-checks as bool; `1_000` lexes as `1` + `_000`; `-v` is
-  `--version`; `--help` writes to stderr.
+  255; `-true` type-checks as bool; `-v` is `--version`; `--help` writes to stderr.
+  (`-x as i16` already parses as `(-x) as i16`, matching Rust — unary binds
+  tighter than `as`; `1_000` already lexes as `1000`. Both locked in
+  `tests/e2e/operators.rs`.)
 - **Match-arm binding slots.** Each arm allocates fresh frame slots; siblings could
   share (cf. `loop_bound_free`).
 - **Test isolation.** `tests/visibility_errors.rs` writes fixed filenames into the
