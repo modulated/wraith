@@ -1527,19 +1527,15 @@ impl SemanticAnalyzer {
             return Ok(Type::Primitive(PrimitiveType::Bool));
         }
 
-        // A mutation writes back, so the target must be assignable: a plain
-        // variable, a static, a writable addr register, or a field/array-element
-        // chain rooted at one of those. Its lvalue root is what has to be
-        // mutable. `lvalue_root` returns None where the chain passes through a
-        // pointer or a by-reference parameter — codegen cannot reach those with
-        // a static-address read-modify-write yet.
+        // A mutation writes back, so the target must be assignable. When the
+        // chain is rooted at a named lvalue (a variable, static, or addr
+        // register), that root is what has to be mutable. `lvalue_root` returns
+        // None where the chain passes through a pointer or a by-reference
+        // parameter — a mutation through a pointer is always to mutable memory
+        // (`&` is rejected on a `const` or an `addr`), so it needs no root check
+        // and codegen reaches it with an indirect read-modify-write.
         let Some(root) = self.lvalue_root(object).cloned() else {
-            return Err(SemaError::Custom {
-                message: "a bit mutation cannot go through a pointer yet; read the byte, \
-                          modify it, and write it back"
-                    .to_string(),
-                span: object.span,
-            });
+            return Ok(Type::Void);
         };
         if let Some(info) = self.table.lookup(&root) {
             if info.kind == SymbolKind::Constant {

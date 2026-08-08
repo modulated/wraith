@@ -40,14 +40,13 @@ Single-bit access ships (`x.bit(n)`, `x.set_bit(n)`, `x.clear_bit(n)`,
 `x.toggle_bit(n)`, constant bit index; lowered to `SMB`/`RMB` on the 65C02, an
 `ORA`/`AND` read-modify-write otherwise), including on struct-field and
 constant-index array-element targets that resolve to a fixed address
-(`DEV.ctrl.set_bit(3)`, `t[1].flags.clear_bit(0)`). `if x.bit(n)` / `if !x.bit(n)`
-on a zero-page byte fold into a single `BBSn`/`BBRn` bit-test-branch on the 65C02.
-Remaining:
+(`DEV.ctrl.set_bit(3)`, `t[1].flags.clear_bit(0)`), and through a pointer
+(`p.field.set_bit(n)`) or a runtime index (`t[i].flags.set_bit(n)`), which
+desugar to an indirect `object = object <op> mask` read-modify-write.
+`if x.bit(n)` / `if !x.bit(n)` on a zero-page byte fold into a single
+`BBSn`/`BBRn` bit-test-branch on the 65C02. Remaining:
 
 - **Bit-range slice** `flags.bits[7:4]` — extract/insert a contiguous field.
-- **Bit mutation through a pointer or a runtime index** — `p.field.set_bit(n)`
-  and `arr[i].flags.set_bit(n)` are rejected with a clear error. They need an
-  indirect (`(zp),Y`) read-modify-write, where `SMB`/`RMB` do not apply.
 
 ### Const attributes (consider later)
 

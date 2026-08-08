@@ -22,6 +22,17 @@ enum ByteLoc {
     Sym(String),
 }
 
+/// How a mutation reaches its target byte.
+enum BitTarget {
+    /// A byte at a known address — lowers to `SMB`/`RMB` or a direct
+    /// read-modify-write.
+    Fixed(ByteLoc),
+    /// The address is only known at run time — through a pointer (`p.field`) or a
+    /// runtime array index (`t[i].flags`). Reached with an indirect
+    /// read-modify-write, emitted by desugaring to `object = object <op> mask`.
+    Indirect,
+}
+
 pub(super) fn generate_bitop(
     object: &Spanned<Expr>,
     kind: BitOpKind,
@@ -59,7 +70,16 @@ pub(super) fn generate_bitop(
     }
 
     // A mutation. Resolve the target byte's location and a name for comments.
-    let loc = resolve_bit_target(object, byte_off, info)?;
+    let loc = match resolve_bit_target(object, byte_off, info)? {
+        BitTarget::Fixed(loc) => loc,
+        // Through a pointer or a runtime index: the address is a runtime value,
+        // so there is no `SMB`/`RMB` or absolute read-modify-write. Desugar to
+        // `object = object <op> mask`, which rides the indirect `(zp),Y`
+        // field/element assignment paths (and handles a u16 target for free).
+        BitTarget::Indirect => {
+            return emit_indirect_bit_rmw(object, kind, n, emitter, info, string_collector);
+        }
+    };
     let name = render_target(object);
 
     // 65C02 fast path: a zero-page set/clear is a single instruction that leaves
@@ -135,9 +155,68 @@ pub(crate) fn bit_test_zp(
     let byte_off: u16 = (n / 8) as u16;
     let bit_in_byte = n % 8;
     match resolve_bit_target(object, byte_off, info) {
-        Ok(ByteLoc::Zp(addr)) => Some((addr, bit_in_byte)),
+        Ok(BitTarget::Fixed(ByteLoc::Zp(addr))) => Some((addr, bit_in_byte)),
         _ => None,
     }
+}
+
+/// Emit an indirect bit mutation as `object = object <op> mask`.
+///
+/// The desugar reuses the field/element assignment codegen — which already
+/// stages a pointer in zero page and does the `(zp),Y` read and write — so a
+/// bit through a pointer or a runtime index works without a bespoke addressing
+/// path here, and a u16 target lands the mask on the right byte via the u16
+/// assignment. This mirrors how `x |= mask` already lowers.
+fn emit_indirect_bit_rmw(
+    object: &Spanned<Expr>,
+    kind: BitOpKind,
+    n: u8,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    use crate::ast::{BinaryOp, Literal};
+    use crate::sema::types::Type;
+
+    let is_16 = matches!(
+        info.resolved_types.get(&object.span),
+        Some(Type::Primitive(
+            crate::ast::PrimitiveType::U16
+                | crate::ast::PrimitiveType::I16
+                | crate::ast::PrimitiveType::B16
+        ))
+    );
+    let width_mask: i64 = if is_16 { 0xFFFF } else { 0xFF };
+    let bit: i64 = 1 << n;
+    let (op, mask) = match kind {
+        BitOpKind::Set => (BinaryOp::BitOr, bit),
+        BitOpKind::Clear => (BinaryOp::BitAnd, !bit & width_mask),
+        BitOpKind::Toggle => (BinaryOp::BitXor, bit),
+        BitOpKind::Get => unreachable!("Get is not a mutation"),
+    };
+
+    // Synthesize `object <op> mask` and assign it back to `object`. The nodes
+    // reuse `object.span`, which already carries `object`'s resolved type, so
+    // the binary/assignment codegen sees the correct width; the synthetic mask
+    // literal needs no entry of its own.
+    let sp = object.span;
+    let mask_expr = Spanned::new(Expr::Literal(Literal::Integer(mask)), sp);
+    let rhs = Spanned::new(
+        Expr::Binary {
+            left: Box::new(object.clone()),
+            op,
+            right: Box::new(mask_expr),
+        },
+        sp,
+    );
+    let assign = Spanned::new(
+        crate::ast::Stmt::Assign {
+            target: object.clone(),
+            value: rhs,
+        },
+        sp,
+    );
+    crate::codegen::stmt::generate_stmt(&assign, emitter, info, string_collector)
 }
 
 /// Resolve the byte holding the target bit for a *mutation*.
@@ -148,14 +227,13 @@ pub(crate) fn bit_test_zp(
 /// so `FLAGS.enable.set_bit(3)` and `T[2].mode.clear_bit(1)` land on the right
 /// byte and still lower to `SMB`/`RMB` when it sits in zero page.
 ///
-/// A pointer/parameter target (indirect) and a runtime array index are not
-/// reachable this way yet; both surface as a clear error rather than a wrong
-/// address.
+/// A pointer/parameter target and a runtime array index resolve to `Indirect`;
+/// the caller reaches them with a read-modify-write rather than a fixed address.
 fn resolve_bit_target(
     object: &Spanned<Expr>,
     byte_off: u16,
     info: &ProgramInfo,
-) -> Result<ByteLoc, CodegenError> {
+) -> Result<BitTarget, CodegenError> {
     if let Expr::Variable(name) = &object.node {
         let sym = info
             .resolved_symbols
@@ -163,13 +241,15 @@ fn resolve_bit_target(
             .or_else(|| info.table.lookup(name))
             .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
         return match sym.location {
-            SymbolLocation::ZeroPage(addr) => Ok(ByteLoc::Zp(addr + byte_off as u8)),
+            SymbolLocation::ZeroPage(addr) => {
+                Ok(BitTarget::Fixed(ByteLoc::Zp(addr + byte_off as u8)))
+            }
             SymbolLocation::Absolute(addr) => {
                 if sym.kind == SymbolKind::Address {
                     // A byte MMIO register: address it by name (byte_off is 0).
-                    Ok(ByteLoc::Sym(name.clone()))
+                    Ok(BitTarget::Fixed(ByteLoc::Sym(name.clone())))
                 } else {
-                    Ok(ByteLoc::Abs(addr + byte_off))
+                    Ok(BitTarget::Fixed(ByteLoc::Abs(addr + byte_off)))
                 }
             }
             SymbolLocation::FrameOffset(_) => Err(CodegenError::Internal(
@@ -184,20 +264,19 @@ fn resolve_bit_target(
     match resolve_static_addr(object, info) {
         Some((StaticBase::Addr(base), _)) => {
             let byte = base.wrapping_add(byte_off);
-            Ok(if byte < 0x100 {
+            Ok(BitTarget::Fixed(if byte < 0x100 {
                 ByteLoc::Zp(byte as u8)
             } else {
                 ByteLoc::Abs(byte)
-            })
+            }))
         }
+        // A `const` array element lives in ROM; sema already rejects a mutation
+        // rooted at a `const`, so this is a defensive error, not a normal path.
         Some((StaticBase::Label(..), _)) => Err(CodegenError::UnsupportedOperation(
             "cannot modify a bit of constant (ROM) data".to_string(),
         )),
-        None => Err(CodegenError::UnsupportedOperation(
-            "a bit mutation target must be a variable, static, or a field/element at a fixed \
-             address; a pointer target or a runtime index is not supported yet"
-                .to_string(),
-        )),
+        // Through a pointer or a runtime index — the address is a runtime value.
+        None => Ok(BitTarget::Indirect),
     }
 }
 

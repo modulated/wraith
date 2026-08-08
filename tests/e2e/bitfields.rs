@@ -405,20 +405,6 @@ fn set_the_high_bit_of_a_u16_field() {
 }
 
 #[test]
-fn a_bit_mutation_through_a_pointer_is_rejected() {
-    let err = expect_error(
-        r#"
-        const R0: addr = 0x0900;
-        struct Ctrl { flags: u8 }
-        fn f(c: &Ctrl) { c.flags.set_bit(3); }
-        #[reset]
-        fn main() { let c: Ctrl = Ctrl { flags: 0 }; f(&c); R0 = c.flags; loop {} }
-    "#,
-    );
-    assert!(err.contains("pointer"), "{err}");
-}
-
-#[test]
 fn a_bit_mutation_of_a_const_array_element_is_rejected() {
     // A const lives in ROM, so a bit write to one of its elements would be a
     // silent no-op on real hardware. (A struct can't be `const` at all — only a
@@ -434,24 +420,92 @@ fn a_bit_mutation_of_a_const_array_element_is_rejected() {
     assert!(err.contains("ROM"), "{err}");
 }
 
+// ---------------------------------------------------------------------------
+// Indirect bit mutation: through a pointer, and through a runtime index
+// ---------------------------------------------------------------------------
+
 #[test]
-fn a_bit_mutation_with_a_runtime_index_is_rejected() {
-    let err = expect_error(
-        r#"
+fn set_a_bit_through_a_pointer() {
+    // A driver handed `&Ctrl` sets a control bit on the caller's struct.
+    let mut e = run(r#"
         const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        fn enable(c: &Ctrl) { c.flags.set_bit(3); }
+        #[reset]
+        fn main() {
+            let dev: Ctrl = Ctrl { flags: 0b0000_0001 };
+            enable(&dev);
+            R0 = dev.flags;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 0b0000_1001, "bit 3 set through the pointer");
+}
+
+#[test]
+fn clear_and_toggle_a_bit_through_a_pointer() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        struct Ctrl { flags: u8 }
+        fn tweak(c: &Ctrl) { c.flags.clear_bit(0); c.flags.toggle_bit(7); }
+        #[reset]
+        fn main() {
+            let dev: Ctrl = Ctrl { flags: 0b0000_0001 };
+            tweak(&dev);
+            R0 = dev.flags;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0900),
+        0b1000_0000,
+        "bit 0 cleared, bit 7 toggled on"
+    );
+}
+
+#[test]
+fn set_a_bit_of_a_runtime_indexed_element() {
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
         struct Ctrl { flags: u8 }
         #[reset]
         fn main() {
-            let t: [Ctrl; 3] = [ Ctrl { flags: 0 }, Ctrl { flags: 0 }, Ctrl { flags: 0 } ];
-            let i: u8 = 1;
-            t[i].flags.set_bit(2);
-            R0 = 0;
+            let t: [Ctrl; 4] = [ Ctrl{flags:0}, Ctrl{flags:0}, Ctrl{flags:0}, Ctrl{flags:0} ];
+            let i: u8 = 2;
+            t[i].flags.set_bit(1);
+            R0 = t[2].flags;   // the one changed
+            R1 = t[0].flags;   // untouched
             loop {}
         }
-    "#,
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (0b0000_0010, 0),
+        "only element 2 changed"
     );
-    assert!(
-        err.contains("fixed address") || err.contains("runtime index"),
-        "{err}"
+}
+
+#[test]
+fn set_a_high_bit_of_a_u16_field_through_a_pointer() {
+    // The u16 target routes through the u16 assignment, landing bit 15 in the
+    // high byte.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
+        struct Reg { value: u16 }
+        fn hoist(r: &Reg) { r.value.set_bit(15); }
+        #[reset]
+        fn main() {
+            let reg: Reg = Reg { value: 0x0001 };
+            hoist(&reg);
+            R0 = reg.value.low; R1 = reg.value.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (0x01, 0x80),
+        "bit 15 set through the pointer"
     );
 }
