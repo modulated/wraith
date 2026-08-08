@@ -235,6 +235,42 @@ impl SemanticAnalyzer {
     }
 
     /// Compute the size of a type, looking up named types in the registry
+    /// Does `ty` contain the struct `target` *by value* — directly, through an
+    /// array element, or through another by-value struct field?
+    ///
+    /// A pointer, slice, string, or function pointer breaks the chain (it is a
+    /// fixed 2/4-byte handle, not inline storage), so `&target` is fine. Used to
+    /// reject a struct that contains itself, which has no finite size and whose
+    /// self-field otherwise silently sizes to 0 (the name is not yet registered,
+    /// so `type_size` returns its unknown-type fallback).
+    pub(super) fn type_reaches(
+        &self,
+        ty: &Type,
+        target: &str,
+        visited: &mut HashSet<String>,
+    ) -> bool {
+        match ty {
+            Type::Named(inner) => {
+                if inner == target {
+                    return true;
+                }
+                if visited.insert(inner.clone())
+                    && let Some(def) = self.type_registry.structs.get(inner)
+                {
+                    return def
+                        .fields
+                        .iter()
+                        .any(|f| self.type_reaches(&f.ty, target, visited));
+                }
+                false
+            }
+            Type::Array(element, _) => self.type_reaches(element, target, visited),
+            // Pointer/Slice/String/Function are fixed-size handles; primitives
+            // and Void cannot contain a struct.
+            _ => false,
+        }
+    }
+
     pub(super) fn type_size(&self, ty: &Type) -> usize {
         match ty {
             Type::Primitive(prim) => prim.size_bytes(),

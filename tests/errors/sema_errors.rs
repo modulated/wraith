@@ -616,3 +616,60 @@ fn b16_for_loop_counter_rejected() {
         "b16",
     );
 }
+
+// ============================================================================
+// Recursive (by-value) struct layout
+// ============================================================================
+
+#[test]
+fn a_directly_self_referential_struct_is_rejected() {
+    // `struct Node { next: Node }` has no finite size; the self-field used to
+    // silently size to 0 (the name is not yet registered), laying the struct
+    // out too small.
+    assert_error_contains(
+        r#"
+        struct Node { next: Node, v: u8 }
+        #[reset]
+        fn main() { loop {} }
+        "#,
+        "contains itself by value",
+    );
+}
+
+#[test]
+fn a_struct_holding_an_array_of_itself_is_rejected() {
+    assert_error_contains(
+        r#"
+        struct Tree { kids: [Tree; 3] }
+        #[reset]
+        fn main() { loop {} }
+        "#,
+        "contains itself by value",
+    );
+}
+
+#[test]
+fn a_mutually_recursive_by_value_struct_cycle_is_rejected() {
+    assert_error_contains(
+        r#"
+        struct A { b: B }
+        struct B { a: A }
+        #[reset]
+        fn main() { loop {} }
+        "#,
+        "contains itself by value",
+    );
+}
+
+#[test]
+fn a_pointer_field_breaks_the_recursion() {
+    // The intended shape for a linked node: the pointer is a fixed 2-byte
+    // handle, so the struct has a finite size.
+    let _asm = compile_success(
+        r#"
+        struct Node { next: &Node, v: u8 }
+        #[reset]
+        fn main() { let n: Node = Node { next: 0 as &Node, v: 1 }; loop {} }
+        "#,
+    );
+}

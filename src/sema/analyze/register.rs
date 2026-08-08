@@ -1101,6 +1101,24 @@ impl SemanticAnalyzer {
             offset += size;
         }
 
+        // A struct that contains itself by value (directly, through an array, or
+        // through a cycle of by-value struct fields) has no finite size; the
+        // self-field silently sized to 0 above, laying the struct out too small.
+        // A pointer field (`&Node`) breaks the cycle and is the intended shape.
+        let mut visited = HashSet::default();
+        if fields
+            .iter()
+            .any(|f| self.type_reaches(&f.ty, &name, &mut visited))
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "struct '{name}' contains itself by value, which has no finite size; \
+                     store it behind a pointer (`&{name}`) instead"
+                ),
+                span: struct_def.name.span,
+            });
+        }
+
         let struct_info = StructDef {
             name: name.clone(),
             fields,
