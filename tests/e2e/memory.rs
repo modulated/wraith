@@ -360,3 +360,24 @@ fn a_runtime_index_into_a_128_element_two_byte_array_is_allowed() {
         "#,
     );
 }
+
+#[test]
+fn a_constant_index_into_a_u16_array_reads_the_element() {
+    // Regression: the outer `let r: u16` expected-type leaked onto the constant
+    // index `3`, typing it u16 and failing the u8/i8 index gate ("type
+    // mismatch"). A runtime index (a u8 variable) kept its own type and worked,
+    // so only constant indices into a two-byte array were broken.
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        static T: [u16; 8] = [0 as u16; 8];
+        #[reset]
+        fn main() {
+            T[3] = 0xBEEF as u16;
+            let r: u16 = T[3];
+            LO = r.low; HI = r.high;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0xEF, 0xBE));
+}

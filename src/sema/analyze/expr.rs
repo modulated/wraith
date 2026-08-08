@@ -1358,6 +1358,14 @@ impl SemanticAnalyzer {
         index: &Spanned<Expr>,
         _span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
+        // The index is a byte offset (u8/i8) and the object is an aggregate —
+        // neither should inherit the *element* type the surrounding context
+        // expects. Without clearing it, `let r: u16 = arr[3]` pushes u16 onto
+        // the literal `3`, which then fails the u8/i8 index gate below. (A
+        // variable index keeps its own declared type, so only constant indices
+        // hit this.)
+        let saved_expected = self.expected_type.take();
+
         // Type check the index expression (should be integer)
         let index_ty = self.check_expr(index)?;
         if !matches!(
@@ -1373,6 +1381,7 @@ impl SemanticAnalyzer {
 
         // Type check the object being indexed
         let object_ty = self.check_expr(object)?;
+        self.expected_type = saved_expected;
 
         // Extract element type from array or string type
         match &object_ty {
