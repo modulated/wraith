@@ -57,11 +57,26 @@ impl Config {
         Ok(config)
     }
 
-    /// Check a user-supplied config for the mistakes that used to panic deep
-    /// in the compiler: a section with `end < start` (the size subtraction
-    /// underflows) and a `default_section` naming a section that doesn't
-    /// exist.
+    /// Reject a malformed memory map before it can miscompile silently.
+    ///
+    /// Placement trusts these sections completely — an overlap or a section laid
+    /// over a hardware-fixed region does not error at placement time, it just
+    /// puts two things at one address (or over the reset vector). Catch the
+    /// structural mistakes here, at load, where the message can name the file.
     pub fn validate(&self) -> Result<(), String> {
+        // Regions the 6502 fixes in hardware; nothing a section reserves may sit
+        // on top of them. (The compiler's zero-page scratch is not configurable,
+        // so a section straying into the zero page is always a mistake too.)
+        const RESERVED: [(&str, u16, u16); 3] = [
+            ("the zero page", 0x0000, 0x00FF),
+            ("the hardware stack", 0x0100, 0x01FF),
+            ("the interrupt vector table", 0xFFFA, 0xFFFF),
+        ];
+        // The software stack is a fixed one-page (256-byte) block addressed
+        // `base,X` off an 8-bit pointer, so a smaller `STACK` section is silently
+        // overrun. Kept in sync with `codegen::memory_layout::SOFTWARE_STACK_BYTES`.
+        const SOFTWARE_STACK_BYTES: usize = 256;
+
         for s in &self.sections {
             if s.end < s.start {
                 return Err(format!(
@@ -69,7 +84,51 @@ impl Config {
                     s.name, s.end, s.start
                 ));
             }
+            for (what, lo, hi) in RESERVED {
+                if s.start <= hi && s.end >= lo {
+                    return Err(format!(
+                        "section '{}' (${:04X}-${:04X}) overlaps {} (${:04X}-${:04X}), which is \
+                         fixed by the hardware and cannot be reused",
+                        s.name, s.start, s.end, what, lo, hi
+                    ));
+                }
+            }
         }
+
+        // Duplicate names: `get_section` returns the first match, so a second
+        // definition is silently ignored — the addresses you think you set are
+        // not the ones in effect.
+        for (i, a) in self.sections.iter().enumerate() {
+            if self.sections[..i].iter().any(|b| b.name == a.name) {
+                return Err(format!("section '{}' is defined more than once", a.name));
+            }
+        }
+
+        // Overlapping sections: two things placed at one address.
+        for (i, a) in self.sections.iter().enumerate() {
+            for b in &self.sections[..i] {
+                if a.start <= b.end && a.end >= b.start {
+                    return Err(format!(
+                        "sections '{}' (${:04X}-${:04X}) and '{}' (${:04X}-${:04X}) overlap",
+                        a.name, a.start, a.end, b.name, b.start, b.end
+                    ));
+                }
+            }
+        }
+
+        if let Some(stack) = self.sections.iter().find(|s| s.name == "STACK")
+            && stack.size() < SOFTWARE_STACK_BYTES
+        {
+            return Err(format!(
+                "STACK section (${:04X}-${:04X}, {} bytes) is smaller than the fixed \
+                 {}-byte software stack, which would overrun it",
+                stack.start,
+                stack.end,
+                stack.size(),
+                SOFTWARE_STACK_BYTES
+            ));
+        }
+
         if !self.sections.iter().any(|s| s.name == self.default_section) {
             return Err(format!(
                 "default_section '{}' is not one of the configured sections: [{}]",
@@ -84,7 +143,28 @@ impl Config {
         Ok(())
     }
 
-    /// Try to load from wraith.toml in current directory, fall back to defaults
+    /// Validate a `wraith.toml` in the working directory, if one exists.
+    ///
+    /// Returns `Ok(())` when the file is absent (the default map is used) or
+    /// present and well-formed, and `Err(message)` when it is present but
+    /// malformed. The CLI calls this up front so a broken config fails fast with
+    /// a clear message, rather than being silently swallowed by
+    /// [`load_or_default`](Self::load_or_default) and replaced with the default
+    /// map — which would compile against a memory layout the user never asked
+    /// for.
+    pub fn check_project_file() -> Result<(), String> {
+        if Path::new("wraith.toml").exists() {
+            Self::from_file("wraith.toml").map(|_| ())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Try to load from wraith.toml in current directory, fall back to defaults.
+    ///
+    /// A malformed file falls back to the default map here; call
+    /// [`check_project_file`](Self::check_project_file) first to surface the
+    /// error instead of silently defaulting.
     pub fn load_or_default() -> Self {
         // Try to load from wraith.toml in current directory
         if let Ok(config) = Self::from_file("wraith.toml") {
@@ -246,5 +326,90 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.contains("ROM"), "{err}");
+    }
+
+    #[test]
+    fn the_default_config_validates() {
+        Config::default_6502()
+            .validate()
+            .expect("default must be valid");
+    }
+
+    fn cfg(sections: Vec<Section>) -> Config {
+        Config {
+            sections,
+            default_section: "CODE".to_string(),
+        }
+    }
+
+    #[test]
+    fn duplicate_section_names_are_rejected() {
+        // get_section() returns the first, so a second CODE is silently dropped.
+        let err = cfg(vec![
+            Section::new("CODE", 0x8000, 0x9FFF),
+            Section::new("CODE", 0xA000, 0xBFFF),
+        ])
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn overlapping_sections_are_rejected() {
+        let err = cfg(vec![
+            Section::new("CODE", 0x8000, 0xBFFF),
+            Section::new("DATA", 0xB000, 0xCFFF), // overlaps CODE at $B000-$BFFF
+        ])
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("overlap"), "{err}");
+    }
+
+    #[test]
+    fn a_section_over_the_vector_table_is_rejected() {
+        // A CODE section running to $FFFF would sit on the reset/IRQ vectors.
+        let err = cfg(vec![Section::new("CODE", 0x8000, 0xFFFF)])
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("vector"), "{err}");
+    }
+
+    #[test]
+    fn a_section_in_the_zero_page_is_rejected() {
+        let err = cfg(vec![Section::new("CODE", 0x0000, 0x00FF)])
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("zero page"), "{err}");
+    }
+
+    #[test]
+    fn a_section_over_the_hardware_stack_is_rejected() {
+        let err = cfg(vec![Section::new("CODE", 0x0100, 0x01FF)])
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("hardware stack"), "{err}");
+    }
+
+    #[test]
+    fn an_undersized_stack_section_is_rejected() {
+        // The software stack is a fixed 256-byte page; a 128-byte section is
+        // silently overrun.
+        let err = cfg(vec![
+            Section::new("CODE", 0x8000, 0xBFFF),
+            Section::new("STACK", 0x0200, 0x027F), // 128 bytes
+        ])
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("software stack"), "{err}");
+    }
+
+    #[test]
+    fn a_full_page_stack_section_is_accepted() {
+        cfg(vec![
+            Section::new("CODE", 0x8000, 0xBFFF),
+            Section::new("STACK", 0x0200, 0x02FF), // exactly 256 bytes
+        ])
+        .validate()
+        .expect("a 256-byte STACK is valid");
     }
 }

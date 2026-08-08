@@ -144,6 +144,15 @@ fn main() {
         resolved.to_path_buf()
     });
 
+    // Validate the project's memory map before doing any work. A malformed
+    // wraith.toml is otherwise silently swallowed and replaced with the default
+    // map, so the compile would succeed against a layout the user never asked
+    // for.
+    if let Err(e) = wraith::config::Config::check_project_file() {
+        eprintln!("{}Error:{} malformed wraith.toml: {}", RED, RESET, e);
+        std::process::exit(1);
+    }
+
     // Read source file
     println!("{}{:>12}{} {}", YELLOW, "Compiling", RESET, file);
     let source = match fs::read_to_string(&file) {
