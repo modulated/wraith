@@ -79,12 +79,17 @@ fn emit_indexed_load(
         }
         _ => None,
     };
+    // Two-byte elements (u16/i16/b16, a function pointer, or a `&T`) are scaled
+    // by the element width and loaded into A:Y — including a local
+    // function-pointer table (`let handlers = [d0, d1]; handlers[i](x)`).
     let is_multibyte = matches!(
         elem_ty,
         Some(
             Type::Primitive(PrimitiveType::U16)
                 | Type::Primitive(PrimitiveType::I16)
                 | Type::Primitive(PrimitiveType::B16)
+                | Type::Function(..)
+                | Type::Pointer(..)
         )
     );
 
@@ -204,6 +209,11 @@ pub(super) fn generate_index(
                             crate::sema::table::SymbolLocation::Absolute(_)
                         )));
             if is_global_inline_array {
+                // A two-byte element (u16/i16/b16, a function pointer, or a
+                // `&T`) is indexed with a scaled offset and loaded into A:Y.
+                // Function pointers are what a `static` driver-dispatch table
+                // (`handlers[i](x)`) is built from; omitting them here loaded a
+                // single byte and left the index in Y as the "high byte".
                 let is_multibyte = matches!(
                     &sym.ty,
                     crate::sema::types::Type::Array(elem, _) if matches!(
@@ -212,7 +222,8 @@ pub(super) fn generate_index(
                             crate::ast::PrimitiveType::U16
                                 | crate::ast::PrimitiveType::I16
                                 | crate::ast::PrimitiveType::B16
-                        )
+                        ) | crate::sema::types::Type::Function(..)
+                            | crate::sema::types::Type::Pointer(..)
                     )
                 );
                 generate_expr(index, emitter, info, string_collector)?;

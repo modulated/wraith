@@ -1,8 +1,9 @@
 //! Runtime (emulator) tests for indirect calls through computed callees:
-//! function pointers held in struct fields (a device vtable) and in variables.
-//! This is the shape a generic bus/device protocol takes — a driver is a struct
-//! of function pointers, and code calls `dev.read(reg)` without knowing which
-//! driver it holds.
+//! function pointers held in struct fields (a device vtable), in variables, and
+//! in arrays indexed by a runtime value (a driver-dispatch table). This is the
+//! shape a generic bus/device protocol takes — a driver is a struct or table of
+//! function pointers, and code calls `dev.read(reg)` or `handlers[i](x)` without
+//! knowing which driver it holds.
 
 use crate::common::exec::run;
 
@@ -148,4 +149,95 @@ fn a_u16_left_operand_survives_an_indirect_call() {
         }
     "#);
     assert_eq!(e.mem16(0x0900), 212);
+}
+
+// ---------------------------------------------------------------------------
+// Function-pointer *tables*: an array of drivers dispatched by a runtime index
+// (a syscall / device-by-number table). Distinct from the struct-field vtable
+// above — the callee is `table[i]`, so the indexed load must scale by the
+// element size and load both bytes of the pointer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn static_function_pointer_table_dispatches_by_index() {
+    let pick = |i: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0900;
+            fn d0(a: u8) -> u8 {{ return a + 1; }}
+            fn d1(a: u8) -> u8 {{ return a + 2; }}
+            fn d2(a: u8) -> u8 {{ return a + 3; }}
+            static TABLE: [fn(u8) -> u8; 3] = [d0, d1, d2];
+            #[reset]
+            fn main() {{ let i: u8 = {i}; OUT = TABLE[i](10); loop {{}} }}
+        "#
+        );
+        run(&src).mem(0x0900)
+    };
+    // Before the fix each of these returned 0 (single-byte load, index left in
+    // Y as the pretend high byte).
+    assert_eq!((pick(0), pick(1), pick(2)), (11, 12, 13));
+}
+
+#[test]
+fn const_function_pointer_table_dispatches_by_index() {
+    // A const table lives in ROM; the same indexed dispatch must work.
+    let pick = |i: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0900;
+            fn d0(a: u8) -> u8 {{ return a + 100; }}
+            fn d1(a: u8) -> u8 {{ return a + 200; }}
+            const TABLE: [fn(u8) -> u8; 2] = [d0, d1];
+            #[reset]
+            fn main() {{ let i: u8 = {i}; OUT = TABLE[i](1); loop {{}} }}
+        "#
+        );
+        run(&src).mem(0x0900)
+    };
+    assert_eq!((pick(0), pick(1)), (101, 201));
+}
+
+#[test]
+fn function_pointer_table_installed_at_runtime() {
+    // Device registration: a table entry is rebound at runtime, then dispatched
+    // through without knowing which driver is installed.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        fn uart_read(r: u8) -> u8 { return r + 10; }
+        fn via_read(r: u8) -> u8 { return r + 20; }
+        static TABLE: [fn(u8) -> u8; 2] = [uart_read, uart_read];
+        #[reset]
+        fn main() {
+            TABLE[1] = via_read;      // register a driver into slot 1
+            let i: u8 = 1;
+            OUT = TABLE[i](5);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 25, "slot 1 now dispatches to via_read");
+}
+
+#[test]
+fn local_function_pointer_table_dispatches_by_index() {
+    // A dispatch table built in a local (RAM frame), not a static.
+    let pick = |i: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0900;
+            fn d0(a: u8) -> u8 {{ return a + 1; }}
+            fn d1(a: u8) -> u8 {{ return a + 2; }}
+            fn d2(a: u8) -> u8 {{ return a + 3; }}
+            #[reset]
+            fn main() {{
+                let table: [fn(u8) -> u8; 3] = [d0, d1, d2];
+                let i: u8 = {i};
+                OUT = table[i](10);
+                loop {{}}
+            }}
+        "#
+        );
+        run(&src).mem(0x0900)
+    };
+    assert_eq!((pick(0), pick(1), pick(2)), (11, 12, 13));
 }

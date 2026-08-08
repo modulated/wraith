@@ -1675,10 +1675,16 @@ fn generate_index_assignment(
         }
     };
 
+    // A two-byte element (u16/i16/b16, a function pointer, or a `&T`) is scaled
+    // by the element width and stored as a low/high pair. Function pointers are
+    // what installing a driver into a table (`handlers[i] = drv`) writes, so
+    // omitting them here stored only the low byte at an unscaled offset.
     let is_multibyte = element_type.is_some_and(|t| {
         matches!(
             t,
             Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+                | Type::Function(..)
+                | Type::Pointer(..)
         )
     });
 
@@ -3245,14 +3251,49 @@ fn generate_local_array_init(
         }
     }
 
+    /// Store a function's 2-byte code address at `addr + offset`. The address is
+    /// a label the assembler resolves, so it is written as `#<f` / `#>f` rather
+    /// than a known constant — this is how a *local* function-pointer table
+    /// (`let handlers = [d0, d1]`) is initialized.
+    fn store_fn_elem(emitter: &mut Emitter, addr: u16, offset: u16, label: &str) {
+        emitter.emit_inst("LDA", &format!("#<{label}"));
+        emitter.emit_inst("STA", &format!("${:04X}", addr + offset));
+        emitter.emit_inst("LDA", &format!("#>{label}"));
+        emitter.emit_inst("STA", &format!("${:04X}", addr + offset + 1));
+    }
+
+    // The function name an element refers to, if it is a bare function pointer.
+    let fn_label_of = |e: &Spanned<Expr>| -> Option<String> {
+        use crate::sema::table::SymbolKind;
+        use crate::sema::types::Type;
+        if let Expr::Variable(n) = &e.node {
+            let sym = info
+                .resolved_symbols
+                .get(&e.span)
+                .or_else(|| info.table.lookup(n))?;
+            if sym.kind == SymbolKind::Function || matches!(sym.ty, Type::Function(..)) {
+                return Some(n.clone());
+            }
+        }
+        None
+    };
+
     match &init.node {
         // `[v; n]` — every element the same. A byte-wide zero (or any uniform
         // byte) over a block worth looping for becomes a loop; otherwise the
         // stores are cheaper than the loop overhead.
         Expr::Literal(Literal::ArrayFill { value, count }) => {
+            // A `[f; n]` fill of one function name — every slot the same driver.
+            if let Some(label) = fn_label_of(value) {
+                for i in 0..*count as u16 {
+                    store_fn_elem(emitter, addr, i * elem_size as u16, &label);
+                }
+                emitter.invalidate_registers();
+                return Ok(());
+            }
             let v = const_of(value).ok_or_else(|| {
                 CodegenError::UnsupportedOperation(
-                    "array fill value must be a constant expression".to_string(),
+                    "array fill value must be a constant expression or a function name".to_string(),
                 )
             })?;
             let uniform_byte = (0..elem_size).all(|b| ((v >> (8 * b)) & 0xFF) == (v & 0xFF));
@@ -3283,12 +3324,16 @@ fn generate_local_array_init(
         // `[a, b, c]` — element by element.
         Expr::Literal(Literal::Array(elements)) => {
             for (i, e) in elements.iter().enumerate() {
-                let v = const_of(e).ok_or_else(|| {
-                    CodegenError::UnsupportedOperation(
-                        "array elements must be constant expressions".to_string(),
-                    )
-                })?;
-                store_elem(emitter, addr, i as u16 * elem_size as u16, v, elem_size);
+                let offset = i as u16 * elem_size as u16;
+                if let Some(v) = const_of(e) {
+                    store_elem(emitter, addr, offset, v, elem_size);
+                } else if let Some(label) = fn_label_of(e) {
+                    store_fn_elem(emitter, addr, offset, &label);
+                } else {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "array elements must be constant expressions or function names".to_string(),
+                    ));
+                }
             }
         }
         _ => {
