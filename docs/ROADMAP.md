@@ -154,8 +154,10 @@ table is new.
   ` ```rust ` fragments reference peripherals/functions defined elsewhere and are
   not self-contained. Tagging more of them (after making them self-contained)
   widens the net.
-- **Error-message golden tests** for the top ~20 diagnostics, in the exact-position
-  style of `tests/e2e/import_diagnostics.rs`.
+- **Error-message golden tests** — done for 15 of the top diagnostics
+  (`tests/e2e/error_diagnostics.rs`), each pinning the `--> line:col` position, a
+  message keyword, and the shared no-`Debug`-leak/has-a-caret invariant. Add more
+  as new diagnostics land.
 
 ---
 

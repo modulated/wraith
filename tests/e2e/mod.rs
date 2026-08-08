@@ -15,6 +15,7 @@ mod dead_code;
 mod devices;
 mod enum_values;
 mod enums;
+mod error_diagnostics;
 mod execution;
 mod frames;
 mod functions;
