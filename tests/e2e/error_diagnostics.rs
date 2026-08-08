@@ -49,13 +49,50 @@ fn assert_at(err: &str, pos: &str, keyword: &str) {
 #[test]
 fn undefined_variable() {
     let e = render("#[reset]\nfn main() { let x: u8 = y; loop {} }\n");
-    assert_at(&e, "--> 2:25", "undefined symbol 'y'");
+    assert_at(&e, "--> 2:25", "cannot find `y` in this scope");
 }
 
 #[test]
 fn undefined_function() {
     let e = render("#[reset]\nfn main() { let x: u8 = nope(); loop {} }\n");
-    assert_at(&e, "--> 2:25", "undefined symbol 'nope'");
+    assert_at(&e, "--> 2:25", "cannot find `nope` in this scope");
+}
+
+#[test]
+fn undefined_variable_suggests_a_similar_name() {
+    // rustc-style "did you mean": a near typo points at the real name.
+    let e = render("#[reset]\nfn main() { let counter: u8 = 0; let x: u8 = countr; loop {} }\n");
+    assert!(
+        e.contains("a similar name is in scope: `counter`"),
+        "expected a did-you-mean hint:\n{e}"
+    );
+}
+
+#[test]
+fn wrong_argument_count_reads_naturally() {
+    // The top line is the rustc-style summary; the caret keeps the exact counts.
+    let e = render(
+        "fn add(a: u8, b: u8) -> u8 { return a; }\n#[reset]\nfn main() { let x: u8 = add(1); loop {} }\n",
+    );
+    assert!(
+        e.contains("this function takes 2 arguments but 1 was supplied"),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_actionable_help_line_accompanies_common_errors() {
+    // A const write names the fix; an out-of-range literal names the range.
+    let assign = render("const K: u8 = 5;\n#[reset]\nfn main() { K = 6; loop {} }\n");
+    assert!(
+        assign.contains("= help:") && assign.contains("`const` is fixed"),
+        "{assign}"
+    );
+    let overflow = render("const K: u8 = 256;\n#[reset]\nfn main() { loop {} }\n");
+    assert!(
+        overflow.contains("= note: `u8` holds 0 to 255"),
+        "{overflow}"
+    );
 }
 
 #[test]

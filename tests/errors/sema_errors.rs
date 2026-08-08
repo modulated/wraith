@@ -17,7 +17,7 @@ fn type_mismatch_assignment() {
             x = 300;
         }
         "#,
-        "type mismatch",
+        "mismatched types",
     );
 }
 
@@ -89,7 +89,7 @@ fn undefined_variable() {
             let x: u8 = y;
         }
         "#,
-        "undefined",
+        "cannot find",
     );
 }
 
@@ -101,7 +101,7 @@ fn undefined_function() {
             foo();
         }
         "#,
-        "undefined",
+        "cannot find",
     );
 }
 

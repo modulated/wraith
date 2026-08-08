@@ -141,6 +141,7 @@ impl SemanticAnalyzer {
                 // Look up the struct definition
                 if !self.type_registry.structs.contains_key(&name.node) {
                     return Err(SemaError::UndefinedSymbol {
+                        suggestion: self.table.closest_name(&name.node),
                         name: name.node.clone(),
                         span: name.span,
                     });
@@ -436,6 +437,7 @@ impl SemanticAnalyzer {
             info.clone()
         } else {
             return Err(SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(name),
                 name: name.to_string(),
                 span: expr.span,
             });
@@ -739,6 +741,7 @@ impl SemanticAnalyzer {
             }
         } else {
             return Err(SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(&function.node),
                 name: function.node.clone(),
                 span: function.span,
             });
@@ -874,6 +877,7 @@ impl SemanticAnalyzer {
                     Some(s) => s.clone(),
                     None => {
                         return Err(SemaError::UndefinedSymbol {
+                            suggestion: self.table.closest_name(name),
                             name: name.clone(),
                             span: operand.span,
                         });
@@ -1110,6 +1114,7 @@ impl SemanticAnalyzer {
         // Verify struct exists
         if !self.type_registry.structs.contains_key(&struct_name) {
             return Err(SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(&struct_name),
                 name: struct_name.clone(),
                 span,
             });
@@ -1178,6 +1183,7 @@ impl SemanticAnalyzer {
             .type_registry
             .get_enum(&enum_name.node)
             .ok_or_else(|| SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(&enum_name.node),
                 name: enum_name.node.clone(),
                 span: enum_name.span,
             })?;

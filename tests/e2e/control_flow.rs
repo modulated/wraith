@@ -295,7 +295,7 @@ fn match_expression_incompatible_arms_error() {
             let flag: bool = match k { 0 => true, _ => 5 };
         }
     "#,
-        "type mismatch",
+        "mismatched",
     );
 }
 
