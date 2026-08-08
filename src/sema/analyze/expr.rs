@@ -539,6 +539,15 @@ impl SemanticAnalyzer {
         // through `as u16`, which puts the address in the register pair the
         // 16-bit compare paths expect.
         if matches!(left_ty, Type::Pointer(_)) || matches!(right_ty, Type::Pointer(_)) {
+            // Equality on two pointers of the *same* type compares the
+            // addresses — the natural null check for the linked lists that
+            // `struct Node { next: &Node }` now makes expressible is
+            // `p == 0 as &Node`. Ordering and arithmetic stay rejected: a
+            // relative order between two heap-less addresses is rarely meaningful
+            // and `<`/`+` on the A:X pointer pair would miscompile.
+            if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_ty == right_ty {
+                return Ok(Type::Primitive(PrimitiveType::Bool));
+            }
             let hint = match op {
                 BinaryOp::Add | BinaryOp::Sub => {
                     "index instead, as `p[i]`, which scales by the element width"
