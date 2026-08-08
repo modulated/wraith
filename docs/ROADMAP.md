@@ -145,7 +145,8 @@ table is new.
 ## Correctness & diagnostics
 
 - **Sema-level multi-error reporting.** The parser recovers and reports multiple
-  errors; sema still stops at the first.
+  errors; sema still stops at the first. This is a structural change with a real
+  soundness risk — see the plan below before starting.
 - **Interrupt hardware-stack depth check.** Frame coloring computes what a handler
   saves, but nothing checks that a handler's own call depth fits the hardware
   stack.
@@ -158,6 +159,75 @@ table is new.
   (`tests/e2e/error_diagnostics.rs`), each pinning the `--> line:col` position, a
   message keyword, and the shared no-`Debug`-leak/has-a-caret invariant. Add more
   as new diagnostics land.
+
+### Plan: sema-level multi-error reporting
+
+Today every check in `src/sema/analyze/` returns `Result<_, SemaError>` and the
+driver (`analyze_module` → `analyze_item` → `analyze_stmt`/`check_expr`)
+`?`-propagates the first failure. The goal is to collect and report *all*
+independent errors in one pass, as the parser already does.
+
+**The load-bearing risk.** The historical defect class here is *state that
+outlived its validity* — a register belief past a label, a merge list missing a
+variant — producing silent miscompiles. Continuing analysis past an error means
+deliberately running checks over partially-invalid state. So the invariant is:
+**recover only at boundaries where the remaining work is independent of what
+failed, and never fabricate a plausible-but-wrong type that later code trusts.**
+
+**Recovery boundaries (where to catch, not `?`):**
+
+- **Item** — a bad `fn`/`struct`/`static`/`const` is recorded; the next item is
+  still analyzed. `analyze_item` and `register_item` become the coarse
+  catch points, iterating all of `source.items` instead of stopping.
+- **Statement** — within a function body, a failed `analyze_stmt` is recorded and
+  the next statement is analyzed. Sibling statements are independent; a broken
+  `let` should not hide a type error three lines down.
+- **Never mid-expression.** A subexpression whose type could not be determined
+  must *not* be guessed. Introduce a `Type::Error` (or `Type::Unknown`) sentinel:
+  a failed `check_expr` records the error, returns `Type::Error`, and every
+  operator/assignment/call check treats `Type::Error` on either side as
+  "already reported — produce `Type::Error`, emit nothing." This is what stops
+  one real error from cascading into ten bogus ones, and is the piece most likely
+  to be wrong if rushed.
+
+**Mechanism:**
+
+1. Add `errors: Vec<SemaError>` to the analyzer, mirroring the existing
+   `warnings: Vec<Warning>` field and its `.clone()` into `ProgramInfo`. Add a
+   `record(&mut self, e: SemaError)` helper (dedupe by span+message; cap at, say,
+   50 to bound pathological input).
+2. Add `Type::Error`. Make it compatible with everything in the compatibility
+   checks (so it never produces a *second* error) and make `type_size`/codegen
+   never see it — analysis must abort before codegen if `!errors.is_empty()`.
+3. Convert the two driver loops (`analyze_module`'s register and analyze passes)
+   to record-and-continue. Convert `analyze_stmt`'s block walk likewise.
+4. Change the public entry: `analyze` returns `Result<ProgramInfo, Vec<SemaError>>`
+   (or keeps `ProgramInfo` carrying `errors`, with the CLI/tests checking it).
+   The CLI renders each with `format_with_source_and_file` and exits non-zero if
+   any; a partial `ProgramInfo` is **never** handed to codegen.
+
+**Phasing (each independently green):**
+
+- *Phase 1* — plumbing only: add `errors`, `record`, `Type::Error`, and the
+  abort-before-codegen gate. Keep `?` everywhere; behavior is unchanged (still
+  one error), but the machinery exists and is tested.
+- *Phase 2* — item-level recovery: the two driver loops record-and-continue.
+  Two unrelated broken items now both report. Highest value, lowest risk.
+- *Phase 3* — statement-level recovery inside a body, guarded by `Type::Error`
+  poisoning so a bad expression doesn't cascade.
+- *Phase 4* — widen `check_expr`'s internal `?`s to record-and-poison where a
+  subexpression failure is genuinely independent (e.g. each call argument).
+
+**Testing:** a `tests/e2e/multi_error.rs` asserting that a program with N
+independent errors reports N (not 1), that a single bad expression reports
+*once* (no cascade — the key anti-goal), and that a file with any error produces
+no `.asm`. The existing single-error golden tests
+(`tests/e2e/error_diagnostics.rs`) must stay green throughout: first-error
+position and message do not change.
+
+**Explicitly out of scope:** partial code generation. If there is any error,
+the compile fails with no output. This is a diagnostics-quality change, not an
+error-recovery-codegen feature.
 
 ---
 
