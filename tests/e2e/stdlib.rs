@@ -233,7 +233,7 @@ fn divmod_returns_quotient_and_remainder() {
 #[test]
 fn rand_is_deterministic_and_varies() {
     // With a fixed seed the sequence is reproducible; consecutive draws differ
-    // (the LFSR advances) and stay in range. Emit four draws to four addresses.
+    // (the generator advances) and stay in range. Four draws to four addresses.
     let mut e = run(r#"
         import { rand, srand } from "std/math.wr";
         const R0: addr = 0x0400;
@@ -276,105 +276,46 @@ fn rand_is_deterministic_and_varies() {
 }
 
 #[test]
-fn xorshift32_matches_the_reference_for_a_known_seed() {
-    // Marsaglia xorshift32 with seed 1: x ^= x<<13 -> 0x2001; x ^= x>>17 ->
-    // 0x2001; x ^= x<<5 -> 0x00042021. The low 16 bits are 0x2021, so the
-    // first byte is 0x21 and the first 16-bit low/high are 0x21/0x20.
+fn xorshift16_matches_the_reference_for_a_known_seed() {
+    // Marsaglia xorshift16, triple (7, 9, 8), seed 1:
+    //   x ^= x << 7  -> 0x0081
+    //   x ^= x >> 9  -> 0x0081
+    //   x ^= x << 8  -> 0x8181
+    // so rand16() returns 0x8181 (low 0x81, high 0x81).
     let mut e = run(r#"
-        import { xrand16, xsrand } from "std/math.wr";
+        import { rand16, srand } from "std/math.wr";
         const LO: addr = 0x0400;
         const HI: addr = 0x0401;
         #[reset]
         fn main() {
-            xsrand(1 as u16, 0 as u16);
-            let v: u16 = xrand16();
+            srand(1 as u16);
+            let v: u16 = rand16();
             LO = v.low;
             HI = v.high;
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0400), 0x21, "low byte of xorshift32(1)");
-    assert_eq!(e.mem(0x0401), 0x20, "high byte of xorshift32(1)");
+    assert_eq!(e.mem(0x0400), 0x81, "low byte of xorshift16(1)");
+    assert_eq!(e.mem(0x0401), 0x81, "high byte of xorshift16(1)");
 }
 
 #[test]
-fn xorshift32_is_deterministic_and_varies() {
-    // A fixed seed gives a reproducible sequence; consecutive draws differ.
-    let draw = || {
-        run(r#"
-            import { xrand, xsrand } from "std/math.wr";
-            const R0: addr = 0x0400;
-            const R1: addr = 0x0401;
-            const R2: addr = 0x0402;
-            const R3: addr = 0x0403;
-            #[reset]
-            fn main() {
-                xsrand(0x1234 as u16, 0x5678 as u16);
-                R0 = xrand();
-                R1 = xrand();
-                R2 = xrand();
-                R3 = xrand();
-                loop {}
-            }
-        "#)
-    };
-    let mut a = draw();
-    let seq = [a.mem(0x0400), a.mem(0x0401), a.mem(0x0402), a.mem(0x0403)];
-    assert!(
-        !(seq[0] == seq[1] && seq[1] == seq[2] && seq[2] == seq[3]),
-        "xrand() must advance, got {:?}",
-        seq
-    );
-    // Same seed -> identical sequence.
-    let mut b = draw();
-    assert_eq!(
-        [b.mem(0x0400), b.mem(0x0401), b.mem(0x0402), b.mem(0x0403)],
-        seq,
-        "xorshift32 must be deterministic for a fixed seed"
-    );
-}
-
-#[test]
-fn xorshift32_self_seeds_without_an_explicit_seed() {
-    // Never calling xsrand still yields a varying, nonzero stream (the state
-    // self-seeds to a fixed nonzero constant on first use).
+fn xorshift16_zero_seed_is_replaced() {
+    // xorshift is stuck at zero; srand(0) must substitute a nonzero state so the
+    // generator still advances.
     let mut e = run(r#"
-        import { xrand } from "std/math.wr";
-        const R0: addr = 0x0400;
-        const R1: addr = 0x0401;
-        #[reset]
-        fn main() {
-            R0 = xrand();
-            R1 = xrand();
-            loop {}
-        }
-    "#);
-    let (r0, r1) = (e.mem(0x0400), e.mem(0x0401));
-    assert!(
-        r0 != 0 || r1 != 0,
-        "self-seeded stream must not be all zero"
-    );
-    assert_ne!(r0, r1, "consecutive self-seeded draws should differ");
-}
-
-#[test]
-fn xorshift32_zero_seed_is_replaced() {
-    // xorshift32 is stuck at zero; xsrand(0, 0) must substitute a nonzero state
-    // so the generator still advances.
-    let mut e = run(r#"
-        import { xrand16, xsrand } from "std/math.wr";
+        import { rand16, srand } from "std/math.wr";
         const LO: addr = 0x0400;
         const HI: addr = 0x0401;
         #[reset]
         fn main() {
-            xsrand(0 as u16, 0 as u16);
-            let v: u16 = xrand16();
+            srand(0 as u16);
+            let v: u16 = rand16();
             LO = v.low;
             HI = v.high;
             loop {}
         }
     "#);
-    // A stuck-at-zero generator would return 0; a replaced seed advances.
     assert!(
         e.mem(0x0400) != 0 || e.mem(0x0401) != 0,
         "zero seed must be replaced, not left stuck at zero"

@@ -19,12 +19,10 @@
 //!                      overwritten by a callee's frame.
 //! $D0-$D8 (9 bytes):   Stdlib math working storage (mul16/div16/mod16 scratch)
 //! $D9-$DC (4 bytes):   Math routine call parameters (a.lo, a.hi, b.lo, b.hi)
-//! $DD-$DE (2 bytes):   PRNG state/seed (std/math.wr rand/rand16/srand)
-//! $DF     (1 byte):    Reserved (future frame-spill region)
-//! $E0-$E7 (8 bytes):   Indirect-call argument staging (INDIRECT_ARG_BASE)
-//! $E8-$EB (4 bytes):   xorshift32 state (std/math.wr xrand/xrand16/xsrand)
-//! $EC-$ED (2 bytes):   Reserved
-//! $EE-$EF (2 bytes):   Indirect-call jump vector
+//! $DD-$DE (2 bytes):   PRNG state/seed (std/math.wr xorshift16 rand/rand16/srand)
+//! $DF-$EF (17 bytes):  Reserved (future frame-spill region), with
+//!                      $E0-$E7 indirect-call arg staging (INDIRECT_ARG_BASE)
+//!                      and $EE-$EF the indirect-call jump vector
 //! $F0-$F3 (4 bytes):   Binary op left-operand save (only when the right
 //!                      operand is call-free; see expr/binary.rs)
 //! $F4-$FE (11 bytes):  Function argument evaluation temp
