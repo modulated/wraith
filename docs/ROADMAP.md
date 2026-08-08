@@ -180,8 +180,6 @@ table is new.
   `aggregate.rs` is false — runtime enum construction leaks pool bytes
   program-wide); `is_primary_free`, `TempAllocStats`,
   `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
-- **u8 div/mod by zero** loads a never-initialized zero-page byte while the comment
-  says "leave A as-is".
 - **`-x as i16` precedence** parses as `(-x) as i16`; Rust/C parse `-(x as i16)`.
   Align or document.
 - **Small diagnostic/CLI nits.** The string-limit error says 256 but the limit is

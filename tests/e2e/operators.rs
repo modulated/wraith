@@ -412,3 +412,19 @@ fn unary_bitnot_binds_postfix_index() {
     "#);
     assert_eq!(e.mem(0x0900), 0xF0);
 }
+
+// ---------------------------------------------------------------------------
+// Division / modulo by zero is defined (0xFF), not undefined behavior
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u8_divide_by_zero_yields_a_defined_sentinel() {
+    // The zero path once fell through and loaded an uninitialized temp ("leave A
+    // as-is"); it now yields 0xFF, matching div16's 0xFFFF all-ones sentinel.
+    assert_eq!(eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a / b;"), 0xFF);
+}
+
+#[test]
+fn u8_modulo_by_zero_yields_a_defined_sentinel() {
+    assert_eq!(eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a % b;"), 0xFF);
+}
