@@ -58,7 +58,9 @@ impl TestBus {
             ram: vec![0u8; 65536],
             irq: false,
             nmi: false,
-            rom_ranges: vec![(0x8000, 0xBFFF), (0xD000, 0xEFFF)],
+            // ROM: CODE and DATA. $E000-$EFFF is the I/O window, not ROM — a
+            // device overlay claims those addresses (see `devices`).
+            rom_ranges: vec![(0x8000, 0xBFFF), (0xD000, 0xDFFF)],
             devices: super::devices::Devices::default(),
         }
     }

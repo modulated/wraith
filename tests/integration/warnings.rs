@@ -642,7 +642,7 @@ fn no_warn_address_between_sections() {
 
 #[test]
 fn no_warn_address_after_sections() {
-    // Address above DATA section (ends at 0xEFFF)
+    // Address above DATA section (ends at 0xDFFF)
     let result = compile(
         r#"
         const HIGH_MEM: addr = 0xF000;

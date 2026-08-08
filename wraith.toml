@@ -12,8 +12,13 @@ description = "User code (16KB)"
 [[sections]]
 name = "DATA"
 start = 0xD000
-end = 0xEFFF
-description = "Constants and data (8KB)"
+end = 0xDFFF
+description = "Constants and data (4KB). Ends below $E000 so it never collides with the memory-mapped I/O window; a `const … : addr` for a device register in $E000-$EFFF is left alone."
+
+# $E000-$EFFF is the memory-mapped I/O window (UART, 6522 VIA, expansion). It is
+# deliberately NOT a compiler-managed section: device registers are declared with
+# `const NAME: addr = 0xE0xx`, and nothing else may be placed there. Keep DATA
+# below it so constant data is never laid over a device.
 
 [[sections]]
 name = "STACK"

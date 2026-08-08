@@ -450,7 +450,7 @@ fn const_array_lookup_table() {
     assert_asm_contains(&asm, "Data Section (Const Arrays)");
 
     // The array's address comes from the DATA section in wraith.toml
-    // ($D000-$EFFF), not a hardcoded one. It used to be emitted at a fixed
+    // ($D000-$DFFF), not a hardcoded one. It used to be emitted at a fixed
     // $C000 regardless of the memory map, which put it outside every
     // configured section and hid it from #[org] conflict detection.
     assert_asm_contains(&asm, ".ORG $D000");

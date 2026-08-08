@@ -3773,7 +3773,8 @@ Applied roughly in this order during compilation:
 | $0200-$02FF | Default `STACK` section — software stack (recursion frame save/restore, operand spill) |
 | $0400-$07FF | Default `BSS` section (1KB) — **RAM** for mutable globals (`static`) |
 | $8000-$BFFF | Default `CODE` section (16KB) |
-| $D000-$EFFF | Default `DATA` section (8KB) |
+| $D000-$DFFF | Default `DATA` section (4KB) |
+| $E000-$EFFF | Memory-mapped I/O window (device `addr` registers); unmanaged |
 | $FFFA-$FFFF | 6502 hardware vectors (NMI, RESET, IRQ) |
 
 Only `BSS` is written at runtime; `CODE` and `DATA` are read-only on a ROM-based

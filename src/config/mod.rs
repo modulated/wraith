@@ -100,7 +100,11 @@ impl Config {
         Self {
             sections: vec![
                 Section::new("CODE", 0x8000, 0xBFFF), // 16KB for user code
-                Section::new("DATA", 0xD000, 0xEFFF), // 8KB for constants/data
+                // 4KB for constants/data, ending below $E000 so it never
+                // collides with the memory-mapped I/O window ($E000-$EFFF, where
+                // device `addr` registers live). That window is intentionally
+                // left unmanaged — nothing but device registers may sit there.
+                Section::new("DATA", 0xD000, 0xDFFF),
                 // Compiler's software stack: one page of RAM used to save a
                 // callee's frame across a recursive call and to spill operands.
                 // Only the size (256 bytes) is fixed; the page is configurable.
