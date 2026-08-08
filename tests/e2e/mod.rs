@@ -35,6 +35,7 @@ mod pointer_casts;
 mod pointer_escape;
 mod pointer_syntax;
 mod pointers;
+mod spec_examples;
 mod statics;
 mod stdlib;
 mod strings_slices;

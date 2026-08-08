@@ -149,9 +149,11 @@ table is new.
 - **Interrupt hardware-stack depth check.** Frame coloring computes what a handler
   saves, but nothing checks that a handler's own call depth fits the hardware
   stack.
-- **Compile the spec's examples as tests.** A harness that extracts the ` ```rust `
-  blocks from `specification.md` and asserts they compile would permanently catch
-  the class of spec examples that don't.
+- **Compile the spec's examples as tests.** Done for the opt-in
+  ` ```rust,compile ` blocks (`tests/e2e/spec_examples.rs`); the remaining plain
+  ` ```rust ` fragments reference peripherals/functions defined elsewhere and are
+  not self-contained. Tagging more of them (after making them self-contained)
+  widens the net.
 - **Error-message golden tests** for the top ~20 diagnostics, in the exact-position
   style of `tests/e2e/import_diagnostics.rs`.
 
