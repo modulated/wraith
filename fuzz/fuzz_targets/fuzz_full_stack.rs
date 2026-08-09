@@ -9,11 +9,13 @@ fn main() {
                 // Parse the tokens
                 if let Ok(ast) = wraith::Parser::parse(&tokens) {
                     // Drive all of sema.
-                    if let Ok(prog_info) = wraith::sema::analyze(&ast) {
+                    if let Ok(mut prog_info) = wraith::sema::analyze(&ast) {
                         // Code gen. Target the compiler's default CPU, as the CLI does.
+                        // `generate` takes `&mut ProgramInfo` — it refines the
+                        // auto-inline decision into the metadata before placement.
                         let _ = wraith::codegen::generate(
                             &ast,
-                            &prog_info,
+                            &mut prog_info,
                             wraith::codegen::CommentVerbosity::Normal,
                             wraith::codegen::TargetCpu::default(),
                         );
