@@ -185,6 +185,7 @@ pub fn optimize(
         // by inverting branches that exceed the 127-byte limit
         // result = eliminate_branch_over_jump(&result);
         result = eliminate_redundant_ldx_zero(&result);
+        result = fold_matching_immediate_into_transfer(&result);
         // DISABLED: eliminate_clc_adc_zero / eliminate_sec_sbc_zero remove
         // `CLC; ADC #$00` / `SEC; SBC #$00`, which preserve A but DO change the
         // N/Z/C/V flags. Codegen uses `SEC; SBC #imm` (incl. #$00) for signed
@@ -929,6 +930,87 @@ fn fold_inc_dec_accumulator(lines: &[Line], target: crate::codegen::TargetCpu) -
         result.push(lines[i].clone());
         i += 1;
     }
+    result
+}
+
+/// Reuse a just-loaded accumulator immediate for the index registers:
+///
+/// ```text
+///     LDA #$00
+///     LDY #$00   →   TAY     (and LDX #imm → TAX)
+/// ```
+///
+/// `LDX`/`LDY #imm` is two bytes; `TAX`/`TAY` is one. When A already holds the
+/// same immediate, the transfer produces the identical value and the identical
+/// N/Z flags (both reflect the value moved into the index register, which equals
+/// A), so no liveness check is needed. This is the common `A:Y`/`A:X = 0` case
+/// of returning or materializing a 16-bit zero, and it fires across an
+/// intervening store (`STA $FF` between the loads leaves A untouched).
+fn fold_matching_immediate_into_transfer(lines: &[Line]) -> Vec<Line> {
+    // The immediate A is known to hold (e.g. "#$00"), or None when unknown.
+    let mut a_imm: Option<String> = None;
+    let mut result = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        if let Line::Instruction {
+            mnemonic,
+            operand,
+            comment,
+        } = line
+        {
+            // Rewrite a matching immediate index load into a transfer.
+            let transfer = match mnemonic.as_str() {
+                "LDX" => Some("TAX"),
+                "LDY" => Some("TAY"),
+                _ => None,
+            };
+            if let Some(t) = transfer
+                && operand.is_some()
+                && a_imm.as_deref() == operand.as_deref()
+            {
+                result.push(Line::Instruction {
+                    mnemonic: t.to_string(),
+                    operand: None,
+                    comment: comment.clone(),
+                });
+                // A is unchanged; TAX/TAY only write the index register.
+                continue;
+            }
+
+            // Otherwise track what A now holds. Only instructions that write A
+            // clear the tracked immediate; stores, index loads/transfers,
+            // compares and branches leave A intact.
+            match mnemonic.as_str() {
+                "LDA" => {
+                    a_imm = operand
+                        .as_deref()
+                        .filter(|op| op.starts_with('#'))
+                        .map(str::to_string);
+                }
+                "TXA" | "TYA" | "PLA" | "ADC" | "SBC" | "AND" | "ORA" | "EOR" => a_imm = None,
+                // Accumulator-form shifts and CMOS INC A / DEC A write A; the
+                // memory forms do not, but clearing conservatively only costs a
+                // missed rewrite, never correctness.
+                "ASL" | "LSR" | "ROL" | "ROR" | "INC" | "DEC"
+                    if operand.as_deref() == Some("A") =>
+                {
+                    a_imm = None;
+                }
+                // A callee owns A, and control arriving from elsewhere makes it
+                // unknown.
+                "JSR" | "RTS" | "RTI" | "JMP" | "BRK" => a_imm = None,
+                _ => {}
+            }
+            result.push(line.clone());
+        } else {
+            // A label is a possible entry point: A's value is unknown there.
+            if matches!(line, Line::Label(_)) {
+                a_imm = None;
+            }
+            result.push(line.clone());
+        }
+    }
+
     result
 }
 
@@ -1714,6 +1796,69 @@ mod tests {
         let lines = parse_assembly(asm);
         let optimized = eliminate_redundant_loads(&lines, &VolatileSymbols::default());
         assert_eq!(optimized.len(), 1);
+    }
+
+    #[test]
+    fn matching_immediate_becomes_a_transfer() {
+        // LDA #$00; LDY #$00 -> LDA #$00; TAY (and the LDX/TAX analogue).
+        let lines = parse_assembly("    LDA #$00\n    LDY #$00\n    LDX #$00\n");
+        let out = fold_matching_immediate_into_transfer(&lines);
+        let mnems: Vec<&str> = out
+            .iter()
+            .filter_map(|l| match l {
+                Line::Instruction { mnemonic, .. } => Some(mnemonic.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mnems, ["LDA", "TAY", "TAX"]);
+    }
+
+    #[test]
+    fn matching_immediate_folds_across_a_store() {
+        // A store does not touch A, so the tracked immediate survives it.
+        let lines = parse_assembly("    LDA #$00\n    STA $FF\n    LDY #$00\n");
+        let out = fold_matching_immediate_into_transfer(&lines);
+        assert!(
+            matches!(&out[2], Line::Instruction { mnemonic, operand, .. } if mnemonic == "TAY" && operand.is_none()),
+            "expected TAY, got {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn a_different_immediate_is_not_folded() {
+        // LDY #$01 while A holds #$00 must stay a real load.
+        let lines = parse_assembly("    LDA #$00\n    LDY #$01\n");
+        let out = fold_matching_immediate_into_transfer(&lines);
+        assert!(
+            matches!(&out[1], Line::Instruction { mnemonic, .. } if mnemonic == "LDY"),
+            "a mismatched immediate must not fold: {:?}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn a_write_to_a_between_blocks_the_fold() {
+        // ADC rewrites A, so its value is no longer the loaded immediate.
+        let lines = parse_assembly("    LDA #$00\n    ADC $30\n    LDY #$00\n");
+        let out = fold_matching_immediate_into_transfer(&lines);
+        assert!(
+            matches!(&out[2], Line::Instruction { mnemonic, .. } if mnemonic == "LDY"),
+            "a value load after an A-write must not fold: {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn a_label_resets_the_tracked_immediate() {
+        // Control can enter at a label with a different A, so don't fold past it.
+        let lines = parse_assembly("    LDA #$00\ntarget:\n    LDY #$00\n");
+        let out = fold_matching_immediate_into_transfer(&lines);
+        assert!(
+            out.iter()
+                .any(|l| matches!(l, Line::Instruction { mnemonic, .. } if mnemonic == "LDY")),
+            "the load after a label must be preserved: {out:?}"
+        );
     }
 
     #[test]
