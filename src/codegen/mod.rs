@@ -1,4 +1,3 @@
-pub mod address_allocator;
 pub mod comment_utils;
 pub mod emitter;
 pub mod expr;

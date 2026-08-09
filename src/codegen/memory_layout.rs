@@ -234,16 +234,6 @@ impl TempAllocator {
         self.arg_pool = 0;
     }
 
-    /// Check if a specific address range is free in primary pool
-    pub fn is_primary_free(&self, addr: u8, size: u8) -> bool {
-        if addr < Self::PRIMARY_BASE || addr + size > Self::PRIMARY_BASE + Self::PRIMARY_SIZE {
-            return false;
-        }
-        let offset = addr - Self::PRIMARY_BASE;
-        let mask = ((1u32 << size) - 1) << offset;
-        (self.primary_pool & mask) == 0
-    }
-
     /// Internal: allocate from a bitmap pool (static to avoid borrow issues)
     fn alloc_from_pool(pool: &mut u32, base: u8, pool_size: u8, size: u8) -> Option<u8> {
         if size == 0 || size > pool_size {
@@ -272,27 +262,4 @@ impl TempAllocator {
         let mask = ((1u32 << size) - 1) << offset;
         *pool &= !mask;
     }
-
-    /// Get allocation statistics for debugging
-    pub fn stats(&self) -> TempAllocStats {
-        TempAllocStats {
-            primary_used: self.primary_pool.count_ones() as u8,
-            primary_total: Self::PRIMARY_SIZE,
-            high_used: self.high_pool.count_ones() as u8,
-            high_total: Self::HIGH_SIZE,
-            arg_used: self.arg_pool.count_ones() as u8,
-            arg_total: Self::ARG_SIZE,
-        }
-    }
-}
-
-/// Statistics about temp allocation usage
-#[derive(Debug, Clone)]
-pub struct TempAllocStats {
-    pub primary_used: u8,
-    pub primary_total: u8,
-    pub high_used: u8,
-    pub high_total: u8,
-    pub arg_used: u8,
-    pub arg_total: u8,
 }
