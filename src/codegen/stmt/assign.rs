@@ -534,9 +534,6 @@ pub(super) fn generate_field_assignment(
                     field.node, struct_name
                 ))
             })?;
-        // Function-pointer fields are 2-byte code addresses, so they must be
-        // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
-        let is_multibyte = crate::codegen::expr::is_two_byte_value(&field_info.ty);
         // Sema rejects assigning through a `const`, so a read-only base here
         // would mean a store quietly aimed at ROM.
         if base.is_read_only() {
@@ -546,11 +543,10 @@ pub(super) fn generate_field_assignment(
         }
         emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
         generate_expr(value, emitter, info, string_collector)?;
+        // Function-pointer fields are 2-byte code addresses stored as a pair like
+        // u16 — a device vtable depends on it; `store_value_pair` handles the width.
         let at = base.plus(field_info.offset as u16);
-        emitter.emit_inst("STA", &at.operand(0));
-        if is_multibyte {
-            emitter.emit_inst(store_high(&field_info.ty), &at.operand(1));
-        }
+        store_value_pair(emitter, &field_info.ty, &at.operand(0), &at.operand(1));
         return Ok(());
     }
 
@@ -639,10 +635,7 @@ pub(super) fn generate_field_assignment(
             let offset = field_info.offset;
 
             // Save value to temp
-            emitter.emit_inst("STA", "$20"); // Save low byte
-            if is_multibyte {
-                emitter.emit_inst(store_high(&field_info.ty), "$21"); // Save high byte
-            }
+            store_value_pair(emitter, &field_info.ty, "$20", "$21");
 
             // Set Y to field offset and store via indirect
             emitter.emit_inst("LDY", &format!("#${:02X}", offset));
@@ -659,17 +652,20 @@ pub(super) fn generate_field_assignment(
             // Local struct - direct access
             let field_addr = base_addr + field_info.offset as u16;
 
-            let hi = store_high(&field_info.ty);
             if field_addr < 0x100 {
-                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-                if is_multibyte {
-                    emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
-                }
+                store_value_pair(
+                    emitter,
+                    &field_info.ty,
+                    &format!("${:02X}", field_addr),
+                    &format!("${:02X}", field_addr + 1),
+                );
             } else {
-                emitter.emit_inst("STA", &format!("${:04X}", field_addr));
-                if is_multibyte {
-                    emitter.emit_inst(hi, &format!("${:04X}", field_addr + 1));
-                }
+                store_value_pair(
+                    emitter,
+                    &field_info.ty,
+                    &format!("${:04X}", field_addr),
+                    &format!("${:04X}", field_addr + 1),
+                );
             }
         }
 
@@ -695,6 +691,18 @@ fn store_high(ty: &crate::sema::types::Type) -> &'static str {
         "STX"
     } else {
         "STY"
+    }
+}
+
+/// Store a value in A (low byte) to `lo`, and — for a two-byte `ty` — its high
+/// byte (from X or Y per `high_byte_in_x`) to `hi`. `lo`/`hi` are already-formed
+/// operands, so the same store shape serves zero-page, absolute, and indirect
+/// destinations. The one place that decides a value's store width and high-byte
+/// register.
+fn store_value_pair(emitter: &mut Emitter, ty: &crate::sema::types::Type, lo: &str, hi: &str) {
+    emitter.emit_inst("STA", lo);
+    if crate::codegen::expr::is_two_byte_value(ty) {
+        emitter.emit_inst(store_high(ty), hi);
     }
 }
 
