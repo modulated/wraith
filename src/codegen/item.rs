@@ -168,6 +168,18 @@ fn generate_function(
     };
     emitter.emit_org(function_addr);
 
+    // Start each function with an empty temp pool. Temps are per-function
+    // scratch, but a few allocations are intentionally never freed within a
+    // function (runtime enum construction hands the caller a pointer into the
+    // pool), so without a per-function reset those bytes leak for the rest of
+    // the program on the single shared emitter — eventually failing a later
+    // function with a spurious "not enough temp storage". The measuring pass
+    // already starts clean (`placement::measure` builds a fresh `Emitter` per
+    // function), so this also keeps the two passes symmetric. Pool addresses are
+    // all zero-page, so which one an allocation gets never changes an
+    // instruction's length: resetting cannot affect the measured size.
+    emitter.temp_alloc.reset();
+
     // Size-integrity check (see the end of this function): the allocator
     // reserved `function_size` bytes from the measuring pass. If the real pass
     // emits more, the next allocation overlaps this function's tail — the

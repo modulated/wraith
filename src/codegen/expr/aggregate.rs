@@ -1464,8 +1464,10 @@ fn generate_enum_variant_runtime(
     emitter.emit_inst("LDA", &format!("#${:02X}", temp_base));
     emitter.emit_inst("LDX", "#$00");
 
-    // Note: We don't free the temp storage here because the caller needs
-    // to use the pointer. The temp allocator will be reset at function boundaries.
+    // We don't free the temp storage here: the caller needs the pointer we just
+    // loaded, so the block must stay reserved for the rest of the expression.
+    // `generate_function` resets the pool at each function boundary, which
+    // reclaims it — do not add a per-construction free.
 
     Ok(())
 }
