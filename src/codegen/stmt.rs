@@ -283,14 +283,7 @@ pub fn generate_stmt(
                             total, dest
                         ));
                         generate_expr(init, emitter, info, string_collector)?;
-                        // A = pointer low, X = pointer high -> $20/$21 vector.
-                        emitter.emit_inst("STA", "$20");
-                        emitter.emit_inst("STX", "$21");
-                        for i in 0..total {
-                            emitter.emit_inst("LDY", &format!("#${:02X}", i));
-                            emitter.emit_inst("LDA", "($20),Y");
-                            emitter.emit_inst("STA", &format!("${:02X}", dest + i));
-                        }
+                        emit_return_by_value_copy(emitter, dest, total);
                         emitter.invalidate_registers();
                         return Ok(());
                     }
@@ -360,13 +353,7 @@ pub fn generate_stmt(
                 {
                     emitter.emit_comment("Slice return-by-value: copy 4-byte descriptor");
                     generate_expr(init, emitter, info, string_collector)?;
-                    emitter.emit_inst("STA", "$20");
-                    emitter.emit_inst("STX", "$21");
-                    for k in 0..4u8 {
-                        emitter.emit_inst("LDY", &format!("#${:02X}", k));
-                        emitter.emit_inst("LDA", "($20),Y");
-                        emitter.emit_inst("STA", &format!("${:02X}", dest + k));
-                    }
+                    emit_return_by_value_copy(emitter, dest, 4);
                     emitter.invalidate_registers();
                     return Ok(());
                 }
@@ -856,13 +843,7 @@ pub fn generate_stmt(
                                 "Struct return-by-value assign: copy {} bytes into ${:02X}",
                                 total, dest
                             ));
-                            emitter.emit_inst("STA", "$20");
-                            emitter.emit_inst("STX", "$21");
-                            for i in 0..total {
-                                emitter.emit_inst("LDY", &format!("#${:02X}", i));
-                                emitter.emit_inst("LDA", "($20),Y");
-                                emitter.emit_inst("STA", &format!("${:02X}", dest + i));
-                            }
+                            emit_return_by_value_copy(emitter, dest, total);
                             emitter.invalidate_registers();
                             return Ok(());
                         }
@@ -2333,6 +2314,44 @@ fn emit_enum_copy_to_block(
     emitter.emit_inst("LDX", &format!("#${:02X}", (block.addr >> 8) & 0xFF));
     emitter.invalidate_registers();
     Ok(())
+}
+
+/// Copy a return-by-value aggregate out of the callee's storage into the
+/// caller's slot. On entry `A:X` holds a pointer to `size` source bytes; they
+/// are copied into `dest..dest+size` (zero page).
+///
+/// Below the threshold the copy is unrolled (`LDY #i; LDA ($20),Y; STA dest+i`,
+/// ~6 bytes/byte — smallest for a handful of bytes). At or above it, an
+/// `INY`/`CPY`/`BNE` loop is emitted instead: 12 bytes flat regardless of size,
+/// so it wins once the aggregate exceeds ~3 bytes (a `DEX/BNE`-class trade of a
+/// little speed for much smaller code). `A:X` are dead afterwards; callers
+/// invalidate register state.
+fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u8, size: u8) {
+    /// Aggregate size at/above which the loop is smaller than unrolling.
+    const COPY_LOOP_THRESHOLD: u8 = 4;
+
+    // A = pointer low, X = pointer high -> $20/$21 vector.
+    emitter.emit_inst("STA", "$20");
+    emitter.emit_inst("STX", "$21");
+
+    if size < COPY_LOOP_THRESHOLD {
+        for i in 0..size {
+            emitter.emit_inst("LDY", &format!("#${:02X}", i));
+            emitter.emit_inst("LDA", "($20),Y");
+            emitter.emit_inst("STA", &format!("${:02X}", dest + i));
+        }
+    } else {
+        let loop_label = emitter.next_label("rbvcp");
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_label(&loop_label);
+        emitter.emit_inst("LDA", "($20),Y");
+        // Absolute,Y: `STA zp,Y` has no encoding, so the zero-page dest is
+        // addressed as a 16-bit base ($00dd) with the Y index.
+        emitter.emit_inst("STA", &format!("${:04X},Y", dest as u16));
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("CPY", &format!("#${:02X}", size));
+        emitter.emit_inst("BNE", &loop_label);
+    }
 }
 
 fn generate_field_assignment(
