@@ -102,9 +102,8 @@ outset (`Emitter::emit_label` already does this for registers).
 - **Automatic inlining of small functions.** `#[inline]` is explicit only; a leaf
   function smaller than its call sequence is always worth inlining, and the size
   is already measured in the first pass of `generate_function`.
-- **stdlib math ROM over-allocation** (~49 bytes across `mul16`/`div16`/`mod16`);
-  **copy loops unrolled per byte** (6 code bytes per byte copied — a `DEX/BNE`
-  loop pays off beyond ~3 bytes); **`LDA #$00; LDY #$00` → `LDA #$00; TAY`**.
+- **Copy loops unrolled per byte** (6 code bytes per byte copied — a `DEX/BNE`
+  loop pays off beyond ~3 bytes).
 
 ---
 
@@ -172,12 +171,8 @@ Also open:
 
 ## Polish
 
-- **Dead code.** `address_allocator.rs` (188 lines) is unused; `is_primary_free`,
-  `TempAllocStats`, `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
 - **Match-arm binding slots.** Each arm allocates fresh frame slots; siblings could
   share (cf. `loop_bound_free`).
-- **Test isolation.** `tests/visibility_errors.rs` writes fixed filenames into the
-  shared temp dir, risking parallel-run flakiness.
 
 ---
 
