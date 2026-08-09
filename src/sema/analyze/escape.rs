@@ -468,7 +468,7 @@ fn param_index(e: &Spanned<Expr>, params: &[String]) -> Option<usize> {
 }
 
 /// Visit every statement, including nested blocks.
-fn walk_stmts(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Stmt>)) {
+pub(crate) fn walk_stmts(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Stmt>)) {
     f(stmt);
     match &stmt.node {
         Stmt::Block(stmts) => stmts.iter().for_each(|s| walk_stmts(s, f)),
@@ -492,7 +492,7 @@ fn walk_stmts(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Stmt>)) {
 }
 
 /// Visit every expression that appears directly in this statement.
-fn walk_exprs_in_stmt(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Expr>)) {
+pub(crate) fn walk_exprs_in_stmt(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Expr>)) {
     let mut visit = |e: &Spanned<Expr>| walk_expr(e, f);
     match &stmt.node {
         Stmt::VarDecl { init, .. } => visit(init),
@@ -512,7 +512,7 @@ fn walk_exprs_in_stmt(stmt: &Spanned<Stmt>, f: &mut impl FnMut(&Spanned<Expr>)) 
     }
 }
 
-fn walk_expr(e: &Spanned<Expr>, f: &mut impl FnMut(&Spanned<Expr>)) {
+pub(crate) fn walk_expr(e: &Spanned<Expr>, f: &mut impl FnMut(&Spanned<Expr>)) {
     f(e);
     match &e.node {
         Expr::Paren(i) => walk_expr(i, f),

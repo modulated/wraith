@@ -147,8 +147,42 @@ impl SemanticAnalyzer {
             }
         });
 
-        // For inline functions, store body and parameters for later expansion
-        let (inline_body, inline_params) = if is_inline {
+        // A function the codegen auto-inliner may expand: not already `#[inline]`,
+        // not an entry point (reset/irq/nmi never inline — they need a vector
+        // address), not explicitly placed (`#[org]`/`#[section]` express an intent
+        // to keep the body where it is), and returning a scalar or void (the
+        // inline-expansion path is only exercised for those; aggregate returns are
+        // left out for safety). Address-taken and recursive functions are excluded
+        // later, in codegen, from data the register pass does not yet have.
+        let is_entry = func.attributes.iter().any(|attr| {
+            matches!(
+                attr,
+                crate::ast::FnAttribute::Reset
+                    | crate::ast::FnAttribute::Irq
+                    | crate::ast::FnAttribute::Nmi
+                    | crate::ast::FnAttribute::Interrupt
+            )
+        });
+        // Only functions with a purely scalar signature are inlined. Aggregate
+        // and pointer parameters are passed by reference, and the inline
+        // arg-store path does not set that up correctly (it would read the field
+        // through the wrong location), so restrict to Primitive params and a
+        // Primitive/void return.
+        let signature_is_scalar = matches!(
+            self.function_signatures.get(&name),
+            Some(crate::sema::types::Type::Function(params, ret))
+                if matches!(**ret, crate::sema::types::Type::Primitive(_) | crate::sema::types::Type::Void)
+                    && params.iter().all(|p| matches!(p, crate::sema::types::Type::Primitive(_)))
+        );
+        let inline_candidate = !is_inline
+            && !is_entry
+            && org_address.is_none()
+            && section.is_none()
+            && signature_is_scalar;
+
+        // Capture the body and parameters for `#[inline]` and auto-inline
+        // candidates alike, so codegen can expand either.
+        let (inline_body, inline_params) = if is_inline || inline_candidate {
             (Some(func.body.clone()), Some(func.params.clone()))
         } else {
             (None, None)
@@ -186,6 +220,7 @@ impl SemanticAnalyzer {
                 org_address,
                 section,
                 is_inline,
+                inline_candidate,
                 is_interrupt_handler,
                 inline_body,
                 inline_params,

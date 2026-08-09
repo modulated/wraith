@@ -732,9 +732,155 @@ pub(crate) fn is_live(item: &crate::ast::Spanned<crate::ast::Item>, program: &Pr
     }
 }
 
+/// Find a function's AST node by name, in the root module or an imported one.
+fn find_function<'a>(
+    ast: &'a SourceFile,
+    program: &'a ProgramInfo,
+    name: &str,
+) -> Option<&'a crate::ast::Function> {
+    ast.items
+        .iter()
+        .chain(program.imported_items.iter())
+        .find_map(|item| match &item.node {
+            crate::ast::Item::Function(f) if f.name.node == name => Some(&**f),
+            _ => None,
+        })
+}
+
+/// Decide which auto-inline candidates to actually inline, and mark them
+/// `is_inline` so placement and emission skip their bodies and every call site
+/// expands them.
+///
+/// Candidacy (non-entry, non-`#[inline]`, no explicit placement, scalar/void
+/// return, body+params captured) was set in sema. Here we add the constraints
+/// that need the whole-program view — never inline an address-taken function
+/// (its pointer needs a real address) or one in a call cycle (infinite
+/// expansion) — and apply the size/reuse heuristic against real measured sizes:
+///
+/// - a single call site always wins (the out-of-line body disappears);
+/// - a leaf body of ≤3 bytes (smaller than the `JSR` it replaces) wins anywhere;
+/// - a larger leaf body wins where it stays size-neutral: `B·(N−1) ≤ 3N+1`.
+///
+/// Inlining a candidate is always *correct*; the heuristic only governs whether
+/// it is a size win, so an imperfect call count can never miscompile.
+fn select_auto_inline(
+    ast: &SourceFile,
+    program: &mut ProgramInfo,
+    verbosity: CommentVerbosity,
+    target: TargetCpu,
+    layout: &memory_layout::MemoryLayout,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    // Count direct call sites per callee across the whole program, note callers
+    // that make any call at all (non-leaf), and collect every identifier that
+    // appears in an inline-asm block. A function a `JSR`/`JMP` inside inline asm
+    // targets by name is not visible as an `Expr::Call`, so inlining it would
+    // drop its definition and leave that reference dangling — exclude any
+    // function named anywhere in inline asm (over-broad but always safe; asm
+    // blocks are rare).
+    let mut call_sites: FxHashMap<String, u32> = FxHashMap::default();
+    let mut non_leaf: FxHashSet<String> = FxHashSet::default();
+    // Functions that contain inline asm, or are named inside inline asm.
+    // Inlining an asm-containing function is unreliable — inline expansion runs
+    // `uniquify_asm_labels`, which mangles bare operands (an external `JSR
+    // asm_only` becomes `JSR asm_only_1`). And a function a `JSR` inside asm
+    // targets by name is invisible to the `Expr::Call` count, so dropping its
+    // definition would dangle that reference. Exclude both (asm blocks are rare).
+    let mut asm_unsafe: FxHashSet<String> = FxHashSet::default();
+    for item in ast.items.iter().chain(program.imported_items.iter()) {
+        if let crate::ast::Item::Function(f) = &item.node {
+            let caller = f.name.node.clone();
+            crate::sema::analyze::escape::walk_stmts(&f.body, &mut |s| {
+                if let crate::ast::Stmt::Asm { lines } = &s.node {
+                    asm_unsafe.insert(caller.clone());
+                    for line in lines {
+                        for tok in line
+                            .instruction
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        {
+                            if !tok.is_empty() {
+                                asm_unsafe.insert(tok.to_string());
+                            }
+                        }
+                    }
+                }
+                crate::sema::analyze::escape::walk_exprs_in_stmt(s, &mut |e| {
+                    if let Expr::Call { function, .. } = &e.node {
+                        *call_sites.entry(function.node.clone()).or_insert(0) += 1;
+                        non_leaf.insert(caller.clone());
+                    }
+                });
+            });
+        }
+    }
+
+    // Functions in any call cycle (direct or mutual recursion) must never be
+    // inlined; owned so it doesn't borrow `program` across the mutation below.
+    let recursive: FxHashSet<String> = program
+        .recursive_call_edges
+        .iter()
+        .flat_map(|(a, b)| [a.clone(), b.clone()])
+        .collect();
+
+    let candidates: Vec<String> = program
+        .function_metadata
+        .iter()
+        .filter(|(_, m)| m.inline_candidate)
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    let mut to_inline: Vec<String> = Vec::new();
+    for name in &candidates {
+        if program.address_taken_functions.contains(name)
+            || recursive.contains(name)
+            || asm_unsafe.contains(name)
+        {
+            continue;
+        }
+        let n = call_sites.get(name).copied().unwrap_or(0);
+        if n == 0 {
+            continue; // unreachable; dead-code elimination handles it
+        }
+        let Some(func) = find_function(ast, program, name) else {
+            continue;
+        };
+        let is_leaf = !non_leaf.contains(name);
+        let inline = if n == 1 {
+            true
+        } else if is_leaf {
+            // `measure` pads every function by a safety slack; subtract it to
+            // get the true body size the heuristic reasons about.
+            let size = placement::measure(
+                func,
+                program,
+                verbosity,
+                target,
+                layout,
+                &mut StringCollector::new(),
+            )?
+            .saturating_sub(placement::MEASURE_SLACK) as u32;
+            size <= 3 || size * (n - 1) <= 3 * n + 1
+        } else {
+            false
+        };
+        if inline {
+            to_inline.push(name.clone());
+        }
+    }
+
+    for name in to_inline {
+        if let Some(m) = program.function_metadata.get_mut(&name) {
+            m.is_inline = true;
+        }
+    }
+    Ok(())
+}
+
 pub fn generate(
     ast: &SourceFile,
-    program: &ProgramInfo,
+    program: &mut ProgramInfo,
     verbosity: CommentVerbosity,
     target: TargetCpu,
 ) -> Result<(String, SectionAllocator), CodegenError> {
@@ -750,6 +896,18 @@ pub fn generate(
     }
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
+
+    // Automatic inlining: promote auto-inline candidates whose expansion is a
+    // size win to `is_inline`, before placement so the layout already excludes
+    // their bodies and every call site expands them. Doing it here (not in sema)
+    // is what lets the heuristic use real measured function sizes.
+    select_auto_inline(
+        ast,
+        program,
+        verbosity,
+        target,
+        &emitter.memory_layout.clone(),
+    )?;
 
     // Decide where every function goes before emitting anything. Doing this up
     // front is what lets `#[org]` reserve its range: the allocator can only

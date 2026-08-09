@@ -67,7 +67,7 @@ fn auto_allocation_routes_around_an_org_at_the_section_base() {
         fn helper() -> u8 { return 40; }
         #[org(0x8000)]
         #[reset]
-        fn main() { OUT = helper() + 2; loop {} }
+        fn main() { let _k: fn() -> u8 = helper; OUT = helper() + 2; loop {} }
     "#;
     let asm = compile_success(src);
     assert_eq!(addr_of(&asm, "main"), 0x8000, "the pin is honoured");
@@ -111,7 +111,12 @@ fn functions_fill_the_gap_between_two_pinned_ones() {
         fn a() -> u8 { return 3; }
         fn b() -> u8 { return 4; }
         #[reset]
-        fn main() { OUT = low() + high() + a() + b(); loop {} }
+        fn main() {
+            let _ka: fn() -> u8 = a;
+            let _kb: fn() -> u8 = b;
+            OUT = low() + high() + a() + b();
+            loop {}
+        }
     "#;
     let asm = compile_success(src);
     let (a, b) = (addr_of(&asm, "a"), addr_of(&asm, "b"));
@@ -139,7 +144,7 @@ fn a_function_too_large_for_a_gap_is_placed_after_it() {
             return t;
         }
         #[reset]
-        fn main() { OUT = low() + high() + big(1); loop {} }
+        fn main() { let _k: fn(u8) -> u8 = big; OUT = low() + high() + big(1); loop {} }
     "#;
     let asm = compile_success(src);
     let low = addr_of(&asm, "low");
@@ -168,7 +173,13 @@ fn nothing_overlaps_anything_when_pins_and_auto_are_mixed() {
         #[org(0x8200)]
         fn p3() -> u8 { return 4; }
         #[reset]
-        fn main() { OUT = p1() + p2() + p3() + a1() + a2() + a3(); loop {} }
+        fn main() {
+            let _k1: fn() -> u8 = a1;
+            let _k2: fn() -> u8 = a2;
+            let _k3: fn() -> u8 = a3;
+            OUT = p1() + p2() + p3() + a1() + a2() + a3();
+            loop {}
+        }
     "#;
     let asm = compile_success(src);
 
@@ -240,7 +251,12 @@ fn a_pin_at_the_top_of_a_section_does_not_push_others_out_of_it() {
         fn a() -> u8 { return 2; }
         fn b() -> u8 { return 3; }
         #[reset]
-        fn main() { OUT = at_top() + a() + b(); loop {} }
+        fn main() {
+            let _ka: fn() -> u8 = a;
+            let _kb: fn() -> u8 = b;
+            OUT = at_top() + a() + b();
+            loop {}
+        }
     "#;
     let asm = compile_success(src);
     assert_eq!(addr_of(&asm, "at_top"), 0xBFF0);
@@ -348,7 +364,13 @@ fn declaration_order_decides_the_layout_of_auto_allocated_functions() {
         fn second() -> u8 { return 2; }
         fn third() -> u8 { return 3; }
         #[reset]
-        fn main() { OUT = first() + second() + third(); loop {} }
+        fn main() {
+            let _k1: fn() -> u8 = first;
+            let _k2: fn() -> u8 = second;
+            let _k3: fn() -> u8 = third;
+            OUT = first() + second() + third();
+            loop {}
+        }
     "#,
     );
     let (a, b, c) = (

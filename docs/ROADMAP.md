@@ -104,9 +104,6 @@ outset (`Emitter::emit_label` already does this for registers).
   declaration order) and flatten their init bytes — and keeping the shared
   `bss_cursor` consistent before `finalize_frames` lays local-array blocks
   above it.
-- **Automatic inlining of small functions.** `#[inline]` is explicit only; a leaf
-  function smaller than its call sequence is always worth inlining, and the size
-  is already measured in the first pass of `generate_function`.
 
 ---
 

@@ -381,6 +381,10 @@ fn tail_call_optimization() {
         }
 
         fn main() {
+            // Keep both out-of-line so the tail call (JSR helper; RTS -> JMP
+            // helper) survives to be measured, rather than being inlined away.
+            let _kh: fn() -> u8 = helper;
+            let _kt: fn() -> u8 = tail_caller;
             let x: u8 = tail_caller();
         }
     "#,

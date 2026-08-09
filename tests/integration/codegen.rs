@@ -563,6 +563,7 @@ fn const_array_separated_from_code() {
         }
 
         fn main() {
+            let _keep: fn() -> u8 = helper; // keep helper out-of-line
             let x: u8 = helper();
         }
     "#,
