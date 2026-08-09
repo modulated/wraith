@@ -75,11 +75,23 @@ pub fn analyze_text(text: &str, index: &LineIndex) -> Analysis {
             }
         }
         Err(e) => {
-            let (start, end) = e.span().map(|s| (s.start, s.end)).unwrap_or((0, 0));
-            let range = span_range(text, index, start, end);
-            let msg = strip_offsets(e.to_string(), start, end);
+            // Sema reports several independent errors per run, so flatten a
+            // `Multiple` into one diagnostic each — squashing them into a single
+            // marker would put every message on whichever line came first.
+            let flattened: Vec<&wraith::sema::SemaError> = match &e {
+                wraith::sema::SemaError::Multiple(errors) => errors.iter().collect(),
+                single => vec![single],
+            };
+            let diagnostics = flattened
+                .into_iter()
+                .map(|e| {
+                    let (start, end) = e.span().map(|s| (s.start, s.end)).unwrap_or((0, 0));
+                    let range = span_range(text, index, start, end);
+                    error(range, strip_offsets(e.to_string(), start, end))
+                })
+                .collect();
             Analysis {
-                diagnostics: vec![error(range, msg)],
+                diagnostics,
                 good: None,
             }
         }

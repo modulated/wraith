@@ -29,6 +29,7 @@ mod local_arrays;
 mod loop_sweep;
 mod math16;
 mod memory;
+mod multi_error;
 mod operators;
 mod org_conflicts;
 mod placement;

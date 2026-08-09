@@ -201,3 +201,88 @@ fn a_math_handler_saves_the_math_scratch() {
     assert!(body.contains("LDA $D0"), "math scratch saved:\n{body}");
     assert!(body.contains("LDA $20"), "binary-op scratch saved:\n{body}");
 }
+
+// ---------------------------------------------------------------------------
+// Hardware-stack (page 1) depth
+//
+// A handler entry costs 3 bytes for the CPU sequence, 3 for the A/X/Y pushes,
+// the zero-page save (which can reach ~220 bytes), and 2 per nested JSR.
+// Overflow wraps silently on a 6502, so it is caught here or not at all.
+// ---------------------------------------------------------------------------
+
+fn warnings_of(src: &str) -> String {
+    match compile(src) {
+        CompileResult::Success(warnings, _) => warnings,
+        other => panic!("expected success, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_trivial_handler_does_not_warn_about_the_hardware_stack() {
+    let w = warnings_of(
+        r#"
+        const R: addr = 0x0900;
+        #[irq]
+        fn on_irq() { R = 1; }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(!w.contains("hardware-stack"), "{w}");
+}
+
+#[test]
+fn nesting_handlers_that_exceed_page_one_warns() {
+    // Two heavy handlers: an NMI can preempt an IRQ, so their entry costs sum.
+    // Each saves a wide zero-page span (deep chain of large u16 frames) plus the
+    // math scratch, which alone is ~135 bytes; two of them overflow page 1.
+    let w = warnings_of(
+        r#"
+        const R: addr = 0x0900;
+        const R2: addr = 0x0901;
+        fn e(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return p+q+r+s+t+u+v; }
+        fn d(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return e(a)+p+q+r+s+t+u+v; }
+        fn c(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return d(a)+p+q+r+s+t+u+v; }
+        fn b(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return c(a)+p+q+r+s+t+u+v; }
+        #[irq]
+        fn on_irq() { let v: u16 = b(7 as u16); R = v.low; }
+        #[nmi]
+        fn on_nmi() { let v: u16 = b(9 as u16); R2 = v.low; }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(
+        w.contains("hardware stack"),
+        "expected a depth warning:\n{w}"
+    );
+    assert!(
+        w.contains("nested call"),
+        "the message should break down the cost:\n{w}"
+    );
+}
+
+#[test]
+fn an_indirect_call_in_a_handler_suppresses_the_depth_warning() {
+    // Depth through a function pointer is unknowable (no call edge is recorded),
+    // so the check declines rather than reporting a wrong number.
+    let w = warnings_of(
+        r#"
+        const R: addr = 0x0900;
+        const R2: addr = 0x0901;
+        fn e(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return p+q+r+s+t+u+v; }
+        fn d(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return e(a)+p+q+r+s+t+u+v; }
+        fn c(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return d(a)+p+q+r+s+t+u+v; }
+        fn b(a: u16) -> u16 { let p:u16=a; let q:u16=a; let r:u16=a; let s:u16=a; let t:u16=a; let u:u16=a; let v:u16=a; return c(a)+p+q+r+s+t+u+v; }
+        fn leaf(x: u8) -> u8 { return x; }
+        static TBL: [fn(u8) -> u8; 1] = [leaf];
+        #[irq]
+        fn on_irq() { let i: u8 = 0; R = TBL[i](1); }
+        #[nmi]
+        fn on_nmi() { let v: u16 = b(9 as u16); R2 = v.low; }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(!w.contains("hardware stack"), "should be silent:\n{w}");
+}

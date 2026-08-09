@@ -584,3 +584,34 @@ fn reassigning_an_enum_replaces_only_that_variable() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (3, 2));
 }
+
+#[test]
+fn many_runtime_enum_constructions_do_not_exhaust_the_temp_pool() {
+    // Runtime enum construction parks the value in the primary temp pool and
+    // hands the caller a pointer, so the bytes are intentionally not freed
+    // within a function. Before the per-function pool reset, they leaked across
+    // the whole program on the single shared emitter, and enough constructions
+    // failed a later function with "not enough temp storage". Build many across
+    // separate functions and confirm every payload still round-trips — the reset
+    // must reclaim the pool without corrupting anything.
+    let mut src =
+        String::from("const R: addr = 0x0900;\n         enum E { A(u16, u16), B(u16) }\n");
+    for i in 0..40 {
+        src.push_str(&format!(
+            "fn make{i}(x: u16) -> E {{ return E::A(x, x); }}\n"
+        ));
+    }
+    src.push_str("#[reset]\nfn main() {\n");
+    for i in 0..40 {
+        src.push_str(&format!("    let e{i}: E = make{i}({i} as u16);\n"));
+    }
+    // Read the last one's payload back through a match to prove it is intact.
+    src.push_str(
+        "    match e39 { E::A(v, _) => { R = v.low; } E::B(_) => { R = 0xFF; } }\n         loop {}\n}\n",
+    );
+    assert_eq!(
+        run(&src).mem(0x0900),
+        39,
+        "payload of the 40th construction"
+    );
+}

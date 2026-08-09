@@ -78,27 +78,14 @@ pub fn generate_item(
 /// handler can preempt main code mid-expression, it must preserve the shared
 /// codegen scratch/pools/math region plus the frame span its own call graph
 /// touches (frames overlap main frames under unified coloring).
+///
+/// The address list itself lives on `InterruptSaveInfo` so that sema's
+/// hardware-stack depth check counts exactly the bytes this emits.
 pub(super) fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
-    let mut addrs = Vec::new();
-    if let Some(si) = info.interrupt_save_info.get(name) {
-        if si.save_scratch {
-            addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
-            addrs.extend(0xE0u8..=0xEF); // indirect-arg staging block: an NMI
-            // landing between staging and the callee's prologue copy would
-            // otherwise destroy in-flight args when the handler itself calls
-            // indirectly
-            addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
-        }
-        if si.save_math {
-            addrs.extend(0xD0u8..=0xDC); // mul16/div16 working storage + params
-        }
-        for (base, len) in &si.shared_frames {
-            for i in 0..*len {
-                addrs.push(base.wrapping_add(i));
-            }
-        }
-    }
-    addrs
+    info.interrupt_save_info
+        .get(name)
+        .map(|si| si.zp_save_addrs())
+        .unwrap_or_default()
 }
 
 pub(super) fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {
@@ -180,6 +167,18 @@ fn generate_function(
         }
     };
     emitter.emit_org(function_addr);
+
+    // Start each function with an empty temp pool. Temps are per-function
+    // scratch, but a few allocations are intentionally never freed within a
+    // function (runtime enum construction hands the caller a pointer into the
+    // pool), so without a per-function reset those bytes leak for the rest of
+    // the program on the single shared emitter — eventually failing a later
+    // function with a spurious "not enough temp storage". The measuring pass
+    // already starts clean (`placement::measure` builds a fresh `Emitter` per
+    // function), so this also keeps the two passes symmetric. Pool addresses are
+    // all zero-page, so which one an allocation gets never changes an
+    // instruction's length: resetting cannot affect the measured size.
+    emitter.temp_alloc.reset();
 
     // Size-integrity check (see the end of this function): the allocator
     // reserved `function_size` bytes from the measuring pass. If the real pass

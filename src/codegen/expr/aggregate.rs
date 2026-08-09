@@ -51,7 +51,7 @@ pub(crate) fn check_runtime_index_range(
         && crate::sema::const_eval::eval_const_expr(index).is_err()
         && !info.folded_constants.contains_key(&index.span)
     {
-        let max_elems = if elem_size == 0 { len } else { 256 / elem_size };
+        let max_elems = 256usize.checked_div(elem_size).unwrap_or(len);
         return Err(CodegenError::UnsupportedOperation(format!(
             "array of {len} elements of {elem_size} bytes is too large to index by a \
              runtime value: the scaled offset would exceed the 8-bit index register \
@@ -95,7 +95,6 @@ fn emit_indexed_load(
     ptr: u8,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    use crate::ast::PrimitiveType;
     use crate::sema::types::Type;
 
     // Determine whether the element type occupies two bytes (arrays, slices and
@@ -112,16 +111,7 @@ fn emit_indexed_load(
     // Two-byte elements (u16/i16/b16, a function pointer, or a `&T`) are scaled
     // by the element width and loaded into A:Y — including a local
     // function-pointer table (`let handlers = [d0, d1]; handlers[i](x)`).
-    let is_multibyte = matches!(
-        elem_ty,
-        Some(
-            Type::Primitive(PrimitiveType::U16)
-                | Type::Primitive(PrimitiveType::I16)
-                | Type::Primitive(PrimitiveType::B16)
-                | Type::Function(..)
-                | Type::Pointer(..)
-        )
-    );
+    let is_multibyte = elem_ty.is_some_and(is_two_byte_value);
 
     // A fixed-size array whose scaled offset would exceed the 8-bit index is
     // not runtime-indexable (a local array is frame-bounded well under this, but
@@ -254,15 +244,7 @@ pub(super) fn generate_index(
                 // single byte and left the index in Y as the "high byte".
                 let is_multibyte = matches!(
                     &sym.ty,
-                    crate::sema::types::Type::Array(elem, _) if matches!(
-                        &**elem,
-                        crate::sema::types::Type::Primitive(
-                            crate::ast::PrimitiveType::U16
-                                | crate::ast::PrimitiveType::I16
-                                | crate::ast::PrimitiveType::B16
-                        ) | crate::sema::types::Type::Function(..)
-                            | crate::sema::types::Type::Pointer(..)
-                    )
+                    crate::sema::types::Type::Array(elem, _) if is_two_byte_value(elem)
                 );
                 if let crate::sema::types::Type::Array(elem, len) = &sym.ty {
                     check_runtime_index_range(type_byte_size(elem, info), *len, index, info)?;
@@ -524,7 +506,7 @@ pub fn generate_struct_init_runtime(
                 // function pointer, but in X for a `&T` — the pointer
                 // convention every other pointer-like value uses.
                 emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-                let hi = if field_high_byte_in_x(&field_info.ty) {
+                let hi = if high_byte_in_x(&field_info.ty) {
                     "STX"
                 } else {
                     "STY"
@@ -557,21 +539,28 @@ pub fn generate_struct_init_runtime(
     Ok(())
 }
 
-/// Whether a *struct field* occupies two bytes.
+/// Which register holds the high byte of a two-byte value once loaded.
 ///
-/// Beyond the obvious 16-bit primitives this has to include a function pointer
-/// and a `&T`: both hold an address. Loading one byte of a code address and
-/// letting the caller supply a high byte from whatever an index register
-/// happened to hold is how a ROM dispatch table came to jump into nowhere.
-///
-/// The two are not interchangeable once loaded, though. A `&T` follows the
-/// pointer convention and wants its high byte in X; everything else, function
-/// pointers included, uses A:Y. `field_high_byte_in_x` is that half.
-pub(crate) fn field_high_byte_in_x(ty: &crate::sema::types::Type) -> bool {
+/// A `&T` follows the pointer convention (A:X); everything else that is two
+/// bytes — 16-bit scalars, and function pointers — uses A:Y. Storing a pointer
+/// as though it were A:Y writes the wrong high byte, which is how `*pp = q` on a
+/// `&&u8` used to lose half its address.
+pub(crate) fn high_byte_in_x(ty: &crate::sema::types::Type) -> bool {
     matches!(ty, crate::sema::types::Type::Pointer(_))
 }
 
-pub(crate) fn field_is_two_bytes(ty: &crate::sema::types::Type) -> bool {
+/// Whether a scalar value occupies two bytes (a field, array element, pointee,
+/// or the value itself).
+///
+/// The one authoritative answer, so a load/store site cannot drift by
+/// re-listing the variants and forgetting one. Beyond the 16-bit primitives it
+/// must include a function pointer and a `&T` — both hold an address — because
+/// loading one byte of an address and letting the caller supply a high byte
+/// from whatever an index register held is how a dispatch table came to jump
+/// into nowhere and `*pp = q` came to store half a pointer. Pair it with
+/// [`high_byte_in_x`] for the register convention. (A slice is four bytes and is
+/// handled separately; this predicate is for the two-byte-or-one question.)
+pub(crate) fn is_two_byte_value(ty: &crate::sema::types::Type) -> bool {
     use crate::sema::types::Type;
     matches!(
         ty,
@@ -731,7 +720,7 @@ pub(crate) fn emit_array_struct_field_indexed(
         ))
     })?;
     let field = base.plus(finfo.offset as u16);
-    let is_multibyte = field_is_two_bytes(&finfo.ty);
+    let is_multibyte = is_two_byte_value(&finfo.ty);
 
     match value {
         None => {
@@ -743,7 +732,7 @@ pub(crate) fn emit_array_struct_field_indexed(
             if is_multibyte {
                 emitter.emit_inst("PHA", "");
                 emitter.emit_inst("LDA", &format!("{},Y", field.operand_abs(1)));
-                let hi = if field_high_byte_in_x(&finfo.ty) {
+                let hi = if high_byte_in_x(&finfo.ty) {
                     "TAX"
                 } else {
                     "TAY"
@@ -775,7 +764,7 @@ pub(crate) fn emit_array_struct_field_indexed(
             generate_expr(val, emitter, info, string_collector)?;
             emitter.emit_inst("STA", &format!("${:02X}", park));
             if is_multibyte {
-                let hi = if field_high_byte_in_x(&finfo.ty) {
+                let hi = if high_byte_in_x(&finfo.ty) {
                     "STX"
                 } else {
                     "STY"
@@ -912,11 +901,11 @@ fn emit_static_field_load(
             field.node, struct_name
         ))
     })?;
-    let is_multibyte = field_is_two_bytes(&finfo.ty);
+    let is_multibyte = is_two_byte_value(&finfo.ty);
     let at = base.plus(finfo.offset as u16);
     emitter.emit_inst("LDA", &at.operand(0));
     if is_multibyte {
-        let hi = if field_high_byte_in_x(&finfo.ty) {
+        let hi = if high_byte_in_x(&finfo.ty) {
             "LDX"
         } else {
             "LDY"
@@ -1079,7 +1068,7 @@ pub(super) fn generate_field_access(
             // A function-pointer field holds a 2-byte code address, so it must be
             // loaded as a pair like u16 — reading only the low byte would call
             // through a half-formed vector.
-            let is_multibyte = field_is_two_bytes(&field_info.ty);
+            let is_multibyte = is_two_byte_value(&field_info.ty);
 
             if is_parameter {
                 // The struct pointer lives directly in this parameter's frame slot;
@@ -1094,7 +1083,7 @@ pub(super) fn generate_field_access(
                     emitter.emit_inst("PHA", ""); // stash low byte
                     emitter.emit_inst("INY", ""); // next field byte
                     emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
-                    let hi = if field_high_byte_in_x(&field_info.ty) {
+                    let hi = if high_byte_in_x(&field_info.ty) {
                         "TAX"
                     } else {
                         "TAY"
@@ -1105,7 +1094,7 @@ pub(super) fn generate_field_access(
             } else {
                 // Local struct - direct access
                 let field_addr = base_addr + field_info.offset as u16;
-                let hi = if field_high_byte_in_x(&field_info.ty) {
+                let hi = if high_byte_in_x(&field_info.ty) {
                     "LDX"
                 } else {
                     "LDY"
@@ -1464,8 +1453,10 @@ fn generate_enum_variant_runtime(
     emitter.emit_inst("LDA", &format!("#${:02X}", temp_base));
     emitter.emit_inst("LDX", "#$00");
 
-    // Note: We don't free the temp storage here because the caller needs
-    // to use the pointer. The temp allocator will be reset at function boundaries.
+    // We don't free the temp storage here: the caller needs the pointer we just
+    // loaded, so the block must stay reserved for the rest of the expression.
+    // `generate_function` resets the pool at each function boundary, which
+    // reclaims it — do not add a per-construction free.
 
     Ok(())
 }

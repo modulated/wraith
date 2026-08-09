@@ -144,6 +144,14 @@ pub enum SemaError {
         array_size: usize,
         span: Span,
     },
+
+    /// Several independent errors from one analysis run.
+    ///
+    /// Mirrors `ParseErrorKind::Multiple`: wrapping the collection in a variant
+    /// rather than widening `analyze`'s return type keeps every caller —
+    /// the driver, the LSP, the test harness, the fuzz target — unchanged, and
+    /// keeps one convention for multi-error reporting across the front end.
+    Multiple(Vec<SemaError>),
 }
 
 impl SemaError {
@@ -178,6 +186,9 @@ impl SemaError {
             | ArrayIndexOutOfBounds { span, .. } => Some(*span),
             InModule { import_span, .. } => Some(*import_span),
             CircularImport { .. } | FrameRegionOverflow { .. } => None,
+            // The first error's position, so a consumer that can only show one
+            // location (the LSP's fallback) points at the earliest problem.
+            Multiple(errors) => errors.first().and_then(|e| e.span()),
         }
     }
 
@@ -502,6 +513,13 @@ impl SemaError {
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
+            // Each rendered in full and separated by a blank line, matching how
+            // the driver already prints a run's warnings.
+            SemaError::Multiple(errors) => errors
+                .iter()
+                .map(|e| e.format_with_source_of_file(source, filename, file))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
         }
     }
 }
@@ -711,6 +729,13 @@ impl std::fmt::Display for SemaError {
                     span.start, span.end, index, array_size
                 )
             }
+            SemaError::Multiple(errors) => {
+                write!(f, "{} semantic errors:", errors.len())?;
+                for e in errors {
+                    write!(f, "\n  {}", e)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -774,17 +799,50 @@ pub enum Warning {
         safe_depth: usize,
         span: Span,
     },
+
+    /// An interrupt handler's worst-case hardware-stack (page 1) usage leaves
+    /// little or no headroom. Overflow wraps silently on a 6502 — there is no
+    /// stack-limit detection — so this is caught at compile time or not at all.
+    InterruptStackDepth {
+        handler: String,
+        /// Bytes pushed on entry: CPU sequence + registers + zero-page save.
+        entry_bytes: usize,
+        /// Deepest nested `JSR` chain reachable from the handler.
+        call_depth: usize,
+        /// Total worst case across every handler (they can nest: NMI over IRQ).
+        total_bytes: usize,
+        span: Span,
+    },
 }
 
 impl Warning {
     /// Format warning with source context (similar to error formatting)
     pub fn format_with_source_and_file(&self, source: &str, filename: Option<&str>) -> String {
         let (message, span) = self.parts();
+        // The header carries the full explanation; the caret carries a short
+        // label. Repeating a multi-line message under the excerpt (as every
+        // warning used to) buries the source line it is meant to point at.
+        let caret = self.caret_label().unwrap_or_else(|| message.clone());
         format!(
             "warning: {}\n{}",
             message,
-            span.format_error_context(source, filename, &message)
+            span.format_error_context(source, filename, &caret)
         )
+    }
+
+    /// A short label for the caret, when the full message is too long to repeat
+    /// under the source excerpt. `None` means reuse the message.
+    fn caret_label(&self) -> Option<String> {
+        match self {
+            Warning::DeepRecursionRisk { safe_depth, .. } => Some(format!(
+                "recursion deeper than ~{} levels overflows",
+                safe_depth
+            )),
+            Warning::InterruptStackDepth { total_bytes, .. } => {
+                Some(format!("{} of 256 hardware-stack bytes used", total_bytes))
+            }
+            _ => None,
+        }
     }
 
     /// The warning's one-line message and the span it points at, without any
@@ -876,6 +934,33 @@ impl Warning {
                 ),
                 span,
             ),
+            Warning::InterruptStackDepth {
+                handler,
+                entry_bytes,
+                call_depth,
+                total_bytes,
+                span,
+            } => (
+                format!(
+                    "interrupt handler `{}` uses {} bytes of the 256-byte hardware stack \
+                     ({} on entry — CPU sequence, registers and the zero-page save — plus {} \
+                     nested call{} at 2 bytes each){}. The 6502 has no stack-limit detection, \
+                     so an overflow wraps and corrupts silently.\n  = help: shrink the saved \
+                     zero-page set by keeping the handler's call graph small (16-bit \
+                     multiply/divide pulls in the math scratch), or flatten nested calls",
+                    handler,
+                    total_bytes,
+                    entry_bytes,
+                    call_depth,
+                    if *call_depth == 1 { "" } else { "s" },
+                    if *total_bytes > entry_bytes + call_depth * 2 {
+                        ", summed over all handlers because an NMI can preempt an IRQ"
+                    } else {
+                        ""
+                    }
+                ),
+                span,
+            ),
         }
     }
 
@@ -951,6 +1036,41 @@ pub struct InterruptSaveInfo {
     /// (base, size) of frames belonging to functions shared between this handler
     /// and main-thread code, which must be preserved across the handler.
     pub shared_frames: Vec<(u8, u8)>,
+}
+
+impl InterruptSaveInfo {
+    /// Every zero-page address the handler prologue saves, in push order.
+    ///
+    /// Codegen emits one `LDA`/`PHA` pair per address, so the length is also the
+    /// number of hardware-stack bytes the save costs — which is why this lives
+    /// here rather than in codegen: the depth check in `finalize_frames` needs
+    /// the same count before `ProgramInfo` exists, and two hand-maintained
+    /// copies of this list would drift.
+    pub fn zp_save_addrs(&self) -> Vec<u8> {
+        let mut addrs = Vec::new();
+        if self.save_scratch {
+            addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
+            addrs.extend(0xE0u8..=0xEF); // indirect-arg staging block: an NMI
+            // landing between staging and the callee's prologue copy would
+            // otherwise destroy in-flight args when the handler itself calls
+            // indirectly
+            addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
+        }
+        if self.save_math {
+            addrs.extend(0xD0u8..=0xDC); // mul16/div16 working storage + params
+        }
+        for (base, len) in &self.shared_frames {
+            for i in 0..*len {
+                addrs.push(base.wrapping_add(i));
+            }
+        }
+        addrs
+    }
+
+    /// Hardware-stack bytes the zero-page save costs (one push per address).
+    pub fn zp_save_bytes(&self) -> usize {
+        self.zp_save_addrs().len()
+    }
 }
 
 /// One byte of a mutable global's startup image. Function pointers cannot be

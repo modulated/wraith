@@ -528,8 +528,21 @@ impl SemanticAnalyzer {
             self.expected_type = saved;
             (lt?, rt)
         } else {
-            (self.check_expr(left)?, self.check_expr(right)?)
+            // Neither side informs the other's type, so check both: two bad
+            // names in `p + q` should report together rather than one per
+            // recompile. (The literal-adaptation branches above deliberately
+            // keep `?` — there the first operand's type is what the second is
+            // checked against, so continuing past a failure would be guessing.)
+            let lt = self.check_expr(left);
+            let rt = self.check_expr(right);
+            (self.poison_on_err(lt), self.poison_on_err(rt))
         };
+
+        // A poisoned operand has already reported. Anything below would only add
+        // a second diagnostic about an operator applied to `<unknown>`.
+        if matches!(left_ty, Type::Error) || matches!(right_ty, Type::Error) {
+            return Ok(Type::Error);
+        }
 
         // No binary operator applies to a pointer. This has to be said
         // explicitly: the compatibility gate further down is `left_ty ==
@@ -760,11 +773,15 @@ impl SemanticAnalyzer {
         let saved_expected = self.expected_type.take();
         for (arg, param_ty) in args.iter().zip(param_types.iter()) {
             self.expected_type = Some(param_ty.clone());
-            let arg_ty = self.check_expr(arg)?;
+            // Arguments are independent of each other, so a bad one is recorded
+            // and the rest are still checked — `f(bad1, bad2)` reports both.
+            // `Type::Error` then satisfies the conversion check below, so the
+            // argument that already reported does not also report a mismatch.
+            let arg_ty = self.check_expr(arg);
+            let arg_ty = self.poison_on_err(arg_ty);
             // Check if argument type can be implicitly converted to parameter type
             if !arg_ty.is_implicitly_convertible_to(param_ty) {
-                self.expected_type = saved_expected;
-                return Err(SemaError::TypeMismatch {
+                self.record(SemaError::TypeMismatch {
                     expected: param_ty.display_name(),
                     found: arg_ty.display_name(),
                     span: arg.span,

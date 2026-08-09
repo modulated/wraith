@@ -1,0 +1,9 @@
+# Everyone — local dev and CI — builds Wraith with the current stable Rust.
+# `channel = "stable"` floats to the most recent stable release, so
+# `rustup` installs/updates it automatically on first `cargo` invocation and a
+# new clippy lint surfaces locally at the same time it would in CI, not only
+# after a red build.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "default"

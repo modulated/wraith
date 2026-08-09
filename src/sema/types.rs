@@ -30,6 +30,15 @@ pub enum Type {
     /// User-defined type (Struct/Enum) - stored by name
     /// We store the name here, and look up the definition in the symbol table
     Named(String),
+    /// A type that could not be determined because an error was already
+    /// reported for the expression producing it.
+    ///
+    /// This is a poison value, not a real type: it exists so analysis can keep
+    /// going after a failure without inventing a plausible-but-wrong type that
+    /// later checks would trust. Every check treats it as "already reported" and
+    /// stays quiet, which is what stops one mistake from cascading. It can never
+    /// reach codegen — `analyze_module` fails whenever any error was recorded.
+    Error,
 }
 
 impl Type {
@@ -55,6 +64,7 @@ impl Type {
             Type::Function(_, _) => 2, // Function pointer is 16-bit address
             Type::Void => 0,
             Type::Named(_) => 0, // Size depends on definition, needs lookup
+            Type::Error => 0,    // Poison; never laid out (analysis has failed)
         }
     }
 
@@ -86,6 +96,7 @@ impl Type {
             Type::Named(name) => name.clone(),
             Type::String => "string".to_string(),
             Type::Void => "void".to_string(),
+            Type::Error => "<unknown>".to_string(),
         }
     }
 
@@ -98,6 +109,13 @@ impl Type {
     pub fn is_implicitly_convertible_to(&self, to: &Type) -> bool {
         // Exact match is always ok
         if self == to {
+            return true;
+        }
+
+        // A poisoned type is compatible in both directions. The expression that
+        // produced it already reported, and a follow-on "mismatched types
+        // `<unknown>`" would be noise pointing at a symptom rather than a cause.
+        if matches!(self, Type::Error) || matches!(to, Type::Error) {
             return true;
         }
 
