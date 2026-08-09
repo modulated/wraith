@@ -328,9 +328,13 @@ fn emit_stdlib_math_functions(
     emitter.emit_comment("============================================================");
 
     if emitter.needs_mul16 {
+        // Exact machine-code size of the routine below; verified against the
+        // emitted bytes at the end of the block.
+        const MUL16_BYTES: u16 = 61;
         let org_addr = section_alloc
-            .allocate("CODE", 74)
+            .allocate("CODE", MUL16_BYTES)
             .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mul16");
         emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
@@ -375,12 +379,15 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    LDA $D2");
         emitter.emit_raw("    LDY $D3");
         emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("mul16", emitter.output_since(start), MUL16_BYTES)?;
     }
 
     if emitter.needs_div16 {
+        const DIV16_BYTES: u16 = 92;
         let org_addr = section_alloc
-            .allocate("CODE", 110)
+            .allocate("CODE", DIV16_BYTES)
             .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: div16");
         emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
@@ -467,12 +474,15 @@ fn emit_stdlib_math_functions(
 
         emitter.emit_raw("    div16_done:");
         emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("div16", emitter.output_since(start), DIV16_BYTES)?;
     }
 
     if emitter.needs_mod16 {
+        const MOD16_BYTES: u16 = 92;
         let org_addr = section_alloc
-            .allocate("CODE", 110)
+            .allocate("CODE", MOD16_BYTES)
             .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mod16");
         emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
@@ -559,8 +569,23 @@ fn emit_stdlib_math_functions(
 
         emitter.emit_raw("    mod16_done:");
         emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("mod16", emitter.output_since(start), MOD16_BYTES)?;
     }
 
+    Ok(())
+}
+
+/// Fail the build if a hand-written raw stdlib routine grew past the ROM window
+/// reserved for it, instead of letting the following `.ORG` silently overlap its
+/// tail. `emitted` is the routine's assembly text (from `output_since`).
+fn verify_raw_routine_fits(name: &str, emitted: &str, reserved: u16) -> Result<(), CodegenError> {
+    let actual = Emitter::measure_asm(emitted);
+    if actual > reserved {
+        return Err(CodegenError::SectionError(format!(
+            "stdlib `{name}` is {actual} bytes but only {reserved} were reserved; \
+             update its reservation in emit_stdlib_math_functions"
+        )));
+    }
     Ok(())
 }
 

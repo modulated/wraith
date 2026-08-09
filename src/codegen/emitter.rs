@@ -324,8 +324,11 @@ impl Emitter {
 
     /// Calculate the size of a 6502 instruction in bytes
     fn instruction_size(mnemonic: &str, operand: &str) -> u16 {
-        if operand.is_empty() {
-            // Implied or accumulator mode (1 byte)
+        if operand.is_empty() || operand.eq_ignore_ascii_case("A") {
+            // Implied or accumulator mode (1 byte). Codegen normally emits
+            // accumulator shifts with an empty operand, but the explicit `A`
+            // form (`LSR A`) appears in hand-written raw stdlib routines and
+            // must size to 1, not fall through to the 3-byte absolute arm.
             match mnemonic {
                 "RTS" | "RTI" | "PHA" | "PLA" | "PHP" | "PLP" | "TAX" | "TAY" | "TXA" | "TYA"
                 | "TXS" | "TSX" | "INX" | "INY" | "DEX" | "DEY" | "CLC" | "SEC" | "CLI" | "SEI"
@@ -393,6 +396,34 @@ impl Emitter {
             // Label reference or symbol - assume 3 bytes (absolute)
             3
         }
+    }
+
+    /// Total machine-code size, in bytes, of a block of assembly text.
+    ///
+    /// Instruction lines contribute their encoded length; labels, comments,
+    /// `.ORG` and blank lines contribute nothing. Used to verify that a
+    /// hand-written raw routine still fits the ROM window reserved for it, so
+    /// editing the routine can never silently overlap the following `.ORG`.
+    pub fn measure_asm(asm: &str) -> u16 {
+        let mut total = 0u16;
+        for line in asm.lines() {
+            let t = line.trim();
+            // Skip blanks, comments, directives, and (indented) labels.
+            if t.is_empty() || t.starts_with(';') || t.starts_with('.') || t.ends_with(':') {
+                continue;
+            }
+            let mut parts = t.splitn(2, char::is_whitespace);
+            let mnemonic = parts.next().unwrap_or("");
+            let operand = parts
+                .next()
+                .unwrap_or("")
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim();
+            total += Self::instruction_size(mnemonic, operand);
+        }
+        total
     }
 
     // ========================================================================
@@ -805,6 +836,25 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measure_asm_sizes_instructions_and_skips_structure() {
+        // Accumulator shifts (`LSR A`) are 1 byte, not the 3 the absolute arm
+        // would give; labels, comments, .ORG and blanks contribute nothing.
+        let asm = "\
+routine:
+    ; a comment
+    LDA #$00     ; 2
+    STA $D2      ; 2 (zero page)
+    LSR A        ; 1 (accumulator)
+    ADC $1234    ; 3 (absolute)
+    BNE routine  ; 2 (branch)
+    RTS          ; 1
+.ORG $9000
+";
+        // 2 + 2 + 1 + 3 + 2 + 1 = 11
+        assert_eq!(Emitter::measure_asm(asm), 11);
+    }
 
     #[test]
     fn a_raw_load_replaces_the_registers_belief() {
