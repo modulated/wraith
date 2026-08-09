@@ -1162,8 +1162,15 @@ pub(super) fn generate_enum_variant(
     let all_constant = is_variant_data_constant(data);
 
     if all_constant {
-        // Use inline data approach (original implementation)
-        generate_enum_variant_inline(enum_name, variant, data, emitter, variant_info)
+        // Constant payload: collect it into DATA (dedup'd), no inline JMP.
+        generate_enum_variant_inline(
+            enum_name,
+            variant,
+            data,
+            emitter,
+            variant_info,
+            string_collector,
+        )
     } else {
         // Use runtime construction approach
         generate_enum_variant_runtime(
@@ -1198,28 +1205,23 @@ fn is_expr_constant(expr: &crate::ast::Expr) -> bool {
     )
 }
 
-/// Generate enum variant with inline data (for constant values)
+/// Generate an enum variant with a constant payload.
+///
+/// The tag byte and the constant field bytes are collected into the DATA
+/// section (deduplicated) rather than emitted inline in the instruction stream
+/// behind a `JMP` — which saves the 3-byte jump and keeps the payload out of
+/// the code path. The construction leaves the payload's address in A:X.
 fn generate_enum_variant_inline(
     _enum_name: &Spanned<String>,
     variant: &Spanned<String>,
     data: &crate::ast::VariantData,
     emitter: &mut Emitter,
     variant_info: &crate::sema::type_defs::VariantInfo,
+    string_collector: &mut crate::codegen::StringCollector,
 ) -> Result<(), CodegenError> {
-    // Generate labels for enum data
-    let enum_label = emitter.next_label("en");
-    let skip_label = emitter.next_label("es");
+    // Build the payload: discriminant tag followed by the field bytes.
+    let mut bytes = vec![variant_info.tag];
 
-    // Jump over the data
-    emitter.emit_inst("JMP", &skip_label);
-
-    // Emit enum data
-    emitter.emit_label(&enum_label);
-
-    // Emit discriminant tag
-    emitter.emit_byte(variant_info.tag);
-
-    // Emit variant data based on type
     match (&variant_info.data, data) {
         (crate::sema::type_defs::VariantData::Unit, crate::ast::VariantData::Unit) => {
             // Unit variant - just the tag, no data
@@ -1238,7 +1240,7 @@ fn generate_enum_variant_inline(
             }
 
             for (value_expr, field_type) in values.iter().zip(field_types.iter()) {
-                emit_constant_value(&value_expr.node, field_type.size(), emitter)?;
+                push_constant_value(&value_expr.node, field_type.size(), &mut bytes)?;
             }
         }
         (
@@ -1253,12 +1255,10 @@ fn generate_enum_variant_inline(
 
             for field_info in field_infos {
                 if let Some(value_expr) = field_values.get(&field_info.name) {
-                    emit_constant_value(&value_expr.node, field_info.ty.size(), emitter)?;
+                    push_constant_value(&value_expr.node, field_info.ty.size(), &mut bytes)?;
                 } else {
                     // Field not provided - initialize to zero
-                    for _ in 0..field_info.ty.size() {
-                        emitter.emit_byte(0);
-                    }
+                    bytes.resize(bytes.len() + field_info.ty.size(), 0);
                 }
             }
         }
@@ -1270,29 +1270,29 @@ fn generate_enum_variant_inline(
         }
     }
 
-    emitter.emit_label(&skip_label);
+    let label = string_collector.add_enum_blob(bytes);
 
-    // Load the address of the enum into A (low byte) and X (high byte)
-    emitter.emit_inst("LDA", &format!("#<{}", enum_label));
-    emitter.emit_inst("LDX", &format!("#>{}", enum_label));
+    // Load the address of the payload into A (low byte) and X (high byte).
+    emitter.emit_inst("LDA", &format!("#<{}", label));
+    emitter.emit_inst("LDX", &format!("#>{}", label));
 
     Ok(())
 }
 
-/// Emit a constant value as inline data bytes
-fn emit_constant_value(
+/// Append a constant value's little-endian bytes to `out`.
+fn push_constant_value(
     expr: &crate::ast::Expr,
     size: usize,
-    emitter: &mut Emitter,
+    out: &mut Vec<u8>,
 ) -> Result<(), CodegenError> {
     if let crate::ast::Expr::Literal(lit) = expr {
         match lit {
             crate::ast::Literal::Integer(val) => {
                 if size == 1 {
-                    emitter.emit_byte(*val as u8);
+                    out.push(*val as u8);
                 } else if size == 2 {
-                    emitter.emit_byte((*val & 0xFF) as u8);
-                    emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
+                    out.push((*val & 0xFF) as u8);
+                    out.push(((*val >> 8) & 0xFF) as u8);
                 } else {
                     return Err(CodegenError::UnsupportedOperation(format!(
                         "field type with size {} not yet supported",
@@ -1301,7 +1301,7 @@ fn emit_constant_value(
                 }
             }
             crate::ast::Literal::Bool(b) => {
-                emitter.emit_byte(if *b { 1 } else { 0 });
+                out.push(if *b { 1 } else { 0 });
             }
             _ => {
                 return Err(CodegenError::UnsupportedOperation(

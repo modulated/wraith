@@ -128,6 +128,13 @@ impl std::error::Error for CodegenError {}
 /// Uses a global pool for cross-module string deduplication
 pub struct StringCollector {
     strings: HashMap<String, String>, // content -> label
+    /// Constant enum payloads (tag byte + field bytes), collected here so they
+    /// land in DATA instead of inline in the instruction stream behind a `JMP`.
+    /// Insertion order is preserved for a deterministic DATA layout; the map
+    /// deduplicates identical blobs so two constructions of the same variant
+    /// with the same payload share one copy.
+    enum_blobs: Vec<(String, Vec<u8>)>, // (label, bytes) in insertion order
+    enum_blob_labels: HashMap<Vec<u8>, String>, // bytes -> label, for dedup
     next_id: usize,
 }
 
@@ -141,8 +148,64 @@ impl StringCollector {
     pub fn new() -> Self {
         Self {
             strings: HashMap::default(),
+            enum_blobs: Vec::new(),
+            enum_blob_labels: HashMap::default(),
             next_id: 0,
         }
+    }
+
+    /// Register a constant enum payload and return its DATA label. Identical
+    /// blobs are deduplicated to a single copy.
+    pub fn add_enum_blob(&mut self, bytes: Vec<u8>) -> String {
+        if let Some(label) = self.enum_blob_labels.get(&bytes) {
+            return label.clone();
+        }
+        let label = format!("ed_{}", self.next_id);
+        self.next_id += 1;
+        self.enum_blob_labels.insert(bytes.clone(), label.clone());
+        self.enum_blobs.push((label.clone(), bytes));
+        label
+    }
+
+    /// Emit all collected constant enum payloads into the DATA section.
+    pub fn emit_enum_data(
+        &self,
+        emitter: &mut Emitter,
+        section_alloc: &mut SectionAllocator,
+    ) -> Result<(), CodegenError> {
+        if self.enum_blobs.is_empty() {
+            return Ok(());
+        }
+
+        emitter.emit_comment("============================");
+        emitter.emit_comment("Constant Enum Payloads");
+        emitter.emit_comment("============================");
+
+        for (label, bytes) in &self.enum_blobs {
+            let size = bytes.len() as u16;
+            let addr = section_alloc
+                .allocate("DATA", size)
+                .map_err(CodegenError::SectionError)?;
+            section_alloc.record_allocation(
+                format!("enum payload {}", label),
+                addr,
+                size,
+                AllocationSource::Section("DATA".to_string()),
+                None,
+            );
+            emitter.emit_org(addr);
+            emitter.emit_label(label);
+            for chunk in bytes.chunks(16) {
+                let bytes_str = chunk
+                    .iter()
+                    .map(|b| format!("${:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                emitter.emit_raw(&format!("    .BYTE {}", bytes_str));
+            }
+        }
+
+        Ok(())
     }
 
     /// Register a string and get its label (deduplicated automatically)
@@ -917,6 +980,7 @@ pub fn generate(
     // Emit collected string literals to DATA section
     // Content-based labels ensure cross-module deduplication
     string_collector.emit_strings(&mut emitter, &mut section_alloc)?;
+    string_collector.emit_enum_data(&mut emitter, &mut section_alloc)?;
 
     // Emit stdlib math functions if needed
     emit_stdlib_math_functions(&mut emitter, &mut section_alloc)?;
