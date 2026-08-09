@@ -90,6 +90,29 @@ fn a_sixteen_bit_zero_keeps_both_bytes_after_the_transfer_fold() {
 }
 
 #[test]
+fn a_symbol_named_a_is_usable() {
+    // `A` collides with the accumulator token in assembly; the assembler only
+    // reads `A` as the accumulator for accumulator-mode mnemonics, so a const
+    // literally named `A` (emitted as `LDA A` / `STA A`) round-trips.
+    let mut e = run(r#"
+        const A: addr = 0x0400;
+        const OUT: addr = 0x0401;
+        #[reset]
+        fn main() {
+            A = 42;
+            A += 1;      // load/modify/store through the accumulator
+            OUT = A;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0401),
+        43,
+        "a const named `A` reads and writes correctly"
+    );
+}
+
+#[test]
 fn smoke_u8_subtraction_is_not_reversed() {
     // Non-commutative: verifies operand order (a - b, not b - a).
     let mut e = run(r#"

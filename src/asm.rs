@@ -330,7 +330,14 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> Result<ParsedOperand, Str
     if op.is_empty() {
         return po(bare_mode, ValueExpr::None);
     }
-    if op == "A" {
+    // A bare `A` operand is the accumulator, but only for the mnemonics that
+    // actually have an accumulator addressing mode. For every other mnemonic
+    // (`LDA A`, `STA A`, `ADC A`, …) an operand of `A` is a label — a user
+    // symbol literally named `A` — so it must fall through to the label path
+    // below. This is unambiguous because codegen only ever writes `A` as an
+    // operand for genuine accumulator ops; memory operands go through
+    // load/modify/store or a resolved numeric address, never `INC A`-the-label.
+    if op == "A" && matches!(mnem, "ASL" | "LSR" | "ROL" | "ROR" | "INC" | "DEC") {
         return po(Mode::Acc, ValueExpr::None);
     }
 
@@ -771,6 +778,31 @@ mod tests {
                 0x1A, 0x3A, // INC A / DEC A
                 0x04, 0x12, // TSB $12
                 0x1C, 0x34, 0x12, // TRB $1234
+            ]
+        );
+    }
+
+    #[test]
+    fn a_label_named_a_is_not_mistaken_for_the_accumulator() {
+        // `A` as an operand is the accumulator only for the mnemonics that have
+        // an accumulator mode. `LDA A` / `STA A` target a user symbol named `A`
+        // (absolute); `ASL A` / `INC A` stay accumulator ops.
+        let mem = assemble(
+            ".ORG $8000\n\
+             A = $0400\n\
+             LDA A\n\
+             STA A\n\
+             ASL A\n\
+             INC A\n",
+        )
+        .unwrap();
+        assert_eq!(
+            &mem[0x8000..0x8000 + 8],
+            &[
+                0xAD, 0x00, 0x04, // LDA $0400  (label A, absolute)
+                0x8D, 0x00, 0x04, // STA $0400  (label A, absolute)
+                0x0A, // ASL A     (accumulator)
+                0x1A, // INC A     (accumulator, CMOS)
             ]
         );
     }
