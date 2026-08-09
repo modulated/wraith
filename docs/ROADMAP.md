@@ -95,15 +95,9 @@ outset (`Emitter::emit_label` already does this for registers).
 - **Reclaim BSS from dropped statics.** Dead statics are no longer emitted, but
   sema assigns their RAM addresses before liveness is known, so the space stays
   reserved. Ordering BSS allocation after the liveness walk recovers it.
-- **Consolidate duplicate enum variant data.** Two constructions of the same
-  variant with the same payload emit the same bytes twice.
-- **Move const enum payloads out of the instruction stream.** They are emitted
-  inline with a `JMP` over them; placing them in `DATA` removes the jump.
 - **Automatic inlining of small functions.** `#[inline]` is explicit only; a leaf
   function smaller than its call sequence is always worth inlining, and the size
   is already measured in the first pass of `generate_function`.
-- **Copy loops unrolled per byte** (6 code bytes per byte copied — a `DEX/BNE`
-  loop pays off beyond ~3 bytes).
 
 ---
 
