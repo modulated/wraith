@@ -4,31 +4,9 @@ Open work only. For what the language already does, see the
 [Language Specification](specification.md); for building and running the
 compiler, see the [README](../README.md).
 
-The near-term goal driving most of the language work is a small operating system
-for a 6502 homebrew machine: UART serial, keyboard input, a monochrome text
-display, and a device protocol over a 6522 VIA.
-
----
-
-## Blocking the OS
-
-### Console and keyboard drivers
-
-The device models and execution harness already exist (`tests/common/devices.rs`
-— a TL16C550 UART and a 6522 VIA with real side effects), so this is Wraith code,
-not compiler work. Pointers are in place, so a driver can be handed a caller's
-buffer (`examples/pointers.wr`).
-
-- **Keyboard** — scancode in via a VIA port with a CA1 strobe raising IRQ,
-  decoded to ASCII, queued in a `static` ring buffer.
-- **Text console** — memory-mapped framebuffer, cursor, line wrap, scroll (reuse
-  `memcpy16` from `std/mem.wr`), clear-screen.
-- **Monitor command loop** — `peek` / `poke` / `dump` / `load` / `run` / `help`
-  over the modelled UART.
-
-`examples/monitor_standalone.wr` is an earlier sketch. It compiles, but predates
-pointers and the device models, so treat it as reference material to be rewritten
-rather than as the shape to build on.
+This is the language and compiler roadmap; it stays agnostic of any particular
+program written in Wraith. Application work (device drivers, an OS, monitors)
+lives in its own repository.
 
 ---
 
