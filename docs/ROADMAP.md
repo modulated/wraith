@@ -93,8 +93,17 @@ outset (`Emitter::emit_label` already does this for registers).
 ### Smaller code
 
 - **Reclaim BSS from dropped statics.** Dead statics are no longer emitted, but
-  sema assigns their RAM addresses before liveness is known, so the space stays
-  reserved. Ordering BSS allocation after the liveness walk recovers it.
+  the registration pass (`register.rs` `bss_alloc`) assigns every mutable
+  static a RAM address before liveness (`reachable_symbols`) is known, so a
+  dropped static still reserves its bytes. A naive "allocate after the liveness
+  walk" reorder does not work directly: initializer `&OTHER_STATIC` references
+  and the flattened init bytes are resolved at registration time, in
+  declaration order, from the already-assigned addresses. Recovering the space
+  means splitting static registration into phases — declare symbols and collect
+  refs, run liveness, then assign BSS addresses to the live statics (still in
+  declaration order) and flatten their init bytes — and keeping the shared
+  `bss_cursor` consistent before `finalize_frames` lays local-array blocks
+  above it.
 - **Automatic inlining of small functions.** `#[inline]` is explicit only; a leaf
   function smaller than its call sequence is always worth inlining, and the size
   is already measured in the first pass of `generate_function`.
