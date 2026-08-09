@@ -926,3 +926,651 @@ pub(super) fn generate_local_array_init(
     emitter.invalidate_registers();
     Ok(())
 }
+
+pub(super) fn generate_var_decl(
+    name: &Spanned<String>,
+    init: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    // Look up variable info first
+    if let Some(sym) = info.resolved_symbols.get(&name.span) {
+        use crate::sema::table::SymbolKind;
+        use crate::sema::types::Type;
+
+        // A `str<N>` buffer: fill its RAM block from the literal, then
+        // point the frame slot at the block. Downstream, the slot reads
+        // as a 2-byte pointer to `[len][bytes]` — identical to a str
+        // literal binding — so every str read path works unchanged. The
+        // difference is the data lives in RAM and can be edited.
+        if let Some(buf) = info.string_buffers.get(&name.span)
+            && let crate::sema::table::SymbolLocation::ZeroPage(slot) = sym.location
+        {
+            let bytes: Vec<u8> = match &init.node {
+                crate::ast::Expr::Literal(crate::ast::Literal::String(s)) => s.as_bytes().to_vec(),
+                // sema requires a string-literal initializer for a buffer
+                _ => Vec::new(),
+            };
+            let len = bytes.len() as u8;
+            emitter.emit_comment(&format!(
+                "str<{}> buffer {} @ ${:04X} ({}/{} bytes, RAM)",
+                buf.size - 1,
+                name.node,
+                buf.addr,
+                len,
+                buf.size - 1
+            ));
+            // Length prefix, then each content byte as an immediate store.
+            emitter.emit_inst("LDA", &format!("#${:02X}", len));
+            emitter.emit_inst("STA", &format!("${:04X}", buf.addr));
+            for (i, b) in bytes.iter().enumerate() {
+                emitter.emit_inst("LDA", &format!("#${:02X}", b));
+                emitter.emit_inst("STA", &format!("${:04X}", buf.addr as usize + 1 + i));
+            }
+            // Point the frame slot at the block.
+            emitter.emit_inst("LDA", &format!("#${:02X}", buf.addr & 0xFF));
+            emitter.emit_inst("STA", &format!("${:02X}", slot));
+            emitter.emit_inst("LDA", &format!("#${:02X}", buf.addr >> 8));
+            emitter.emit_inst("STA", &format!("${:02X}", slot + 1));
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+
+        // Check if this is a struct variable initialized with a struct literal
+        // Use runtime initialization for struct literals only (not enum variants)
+        if let Type::Named(struct_name) = &sym.ty {
+            // Only use runtime init if the init expression is a struct literal
+            let is_struct_literal = matches!(
+                &init.node,
+                crate::ast::Expr::StructInit { .. } | crate::ast::Expr::AnonStructInit { .. }
+            );
+
+            // Also verify this is actually a struct type (not an enum)
+            let is_struct_type = info.type_registry.get_struct(struct_name).is_some();
+
+            if is_struct_literal
+                && is_struct_type
+                && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+            {
+                // Get fields from the init expression
+                let fields = match &init.node {
+                    crate::ast::Expr::StructInit { fields, .. } => fields,
+                    crate::ast::Expr::AnonStructInit { fields } => fields,
+                    _ => unreachable!(),
+                };
+
+                // Use runtime struct initialization directly to ZP address
+                crate::codegen::expr::generate_struct_init_runtime(
+                    struct_name,
+                    fields,
+                    addr,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                return Ok(());
+            }
+
+            // Struct-by-value initialization from a call, e.g.
+            // `let p: Point = make();`. A struct-returning function
+            // leaves a pointer to the struct bytes in A:X; copy the
+            // whole struct into this local's inline storage (frame
+            // coloring keeps the returned pointer valid until the next
+            // call, and the copy is the first thing after the call).
+            if is_struct_type
+                && matches!(&init.node, crate::ast::Expr::Call { .. })
+                && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                && let Some(sdef) = info.type_registry.get_struct(struct_name)
+            {
+                let total = sdef.total_size as u8;
+                emitter.emit_comment(&format!(
+                    "Struct return-by-value: copy {} bytes into ${:02X}",
+                    total, dest
+                ));
+                generate_expr(init, emitter, info, string_collector)?;
+                emit_return_by_value_copy(emitter, dest, total);
+                emitter.invalidate_registers();
+                return Ok(());
+            }
+        }
+
+        // Local array: the data lives in RAM (see `LocalArray`), not
+        // inline in the code stream where it used to be emitted and
+        // where writes would have gone to ROM on a real board. Fill the
+        // block from the initializer, then put its address in the
+        // frame slot — every downstream path still reads the slot as a
+        // 2-byte pointer, so indexing is unchanged.
+        if let Some(arr) = info.local_arrays.get(&name.span)
+            && let crate::sema::table::SymbolLocation::ZeroPage(slot) = sym.location
+        {
+            let elem_size = match &sym.ty {
+                Type::Array(elem, _) => crate::codegen::expr::type_byte_size(elem, info).max(1),
+                _ => 1,
+            };
+            emitter.emit_comment(&format!(
+                "local array {} @ ${:04X} ({} bytes, RAM)",
+                name.node, arr.addr, arr.size
+            ));
+            generate_local_array_init(arr.addr, arr.size, elem_size, init, emitter, info)?;
+            // Point the frame slot at the block.
+            emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr & 0xFF));
+            emitter.emit_inst("STA", &format!("${:02X}", slot));
+            emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr >> 8));
+            emitter.emit_inst("STA", &format!("${:02X}", slot + 1));
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+
+        // Slice value: `let s: &[T] = arr[start..end];`. Materialize the
+        // 4-byte fat-pointer descriptor into s's frame slot:
+        //   slot[0..1] = base = arr's data pointer + start*elem_size
+        //   slot[2..3] = len  = (end - start) in elements
+        if let Type::Slice(elem) = &sym.ty
+            && let crate::ast::Expr::Slice {
+                object,
+                start,
+                end,
+                inclusive,
+            } = &init.node
+            && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+        {
+            generate_slice_materialize(
+                dest,
+                elem,
+                object,
+                start,
+                end,
+                *inclusive,
+                emitter,
+                info,
+                string_collector,
+            )?;
+            return Ok(());
+        }
+
+        // Slice returned from a call: the callee left a pointer to its
+        // 4-byte descriptor in A:X; copy the descriptor into this slot.
+        if let Type::Slice(_) = &sym.ty
+            && matches!(&init.node, crate::ast::Expr::Call { .. })
+            && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+        {
+            emitter.emit_comment("Slice return-by-value: copy 4-byte descriptor");
+            generate_expr(init, emitter, info, string_collector)?;
+            emit_return_by_value_copy(emitter, dest, 4);
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+
+        // Array of structs: stored inline. Runtime-initialize each element
+        // struct literal directly at addr + i*element_size.
+        if let Type::Array(elem, _n) = &sym.ty
+            && let Type::Named(elem_struct) = &**elem
+            && let Some(sdef) = info.type_registry.get_struct(elem_struct)
+            && let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) = &init.node
+            && let crate::sema::table::SymbolLocation::ZeroPage(base) = sym.location
+        {
+            let elem_size = sdef.total_size as u8;
+            emitter.emit_comment(&format!(
+                "Array of {} {}: {} elements inline at ${:02X}",
+                elem_struct,
+                "structs",
+                elements.len(),
+                base
+            ));
+            for (i, elem_expr) in elements.iter().enumerate() {
+                let elem_addr = base + (i as u8) * elem_size;
+                let fields = match &elem_expr.node {
+                    crate::ast::Expr::StructInit { fields, .. }
+                    | crate::ast::Expr::AnonStructInit { fields } => fields,
+                    _ => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "array-of-struct elements must be struct literals".to_string(),
+                        ));
+                    }
+                };
+                crate::codegen::expr::generate_struct_init_runtime(
+                    elem_struct,
+                    fields,
+                    elem_addr,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+            }
+            return Ok(());
+        }
+
+        // Check for shorthand array syntax: [value] expanding to [value, value, ...]
+        // If init is a single-element array and target is a larger array, synthesize an ArrayFill
+        let modified_init;
+        let init_expr = if let Type::Array(_, target_size) = &sym.ty {
+            if let crate::ast::Expr::Literal(crate::ast::Literal::Array(elements)) = &init.node {
+                if elements.len() == 1 && *target_size > 1 {
+                    // Shorthand syntax detected! Convert to ArrayFill
+                    emitter
+                        .emit_comment(&format!("Expanding [value] to [{} elements]", target_size));
+                    modified_init = crate::ast::Spanned {
+                        node: crate::ast::Expr::Literal(crate::ast::Literal::ArrayFill {
+                            value: Box::new(elements[0].clone()),
+                            count: *target_size,
+                        }),
+                        span: init.span,
+                    };
+                    &modified_init
+                } else {
+                    init
+                }
+            } else {
+                init
+            }
+        } else {
+            init
+        };
+
+        // Generate initialization expression (result in A, and X if u16)
+        generate_expr(init_expr, emitter, info, string_collector)?;
+
+        // Check if we need to zero-extend (u8 -> u16)
+        // Get the init expression type from resolved_types
+        let init_type = info.resolved_types.get(&init.span);
+        let target_type = &sym.ty;
+
+        let needs_zero_extend = if let Some(init_ty) = init_type {
+            matches!(init_ty, Type::Primitive(crate::ast::PrimitiveType::U8))
+                && matches!(
+                    target_type,
+                    Type::Primitive(crate::ast::PrimitiveType::U16)
+                        | Type::Primitive(crate::ast::PrimitiveType::I16)
+                        | Type::Primitive(crate::ast::PrimitiveType::B16)
+                )
+        } else {
+            false
+        };
+
+        // If we need to zero-extend, set Y=0 for the high byte
+        if needs_zero_extend {
+            emitter.emit_inst("LDY", "#$00");
+        }
+
+        // Check if this is a multi-byte type (arrays, u16, i16, b16, enums)
+        // Enums store a 2-byte pointer like arrays
+        let is_enum = if let Type::Named(type_name) = &sym.ty {
+            info.type_registry.get_enum(type_name).is_some()
+        } else {
+            false
+        };
+
+        let is_multibyte = matches!(
+            sym.ty,
+            Type::Array(_, _)
+                | Type::String
+                | Type::Pointer(_)
+                | Type::Function(_, _)
+                | Type::Primitive(crate::ast::PrimitiveType::U16)
+                | Type::Primitive(crate::ast::PrimitiveType::I16)
+                | Type::Primitive(crate::ast::PrimitiveType::B16)
+        ) || is_enum;
+
+        // Arrays, enums, strings and pointers carry an address in
+        // A (low) and X (high); other 16-bit values use A (low) and
+        // Y (high). Storing only A leaves the high byte as whatever was
+        // in the slot, which reads as a pointer into an arbitrary page.
+        let is_array_or_enum =
+            matches!(sym.ty, Type::Array(_, _) | Type::String | Type::Pointer(_)) || is_enum;
+
+        // An enum value binds by *copy*: the constructed bytes live in
+        // shared codegen scratch until here (and a returned enum points
+        // into the callee's reused region), so without the copy two
+        // live enums alias and any later temp use destroys the payload.
+        // The variable's slot points at its own per-declaration block
+        // from here on.
+        let enum_block = if is_enum {
+            info.enum_blocks.get(&name.span).cloned()
+        } else {
+            None
+        };
+        if let Some(block) = &enum_block {
+            emit_enum_copy_to_block(block, emitter)?;
+        }
+
+        match sym.location {
+            crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                return Err(CodegenError::Internal(
+                    "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                        .to_string(),
+                ));
+            }
+            crate::sema::table::SymbolLocation::Absolute(addr) => {
+                // Check if this is an address declaration - use symbolic name
+                if sym.kind == SymbolKind::Address {
+                    emitter.emit_sta_symbol(&name.node);
+                } else {
+                    emitter.emit_sta_abs(addr);
+                    // For multi-byte types, also store high byte
+                    if is_multibyte {
+                        let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
+                        emitter.emit_inst(hi_inst, &format!("${:04X}", addr + 1));
+                    }
+                }
+            }
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                emitter.emit_sta_zp(addr);
+                // For multi-byte types, also store high byte
+                if is_multibyte {
+                    let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
+                    emitter.emit_inst(hi_inst, &format!("${:02X}", addr + 1));
+                }
+            }
+            crate::sema::table::SymbolLocation::None => {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "VarDecl '{}' has no storage location",
+                    name.node
+                )));
+            }
+        }
+    } else {
+        return Err(CodegenError::SymbolNotFound(name.node.clone()));
+    }
+    Ok(())
+}
+
+pub(super) fn generate_assign(
+    target: &Spanned<crate::ast::Expr>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    // Slice reassignment: `s = arr[a..b];` materializes a new descriptor
+    // into the slice variable's slot (same as the `let` form).
+    if let crate::ast::Expr::Variable(target_name) = &target.node
+        && let crate::ast::Expr::Slice {
+            object,
+            start,
+            end,
+            inclusive,
+        } = &value.node
+        && let Some(sym) = info
+            .resolved_symbols
+            .get(&target.span)
+            .or_else(|| info.table.lookup(target_name))
+        && let crate::sema::types::Type::Slice(elem) = &sym.ty
+        && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+    {
+        generate_slice_materialize(
+            dest,
+            elem,
+            object,
+            start,
+            end,
+            *inclusive,
+            emitter,
+            info,
+            string_collector,
+        )?;
+        return Ok(());
+    }
+
+    // Optimization: detect x = x + 1 and x = x - 1 patterns
+    // Use INC/DEC instead of LDA/ADC/STA or LDA/SBC/STA
+    if let crate::ast::Expr::Variable(target_name) = &target.node
+        && let crate::ast::Expr::Binary { left, op, right } = &value.node
+    {
+        // Check if left side is the same variable as target
+        if let crate::ast::Expr::Variable(left_name) = &left.node
+            && left_name == target_name
+        {
+            // Check if right side is literal 1
+            if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &right.node
+                && *n == 1
+            {
+                // Look up variable location
+                let sym = info
+                    .resolved_symbols
+                    .get(&target.span)
+                    .or_else(|| info.table.lookup(target_name));
+
+                // INC/DEC operate on a single byte and do not touch the
+                // carry, so they cannot implement ±1 on a multi-byte
+                // value: `a = a + 1` on a u16 holding $00FF must carry
+                // into the high byte, which INC alone never does.
+                let is_single_byte = sym.is_some_and(|s| {
+                    matches!(
+                        s.ty,
+                        crate::sema::types::Type::Primitive(
+                            crate::ast::PrimitiveType::U8
+                                | crate::ast::PrimitiveType::I8
+                                | crate::ast::PrimitiveType::B8
+                                | crate::ast::PrimitiveType::Bool
+                        )
+                    )
+                });
+
+                if let Some(sym) = sym
+                    && is_single_byte
+                {
+                    match (op, &sym.location) {
+                        (
+                            crate::ast::BinaryOp::Add,
+                            crate::sema::table::SymbolLocation::ZeroPage(addr),
+                        ) => {
+                            // x = x + 1 -> INC $addr
+                            emitter.emit_inst("INC", &format!("${:02X}", *addr));
+                            emitter.reg_state.invalidate_zero_page(*addr);
+                            return Ok(());
+                        }
+                        (
+                            crate::ast::BinaryOp::Add,
+                            crate::sema::table::SymbolLocation::Absolute(addr),
+                        ) => {
+                            // x = x + 1 -> INC $addr
+                            emitter.emit_inst("INC", &format!("${:04X}", *addr));
+                            emitter.reg_state.invalidate_memory(*addr);
+                            return Ok(());
+                        }
+                        (
+                            crate::ast::BinaryOp::Sub,
+                            crate::sema::table::SymbolLocation::ZeroPage(addr),
+                        ) => {
+                            // x = x - 1 -> DEC $addr
+                            emitter.emit_inst("DEC", &format!("${:02X}", *addr));
+                            emitter.reg_state.invalidate_zero_page(*addr);
+                            return Ok(());
+                        }
+                        (
+                            crate::ast::BinaryOp::Sub,
+                            crate::sema::table::SymbolLocation::Absolute(addr),
+                        ) => {
+                            // x = x - 1 -> DEC $addr
+                            emitter.emit_inst("DEC", &format!("${:04X}", *addr));
+                            emitter.reg_state.invalidate_memory(*addr);
+                            return Ok(());
+                        }
+                        _ => {
+                            // Not an INC/DEC pattern, fall through to normal codegen
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // `*p = v` — write through a pointer. Handled before the value is
+    // evaluated below, because the pointer has to be staged first and
+    // the generic path assumes the target is a name.
+    if let crate::ast::Expr::Unary {
+        op: crate::ast::UnaryOp::Deref,
+        operand,
+    } = &target.node
+    {
+        return generate_deref_assignment(operand, value, emitter, info, string_collector);
+    }
+
+    // 1. Generate code for value (result in A)
+    generate_expr(value, emitter, info, string_collector)?;
+
+    // 2. Store A into target
+    // We need a helper to generate store instructions based on target
+    match &target.node {
+        crate::ast::Expr::Variable(name) => {
+            // Look up by span in resolved_symbols first (for local vars)
+            let sym = info
+                .resolved_symbols
+                .get(&target.span)
+                .or_else(|| info.table.lookup(name)); // Fallback to global table
+
+            if let Some(sym) = sym {
+                use crate::sema::table::SymbolKind;
+                use crate::sema::types::Type;
+
+                // Struct-by-value assignment from a call, e.g.
+                // `p = make();`. The value expression (already generated
+                // above) left a pointer to the struct bytes in A:X; copy
+                // the whole struct into the target's inline storage
+                // rather than storing just the low byte of the pointer.
+                if matches!(&value.node, crate::ast::Expr::Call { .. })
+                    && let Type::Named(sname) = &sym.ty
+                    && let Some(sdef) = info.type_registry.get_struct(sname)
+                    && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                {
+                    let total = sdef.total_size as u8;
+                    emitter.emit_comment(&format!(
+                        "Struct return-by-value assign: copy {} bytes into ${:02X}",
+                        total, dest
+                    ));
+                    emit_return_by_value_copy(emitter, dest, total);
+                    emitter.invalidate_registers();
+                    return Ok(());
+                }
+
+                // Check if this is an enum type
+                let is_enum = if let Type::Named(type_name) = &sym.ty {
+                    info.type_registry.get_enum(type_name).is_some()
+                } else {
+                    false
+                };
+
+                // Check if this is a multi-byte type (u16/i16/b16, arrays,
+                // enums, function pointers)
+                let is_multibyte = matches!(
+                    sym.ty,
+                    Type::Array(_, _)
+                        | Type::Pointer(_)
+                        | Type::Function(_, _)
+                        | Type::Primitive(crate::ast::PrimitiveType::U16)
+                        | Type::Primitive(crate::ast::PrimitiveType::I16)
+                        | Type::Primitive(crate::ast::PrimitiveType::B16)
+                ) || is_enum;
+
+                // Arrays, enums and pointers carry an address in
+                // A (low) and X (high); other 16-bit values use A:Y.
+                let is_array_or_enum =
+                    matches!(sym.ty, Type::Array(_, _) | Type::Pointer(_)) || is_enum;
+
+                // Same copy-on-bind as the VarDecl path: an enum
+                // reassignment must land in the variable's own block,
+                // found through the declaration's span. A target
+                // without a block (a parameter) keeps the old
+                // pointer-store behavior.
+                if is_enum
+                    && let Some(block) = sym
+                        .decl_span
+                        .and_then(|sp| info.enum_blocks.get(&sp))
+                        .cloned()
+                {
+                    emit_enum_copy_to_block(&block, emitter)?;
+                }
+
+                match sym.location {
+                    crate::sema::table::SymbolLocation::FrameOffset(_) => {
+                        return Err(CodegenError::Internal(
+                            "unresolved FrameOffset reached codegen (frame finalization skipped)"
+                                .to_string(),
+                        ));
+                    }
+                    crate::sema::table::SymbolLocation::Absolute(addr) => {
+                        // Check if this is an address declaration - use symbolic name
+                        if sym.kind == SymbolKind::Address {
+                            emitter.emit_sta_symbol(name);
+                        } else {
+                            emitter.emit_sta_abs(addr);
+                            // For multi-byte types, also store high byte
+                            if is_multibyte {
+                                let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
+                                emitter.emit_inst(hi_inst, &format!("${:04X}", addr + 1));
+                                // Raw STX/STY overwrites the high byte without
+                                // updating tracking; forget any register cached
+                                // to it so a later load isn't wrongly elided.
+                                emitter.invalidate_abs(addr + 1);
+                            }
+                        }
+                    }
+                    crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                        emitter.emit_sta_zp(addr);
+                        // For multi-byte types, also store high byte
+                        if is_multibyte {
+                            let hi_inst = if is_array_or_enum { "STX" } else { "STY" };
+                            emitter.emit_inst(hi_inst, &format!("${:02X}", addr + 1));
+                            // Raw STX/STY overwrites the high byte without
+                            // updating tracking; forget any register cached
+                            // to it so a later load isn't wrongly elided.
+                            emitter.invalidate_zp(addr + 1);
+                        }
+                    }
+                    crate::sema::table::SymbolLocation::None => {
+                        return Err(CodegenError::UnsupportedOperation(format!(
+                            "Variable '{}' has no storage location",
+                            name
+                        )));
+                    }
+                }
+            } else {
+                return Err(CodegenError::SymbolNotFound(name.clone()));
+            }
+        }
+        crate::ast::Expr::Index { object, index } => {
+            generate_index_assignment(object, index, value, emitter, info, string_collector)?;
+        }
+        crate::ast::Expr::Field { object, field } => {
+            generate_field_assignment(object, field, value, emitter, info, string_collector)?;
+        }
+        // A `.len`/`.low`/`.high` target that sema re-resolved as a
+        // struct field access stores like a plain field.
+        crate::ast::Expr::SliceLen(object) if info.accessor_fields.contains(&target.span) => {
+            let field = crate::ast::Spanned::new("len".to_string(), target.span);
+            generate_field_assignment(object, &field, value, emitter, info, string_collector)?;
+        }
+        crate::ast::Expr::U16Low(object) if info.accessor_fields.contains(&target.span) => {
+            let field = crate::ast::Spanned::new("low".to_string(), target.span);
+            generate_field_assignment(object, &field, value, emitter, info, string_collector)?;
+        }
+        crate::ast::Expr::U16High(object) if info.accessor_fields.contains(&target.span) => {
+            let field = crate::ast::Spanned::new("high".to_string(), target.span);
+            generate_field_assignment(object, &field, value, emitter, info, string_collector)?;
+        }
+        crate::ast::Expr::Slice {
+            object,
+            start,
+            end,
+            inclusive,
+        } => {
+            generate_slice_assignment(
+                object,
+                start,
+                end,
+                *inclusive,
+                value,
+                emitter,
+                info,
+                string_collector,
+            )?;
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "Only variable, index, field, and slice assignment supported".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}

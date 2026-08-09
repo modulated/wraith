@@ -1,6 +1,7 @@
 //! Loop codegen: `for`/`foreach`/`while`/`loop` lowering, the u8/u16 and
 //! countdown loop shapes, and the body-analysis helpers that pick between them.
 
+use super::match_stmt::emit_far_arm_branch;
 use super::*;
 
 /// Iterate a slice with a 16-bit counter (slices can exceed 255 elements). The
@@ -991,4 +992,400 @@ fn body_may_write_addresses(body_asm: &str, addrs: &[&str]) -> bool {
         }
     }
     false
+}
+
+pub(super) fn generate_for(
+    var_name: &Spanned<String>,
+    range: &crate::ast::Range,
+    body: &Spanned<Stmt>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    // Check if loop can be unrolled (constant bounds, small count)
+    let start_const = info.folded_constants.get(&range.start.span);
+    let end_const = info.folded_constants.get(&range.end.span);
+
+    // Threshold for unrolling: 8 iterations or fewer
+    const UNROLL_THRESHOLD: i64 = 8;
+
+    if let (
+        Some(crate::sema::const_eval::ConstValue::Integer(start)),
+        Some(crate::sema::const_eval::ConstValue::Integer(end)),
+    ) = (start_const, end_const)
+    {
+        // Calculate iteration count
+        let count = if range.inclusive {
+            end - start + 1
+        } else {
+            end - start
+        };
+
+        if count > 0 && count <= UNROLL_THRESHOLD {
+            // LOOP UNROLLING: Generate inline code for small constant loops
+            emitter.emit_comment(&format!(
+                "Loop unrolled: {} iteration{}",
+                count,
+                if count == 1 { "" } else { "s" }
+            ));
+
+            // Resolve the loop variable's actual frame slot (registered at
+            // its declaration span during analysis) rather than assuming the
+            // first variable address.
+            let loop_var_addr = match info
+                .resolved_symbols
+                .get(&var_name.span)
+                .map(|s| &s.location)
+            {
+                Some(crate::sema::table::SymbolLocation::ZeroPage(addr)) => *addr,
+                _ => {
+                    return Err(CodegenError::Internal(format!(
+                        "unrolled loop variable '{}' has no zero-page frame slot",
+                        var_name.node
+                    )));
+                }
+            };
+
+            // A 16-bit loop variable needs its high byte written too,
+            // or body reads of the counter see a garbage high byte.
+            let loop_var_is_16bit = info.resolved_symbols.get(&var_name.span).is_some_and(|s| {
+                matches!(
+                    s.ty,
+                    crate::sema::types::Type::Primitive(
+                        crate::ast::PrimitiveType::U16
+                            | crate::ast::PrimitiveType::I16
+                            | crate::ast::PrimitiveType::B16
+                    )
+                )
+            });
+
+            // Create end label for break statements
+            let end_label = emitter.next_label("ux");
+
+            // Generate body for each iteration with loop variable set
+            for i in 0..count {
+                let iter_val = start + i;
+
+                // Set loop variable to current iteration value
+                emitter.emit_comment(&format!("{} = {}", var_name.node, iter_val));
+                emitter.emit_inst("LDA", &format!("#${:02X}", iter_val as u8));
+                emitter.emit_inst("STA", &format!("${:02X}", loop_var_addr));
+                if loop_var_is_16bit {
+                    emitter.emit_inst("LDA", &format!("#${:02X}", (iter_val >> 8) as u8));
+                    emitter.emit_inst("STA", &format!("${:02X}", loop_var_addr.wrapping_add(1)));
+                }
+
+                // Create iteration label for continue statements
+                let iter_label = emitter.next_label("ui");
+
+                // Push loop context so break/continue work
+                emitter.push_loop(iter_label.clone(), end_label.clone());
+
+                // Execute body
+                emitter.reg_state.invalidate_all();
+                generate_stmt(body, emitter, info, string_collector)?;
+
+                // Pop loop context
+                emitter.pop_loop();
+
+                // Emit iteration label for continue
+                emitter.emit_label(&iter_label);
+            }
+
+            // Emit end label for break
+            emitter.emit_label(&end_label);
+
+            return Ok(());
+        }
+    }
+
+    // NORMAL LOOP: Generate standard loop code
+    generate_normal_loop(var_name, range, body, emitter, info, string_collector)
+}
+
+pub(super) fn generate_foreach(
+    var_name: &Spanned<String>,
+    iterable: &Spanned<crate::ast::Expr>,
+    body: &Spanned<Stmt>,
+    index_var: &Option<Spanned<String>>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    // ForEach loop: for item in iterable { ... } or for (index, item) in iterable { ... }
+    // Supports arrays and strings
+    // Strategy:
+    // 1. Evaluate iterable expression to get pointer
+    // 2. Use X register as loop counter (0..length)
+    // 3. Load iterable[X] into the loop variable
+    // 4. Store X in index variable if present
+    // 5. Execute body
+    // 6. Increment X and loop
+
+    emitter.emit_comment("ForEach loop");
+
+    // Generate the iterable expression (can be array or string variable)
+    let (iterable_info, is_string) = match &iterable.node {
+        crate::ast::Expr::Variable(name) => {
+            // Look up the variable to get its pointer location and type
+            let sym = info
+                .resolved_symbols
+                .get(&iterable.span)
+                .or_else(|| info.table.lookup(name))
+                .ok_or_else(|| CodegenError::SymbolNotFound(name.clone()))?;
+
+            // Check if it's an array or string
+            let is_str = matches!(sym.ty, crate::sema::types::Type::String);
+
+            // Get the location where the pointer is stored
+            let ptr_loc = match sym.location {
+                crate::sema::table::SymbolLocation::ZeroPage(addr) => addr,
+                crate::sema::table::SymbolLocation::Absolute(addr) if addr < 256 => addr as u8,
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "ForEach requires pointer in zero page".to_string(),
+                    ));
+                }
+            };
+
+            ((ptr_loc, sym.ty.clone()), is_str)
+        }
+        _ => {
+            return Err(CodegenError::UnsupportedOperation(
+                "ForEach only supports variables currently".to_string(),
+            ));
+        }
+    };
+
+    let (iterable_base, iterable_ty) = iterable_info;
+    let is_slice = matches!(&iterable_ty, crate::sema::types::Type::Slice(_));
+
+    let loop_label = emitter.next_label("fe");
+    let continue_label = emitter.next_label("fc");
+    let end_label = emitter.next_label("fz");
+
+    // Slices iterate with a 16-bit counter (they can exceed 255 elements),
+    // so they use a dedicated loop that re-reads the descriptor each
+    // iteration and advances an element pointer. Handled separately here.
+    if is_slice {
+        generate_foreach_slice(
+            iterable,
+            iterable_base,
+            &iterable_ty,
+            var_name,
+            index_var.as_ref(),
+            body,
+            &loop_label,
+            &continue_label,
+            &end_label,
+            emitter,
+            info,
+            string_collector,
+        )?;
+        return Ok(());
+    }
+
+    // The loop counter lives in a hidden zero-page slot, not just in X,
+    // so the body may clobber X freely (a u8 multiply uses it as a bit
+    // counter, a nested loop as its own counter) without corrupting the
+    // iteration. X is reloaded from the slot at each loop head and the
+    // slot is advanced with INC at continue.
+    let counter = match info
+        .loop_bound_slots
+        .get(&iterable.span)
+        .map(|s| &s.location)
+    {
+        Some(crate::sema::table::SymbolLocation::ZeroPage(a)) => *a,
+        _ => {
+            return Err(CodegenError::Internal(
+                "string/array foreach: counter slot was not allocated".to_string(),
+            ));
+        }
+    };
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("STA", &format!("${:02X}", counter));
+
+    // For arrays the size is a compile-time constant. Strings and
+    // slices have a runtime length, staged (with the string pointer)
+    // at the loop *head* below.
+    let array_size = if is_string || is_slice {
+        None
+    } else {
+        match &iterable_ty {
+            crate::sema::types::Type::Array(_, sz) => Some(*sz),
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    "ForEach requires array, slice, or string type".to_string(),
+                ));
+            }
+        }
+    };
+
+    // Loop start
+    emitter.emit_label(&loop_label);
+
+    // Reload the counter into X. The loop head is a branch target (entry
+    // and back-edge), and the body may have left anything in X, so no
+    // prior belief holds and X must come from the slot.
+    emitter.invalidate_registers();
+    emitter.emit_inst("LDX", &format!("${:02X}", counter));
+
+    // String/slice staging ($F0-$F2) lives only from here to the
+    // element read — never across the body, which is arbitrary code
+    // and may use those bytes itself (an earlier version staged once
+    // before the loop, and a body's index assignment silently
+    // destroyed the string pointer). It is therefore re-staged on
+    // every iteration, which costs a handful of cycles per element.
+    if is_string {
+        // Re-stage the string pointer and read the length prefix.
+        emitter.emit_comment("String iteration - load length");
+        emitter.emit_inst("LDA", &format!("${:02X}", iterable_base));
+        emitter.emit_inst("STA", "$F0");
+        emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 1));
+        emitter.emit_inst("STA", "$F1");
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_inst("LDA", "($F0),Y");
+        emitter.emit_inst("STA", "$F2");
+        emitter.emit_inst("CPX", "$F2");
+    } else if is_slice {
+        // Length is the low byte of the descriptor at base+2
+        // (iteration is bounded to 255 elements).
+        emitter.emit_inst("LDA", &format!("${:02X}", iterable_base + 2));
+        emitter.emit_inst("STA", "$F2");
+        emitter.emit_inst("CPX", "$F2");
+    } else if let Some(size) = array_size {
+        // Compare X against known array size
+        emitter.emit_inst("CPX", &format!("#${:02X}", size));
+    }
+    // Exit when X >= length. end_label sits past the whole body, so a
+    // plain `BCS end_label` overflows its ±127 range once the body is
+    // large (an inlined call, say). Route the far jump through a JMP and
+    // let the conditional branch hop only over it.
+    let fe_body = emitter.next_label("feb");
+    emit_far_arm_branch(emitter, "BCS", &end_label, &fe_body);
+
+    // Push loop context for break/continue. `continue` must land on the
+    // increment (continue_label), NOT the loop head — otherwise the index
+    // in X is never advanced and the loop spins forever.
+    emitter.push_loop(continue_label.clone(), end_label.clone());
+
+    // Store index in index variable if present
+    if let Some(idx_var) = index_var
+        && let Some(idx_sym) = info.resolved_symbols.get(&idx_var.span)
+    {
+        match idx_sym.location {
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+                emitter.emit_comment(&format!("Store index in {}", idx_var.node));
+                emitter.emit_inst("STX", &format!("${:02X}", addr));
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    "ForEach index variable must be in zero page".to_string(),
+                ));
+            }
+        }
+    }
+
+    // Whether the array/slice element type is 16-bit (u16/i16/b16).
+    // Strings always iterate u8 characters.
+    let elem_multibyte = {
+        let elem = match &iterable_ty {
+            crate::sema::types::Type::Array(elem, _) | crate::sema::types::Type::Slice(elem) => {
+                Some(&**elem)
+            }
+            _ => None,
+        };
+        matches!(
+            elem,
+            Some(crate::sema::types::Type::Primitive(
+                crate::ast::PrimitiveType::U16
+                    | crate::ast::PrimitiveType::I16
+                    | crate::ast::PrimitiveType::B16
+            ))
+        )
+    };
+
+    // Resolve the loop variable's storage up front.
+    let loopvar_loc = info
+        .resolved_symbols
+        .get(&var_name.span)
+        .map(|s| s.location.clone())
+        .ok_or_else(|| CodegenError::SymbolNotFound(var_name.node.clone()))?;
+
+    // Index into the iterable: Y = X, scaled ×2 for u16 elements.
+    emitter.emit_inst("TXA", "");
+    if elem_multibyte {
+        emitter.emit_inst("ASL", "A");
+    }
+    emitter.emit_inst("TAY", "");
+
+    // Emit "load byte at (base),Y then store to <dest>" for the low byte,
+    // and (for u16 elements) INY + load/store the high byte.
+    let store_lo = |emitter: &mut Emitter, load: &dyn Fn(&mut Emitter)| match loopvar_loc {
+        crate::sema::table::SymbolLocation::ZeroPage(addr) => {
+            load(emitter);
+            emitter.emit_inst("STA", &format!("${:02X}", addr));
+            if elem_multibyte {
+                emitter.emit_inst("INY", "");
+                load(emitter);
+                emitter.emit_inst("STA", &format!("${:02X}", addr + 1));
+            }
+            Ok(())
+        }
+        crate::sema::table::SymbolLocation::Absolute(addr) => {
+            load(emitter);
+            emitter.emit_sta_abs(addr);
+            if elem_multibyte {
+                emitter.emit_inst("INY", "");
+                load(emitter);
+                emitter.emit_sta_abs(addr + 1);
+            }
+            Ok(())
+        }
+        _ => Err(CodegenError::UnsupportedOperation(
+            "ForEach loop variable must have concrete location".to_string(),
+        )),
+    };
+
+    if is_string {
+        // Strings: skip the length byte, u8 elements only.
+        emitter.emit_inst("INY", "");
+        emitter.emit_inst("LDA", "($F0),Y");
+        match loopvar_loc {
+            crate::sema::table::SymbolLocation::ZeroPage(addr) => emitter.emit_sta_zp(addr),
+            crate::sema::table::SymbolLocation::Absolute(addr) => emitter.emit_sta_abs(addr),
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(
+                    "ForEach loop variable must have concrete location".to_string(),
+                ));
+            }
+        }
+    } else {
+        let base = iterable_base;
+        store_lo(emitter, &move |e: &mut Emitter| {
+            e.emit_inst("LDA", &format!("(${:02X}),Y", base));
+        })?;
+    }
+
+    // The body is arbitrary code; drop all register beliefs before it.
+    // The counter of record is the memory slot, reloaded into X at the
+    // next loop head, so the body clobbering X is harmless.
+    emitter.reg_state.invalidate_all();
+
+    // Execute loop body
+    generate_stmt(body, emitter, info, string_collector)?;
+
+    // Pop loop context
+    emitter.pop_loop();
+
+    // Continue target: advance the counter in memory, then re-test at
+    // the loop head (which reloads X from it). Advancing the slot rather
+    // than X is what lets a body that clobbers X iterate correctly.
+    emitter.emit_label(&continue_label);
+    emitter.emit_inst("INC", &format!("${:02X}", counter));
+
+    emitter.emit_inst("JMP", &loop_label);
+    emitter.emit_label(&end_label);
+
+    Ok(())
 }
