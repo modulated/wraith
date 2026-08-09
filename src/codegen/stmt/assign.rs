@@ -133,62 +133,37 @@ pub(super) fn generate_index_assignment(
             return Ok(());
         }
 
-        match sym.location {
-            SymbolLocation::ZeroPage(addr) => {
-                // For u8 arrays: direct indexed addressing
-                if !is_multibyte {
-                    // Restore value
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    // Store to array[index]
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
-                } else {
-                    // For u16 arrays: need to scale index by 2
-                    emitter.emit_comment("Scale index for u16 array (multiply by 2)");
-                    emitter.emit_inst("TYA", ""); // Get index back to A
-                    emitter.emit_inst("ASL", "A"); // Multiply by 2
-                    emitter.emit_inst("TAY", ""); // Back to Y
-
-                    // Restore and store low byte
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
-
-                    // Store high byte at next position
-                    emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
-                }
-            }
-            SymbolLocation::Absolute(addr) if addr < 256 => {
-                let addr_u8 = addr as u8;
-                // For u8 arrays: direct indexed addressing
-                if !is_multibyte {
-                    // Restore value
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    // Store to array[index]
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
-                } else {
-                    // For u16 arrays: need to scale index by 2
-                    emitter.emit_comment("Scale index for u16 array (multiply by 2)");
-                    emitter.emit_inst("TYA", ""); // Get index back to A
-                    emitter.emit_inst("ASL", "A"); // Multiply by 2
-                    emitter.emit_inst("TAY", ""); // Back to Y
-
-                    // Restore and store low byte
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
-
-                    // Store high byte at next position
-                    emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
-                }
-            }
+        // A local array's slot holds a pointer, whether the slot lives in the
+        // zero page proper or at a low absolute address — both reach it with the
+        // same `(zp),Y` indirect store, so derive the one-byte pointer address
+        // and share the store body.
+        let ptr = match sym.location {
+            SymbolLocation::ZeroPage(addr) => addr,
+            SymbolLocation::Absolute(addr) if addr < 256 => addr as u8,
             _ => {
                 return Err(CodegenError::UnsupportedOperation(format!(
                     "'{}' must be in zero page for indexed assignment",
                     array_name
                 )));
             }
+        };
+        if !is_multibyte {
+            // Restore the saved value and store it at array[index].
+            emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        } else {
+            // Scale the index by the 2-byte element width, then store low/high.
+            emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+            emitter.emit_inst("TYA", "");
+            emitter.emit_inst("ASL", "A");
+            emitter.emit_inst("TAY", "");
+
+            emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
         }
     } else {
         return Err(CodegenError::UnsupportedOperation(
