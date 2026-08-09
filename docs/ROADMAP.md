@@ -172,13 +172,8 @@ Also open:
 
 ## Polish
 
-- **Dead code.** `address_allocator.rs` (188 lines) is unused; `TempAllocator::reset`
-  is never called (and the "reset at function boundaries" comment at
-  `aggregate.rs` is false — runtime enum construction leaks pool bytes
-  program-wide); `is_primary_free`, `TempAllocStats`,
-  `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
-- **Small diagnostic/CLI nits.** The string-limit error says 256 but the limit is
-  255; `-true` type-checks as bool; `-v` is `--version`; `--help` writes to stderr.
+- **Dead code.** `address_allocator.rs` (188 lines) is unused; `is_primary_free`,
+  `TempAllocStats`, `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
 - **Match-arm binding slots.** Each arm allocates fresh frame slots; siblings could
   share (cf. `loop_bound_free`).
 - **Test isolation.** `tests/visibility_errors.rs` writes fixed filenames into the
