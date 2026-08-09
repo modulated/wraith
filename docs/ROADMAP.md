@@ -143,11 +143,15 @@ table is new.
 
 ## Correctness & diagnostics
 
-- **Sema-level multi-error reporting.** Statement- and body-level recovery ship:
-  independent errors within a body, and across sibling functions, are reported
-  together (`SemaError::Multiple`, mirroring `ParseErrorKind::Multiple`, so no
-  caller's signature changed). Remaining: recovery in the *register* pass and
-  across imports — see the plan below, which explains why those come last.
+- **Sema-level multi-error reporting.** Done for declarations, bodies,
+  statements and independent subexpressions (call arguments, binary operands),
+  via `SemaError::Multiple` — mirroring `ParseErrorKind::Multiple`, so no
+  caller's signature changed — and a `Type::Error` poison type that keeps a
+  reported failure from cascading. Two boundaries are deliberately *not* crossed:
+  a failed declaration stops the walk before the bodies (its symbol is missing,
+  so every use would report a bogus "cannot find"), and a failing imported module
+  still surfaces one rendered diagnostic. Both would need per-name suppression to
+  do safely; see the plan below.
 - **Interrupt hardware-stack depth check.** Done
   (`warn_interrupt_stack_depth`, `src/sema/analyze/frames.rs`). Sums each
   handler's entry cost (3 CPU + 3 register bytes + the zero-page save, which can

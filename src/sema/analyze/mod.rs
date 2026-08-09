@@ -313,9 +313,24 @@ impl SemanticAnalyzer {
         &mut self,
         source: &SourceFile,
     ) -> Result<HashMap<String, crate::sema::TailCallInfo>, SemaError> {
-        // First pass: Register all global items (functions, statics, structs)
+        // First pass: Register all global items (functions, statics, structs).
+        // Declarations are independent of each other, so all of their problems
+        // are reported together.
         for item in &source.items {
-            self.register_item(item)?;
+            if let Err(e) = self.register_item(item) {
+                self.record(e);
+            }
+        }
+
+        // But stop before the bodies. A declaration that failed to register left
+        // its symbol missing, so every use of it below would report "cannot find
+        // ..." on top of the real error — symptoms burying the cause. Getting
+        // both passes in one run would need per-name suppression of exactly
+        // those follow-ons; reporting every declaration problem at once, and
+        // bodies once the declarations are sound, buys most of the benefit with
+        // none of the risk.
+        if let Some(e) = self.take_errors() {
+            return Err(e);
         }
 
         // Second pass: Analyze function bodies

@@ -211,3 +211,35 @@ fn a_poisoned_value_does_not_produce_a_follow_on_type_error() {
         "the poison type must never surface to the user:\n{e}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Declaration (register-pass) recovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn broken_declarations_all_report() {
+    let n = error_count(
+        r#"
+        const A: u8 = 256;
+        const B: u8 = 300;
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert_eq!(n, 2, "each bad declaration is its own mistake");
+}
+
+#[test]
+fn a_failed_declaration_does_not_cascade_into_bodies() {
+    // `A` never registered, so analysis stops before the bodies rather than
+    // reporting "cannot find `A`" at each use on top of the real error.
+    let e = errors_of(
+        r#"
+        const A: u8 = 300;
+        #[reset]
+        fn main() { let x: u8 = A; let y: u8 = A + 1; loop {} }
+    "#,
+    );
+    assert_eq!(e.matches("error:").count(), 1, "cause only:\n{e}");
+    assert!(!e.contains("cannot find"), "no follow-on symptoms:\n{e}");
+}
