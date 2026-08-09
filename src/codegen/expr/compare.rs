@@ -134,13 +134,7 @@ pub(super) fn generate_compare_eq(emitter: &mut Emitter, is_u16: bool) -> Result
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
         emitter.emit_inst("BEQ", &true_label);
 
-        // False case
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True case
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, None, &end_label);
     }
 
     emitter.emit_label(&end_label);
@@ -180,13 +174,7 @@ pub(super) fn generate_compare_ne(emitter: &mut Emitter, is_u16: bool) -> Result
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
         emitter.emit_inst("BNE", &true_label);
 
-        // False case
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True case
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, None, &end_label);
     }
 
     emitter.emit_label(&end_label);
@@ -198,6 +186,29 @@ pub(super) fn generate_compare_ne(emitter: &mut Emitter, is_u16: bool) -> Result
 /// Generate less-than comparison (<)
 ///
 /// Compares A register with value at TEMP and sets A to 1 if less than, 0 otherwise
+/// Emit the shared boolean-result tail of an unsigned comparison: the false
+/// path loads `#$00` and jumps to `end`, the true path (at `true_label`) loads
+/// `#$01` and falls through. `false_label` is `Some` when the false path is a
+/// branch target that needs its own label, `None` when control falls into it.
+///
+/// The caller emits `end` and invalidates A afterwards (shared by both the
+/// 8- and 16-bit arms, so it stays out of this helper to avoid a duplicate
+/// label).
+fn emit_bool_tail(
+    emitter: &mut Emitter,
+    true_label: &str,
+    false_label: Option<&str>,
+    end_label: &str,
+) {
+    if let Some(f) = false_label {
+        emitter.emit_label(f);
+    }
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("JMP", end_label);
+    emitter.emit_label(true_label);
+    emitter.emit_inst("LDA", "#$01");
+}
+
 pub(super) fn generate_compare_lt(
     emitter: &mut Emitter,
     is_u16: bool,
@@ -224,26 +235,13 @@ pub(super) fn generate_compare_lt(
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
         emitter.emit_inst("BCC", &true_label); // A < Low -> True
 
-        // False
-        emitter.emit_label(&false_label);
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, Some(&false_label), &end_label);
     } else {
         // 8-bit comparison
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
         emitter.emit_inst("BCC", &true_label); // Branch if carry clear (A < TEMP)
 
-        // False case
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True case
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, None, &end_label);
     }
 
     emitter.emit_label(&end_label);
@@ -282,26 +280,13 @@ pub(super) fn generate_compare_ge(
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
         emitter.emit_inst("BCS", &true_label); // A >= Low -> True
 
-        // False
-        emitter.emit_label(&false_label);
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, Some(&false_label), &end_label);
     } else {
         // 8-bit comparison
         emitter.emit_inst("CMP", &format!("${:02X}", temp));
         emitter.emit_inst("BCS", &true_label); // Branch if carry set (A >= TEMP)
 
-        // False case
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True case
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, None, &end_label);
     }
 
     emitter.emit_label(&end_label);
@@ -343,14 +328,7 @@ pub(super) fn generate_compare_gt(
         emitter.emit_inst("BEQ", &false_label);
         emitter.emit_inst("BCS", &true_label);
 
-        // False
-        emitter.emit_label(&false_label);
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, Some(&false_label), &end_label);
     } else {
         // 8-bit comparison. The equal case must fall into the false path and
         // load 0: branching straight to the end would leave the left operand in
@@ -361,14 +339,7 @@ pub(super) fn generate_compare_gt(
         emitter.emit_inst("BEQ", &false_label); // equal -> not greater
         emitter.emit_inst("BCS", &true_label); // carry set and not equal -> A > TEMP
 
-        // False case (A < TEMP, or A == TEMP via the branch above)
-        emitter.emit_label(&false_label);
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True case
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, Some(&false_label), &end_label);
     }
 
     emitter.emit_label(&end_label);
@@ -408,14 +379,7 @@ pub(super) fn generate_compare_le(
         emitter.emit_inst("BEQ", &true_label); // equal -> true
         emitter.emit_inst("BCC", &true_label); // left.low < right.low -> true
 
-        // Fall through: left.low > right.low -> false
-        emitter.emit_label(&false_label);
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, Some(&false_label), &end_label);
     } else {
         // 8-bit unsigned: A <= TEMP
         let true_label = emitter.next_label("lt");
@@ -423,13 +387,7 @@ pub(super) fn generate_compare_le(
         emitter.emit_inst("BEQ", &true_label); // equal -> true
         emitter.emit_inst("BCC", &true_label); // A < TEMP -> true
 
-        // False (A > TEMP)
-        emitter.emit_inst("LDA", "#$00");
-        emitter.emit_inst("JMP", &end_label);
-
-        // True
-        emitter.emit_label(&true_label);
-        emitter.emit_inst("LDA", "#$01");
+        emit_bool_tail(emitter, &true_label, None, &end_label);
     }
 
     emitter.emit_label(&end_label);

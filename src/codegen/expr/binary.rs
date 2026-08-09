@@ -1252,27 +1252,33 @@ fn generate_modulo_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     Ok(())
 }
 
-fn generate_divide_i16(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Dividend in A/Y, divisor at TEMP/TEMP+1. div16 clobbers $20-$27, so the
-    // result sign is parked at $28 to survive the call; $22/$23 hold the
-    // dividend only before the call.
+/// Signed 16-bit divide/modulo: abs both operands, run the unsigned core, then
+/// negate the result if it should be negative. Divide and modulo differ only in
+/// the sign source (`park_sign` sets `$28`, tested bit 7) and the unsigned core
+/// they call; the abs-negate-restore scaffolding is identical.
+///
+/// Dividend in A/Y, divisor at TEMP/TEMP+1. The unsigned core clobbers
+/// `$20-$27`, so the sign is parked at `$28`; `$22/$23` hold the dividend.
+fn generate_signed_divmod_i16(
+    emitter: &mut Emitter,
+    label: &str,
+    park_sign: impl FnOnce(&mut Emitter),
+    core: impl FnOnce(&mut Emitter) -> Result<(), CodegenError>,
+) -> Result<(), CodegenError> {
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("STA", "$22");
     emitter.emit_inst("STY", "$23");
-    // Result sign = dividend.high ⊕ divisor.high (bit 7).
-    emitter.emit_inst("LDA", "$23");
-    emitter.emit_inst("EOR", &format!("${:02X}", temp + 1));
-    emitter.emit_inst("STA", "$28");
+    park_sign(emitter);
 
     emit_abs16_zp(emitter, temp); // abs divisor
     emit_abs16_zp(emitter, 0x22); // abs dividend
 
     emitter.emit_inst("LDA", "$22");
     emitter.emit_inst("LDY", "$23");
-    generate_divide_u16(emitter)?; // quotient in A/Y
+    core(emitter)?; // result in A/Y
 
-    // Negate quotient if the result should be negative.
-    let done = emitter.next_label("dn");
+    // Negate the result if it should be negative.
+    let done = emitter.next_label(label);
     emitter.emit_inst("BIT", "$28");
     emitter.emit_inst("BPL", &done);
     emitter.emit_inst("STA", "$22");
@@ -1285,30 +1291,30 @@ fn generate_divide_i16(emitter: &mut Emitter) -> Result<(), CodegenError> {
     Ok(())
 }
 
+fn generate_divide_i16(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    generate_signed_divmod_i16(
+        emitter,
+        "dn",
+        // Result sign = dividend.high ⊕ divisor.high (bit 7).
+        |e| {
+            let temp = e.memory_layout.temp_reg();
+            e.emit_inst("LDA", "$23");
+            e.emit_inst("EOR", &format!("${:02X}", temp + 1));
+            e.emit_inst("STA", "$28");
+        },
+        generate_divide_u16,
+    )
+}
+
 fn generate_modulo_i16(emitter: &mut Emitter) -> Result<(), CodegenError> {
-    // Remainder takes the dividend's sign. Park it at $28 to survive mod16.
-    let temp = emitter.memory_layout.temp_reg();
-    emitter.emit_inst("STA", "$22");
-    emitter.emit_inst("STY", "$23");
-    emitter.emit_inst("LDA", "$23"); // dividend high
-    emitter.emit_inst("STA", "$28"); // sign source (bit 7)
-
-    emit_abs16_zp(emitter, temp); // abs divisor
-    emit_abs16_zp(emitter, 0x22); // abs dividend
-
-    emitter.emit_inst("LDA", "$22");
-    emitter.emit_inst("LDY", "$23");
-    generate_modulo_u16(emitter)?; // remainder in A/Y
-
-    let done = emitter.next_label("mn");
-    emitter.emit_inst("BIT", "$28");
-    emitter.emit_inst("BPL", &done);
-    emitter.emit_inst("STA", "$22");
-    emitter.emit_inst("STY", "$23");
-    emit_negate16_zp(emitter, 0x22);
-    emitter.emit_inst("LDA", "$22");
-    emitter.emit_inst("LDY", "$23");
-    emitter.emit_label(&done);
-    emitter.mark_a_unknown();
-    Ok(())
+    generate_signed_divmod_i16(
+        emitter,
+        "mn",
+        // Remainder takes the dividend's sign (its high byte, bit 7).
+        |e| {
+            e.emit_inst("LDA", "$23");
+            e.emit_inst("STA", "$28");
+        },
+        generate_modulo_u16,
+    )
 }
