@@ -26,27 +26,18 @@ buffer (`examples/pointers.wr`).
 - **Monitor command loop** — `peek` / `poke` / `dump` / `load` / `run` / `help`
   over the modelled UART.
 
-`examples/monitor/` holds an earlier sketch; neither `simple_monitor.wr` nor
-`monitor_standalone.wr` compiles, and the set should be treated as reference
-material to be rewritten here rather than as working examples.
+`examples/monitor_standalone.wr` is an earlier sketch. It compiles, but predates
+pointers and the device models, so treat it as reference material to be rewritten
+rather than as the shape to build on.
 
 ---
 
 ## Language features
 
-### Bitfield access — follow-ups
+### Bit-range slice
 
-Single-bit access ships (`x.bit(n)`, `x.set_bit(n)`, `x.clear_bit(n)`,
-`x.toggle_bit(n)`, constant bit index; lowered to `SMB`/`RMB` on the 65C02, an
-`ORA`/`AND` read-modify-write otherwise), including on struct-field and
-constant-index array-element targets that resolve to a fixed address
-(`DEV.ctrl.set_bit(3)`, `t[1].flags.clear_bit(0)`), and through a pointer
-(`p.field.set_bit(n)`) or a runtime index (`t[i].flags.set_bit(n)`), which
-desugar to an indirect `object = object <op> mask` read-modify-write.
-`if x.bit(n)` / `if !x.bit(n)` on a zero-page byte fold into a single
-`BBSn`/`BBRn` bit-test-branch on the 65C02. Remaining:
-
-- **Bit-range slice** `flags.bits[7:4]` — extract/insert a contiguous field.
+`flags.bits[7:4]` — extract and insert a contiguous field. Single-bit access is
+complete; this is the multi-bit generalization.
 
 ### Const attributes (consider later)
 
@@ -75,13 +66,7 @@ or faster code for programs that already compile.
 
 ### 65C02 instruction selection
 
-The `--cpu 65c02` (default) / `--cpu 6502` switch and the `TargetCpu` plumbing
-exist, and the assembler encodes the full WDC 65C02 base set. The CMOS path
-already emits: the Rockwell `SMB`/`RMB` (single-bit set/clear); `STZ` for
-reset-time zeroing; `PHX`/`PHY`/`PLX`/`PLY` in the interrupt prologue/epilogue;
-accumulator `INC A`/`DEC A` (a flag-liveness-guarded fold of `CLC; ADC #$01` /
-`SEC; SBC #$01`); and `JMP (abs,X)` for match jump-table dispatch (no zero-page
-vector). Still to do:
+Two instructions in the WDC set have no codegen site yet:
 
 - **`BRA rel`** — unconditional relative branch: 2 bytes against 3 for `JMP`
   within −128..+127. Awkward because the length depends on range, which is not
@@ -143,100 +128,29 @@ table is new.
 
 ## Correctness & diagnostics
 
-- **Sema-level multi-error reporting.** Done for declarations, bodies,
-  statements and independent subexpressions (call arguments, binary operands),
-  via `SemaError::Multiple` — mirroring `ParseErrorKind::Multiple`, so no
-  caller's signature changed — and a `Type::Error` poison type that keeps a
-  reported failure from cascading. Two boundaries are deliberately *not* crossed:
-  a failed declaration stops the walk before the bodies (its symbol is missing,
-  so every use would report a bogus "cannot find"), and a failing imported module
-  still surfaces one rendered diagnostic. Both would need per-name suppression to
-  do safely; see the plan below.
-- **Interrupt hardware-stack depth check.** Done
-  (`warn_interrupt_stack_depth`, `src/sema/analyze/frames.rs`). Sums each
-  handler's entry cost (3 CPU + 3 register bytes + the zero-page save, which can
-  reach ~220 bytes) plus 2 per nested `JSR` on its deepest chain, and warns when
-  page 1 has under 32 bytes spare. Handlers sum rather than max because an NMI
-  can preempt an IRQ; a handler reachable from an indirect call is skipped, since
-  depth through a function pointer is unknowable.
-- **Compile the spec's examples as tests.** Done for the opt-in
-  ` ```rust,compile ` blocks (`tests/e2e/spec_examples.rs`); the remaining plain
-  ` ```rust ` fragments reference peripherals/functions defined elsewhere and are
-  not self-contained. Tagging more of them (after making them self-contained)
-  widens the net.
-- **Error-message golden tests** — done for 15 of the top diagnostics
-  (`tests/e2e/error_diagnostics.rs`), each pinning the `--> line:col` position, a
-  message keyword, and the shared no-`Debug`-leak/has-a-caret invariant. Add more
-  as new diagnostics land.
+Multi-error reporting covers declarations, bodies, statements and independent
+subexpressions; two boundaries remain uncrossed because doing so safely needs
+work the rest did not:
 
-### Plan: sema-level multi-error reporting
+- **Recover from a failed declaration into the bodies.** Today a declaration that
+  fails to register stops the walk, because its symbol is then missing and every
+  use would report a bogus "cannot find" on top of the real error. Crossing this
+  needs per-name suppression: remember which names failed to register and
+  silence exactly their `UndefinedSymbol`s in the body pass.
+- **Report several errors from one imported module.** `SemaError::InModule`
+  carries a diagnostic already rendered against the child's source (its spans
+  index a file the driver never read), so N child errors need N renders, each
+  with its own `trail` clone, merged under the existing `is_replay` guard in
+  `merge_imported` — or a diamond import reports the same module twice.
 
-Today every check in `src/sema/analyze/` returns `Result<_, SemaError>` and the
-driver (`analyze_module` → `analyze_item` → `analyze_stmt`/`check_expr`)
-`?`-propagates the first failure. The goal is to collect and report *all*
-independent errors in one pass, as the parser already does.
+Also open:
 
-**The load-bearing risk.** The historical defect class here is *state that
-outlived its validity* — a register belief past a label, a merge list missing a
-variant — producing silent miscompiles. Continuing analysis past an error means
-deliberately running checks over partially-invalid state. So the invariant is:
-**recover only at boundaries where the remaining work is independent of what
-failed, and never fabricate a plausible-but-wrong type that later code trusts.**
-
-**Recovery boundaries (where to catch, not `?`):**
-
-- **Item** — a bad `fn`/`struct`/`static`/`const` is recorded; the next item is
-  still analyzed. `analyze_item` and `register_item` become the coarse
-  catch points, iterating all of `source.items` instead of stopping.
-- **Statement** — within a function body, a failed `analyze_stmt` is recorded and
-  the next statement is analyzed. Sibling statements are independent; a broken
-  `let` should not hide a type error three lines down.
-- **Never mid-expression.** A subexpression whose type could not be determined
-  must *not* be guessed. Introduce a `Type::Error` (or `Type::Unknown`) sentinel:
-  a failed `check_expr` records the error, returns `Type::Error`, and every
-  operator/assignment/call check treats `Type::Error` on either side as
-  "already reported — produce `Type::Error`, emit nothing." This is what stops
-  one real error from cascading into ten bogus ones, and is the piece most likely
-  to be wrong if rushed.
-
-**Mechanism:**
-
-1. Add `errors: Vec<SemaError>` to the analyzer, mirroring the existing
-   `warnings: Vec<Warning>` field and its `.clone()` into `ProgramInfo`. Add a
-   `record(&mut self, e: SemaError)` helper (dedupe by span+message; cap at, say,
-   50 to bound pathological input).
-2. Add `Type::Error`. Make it compatible with everything in the compatibility
-   checks (so it never produces a *second* error) and make `type_size`/codegen
-   never see it — analysis must abort before codegen if `!errors.is_empty()`.
-3. Convert the two driver loops (`analyze_module`'s register and analyze passes)
-   to record-and-continue. Convert `analyze_stmt`'s block walk likewise.
-4. Change the public entry: `analyze` returns `Result<ProgramInfo, Vec<SemaError>>`
-   (or keeps `ProgramInfo` carrying `errors`, with the CLI/tests checking it).
-   The CLI renders each with `format_with_source_and_file` and exits non-zero if
-   any; a partial `ProgramInfo` is **never** handed to codegen.
-
-**Phasing (each independently green):**
-
-- *Phase 1* — plumbing only: add `errors`, `record`, `Type::Error`, and the
-  abort-before-codegen gate. Keep `?` everywhere; behavior is unchanged (still
-  one error), but the machinery exists and is tested.
-- *Phase 2* — item-level recovery: the two driver loops record-and-continue.
-  Two unrelated broken items now both report. Highest value, lowest risk.
-- *Phase 3* — statement-level recovery inside a body, guarded by `Type::Error`
-  poisoning so a bad expression doesn't cascade.
-- *Phase 4* — widen `check_expr`'s internal `?`s to record-and-poison where a
-  subexpression failure is genuinely independent (e.g. each call argument).
-
-**Testing:** a `tests/e2e/multi_error.rs` asserting that a program with N
-independent errors reports N (not 1), that a single bad expression reports
-*once* (no cascade — the key anti-goal), and that a file with any error produces
-no `.asm`. The existing single-error golden tests
-(`tests/e2e/error_diagnostics.rs`) must stay green throughout: first-error
-position and message do not change.
-
-**Explicitly out of scope:** partial code generation. If there is any error,
-the compile fails with no output. This is a diagnostics-quality change, not an
-error-recovery-codegen feature.
+- **Widen the spec-example harness.** Only the opt-in ` ```rust,compile ` blocks
+  are compiled (`tests/e2e/spec_examples.rs`); the plain ` ```rust ` fragments
+  reference peripherals defined elsewhere in the prose. Making more of them
+  self-contained and tagging them widens the net.
+- **More error-message golden tests** as new diagnostics land, in the
+  exact-position style of `tests/e2e/error_diagnostics.rs`.
 
 ---
 
@@ -249,7 +163,7 @@ error-recovery-codegen feature.
 - **De-duplicate codegen.** Six near-identical unsigned compare routines; the
   ZeroPage/Absolute arms of `generate_index_assignment`; `generate_divide_i16` /
   `generate_modulo_i16`; the `emit_signed_lt` closure copied verbatim into two
-  files. `stmt.rs` (~3,950 lines) wants a `store_value_to_slot(ty, loc)` helper.
+  files. `stmt.rs` (~4,300 lines) wants a `store_value_to_slot(ty, loc)` helper.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable (`cpu_flags.rs`, and parts of `frames.rs` / `types.rs` /
   `control_flow.rs` / `memory.rs`).
@@ -265,15 +179,10 @@ error-recovery-codegen feature.
   `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
 - **Small diagnostic/CLI nits.** The string-limit error says 256 but the limit is
   255; `-true` type-checks as bool; `-v` is `--version`; `--help` writes to stderr.
-  (`-x as i16` already parses as `(-x) as i16`, matching Rust — unary binds
-  tighter than `as`; `1_000` already lexes as `1000`. Both locked in
-  `tests/e2e/operators.rs`.)
 - **Match-arm binding slots.** Each arm allocates fresh frame slots; siblings could
   share (cf. `loop_bound_free`).
 - **Test isolation.** `tests/visibility_errors.rs` writes fixed filenames into the
   shared temp dir, risking parallel-run flakiness.
-- **Repo hygiene.** A committed `.DS_Store` and an empty `fuzz/pGNi` AFL artifact
-  can go; the spec's revision history is never updated.
 
 ---
 

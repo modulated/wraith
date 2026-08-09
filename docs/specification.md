@@ -3990,4 +3990,12 @@ Because an interrupt can preempt main-line code at any point - including in the 
 
 ## Revision History
 
+- 2026-08-09 (0.6.0): Pointer equality (`==`/`!=` on the same pointer type);
+  bit mutation through a pointer or a runtime index; 65C02 `BBR`/`BBS` fusion for
+  `if x.bit(n)`; function-pointer dispatch tables (`handlers[i](x)`) fixed for
+  `static`, `const` and local tables; `u16` `&`/`|`/`^` fixed to combine the high
+  byte; a 16-bit xorshift PRNG replacing the LFSR; self-referential by-value
+  structs and index-scaling overflow rejected; multi-error reporting and
+  rustc-style diagnostics; an interrupt hardware-stack depth warning; and a
+  memory map that reserves `$E000-$EFFF` for memory-mapped I/O.
 - 2026-01-13: Initial skeleton created with checkboxes for incremental completion
