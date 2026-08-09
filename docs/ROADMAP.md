@@ -165,7 +165,10 @@ Also open:
 - **De-duplicate codegen.** Six near-identical unsigned compare routines; the
   ZeroPage/Absolute arms of `generate_index_assignment`; `generate_divide_i16` /
   `generate_modulo_i16`; the `emit_signed_lt` closure copied verbatim into two
-  files. `stmt.rs` (~4,300 lines) wants a `store_value_to_slot(ty, loc)` helper.
+  files. The statement codegen is now split into a `stmt/` module (`assign`,
+  `loops`, `match_stmt`, `asm_stmt`); the remaining win there is a shared
+  `store_value_to_slot(ty, loc)` helper for the repeated byte-store sequences in
+  `assign.rs`.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable (`cpu_flags.rs`, and parts of `frames.rs` / `types.rs` /
   `control_flow.rs` / `memory.rs`).
