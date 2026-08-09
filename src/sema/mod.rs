@@ -144,6 +144,14 @@ pub enum SemaError {
         array_size: usize,
         span: Span,
     },
+
+    /// Several independent errors from one analysis run.
+    ///
+    /// Mirrors `ParseErrorKind::Multiple`: wrapping the collection in a variant
+    /// rather than widening `analyze`'s return type keeps every caller —
+    /// the driver, the LSP, the test harness, the fuzz target — unchanged, and
+    /// keeps one convention for multi-error reporting across the front end.
+    Multiple(Vec<SemaError>),
 }
 
 impl SemaError {
@@ -178,6 +186,9 @@ impl SemaError {
             | ArrayIndexOutOfBounds { span, .. } => Some(*span),
             InModule { import_span, .. } => Some(*import_span),
             CircularImport { .. } | FrameRegionOverflow { .. } => None,
+            // The first error's position, so a consumer that can only show one
+            // location (the LSP's fallback) points at the earliest problem.
+            Multiple(errors) => errors.first().and_then(|e| e.span()),
         }
     }
 
@@ -502,6 +513,13 @@ impl SemaError {
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
+            // Each rendered in full and separated by a blank line, matching how
+            // the driver already prints a run's warnings.
+            SemaError::Multiple(errors) => errors
+                .iter()
+                .map(|e| e.format_with_source_of_file(source, filename, file))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
         }
     }
 }
@@ -710,6 +728,13 @@ impl std::fmt::Display for SemaError {
                     "array index out of bounds at {}..{}: index {} is out of bounds for array of length {}",
                     span.start, span.end, index, array_size
                 )
+            }
+            SemaError::Multiple(errors) => {
+                write!(f, "{} semantic errors:", errors.len())?;
+                for e in errors {
+                    write!(f, "\n  {}", e)?;
+                }
+                Ok(())
             }
         }
     }

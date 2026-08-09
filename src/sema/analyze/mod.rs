@@ -62,6 +62,10 @@ impl ImportContext {
 pub struct SemanticAnalyzer {
     pub table: SymbolTable,
     pub warnings: Vec<Warning>,
+    /// Errors collected so analysis can report several per run instead of
+    /// stopping at the first, mirroring the parser's `errors` field. Analysis
+    /// still fails if this is non-empty — nothing partial reaches codegen.
+    pub errors: Vec<SemaError>,
     pub(super) current_return_type: Option<Type>,
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
     pub(super) function_metadata: HashMap<String, FunctionMetadata>,
@@ -176,6 +180,7 @@ impl SemanticAnalyzer {
         Self {
             table: SymbolTable::new(),
             warnings: Vec::with_capacity(16),
+            errors: Vec::new(),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
@@ -317,6 +322,18 @@ impl SemanticAnalyzer {
             self.analyze_item(item)?;
         }
 
+        // Surface whatever the two passes collected before going further. This
+        // has to live here, not in `analyze`: an imported module is analyzed
+        // through `analyze_module` too, and its errors must reach the importer
+        // rather than being left in a child analyzer nobody inspects.
+        //
+        // The passes below are skipped on failure deliberately — unused-import
+        // detection and tail-call analysis read state that is incomplete for a
+        // function that failed, and would only add follow-on noise.
+        if let Some(e) = self.take_errors() {
+            return Err(e);
+        }
+
         // Check for unused imports after all analysis is complete. Unused
         // *functions* are reported from `analyze` instead: whether one is dead
         // is a whole-program question, and only the root sees the whole
@@ -327,7 +344,36 @@ impl SemanticAnalyzer {
         Ok(self.analyze_tail_calls(source))
     }
 
+    /// The most errors one analysis collects before it stops trying. Matches
+    /// the parser's ceiling: recovery makes long cascades rare, but a
+    /// pathological file still gets a bound.
+    pub(super) const MAX_ERRORS: usize = 50;
+
+    /// Record an error and continue analyzing.
+    ///
+    /// Only call this where the remaining work is genuinely independent of what
+    /// failed — recovering into state the failure invalidated is how a
+    /// diagnostics feature turns into a miscompile.
+    pub(super) fn record(&mut self, error: SemaError) {
+        if self.errors.len() < Self::MAX_ERRORS {
+            self.errors.push(error);
+        }
+    }
+
+    /// Collapse collected errors into the single value `analyze` returns.
+    /// One error is returned as itself so existing single-error diagnostics —
+    /// and the tests pinning them — are unchanged.
+    pub(super) fn take_errors(&mut self) -> Option<SemaError> {
+        match self.errors.len() {
+            0 => None,
+            1 => Some(self.errors.remove(0)),
+            _ => Some(SemaError::Multiple(std::mem::take(&mut self.errors))),
+        }
+    }
+
     pub fn analyze(&mut self, source: &SourceFile) -> Result<ProgramInfo, SemaError> {
+        // `analyze_module` surfaces anything its two passes collected, so the
+        // whole-program phases below only ever run on a clean module.
         let tail_call_info = self.analyze_module(source)?;
 
         // What the output actually needs. Computed here, at the root, because
@@ -544,8 +590,17 @@ impl SemanticAnalyzer {
                 metadata.param_bytes_used = param_bytes;
             }
 
-            // Analyze body
-            self.analyze_stmt(&func.body)?;
+            // Analyze body. A failure is recorded rather than propagated, so the
+            // bookkeeping below still runs: the frame size, the inline-symbol
+            // capture, and — most importantly — the scope exit and
+            // `current_function`/`current_return_type` reset at the end of this
+            // arm. Returning early skipped all of it, leaving the analyzer in a
+            // state no later function could trust. That was invisible only
+            // because the first error ended the compile; it is load-bearing now
+            // that the next function is still analyzed.
+            if let Err(e) = self.analyze_stmt(&func.body) {
+                self.record(e);
+            }
 
             // Record this function's frame size (params + locals + any temp slots).
             // finalize_frames uses these to color frames across the call graph.

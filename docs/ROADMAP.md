@@ -143,9 +143,11 @@ table is new.
 
 ## Correctness & diagnostics
 
-- **Sema-level multi-error reporting.** The parser recovers and reports multiple
-  errors; sema still stops at the first. This is a structural change with a real
-  soundness risk — see the plan below before starting.
+- **Sema-level multi-error reporting.** Statement- and body-level recovery ship:
+  independent errors within a body, and across sibling functions, are reported
+  together (`SemaError::Multiple`, mirroring `ParseErrorKind::Multiple`, so no
+  caller's signature changed). Remaining: recovery in the *register* pass and
+  across imports — see the plan below, which explains why those come last.
 - **Interrupt hardware-stack depth check.** Done
   (`warn_interrupt_stack_depth`, `src/sema/analyze/frames.rs`). Sums each
   handler's entry cost (3 CPU + 3 register bytes + the zero-page save, which can

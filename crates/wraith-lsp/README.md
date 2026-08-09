@@ -12,7 +12,7 @@ the extension. This document is about the server itself.
 
 | Feature | Notes |
 | --- | --- |
-| **Diagnostics** | Errors (lex / parse / type) and warnings (unused, non-exhaustive match, …), live as you type. Fail-fast, so one error shows at a time. |
+| **Diagnostics** | Errors (lex / parse / type) and warnings (unused, non-exhaustive match, …), live as you type. Independent errors are reported together, each at its own position. |
 | **Completion** | After `.`: the fields of the receiver's struct. Otherwise: keywords, primitive types, and the file's top-level declarations. |
 | **Hover** | The type of the narrowest expression under the cursor. |
 

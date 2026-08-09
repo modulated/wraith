@@ -28,7 +28,14 @@ impl SemanticAnalyzer {
                         // Continue analyzing (don't skip) to find other errors/warnings
                     }
 
-                    self.analyze_stmt(s)?;
+                    // Sibling statements are independent, so a failure is
+                    // recorded and the walk continues — a broken `let` should
+                    // not hide a type error three lines below it. This also
+                    // keeps the `exit_scope` below reachable, which an early
+                    // return skipped.
+                    if let Err(e) = self.analyze_stmt(s) {
+                        self.record(e);
+                    }
 
                     // Check if this statement terminates control flow
                     if matches!(s.node, Stmt::Return(_) | Stmt::Break | Stmt::Continue) {
@@ -205,8 +212,21 @@ impl SemanticAnalyzer {
 
         // Set expected type context for anonymous struct literals
         self.expected_type = Some(declared_ty.clone());
-        let init_ty = self.check_expr(init)?;
+        let init_result = self.check_expr(init);
         self.expected_type = None;
+
+        // A failed initializer must not un-declare the variable. The annotation
+        // already says what `name` is, so record the error and carry on with the
+        // declared type: otherwise every later use reports a bogus "cannot find
+        // `name` in this scope" stacked on top of the one real mistake, which is
+        // exactly the cascade multi-error reporting has to avoid.
+        let init_ty = match init_result {
+            Ok(t) => t,
+            Err(e) => {
+                self.record(e);
+                declared_ty.clone()
+            }
+        };
 
         // Allow Bool to U8 assignment (booleans are 0/1 bytes in 6502)
         // Check if initializer type can be implicitly converted to declared type
