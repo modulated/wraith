@@ -327,6 +327,56 @@ fn completion_survives_a_broken_buffer_via_the_last_good_analysis() {
     shutdown(&mut client, handle);
 }
 
+#[test]
+fn a_relative_import_resolves_against_the_open_files_directory() {
+    // Regression: the LSP used to analyze without the document's path, so sema
+    // resolved imports against the server's working directory and reported
+    // "No such file" for imports the CLI compiled fine. Drive the real server
+    // with a real file on disk that imports a module in a subdirectory.
+    let dir = std::env::temp_dir().join(format!("wraith-lsp-import-{}", std::process::id()));
+    let devices = dir.join("devices");
+    std::fs::create_dir_all(&devices).unwrap();
+    std::fs::write(
+        devices.join("uart.wr"),
+        "pub fn uart_ready() -> u8 { return 1; }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.wr");
+    let main_src = "import { uart_ready } from \"devices/uart.wr\";\n\
+                    #[reset]\n\
+                    fn main() {\n\
+                    \x20   let r: u8 = uart_ready();\n\
+                    \x20   loop {}\n\
+                    }\n";
+    std::fs::write(&main, main_src).unwrap();
+
+    let (mut client, handle) = setup();
+    let main_uri = Uri::from_str(&format!("file://{}", main.display())).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": TextDocumentItem {
+                uri: main_uri,
+                language_id: "wraith".to_string(),
+                version: 0,
+                text: main_src.to_string(),
+            }
+        }),
+    );
+    let diags = client.diagnostics();
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "a relative import should resolve against the file's directory, got: {errors:?}"
+    );
+
+    shutdown(&mut client, handle);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn labels(resp: Option<CompletionResponse>) -> Vec<String> {
     match resp {
         Some(CompletionResponse::Array(items)) => items.into_iter().map(|i| i.label).collect(),
