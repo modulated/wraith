@@ -174,6 +174,45 @@ fn generate_string_eq(
     Ok(())
 }
 
+/// Compare two pointers for equality (`invert` for `!=`), leaving a 0/1 bool in
+/// A. Pointers arrive in A:X (A = low, X = high). The right operand is evaluated
+/// first and both its bytes parked in a call-safe temp, then the left operand is
+/// evaluated, so a call in either operand runs before the other's result is
+/// live.
+fn generate_pointer_eq(
+    left: &Spanned<Expr>,
+    right: &Spanned<Expr>,
+    invert: bool,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    let save = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in pointer compare".to_string())
+    })?;
+    generate_expr(right, emitter, info, string_collector)?;
+    emitter.emit_inst("STA", &format!("${:02X}", save));
+    emitter.emit_inst("STX", &format!("${:02X}", save + 1));
+
+    generate_expr(left, emitter, info, string_collector)?;
+    let ne = emitter.next_label("pne");
+    let done = emitter.next_label("pdone");
+    emitter.emit_inst("CMP", &format!("${:02X}", save)); // low byte
+    emitter.emit_inst("BNE", &ne);
+    emitter.emit_inst("CPX", &format!("${:02X}", save + 1)); // high byte
+    emitter.emit_inst("BNE", &ne);
+    // Equal.
+    emitter.emit_inst("LDA", if invert { "#$00" } else { "#$01" });
+    emitter.emit_inst("JMP", &done);
+    emitter.emit_label(&ne);
+    emitter.emit_inst("LDA", if invert { "#$01" } else { "#$00" });
+    emitter.emit_label(&done);
+
+    emitter.temp_alloc.free_high(save, 2);
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
 pub(super) fn generate_binary(
     left: &Spanned<Expr>,
     op: crate::ast::BinaryOp,
@@ -198,6 +237,23 @@ pub(super) fn generate_binary(
         && matches!(info.resolved_types.get(&left.span), Some(Type::String))
     {
         return generate_string_eq(
+            left,
+            right,
+            matches!(op, crate::ast::BinaryOp::Ne),
+            emitter,
+            info,
+            string_collector,
+        );
+    }
+
+    // Pointer equality/inequality: compare the two-byte address (A:X pair).
+    // Pointers use the A:X convention, not the A:Y one the u16 compare path
+    // below assumes, so this is a dedicated sequence rather than a reuse.
+    if matches!(op, crate::ast::BinaryOp::Eq | crate::ast::BinaryOp::Ne)
+        && (matches!(info.resolved_types.get(&left.span), Some(Type::Pointer(_)))
+            || matches!(info.resolved_types.get(&right.span), Some(Type::Pointer(_))))
+    {
+        return generate_pointer_eq(
             left,
             right,
             matches!(op, crate::ast::BinaryOp::Ne),
@@ -492,14 +548,29 @@ pub(super) fn generate_binary(
             // Arithmetic modifies A, invalidate register tracking
             emitter.mark_a_unknown();
         }
-        crate::ast::BinaryOp::BitAnd => {
-            emitter.emit_inst("AND", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-        }
-        crate::ast::BinaryOp::BitOr => {
-            emitter.emit_inst("ORA", &format!("${:02X}", emitter.memory_layout.temp_reg()));
-        }
-        crate::ast::BinaryOp::BitXor => {
-            emitter.emit_inst("EOR", &format!("${:02X}", emitter.memory_layout.temp_reg()));
+        crate::ast::BinaryOp::BitAnd
+        | crate::ast::BinaryOp::BitOr
+        | crate::ast::BinaryOp::BitXor => {
+            // Left is in A:Y (low:high), right in temp:temp+1. A `u16` bitwise op
+            // must combine *both* bytes — combining only the low byte (`A op
+            // temp`) left the high byte untouched, so e.g. `w | 0x8000` was a
+            // no-op on the high byte.
+            let mnem = match op {
+                crate::ast::BinaryOp::BitAnd => "AND",
+                crate::ast::BinaryOp::BitOr => "ORA",
+                crate::ast::BinaryOp::BitXor => "EOR",
+                _ => unreachable!(),
+            };
+            let temp = emitter.memory_layout.temp_reg();
+            emitter.emit_inst(mnem, &format!("${:02X}", temp)); // low byte
+            if is_u16 {
+                emitter.emit_inst("PHA", ""); // save low result
+                emitter.emit_inst("TYA", ""); // A = high byte
+                emitter.emit_inst(mnem, &format!("${:02X}", temp + 1)); // high byte
+                emitter.emit_inst("TAY", ""); // Y = high result
+                emitter.emit_inst("PLA", ""); // A = low result
+            }
+            emitter.mark_a_unknown();
         }
         crate::ast::BinaryOp::Shl => {
             generate_shift_left(emitter, is_u16)?;

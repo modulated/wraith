@@ -162,9 +162,13 @@ default_section = "CODE"
 If no `wraith.toml` is present, the compiler uses these defaults:
 
 - **CODE**: `0x8000-0xBFFF` (16KB) — user code (default)
-- **DATA**: `0xD000-0xEFFF` (8KB) — constants and read-only data
+- **DATA**: `0xD000-0xDFFF` (4KB) — constants and read-only data
 - **STACK**: `0x0200-0x02FF` (256B) — **RAM** for the compiler's software stack
 - **BSS**: `0x0400-0x07FF` (1KB) — **RAM** for mutable globals (`static`)
+
+`0xE000-0xEFFF` is left unmanaged as the memory-mapped I/O window: device
+registers are declared with `const NAME: addr = 0xE0xx`, and `DATA` stops below
+it so constant data is never laid over a device.
 
 Every one of these is a `wraith.toml` section, so the whole map is yours to
 define. The only addresses the compiler fixes are those the 6502 itself

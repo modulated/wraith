@@ -74,7 +74,7 @@ fn a_type_error_in_an_imported_module_points_at_that_module() {
         "the line should be quoted: {err}"
     );
     assert!(
-        err.contains("expected u8, found Direction"),
+        err.contains("expected `u8`, found `Direction`"),
         "the diagnosis itself must survive: {err}"
     );
     assert!(

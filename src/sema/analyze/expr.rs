@@ -141,6 +141,7 @@ impl SemanticAnalyzer {
                 // Look up the struct definition
                 if !self.type_registry.structs.contains_key(&name.node) {
                     return Err(SemaError::UndefinedSymbol {
+                        suggestion: self.table.closest_name(&name.node),
                         name: name.node.clone(),
                         span: name.span,
                     });
@@ -436,6 +437,7 @@ impl SemanticAnalyzer {
             info.clone()
         } else {
             return Err(SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(name),
                 name: name.to_string(),
                 span: expr.span,
             });
@@ -539,6 +541,15 @@ impl SemanticAnalyzer {
         // through `as u16`, which puts the address in the register pair the
         // 16-bit compare paths expect.
         if matches!(left_ty, Type::Pointer(_)) || matches!(right_ty, Type::Pointer(_)) {
+            // Equality on two pointers of the *same* type compares the
+            // addresses — the natural null check for the linked lists that
+            // `struct Node { next: &Node }` now makes expressible is
+            // `p == 0 as &Node`. Ordering and arithmetic stay rejected: a
+            // relative order between two heap-less addresses is rarely meaningful
+            // and `<`/`+` on the A:X pointer pair would miscompile.
+            if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_ty == right_ty {
+                return Ok(Type::Primitive(PrimitiveType::Bool));
+            }
             let hint = match op {
                 BinaryOp::Add | BinaryOp::Sub => {
                     "index instead, as `p[i]`, which scales by the element width"
@@ -730,6 +741,7 @@ impl SemanticAnalyzer {
             }
         } else {
             return Err(SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(&function.node),
                 name: function.node.clone(),
                 span: function.span,
             });
@@ -865,6 +877,7 @@ impl SemanticAnalyzer {
                     Some(s) => s.clone(),
                     None => {
                         return Err(SemaError::UndefinedSymbol {
+                            suggestion: self.table.closest_name(name),
                             name: name.clone(),
                             span: operand.span,
                         });
@@ -1101,6 +1114,7 @@ impl SemanticAnalyzer {
         // Verify struct exists
         if !self.type_registry.structs.contains_key(&struct_name) {
             return Err(SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(&struct_name),
                 name: struct_name.clone(),
                 span,
             });
@@ -1169,6 +1183,7 @@ impl SemanticAnalyzer {
             .type_registry
             .get_enum(&enum_name.node)
             .ok_or_else(|| SemaError::UndefinedSymbol {
+                suggestion: self.table.closest_name(&enum_name.node),
                 name: enum_name.node.clone(),
                 span: enum_name.span,
             })?;
@@ -1358,6 +1373,14 @@ impl SemanticAnalyzer {
         index: &Spanned<Expr>,
         _span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
+        // The index is a byte offset (u8/i8) and the object is an aggregate —
+        // neither should inherit the *element* type the surrounding context
+        // expects. Without clearing it, `let r: u16 = arr[3]` pushes u16 onto
+        // the literal `3`, which then fails the u8/i8 index gate below. (A
+        // variable index keeps its own declared type, so only constant indices
+        // hit this.)
+        let saved_expected = self.expected_type.take();
+
         // Type check the index expression (should be integer)
         let index_ty = self.check_expr(index)?;
         if !matches!(
@@ -1373,6 +1396,7 @@ impl SemanticAnalyzer {
 
         // Type check the object being indexed
         let object_ty = self.check_expr(object)?;
+        self.expected_type = saved_expected;
 
         // Extract element type from array or string type
         match &object_ty {
@@ -1509,17 +1533,16 @@ impl SemanticAnalyzer {
             return Ok(Type::Primitive(PrimitiveType::Bool));
         }
 
-        // A mutation writes back, so the target must be a plain, assignable
-        // variable (a local, a static, or a writable addr register). Field or
-        // index targets are a later extension.
-        let Expr::Variable(root) = &object.node else {
-            return Err(SemaError::Custom {
-                message: "a bit mutation needs a plain variable target, e.g. `x.set_bit(3)`"
-                    .to_string(),
-                span: object.span,
-            });
+        // A mutation writes back, so the target must be assignable. When the
+        // chain is rooted at a named lvalue (a variable, static, or addr
+        // register), that root is what has to be mutable. `lvalue_root` returns
+        // None where the chain passes through a pointer or a by-reference
+        // parameter — a mutation through a pointer is always to mutable memory
+        // (`&` is rejected on a `const` or an `addr`), so it needs no root check
+        // and codegen reaches it with an indirect read-modify-write.
+        let Some(root) = self.lvalue_root(object).cloned() else {
+            return Ok(Type::Void);
         };
-        let root = root.clone();
         if let Some(info) = self.table.lookup(&root) {
             if info.kind == SymbolKind::Constant {
                 return Err(SemaError::Custom {

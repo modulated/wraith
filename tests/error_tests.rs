@@ -73,7 +73,7 @@ fn test_type_error_mismatch_assignment() {
             x = 300;  // 300 doesn't fit in u8, will be inferred as u16
         }
         "#;
-    assert_error_contains(src, "expected u8, found u16");
+    assert_error_contains(src, "expected `u8`, found `u16`");
     assert_error_contains(src, "--> 4:17");
 }
 
@@ -141,7 +141,7 @@ fn test_type_error_undefined_variable() {
             let x: u8 = undefined_var;
         }
         "#;
-    assert_error_contains(src, "undefined symbol 'undefined_var'");
+    assert_error_contains(src, "cannot find `undefined_var` in this scope");
     assert_error_contains(src, "--> 3:25");
 }
 
@@ -152,7 +152,7 @@ fn test_type_error_undefined_function() {
             undefined_func();
         }
         "#;
-    assert_error_contains(src, "undefined symbol 'undefined_func'");
+    assert_error_contains(src, "cannot find `undefined_func` in this scope");
     assert_error_contains(src, "--> 3:13");
 }
 

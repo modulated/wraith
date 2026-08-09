@@ -154,7 +154,11 @@ pub fn parse_assembly(asm: &str) -> Vec<Line> {
 ///
 /// `volatile` names the memory-mapped I/O locations whose loads/stores must be
 /// preserved verbatim; pass `&VolatileSymbols::default()` when there are none.
-pub fn optimize(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
+pub fn optimize(
+    lines: &[Line],
+    volatile: &VolatileSymbols,
+    target: crate::codegen::TargetCpu,
+) -> Vec<Line> {
     let mut result = lines.to_vec();
     let mut changed = true;
 
@@ -193,6 +197,7 @@ pub fn optimize(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
         result = eliminate_redundant_flag_ops(&result);
         result = eliminate_redundant_address_loads(&result);
         result = apply_strength_reduction(&result);
+        result = fold_inc_dec_accumulator(&result, target);
         result = optimize_tail_calls(&result);
 
         if result.len() != before_len {
@@ -876,6 +881,57 @@ fn eliminate_unreachable_after_terminator(lines: &[Line]) -> Vec<Line> {
 }
 
 // ============================================================================
+/// On the 65C02, fold `CLC; ADC #$01` into `INC A` and `SEC; SBC #$01` into
+/// `DEC A` (three bytes to one).
+///
+/// The pairs and the accumulator increment produce the same value and the same
+/// N/Z flags, but `ADC`/`SBC` also write C and V while `INC A`/`DEC A` do not.
+/// So this is sound only where C and V are dead after the pair — which the flag
+/// liveness answers, the same way the CMP-zero and boolean-compare passes do.
+fn fold_inc_dec_accumulator(lines: &[Line], target: crate::codegen::TargetCpu) -> Vec<Line> {
+    if !target.is_cmos() {
+        return lines.to_vec();
+    }
+    let live_out = compute_flag_liveness(lines);
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if i + 1 < lines.len()
+            && let (
+                Line::Instruction {
+                    mnemonic: m1,
+                    operand: None,
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: Some(op2),
+                    comment,
+                },
+            ) = (&lines[i], &lines[i + 1])
+            && live_out[i + 1] & (FLAG_C | FLAG_V) == 0
+        {
+            let folded = match (m1.as_str(), m2.as_str(), op2.as_str()) {
+                ("CLC", "ADC", "#$01") => Some("INC"),
+                ("SEC", "SBC", "#$01") => Some("DEC"),
+                _ => None,
+            };
+            if let Some(mnem) = folded {
+                result.push(Line::Instruction {
+                    mnemonic: mnem.to_string(),
+                    operand: Some("A".to_string()),
+                    comment: comment.clone(),
+                });
+                i += 2;
+                continue;
+            }
+        }
+        result.push(lines[i].clone());
+        i += 1;
+    }
+    result
+}
+
 // Flags liveness analysis
 // ============================================================================
 //
@@ -2204,5 +2260,37 @@ mod fold_literal_tests {
             eprintln!("{}", l);
         }
         assert_eq!(out.len(), 6, "LDA $40; CLC; ADC #$03 + trailing");
+    }
+
+    #[test]
+    fn fold_inc_a_when_carry_is_dead() {
+        // `CLC; ADC #$01; STA $40` -> `INC A; STA $40` on CMOS: the store does
+        // not read carry, so the fold is sound.
+        let lines = parse_assembly("    CLC\n    ADC #$01\n    STA $40\n");
+        let out = fold_inc_dec_accumulator(&lines, crate::codegen::TargetCpu::Cmos65C02);
+        let text = lines_to_string(&out);
+        assert!(text.contains("INC A"), "{text}");
+        assert!(!text.contains("ADC"), "{text}");
+    }
+
+    #[test]
+    fn do_not_fold_when_the_carry_is_consumed() {
+        // `CLC; ADC #$01; BCC label` reads carry after the add, so folding to
+        // `INC A` (which leaves carry alone) would change the branch. Refuse.
+        let lines = parse_assembly("    CLC\n    ADC #$01\n    BCC done\ndone:\n    RTS\n");
+        let out = fold_inc_dec_accumulator(&lines, crate::codegen::TargetCpu::Cmos65C02);
+        let text = lines_to_string(&out);
+        assert!(
+            text.contains("ADC #$01"),
+            "must keep the add when carry is live:\n{text}"
+        );
+        assert!(!text.contains("INC A"), "{text}");
+    }
+
+    #[test]
+    fn never_fold_on_nmos() {
+        let lines = parse_assembly("    CLC\n    ADC #$01\n    STA $40\n");
+        let out = fold_inc_dec_accumulator(&lines, crate::codegen::TargetCpu::Nmos6502);
+        assert!(lines_to_string(&out).contains("ADC #$01"));
     }
 }

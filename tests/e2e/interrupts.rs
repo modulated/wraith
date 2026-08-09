@@ -17,16 +17,37 @@ fn nmi_handler() {
 
     // Should have RTI for interrupt handler
     assert_asm_contains(&asm, "RTI");
-    // Should have prologue (save registers)
+    // Default target is the 65C02: X and Y are pushed/pulled directly.
     assert_asm_contains(&asm, "PHA");
-    assert_asm_contains(&asm, "TXA");
-    assert_asm_contains(&asm, "TYA");
-    // Should have epilogue (restore registers)
-    assert_asm_contains(&asm, "TAY");
-    assert_asm_contains(&asm, "TAX");
+    assert_asm_contains(&asm, "PHX");
+    assert_asm_contains(&asm, "PHY");
+    assert_asm_contains(&asm, "PLY");
+    assert_asm_contains(&asm, "PLX");
     // Should have vector table
     assert_asm_contains(&asm, ".ORG $FFFA");
     assert_asm_contains(&asm, ".WORD nmi_handler");
+}
+
+#[test]
+fn nmi_handler_prologue_on_nmos_routes_x_and_y_through_a() {
+    // The NMOS 6502 has no PHX/PHY, so X and Y are saved via A (which is why A
+    // is pushed first) and restored in reverse.
+    let asm = compile_success_with_target(
+        r#"
+        const OUT: addr = 0x400;
+        #[nmi]
+        fn nmi_handler() {
+            OUT = 0xFF;
+        }
+        fn main() {}
+    "#,
+        wraith::codegen::TargetCpu::Nmos6502,
+    );
+    for op in ["PHA", "TXA", "TYA", "TAY", "TAX", "RTI"] {
+        assert_asm_contains(&asm, op);
+    }
+    // ...and none of the 65C02 stack ops.
+    assert!(!asm.contains("PHX"), "NMOS output must not use PHX:\n{asm}");
 }
 
 #[test]

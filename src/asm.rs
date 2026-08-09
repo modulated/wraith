@@ -34,11 +34,20 @@ enum Mode {
     IndX,
     IndY,
     Ind,
+    /// Absolute indexed indirect `(abs,X)` — 65C02, `JMP` only.
+    AbsIndX,
     Rel,
+    /// Zero-page + relative `$zp,label` — 65C02 `BBRn`/`BBSn` (3 bytes).
+    ZpRel,
 }
 
-/// Official NMOS 6502 opcode for a (mnemonic, addressing-mode) pair. Also
-/// handles the 65C02 Rockwell bit set/reset instructions.
+/// Opcode for a (mnemonic, addressing-mode) pair.
+///
+/// Covers the NMOS 6502 set plus the WDC 65C02 additions the compiler may emit
+/// when targeting `--cpu 65c02`: `STZ`, `BRA`, `PHX`/`PLX`/`PHY`/`PLY`,
+/// accumulator `INC A`/`DEC A`, `TSB`/`TRB`, and the Rockwell `SMB`/`RMB` bit
+/// ops. The assembler does not gate these on a target — codegen decides whether
+/// to emit them; the assembler just needs to encode whatever it is handed.
 fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
     use Mode::*;
     // 65C02 Rockwell RMB0-7 / SMB0-7: zero-page only, bit number in the
@@ -53,6 +62,22 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
     if let Some(bit) = mnem.strip_prefix("SMB").and_then(|d| d.parse::<u8>().ok()) {
         return if bit <= 7 && mode == Zp {
             Some(0x87 | (bit << 4))
+        } else {
+            None
+        };
+    }
+    // 65C02 Rockwell BBR0-7 / BBS0-7: zero-page byte plus a relative branch,
+    // bit number in the mnemonic. BBRn = 0x0F | n<<4, BBSn = 0x8F | n<<4.
+    if let Some(bit) = mnem.strip_prefix("BBR").and_then(|d| d.parse::<u8>().ok()) {
+        return if bit <= 7 && mode == ZpRel {
+            Some(0x0F | (bit << 4))
+        } else {
+            None
+        };
+    }
+    if let Some(bit) = mnem.strip_prefix("BBS").and_then(|d| d.parse::<u8>().ok()) {
+        return if bit <= 7 && mode == ZpRel {
+            Some(0x8F | (bit << 4))
         } else {
             None
         };
@@ -87,6 +112,7 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
         "BMI" => m(Rel, 0x30),
         "BNE" => m(Rel, 0xD0),
         "BPL" => m(Rel, 0x10),
+        "BRA" => m(Rel, 0x80), // 65C02
         "BRK" => m(Imp, 0x00),
         "BVC" => m(Rel, 0x50),
         "BVS" => m(Rel, 0x70),
@@ -104,7 +130,8 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(IndY, 0xD1)),
         "CPX" => m(Imm, 0xE0).or(m(Zp, 0xE4)).or(m(Abs, 0xEC)),
         "CPY" => m(Imm, 0xC0).or(m(Zp, 0xC4)).or(m(Abs, 0xCC)),
-        "DEC" => m(Zp, 0xC6)
+        "DEC" => m(Acc, 0x3A) // 65C02 accumulator form
+            .or(m(Zp, 0xC6))
             .or(m(ZpX, 0xD6))
             .or(m(Abs, 0xCE))
             .or(m(AbsX, 0xDE)),
@@ -118,13 +145,14 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(AbsY, 0x59))
             .or(m(IndX, 0x41))
             .or(m(IndY, 0x51)),
-        "INC" => m(Zp, 0xE6)
+        "INC" => m(Acc, 0x1A) // 65C02 accumulator form
+            .or(m(Zp, 0xE6))
             .or(m(ZpX, 0xF6))
             .or(m(Abs, 0xEE))
             .or(m(AbsX, 0xFE)),
         "INX" => m(Imp, 0xE8),
         "INY" => m(Imp, 0xC8),
-        "JMP" => m(Abs, 0x4C).or(m(Ind, 0x6C)),
+        "JMP" => m(Abs, 0x4C).or(m(Ind, 0x6C)).or(m(AbsIndX, 0x7C)), // (abs,X) is 65C02
         "JSR" => m(Abs, 0x20),
         "LDA" => m(Imm, 0xA9)
             .or(m(Zp, 0xA5))
@@ -160,8 +188,12 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(IndY, 0x11)),
         "PHA" => m(Imp, 0x48),
         "PHP" => m(Imp, 0x08),
+        "PHX" => m(Imp, 0xDA), // 65C02
+        "PHY" => m(Imp, 0x5A), // 65C02
         "PLA" => m(Imp, 0x68),
         "PLP" => m(Imp, 0x28),
+        "PLX" => m(Imp, 0xFA), // 65C02
+        "PLY" => m(Imp, 0x7A), // 65C02
         "ROL" => m(Acc, 0x2A)
             .or(m(Zp, 0x26))
             .or(m(ZpX, 0x36))
@@ -194,8 +226,14 @@ fn opcode(mnem: &str, mode: Mode) -> Option<u8> {
             .or(m(IndY, 0x91)),
         "STX" => m(Zp, 0x86).or(m(ZpY, 0x96)).or(m(Abs, 0x8E)),
         "STY" => m(Zp, 0x84).or(m(ZpX, 0x94)).or(m(Abs, 0x8C)),
+        "STZ" => m(Zp, 0x64)
+            .or(m(ZpX, 0x74))
+            .or(m(Abs, 0x9C))
+            .or(m(AbsX, 0x9E)), // 65C02
         "TAX" => m(Imp, 0xAA),
         "TAY" => m(Imp, 0xA8),
+        "TRB" => m(Zp, 0x14).or(m(Abs, 0x1C)), // 65C02
+        "TSB" => m(Zp, 0x04).or(m(Abs, 0x0C)), // 65C02
         "TSX" => m(Imp, 0xBA),
         "TXA" => m(Imp, 0x8A),
         "TXS" => m(Imp, 0x9A),
@@ -208,7 +246,7 @@ fn instr_len(mode: Mode) -> u16 {
     match mode {
         Mode::Imp | Mode::Acc => 1,
         Mode::Imm | Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY | Mode::Rel => 2,
-        Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind => 3,
+        Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind | Mode::AbsIndX | Mode::ZpRel => 3,
     }
 }
 
@@ -228,6 +266,12 @@ enum ValueExpr {
     LabelLow(String, i32),
     /// high byte of (label + offset)
     LabelHigh(String, i32),
+    /// zero-page byte plus a branch target label — 65C02 `BBRn`/`BBSn`.
+    ZpRel {
+        zp: u8,
+        label: String,
+        off: i32,
+    },
 }
 
 /// Parse a numeric term like `$4E`, `$0200`, `42`, or `$4E+1` -> value.
@@ -256,8 +300,17 @@ fn split_label(s: &str) -> (String, i32) {
 fn is_branch(mnem: &str) -> bool {
     matches!(
         mnem,
-        "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS"
+        "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS" | "BRA"
     )
+}
+
+/// A 65C02 Rockwell bit-test-branch: `BBRn`/`BBSn`, taking `$zp,label`.
+fn is_bit_branch(mnem: &str) -> bool {
+    (mnem
+        .strip_prefix("BBR")
+        .or_else(|| mnem.strip_prefix("BBS")))
+    .and_then(|d| d.parse::<u8>().ok())
+    .is_some_and(|bit| bit <= 7)
 }
 
 /// Parse a mnemonic's operand string into an addressing mode + value.
@@ -279,6 +332,19 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> Result<ParsedOperand, Str
     }
     if op == "A" {
         return po(Mode::Acc, ValueExpr::None);
+    }
+
+    // 65C02 bit-test-branch `BBRn $zp,label` / `BBSn $zp,label`.
+    if is_bit_branch(mnem) {
+        let (zp_str, label) = op
+            .split_once(',')
+            .ok_or_else(|| format!("{mnem} expects `$zp,label`, got: {op}"))?;
+        let zp = parse_num(zp_str.trim())
+            .filter(|v| *v <= 0xFF)
+            .ok_or_else(|| format!("bad zero-page operand for {mnem}: {op}"))?
+            as u8;
+        let (l, off) = split_label(label);
+        return po(Mode::ZpRel, ValueExpr::ZpRel { zp, label: l, off });
     }
 
     // Immediate
@@ -311,8 +377,20 @@ fn parse_operand(mnem: &str, operand: Option<&str>) -> Result<ParsedOperand, Str
             let v = parse_num(zp).ok_or_else(|| format!("bad (zp),Y operand: {op}"))?;
             return po(Mode::IndY, ValueExpr::Num(v));
         }
-        if let Some(zp) = inner.strip_suffix(",X)") {
-            let v = parse_num(zp).ok_or_else(|| format!("bad (zp,X) operand: {op}"))?;
+        if let Some(base) = inner.strip_suffix(",X)") {
+            // `JMP (abs,X)` is absolute indexed indirect (65C02); it is the only
+            // instruction that takes a 16-bit or label operand here. Everything
+            // else is the zero-page `(zp,X)` form.
+            if mnem == "JMP" {
+                return match parse_num(base) {
+                    Some(v) => po(Mode::AbsIndX, ValueExpr::Num(v)),
+                    None => {
+                        let (l, off) = split_label(base);
+                        po(Mode::AbsIndX, ValueExpr::Label(l, off))
+                    }
+                };
+            }
+            let v = parse_num(base).ok_or_else(|| format!("bad (zp,X) operand: {op}"))?;
             return po(Mode::IndX, ValueExpr::Num(v));
         }
         if let Some(addr) = inner.strip_suffix(')') {
@@ -425,6 +503,11 @@ fn resolve(labels: &HashMap<String, u16>, v: &ValueExpr) -> Result<u16, String> 
         ValueExpr::Label(l, off) => (base(l)? as i32 + off) as u16,
         ValueExpr::LabelLow(l, off) => ((base(l)? as i32 + off) as u16) & 0xFF,
         ValueExpr::LabelHigh(l, off) => (((base(l)? as i32 + off) as u16) >> 8) & 0xFF,
+        // A bit-test-branch is emitted directly (it needs the instruction
+        // address for its relative offset), never resolved to a single value.
+        ValueExpr::ZpRel { .. } => {
+            return Err("internal: BBR/BBS operand resolved as a scalar".to_string());
+        }
     })
 }
 
@@ -604,10 +687,29 @@ pub fn assemble(asm: &str) -> Result<[u8; IMAGE_SIZE], String> {
                         }
                         emit(&mut mem, &mut addr, v as u8)?;
                     }
-                    Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind => {
+                    Mode::Abs | Mode::AbsX | Mode::AbsY | Mode::Ind | Mode::AbsIndX => {
                         let v = resolve(&labels, &parsed.value)?;
                         emit(&mut mem, &mut addr, (v & 0xFF) as u8)?;
                         emit(&mut mem, &mut addr, (v >> 8) as u8)?;
+                    }
+                    Mode::ZpRel => {
+                        // `BBRn $zp,label` / `BBSn $zp,label`: the zero-page byte
+                        // then a branch offset relative to the address after the
+                        // 3-byte instruction.
+                        let ValueExpr::ZpRel { zp, label, off } = &parsed.value else {
+                            return Err(format!("{mnem} has a malformed operand"));
+                        };
+                        emit(&mut mem, &mut addr, *zp)?;
+                        let target =
+                            resolve(&labels, &ValueExpr::Label(label.clone(), *off))? as i32;
+                        let next = instr_addr as i32 + 3;
+                        let delta = target - next;
+                        if !(-128..=127).contains(&delta) {
+                            return Err(format!(
+                                "bit-branch out of range: {instr_addr:#06X} -> {target:#06X} (delta {delta})"
+                            ));
+                        }
+                        emit(&mut mem, &mut addr, (delta as i8) as u8)?;
                     }
                 }
             }
@@ -643,6 +745,96 @@ mod tests {
     fn rockwell_bit_ops_reject_a_non_zero_page_operand() {
         // SMB/RMB have no absolute form.
         assert!(assemble(".ORG $8000\n    SMB0 $1234\n").is_err());
+    }
+
+    #[test]
+    fn base_65c02_opcodes_encode() {
+        let mem = assemble(
+            ".ORG $8000\n\
+             STZ $12\n\
+             STZ $1234\n\
+             STZ $12,X\n\
+             STZ $1234,X\n\
+             PHX\n    PHY\n    PLX\n    PLY\n\
+             INC A\n    DEC A\n\
+             TSB $12\n    TRB $1234\n",
+        )
+        .unwrap();
+        assert_eq!(
+            &mem[0x8000..0x8000 + 21],
+            &[
+                0x64, 0x12, // STZ $12
+                0x9C, 0x34, 0x12, // STZ $1234
+                0x74, 0x12, // STZ $12,X
+                0x9E, 0x34, 0x12, // STZ $1234,X
+                0xDA, 0x5A, 0xFA, 0x7A, // PHX PHY PLX PLY
+                0x1A, 0x3A, // INC A / DEC A
+                0x04, 0x12, // TSB $12
+                0x1C, 0x34, 0x12, // TRB $1234
+            ]
+        );
+    }
+
+    #[test]
+    fn jmp_absolute_indexed_indirect_is_three_bytes() {
+        // 65C02 JMP (abs,X) = 0x7C with a 16-bit operand (the table label).
+        let mem = assemble(".ORG $8000\n    JMP (tbl,X)\ntbl:\n    .WORD $9000\n").unwrap();
+        assert_eq!(mem[0x8000], 0x7C);
+        assert_eq!(mem[0x8001], 0x03); // tbl = $8003
+        assert_eq!(mem[0x8002], 0x80);
+    }
+
+    #[test]
+    fn zero_page_indexed_indirect_stays_two_bytes() {
+        // The NMOS `(zp,X)` form is unchanged by adding `JMP (abs,X)`.
+        let mem = assemble(".ORG $8000\n    LDA ($40,X)\n").unwrap();
+        assert_eq!(&mem[0x8000..0x8002], &[0xA1, 0x40]);
+    }
+
+    #[test]
+    fn bra_is_a_relative_branch() {
+        // BRA $8005 from $8000: opcode 0x80, displacement +3 (target − end).
+        let mem =
+            assemble(".ORG $8000\n    BRA there\n    NOP\n    NOP\nthere:\n    RTS\n").unwrap();
+        assert_eq!(mem[0x8000], 0x80);
+        assert_eq!(mem[0x8001], 0x02); // $8005 − $8002 (next-instruction address)
+    }
+
+    #[test]
+    fn rockwell_bit_branch_opcodes() {
+        // BBRn = 0x0F | n<<4, BBSn = 0x8F | n<<4: opcode, zero-page byte, then a
+        // branch offset relative to the address after the 3-byte instruction.
+        let mem = assemble(
+            ".ORG $8000\n\
+             BBR0 $12,there\n\
+             BBS7 $34,there\n\
+             NOP\n\
+             there:\n    RTS\n",
+        )
+        .unwrap();
+        // BBR0 at $8000: 0x0F, $12, and `there` = $8007, so delta = 7 − 3 = 4.
+        assert_eq!(&mem[0x8000..0x8003], &[0x0F, 0x12, 0x04]);
+        // BBS7 at $8003: 0x8F | 7<<4 = 0xFF, $34, delta = $8007 − $8006 = 1.
+        assert_eq!(&mem[0x8003..0x8006], &[0xFF, 0x34, 0x01]);
+    }
+
+    #[test]
+    fn a_bit_branch_can_reach_backwards() {
+        // A negative displacement: the target is before the instruction.
+        let mem = assemble(
+            ".ORG $8000\n\
+             back:\n    NOP\n\
+             BBR3 $40,back\n",
+        )
+        .unwrap();
+        // back = $8000; BBR3 at $8001: opcode 0x3F, $40, delta = $8000 − $8004 = −4.
+        assert_eq!(&mem[0x8001..0x8004], &[0x3F, 0x40, (-4i8) as u8]);
+    }
+
+    #[test]
+    fn a_bit_branch_rejects_a_non_zero_page_operand() {
+        let err = assemble(".ORG $8000\n    BBR0 $1234,there\nthere:\n    RTS\n").unwrap_err();
+        assert!(err.contains("zero-page"), "{err}");
     }
 
     #[test]

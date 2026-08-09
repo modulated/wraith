@@ -8,6 +8,53 @@ use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
 use rustc_hash::FxHashMap as HashMap;
 
+/// Recognize an `if` condition that folds into a 65C02 bit-test-branch, and
+/// return the `(mnemonic, zero-page byte)` to test-and-branch-to-`then`.
+///
+/// `if x.bit(n)` takes the `then` branch when bit n is set — `BBSn`. `if
+/// !x.bit(n)` takes it when bit n is clear — `BBRn`. Both require the target
+/// byte to be zero-page addressable (the Rockwell ops have no absolute form);
+/// anything else (absolute/MMIO byte, ROM constant, indirect target, non-CMOS
+/// target) returns `None` and the caller emits the mask-and-compare read.
+fn fusible_bit_branch(
+    condition: &Spanned<crate::ast::Expr>,
+    emitter: &Emitter,
+    info: &ProgramInfo,
+) -> Option<(String, u8)> {
+    use crate::ast::{BitOpKind, Expr, UnaryOp};
+
+    if !emitter.target.has_rockwell_bit_ops() {
+        return None;
+    }
+
+    // `!x.bit(n)` -> BBRn (branch if the bit is reset/clear).
+    // `x.bit(n)`  -> BBSn (branch if the bit is set).
+    let (negated, bitop) = match &condition.node {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => (true, operand.as_ref()),
+        _ => (false, condition),
+    };
+
+    let Expr::BitOp {
+        object,
+        kind: BitOpKind::Get,
+        bit,
+    } = &bitop.node
+    else {
+        return None;
+    };
+
+    let (zp, bit_in_byte) = crate::codegen::expr::bit_test_zp(object, bit, info)?;
+    let mnem = if negated {
+        format!("BBR{}", bit_in_byte)
+    } else {
+        format!("BBS{}", bit_in_byte)
+    };
+    Some((mnem, zp))
+}
+
 /// Strategy for generating match statement code
 #[derive(Debug)]
 enum MatchStrategy {
@@ -1002,27 +1049,40 @@ pub fn generate_stmt(
             let else_label = emitter.next_label("else");
             let end_label = emitter.next_label("end");
 
-            // Condition
-            generate_expr(condition, emitter, info, string_collector)?;
+            // 65C02 fusion: `if x.bit(n)` and `if !x.bit(n)` on a zero-page byte
+            // fold the mask-and-compare read into a single bit-test-branch
+            // (`BBSn`/`BBRn`). The branch-over-jump shape below keeps the `then`
+            // target always within a few bytes, so the ±127 reach is never a
+            // concern and no range fallback is needed.
+            if let Some((mnem, zp)) = fusible_bit_branch(condition, emitter, info) {
+                if !emitter.is_minimal() {
+                    emitter.emit_comment("Bit-test branch to then");
+                }
+                emitter.emit_inst(&mnem, &format!("${:02X},{}", zp, then_label));
+                emitter.emit_inst("JMP", &else_label);
+            } else {
+                // Condition
+                generate_expr(condition, emitter, info, string_collector)?;
 
-            // For large if statements, we need to avoid forward branches
-            // that might exceed 127 bytes. Use this structure:
-            //   condition
-            //   BNE then      ; branch if true (short forward jump)
-            //   JMP else      ; jump if false
-            // then:
-            //   then_body
-            //   JMP end
-            // else:
-            //   else_body
-            // end:
+                // For large if statements, we need to avoid forward branches
+                // that might exceed 127 bytes. Use this structure:
+                //   condition
+                //   BNE then      ; branch if true (short forward jump)
+                //   JMP else      ; jump if false
+                // then:
+                //   then_body
+                //   JMP end
+                // else:
+                //   else_body
+                // end:
 
-            if !emitter.is_minimal() {
-                emitter.emit_comment("Branch to then if condition is true");
+                if !emitter.is_minimal() {
+                    emitter.emit_comment("Branch to then if condition is true");
+                }
+                emitter.emit_inst("CMP", "#$00");
+                emitter.emit_inst("BNE", &then_label);
+                emitter.emit_inst("JMP", &else_label);
             }
-            emitter.emit_inst("CMP", "#$00");
-            emitter.emit_inst("BNE", &then_label);
-            emitter.emit_inst("JMP", &else_label);
 
             // Then
             emitter.emit_label(&then_label);
@@ -1615,12 +1675,30 @@ fn generate_index_assignment(
         }
     };
 
+    // A two-byte element (u16/i16/b16, a function pointer, or a `&T`) is scaled
+    // by the element width and stored as a low/high pair. Function pointers are
+    // what installing a driver into a table (`handlers[i] = drv`) writes, so
+    // omitting them here stored only the low byte at an unscaled offset.
     let is_multibyte = element_type.is_some_and(|t| {
         matches!(
             t,
             Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
+                | Type::Function(..)
+                | Type::Pointer(..)
         )
     });
+
+    // A runtime index into a fixed-size array whose scaled offset would exceed
+    // the 8-bit index register silently wraps (`ASL` drops its carry; `base,Y`
+    // reaches only base+255) — the same store-side hole the read path guards.
+    if let Type::Array(elem_ty, len) = object_type {
+        crate::codegen::expr::check_runtime_index_range(
+            crate::codegen::expr::type_byte_size(elem_ty, info),
+            *len,
+            index,
+            info,
+        )?;
+    }
 
     // Step 2: Evaluate the value expression
     emitter.emit_comment("Evaluate value to assign");
@@ -2849,11 +2927,18 @@ fn generate_match_jump_table(
     // 3. Load address and JMP indirect
     emitter.emit_inst("ASL", ""); // tag * 2
     emitter.emit_inst("TAX", ""); // Transfer to X for indexing
-    emitter.emit_inst("LDA", &format!("match_{}_jt,X", match_id));
-    emitter.emit_inst("STA", &format!("${:02X}", jump_ptr));
-    emitter.emit_inst("LDA", &format!("match_{}_jt+1,X", match_id));
-    emitter.emit_inst("STA", &format!("${:02X}", jump_ptr + 1));
-    emitter.emit_inst("JMP", &format!("(${:02X})", jump_ptr));
+    if emitter.target.is_cmos() {
+        // The 65C02 reads the target straight from the table with absolute
+        // indexed-indirect addressing — no zero-page vector, four fewer
+        // instructions, and no scratch pair to collide with anything.
+        emitter.emit_inst("JMP", &format!("(match_{}_jt,X)", match_id));
+    } else {
+        emitter.emit_inst("LDA", &format!("match_{}_jt,X", match_id));
+        emitter.emit_inst("STA", &format!("${:02X}", jump_ptr));
+        emitter.emit_inst("LDA", &format!("match_{}_jt+1,X", match_id));
+        emitter.emit_inst("STA", &format!("${:02X}", jump_ptr + 1));
+        emitter.emit_inst("JMP", &format!("(${:02X})", jump_ptr));
+    }
 
     // Emit jump table
     emit_jump_table(emitter, arms, info, match_id, max_tag, wildcard_arm_index)?;
@@ -3178,14 +3263,49 @@ fn generate_local_array_init(
         }
     }
 
+    /// Store a function's 2-byte code address at `addr + offset`. The address is
+    /// a label the assembler resolves, so it is written as `#<f` / `#>f` rather
+    /// than a known constant — this is how a *local* function-pointer table
+    /// (`let handlers = [d0, d1]`) is initialized.
+    fn store_fn_elem(emitter: &mut Emitter, addr: u16, offset: u16, label: &str) {
+        emitter.emit_inst("LDA", &format!("#<{label}"));
+        emitter.emit_inst("STA", &format!("${:04X}", addr + offset));
+        emitter.emit_inst("LDA", &format!("#>{label}"));
+        emitter.emit_inst("STA", &format!("${:04X}", addr + offset + 1));
+    }
+
+    // The function name an element refers to, if it is a bare function pointer.
+    let fn_label_of = |e: &Spanned<Expr>| -> Option<String> {
+        use crate::sema::table::SymbolKind;
+        use crate::sema::types::Type;
+        if let Expr::Variable(n) = &e.node {
+            let sym = info
+                .resolved_symbols
+                .get(&e.span)
+                .or_else(|| info.table.lookup(n))?;
+            if sym.kind == SymbolKind::Function || matches!(sym.ty, Type::Function(..)) {
+                return Some(n.clone());
+            }
+        }
+        None
+    };
+
     match &init.node {
         // `[v; n]` — every element the same. A byte-wide zero (or any uniform
         // byte) over a block worth looping for becomes a loop; otherwise the
         // stores are cheaper than the loop overhead.
         Expr::Literal(Literal::ArrayFill { value, count }) => {
+            // A `[f; n]` fill of one function name — every slot the same driver.
+            if let Some(label) = fn_label_of(value) {
+                for i in 0..*count as u16 {
+                    store_fn_elem(emitter, addr, i * elem_size as u16, &label);
+                }
+                emitter.invalidate_registers();
+                return Ok(());
+            }
             let v = const_of(value).ok_or_else(|| {
                 CodegenError::UnsupportedOperation(
-                    "array fill value must be a constant expression".to_string(),
+                    "array fill value must be a constant expression or a function name".to_string(),
                 )
             })?;
             let uniform_byte = (0..elem_size).all(|b| ((v >> (8 * b)) & 0xFF) == (v & 0xFF));
@@ -3216,12 +3336,16 @@ fn generate_local_array_init(
         // `[a, b, c]` — element by element.
         Expr::Literal(Literal::Array(elements)) => {
             for (i, e) in elements.iter().enumerate() {
-                let v = const_of(e).ok_or_else(|| {
-                    CodegenError::UnsupportedOperation(
-                        "array elements must be constant expressions".to_string(),
-                    )
-                })?;
-                store_elem(emitter, addr, i as u16 * elem_size as u16, v, elem_size);
+                let offset = i as u16 * elem_size as u16;
+                if let Some(v) = const_of(e) {
+                    store_elem(emitter, addr, offset, v, elem_size);
+                } else if let Some(label) = fn_label_of(e) {
+                    store_fn_elem(emitter, addr, offset, &label);
+                } else {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "array elements must be constant expressions or function names".to_string(),
+                    ));
+                }
             }
         }
         _ => {

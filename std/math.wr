@@ -292,60 +292,67 @@ pub fn divmod(a: u8, b: u8) -> u16 {
 }
 
 // ============================================================================
-// Pseudo-random number generator (16-bit Galois LFSR)
+// Pseudo-random number generator (16-bit xorshift)
 // ============================================================================
 //
-// State is a 16-bit seed held at zero page $DD-$DE (reserved for the PRNG in the
-// compiler memory map). The generator is a maximal-period (65535) Galois LFSR
-// with tap mask $B400. It self-seeds to a fixed nonzero value on first use, so
-// rand() works without an explicit srand(); call srand() for a chosen sequence.
-
-/// Advance the PRNG and return the next pseudo-random byte (0..=255).
-pub fn rand() -> u8 {
-    asm {
-        "LDA $DD",
-        "ORA $DE",
-        "BNE rand_step",  // state != 0: use it
-        "LDA #$E1",       // first use: self-seed to $ACE1
-        "STA $DD",
-        "LDA #$AC",
-        "STA $DE",
-        "rand_step:",
-        "LSR $DE",        // 16-bit right shift: high first...
-        "ROR $DD",        // ...then low; carry = bit shifted out (the LSB)
-        "BCC rand_noxor",
-        "LDA $DE",
-        "EOR #$B4",       // feedback tap $B400 (low byte is 0)
-        "STA $DE",
-        "rand_noxor:",
-        "LDA $DD",        // return low byte of new state
-    }
-}
+// Marsaglia's xorshift16 with the (7, 9, 8) triple (as popularized for the 6502
+// by John Metcalf): full period 2^16 - 1 over any nonzero seed. It mixes the
+// whole word on every draw, so consecutive outputs are far less correlated than
+// a one-bit-per-step LFSR while keeping the same two-byte footprint.
+//
+// State is held at zero page $DD-$DE (reserved for the PRNG in the compiler
+// memory map). It self-seeds to a fixed nonzero value on first use, so rand()
+// works without an explicit srand(); call srand() for a chosen sequence. $D0 is
+// used as one byte of scratch (stdlib math working storage, dead here since
+// these routines call nothing).
+//
+// Two of the three steps collapse to byte moves once you write them out:
+//   x ^= x >> 9   is  lo ^= hi >> 1     (high byte unchanged)
+//   x ^= x << 8   is  hi ^= lo          (low byte unchanged)
+// only  x ^= x << 7  needs a real 7-bit shift.
 
 /// Advance the PRNG and return the next pseudo-random 16-bit value.
 pub fn rand16() -> u16 {
     asm {
+        // Self-seed to a fixed nonzero value on first use ($0000 is the one
+        // state xorshift can never leave).
         "LDA $DD",
         "ORA $DE",
-        "BNE rand16_step",
-        "LDA #$E1",
+        "BNE rng_ready",
+        "LDA #$E1",       // self-seed to $ACE1
         "STA $DD",
         "LDA #$AC",
         "STA $DE",
-        "rand16_step:",
-        "LSR $DE",
-        "ROR $DD",
-        "BCC rand16_noxor",
-        "LDA $DE",
-        "EOR #$B4",
-        "STA $DE",
-        "rand16_noxor:",
-        "LDA $DD",        // low -> A
-        "LDY $DE",        // high -> Y
+        "rng_ready:",
+        // x ^= x << 7: shift a copy of the whole word left 7 times, EOR it back.
+        "LDA $DD", "STA $D0",   // $D0:$D1 = copy of x (lo:hi)
+        "LDA $DE", "STA $D1",
+        "LDX #7",
+        "rng_shl7:",
+        "ASL $D0", "ROL $D1",
+        "DEX",
+        "BNE rng_shl7",
+        "LDA $DD", "EOR $D0", "STA $DD",
+        "LDA $DE", "EOR $D1", "STA $DE",
+        // x ^= x >> 9  ==>  lo ^= (hi >> 1)   (high byte unchanged)
+        "LDA $DE", "STA $D0",
+        "LSR $D0",
+        "LDA $D0", "EOR $DD", "STA $DD",
+        // x ^= x << 8  ==>  hi ^= lo          (low byte unchanged)
+        "LDA $DD", "EOR $DE", "STA $DE",
+        // Return the new state: low -> A, high -> Y.
+        "LDA $DD",
+        "LDY $DE",
     }
 }
 
-/// Seed the PRNG. A zero seed is replaced with 1 so the LFSR never gets stuck.
+/// Advance the PRNG and return the next pseudo-random byte (0..=255).
+pub fn rand() -> u8 {
+    // rand16 leaves the low byte in A; truncating the u16 keeps it.
+    return rand16() as u8;
+}
+
+/// Seed the PRNG. A zero seed is replaced with 1 so xorshift never gets stuck.
 pub fn srand(seed: u16) {
     asm {
         "LDA {seed}",

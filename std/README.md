@@ -129,6 +129,12 @@ Mathematical operations, all NMOS 6502-legal.
 
 #### Pseudo-Random Numbers
 
+A 16-bit xorshift generator (Marsaglia's `(7, 9, 8)` triple, full period
+2¹⁶−1). It mixes the whole word each draw, so consecutive outputs are far less
+correlated than a one-bit-per-step LFSR. It self-seeds to a fixed nonzero
+constant on first use, so the calls work without an explicit seed; seed it for a
+chosen sequence.
+
 -   `rand() -> u8` - Next pseudo-random byte
 -   `rand16() -> u16` - Next pseudo-random 16-bit value
--   `srand(seed: u16)` - Seed the generator
+-   `srand(seed: u16)` - Seed the generator (a zero seed is replaced with 1)

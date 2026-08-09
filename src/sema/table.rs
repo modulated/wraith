@@ -88,6 +88,25 @@ impl SymbolTable {
         None
     }
 
+    /// The visible name closest to `target`, for a "did you mean" hint.
+    ///
+    /// Returns a name within a small edit distance (1 for short targets, 2
+    /// otherwise) — close enough to be a likely typo, not a coincidence. `None`
+    /// when nothing is near, so the caller adds no misleading suggestion.
+    pub fn closest_name(&self, target: &str) -> Option<String> {
+        let limit = if target.len() <= 3 { 1 } else { 2 };
+        let mut best: Option<(usize, &str)> = None;
+        for scope in &self.scopes {
+            for name in scope.keys() {
+                let d = levenshtein(target, name);
+                if d <= limit && d > 0 && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, name));
+                }
+            }
+        }
+        best.map(|(_, n)| n.to_string())
+    }
+
     /// Check if a symbol exists in the current (innermost) scope
     pub fn defined_in_current_scope(&self, name: &str) -> bool {
         if let Some(scope) = self.scopes.last() {
@@ -116,5 +135,58 @@ impl SymbolTable {
 impl Default for SymbolTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Levenshtein edit distance between two identifiers, for typo suggestions.
+/// Small strings, so the straightforward two-row dynamic program is plenty.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+
+    #[test]
+    fn closest_name_finds_a_near_typo() {
+        let mut t = SymbolTable::new();
+        t.insert("counter".to_string(), dummy());
+        t.insert("index".to_string(), dummy());
+        assert_eq!(t.closest_name("countr").as_deref(), Some("counter"));
+        assert_eq!(t.closest_name("indx").as_deref(), Some("index"));
+    }
+
+    #[test]
+    fn closest_name_declines_when_nothing_is_close() {
+        let mut t = SymbolTable::new();
+        t.insert("counter".to_string(), dummy());
+        assert_eq!(t.closest_name("xyzzy"), None);
+    }
+
+    fn dummy() -> SymbolInfo {
+        SymbolInfo {
+            name: String::new(),
+            kind: SymbolKind::Variable,
+            ty: crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U8),
+            location: SymbolLocation::None,
+            mutable: true,
+            access_mode: None,
+            is_pub: false,
+            containing_function: None,
+            is_param: false,
+            decl_span: None,
+        }
     }
 }

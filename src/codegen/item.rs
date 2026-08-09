@@ -292,11 +292,19 @@ fn generate_function(
         if emitter.is_verbose() {
             emitter.emit_comment("Stack: [return_lo, return_hi, P, A, X, Y] (6 bytes pushed)");
         }
-        emitter.emit_inst("PHA", "");
-        emitter.emit_inst("TXA", "");
-        emitter.emit_inst("PHA", "");
-        emitter.emit_inst("TYA", "");
-        emitter.emit_inst("PHA", "");
+        if emitter.target.is_cmos() {
+            // The 65C02 pushes X and Y directly; NMOS has to route them through
+            // A (which is why A is saved first).
+            emitter.emit_inst("PHA", "");
+            emitter.emit_inst("PHX", "");
+            emitter.emit_inst("PHY", "");
+        } else {
+            emitter.emit_inst("PHA", "");
+            emitter.emit_inst("TXA", "");
+            emitter.emit_inst("PHA", "");
+            emitter.emit_inst("TYA", "");
+            emitter.emit_inst("PHA", "");
+        }
         emit_interrupt_zp_save(emitter, &interrupt_zp);
     }
 
@@ -340,11 +348,17 @@ fn generate_function(
             emitter.emit_comment("Restore Y, X, A in reverse order (LIFO)");
         }
         emit_interrupt_zp_restore(emitter, &interrupt_zp);
-        emitter.emit_inst("PLA", "");
-        emitter.emit_inst("TAY", "");
-        emitter.emit_inst("PLA", "");
-        emitter.emit_inst("TAX", "");
-        emitter.emit_inst("PLA", "");
+        if emitter.target.is_cmos() {
+            emitter.emit_inst("PLY", "");
+            emitter.emit_inst("PLX", "");
+            emitter.emit_inst("PLA", "");
+        } else {
+            emitter.emit_inst("PLA", "");
+            emitter.emit_inst("TAY", "");
+            emitter.emit_inst("PLA", "");
+            emitter.emit_inst("TAX", "");
+            emitter.emit_inst("PLA", "");
+        }
         emitter.emit_inst("RTI", "");
     } else {
         // Emit a trailing RTS whenever the body does not already end in a
@@ -423,15 +437,21 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
         if len > 8 && init.bytes.iter().all(|b| matches!(b, InitByte::Byte(0))) {
             let full_pages = len / 256;
             let rem = len % 256;
+            // On the 65C02 `STZ addr,X` stores zero directly, so the loop needs
+            // no `LDA #$00` at all. On NMOS, load A once and store it.
+            let cmos = emitter.target.is_cmos();
+            let store = if cmos { "STZ" } else { "STA" };
             emitter.emit_comment(&format!("{}: zero {} bytes", init.name, len));
-            emitter.emit_inst("LDA", "#$00");
+            if !cmos {
+                emitter.emit_inst("LDA", "#$00");
+            }
             if full_pages > 0 {
                 let loop_label = emitter.next_label("bssz");
                 emitter.emit_inst("LDX", "#$00");
                 emitter.emit_label(&loop_label);
                 for page in 0..full_pages {
                     let base = init.addr as usize + page * 256;
-                    emitter.emit_inst("STA", &format!("${:04X},X", base));
+                    emitter.emit_inst(store, &format!("${:04X},X", base));
                 }
                 emitter.emit_inst("INX", "");
                 emitter.emit_inst("CPX", "#$00");
@@ -442,7 +462,7 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
                 emitter.emit_inst("LDX", "#$00");
                 emitter.emit_label(&loop_label);
                 let base = init.addr as usize + full_pages * 256;
-                emitter.emit_inst("STA", &format!("${:04X},X", base));
+                emitter.emit_inst(store, &format!("${:04X},X", base));
                 emitter.emit_inst("INX", "");
                 emitter.emit_inst("CPX", &format!("#${:02X}", rem as u8));
                 emitter.emit_inst("BNE", &loop_label);
@@ -451,10 +471,18 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
             continue;
         }
         emitter.emit_comment(&format!("{} = {} byte(s)", init.name, len));
+        let cmos = emitter.target.is_cmos();
         // Track the last value loaded into A so runs of equal bytes reload rarely.
         let mut last: Option<u8> = None;
         for (i, b) in init.bytes.iter().enumerate() {
+            let addr = format!("${:04X}", init.addr as usize + i);
             match b {
+                // On the 65C02 a zero byte is a bare `STZ` that leaves A (and so
+                // the `last` cache for surrounding non-zero bytes) untouched.
+                InitByte::Byte(0) if cmos => {
+                    emitter.emit_inst("STZ", &addr);
+                    continue;
+                }
                 InitByte::Byte(v) => {
                     if last != Some(*v) {
                         emitter.emit_inst("LDA", &format!("#${:02X}", v));
@@ -471,7 +499,7 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
                     last = None;
                 }
             }
-            emitter.emit_inst("STA", &format!("${:04X}", init.addr as usize + i));
+            emitter.emit_inst("STA", &addr);
         }
         emitter.invalidate_registers();
     }

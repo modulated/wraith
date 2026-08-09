@@ -20,7 +20,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub enum SemaError {
     /// Symbol not found in scope
-    UndefinedSymbol { name: String, span: Span },
+    UndefinedSymbol {
+        name: String,
+        span: Span,
+        /// A visible name close to `name`, for a "did you mean" hint.
+        suggestion: Option<String>,
+    },
 
     /// Type mismatch in expression or assignment
     TypeMismatch {
@@ -198,12 +203,19 @@ impl SemaError {
         file: u32,
     ) -> String {
         match self {
-            SemaError::UndefinedSymbol { name, span } => {
-                let msg = format!("undefined symbol '{}'", name);
+            SemaError::UndefinedSymbol {
+                name,
+                span,
+                suggestion,
+            } => {
+                let mut caret = "not found in this scope".to_string();
+                if let Some(s) = suggestion {
+                    caret.push_str(&format!("\n  = help: a similar name is in scope: `{}`", s));
+                }
                 format!(
-                    "error: {}\n{}",
-                    msg,
-                    span.format_error_context_of(source, filename, &msg, file)
+                    "error: cannot find `{}` in this scope\n{}",
+                    name,
+                    span.format_error_context_of(source, filename, &caret, file)
                 )
             }
             SemaError::TypeMismatch {
@@ -211,9 +223,9 @@ impl SemaError {
                 found,
                 span,
             } => {
-                let msg = format!("expected {}, found {}", expected, found);
+                let msg = format!("expected `{}`, found `{}`", expected, found);
                 format!(
-                    "error: type mismatch\n{}",
+                    "error: mismatched types\n{}",
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
@@ -264,17 +276,30 @@ impl SemaError {
                 found,
                 span,
             } => {
+                let plural = |n: &usize| if *n == 1 { "" } else { "s" };
+                let top = format!(
+                    "this function takes {} argument{} but {} {} supplied",
+                    expected,
+                    plural(expected),
+                    found,
+                    if *found == 1 { "was" } else { "were" }
+                );
                 let msg = format!("expected {} argument(s), found {}", expected, found);
                 format!(
-                    "error: function call\n{}",
+                    "error: {}\n{}",
+                    top,
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ImmutableAssignment { symbol, span } => {
-                let msg = format!("cannot assign to immutable variable '{}'", symbol);
+                let msg = format!(
+                    "cannot assign to immutable variable '{}'\n  = help: only `let` \
+                     locals and `static` globals can be assigned; a `const` is fixed",
+                    symbol
+                );
                 format!(
-                    "error: {}\n{}",
-                    msg,
+                    "error: cannot assign to immutable variable '{}'\n{}",
+                    symbol,
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
@@ -413,25 +438,43 @@ impl SemaError {
                 )
             }
             SemaError::ConstantOverflow { value, ty, span } => {
-                let msg = format!("constant value {} does not fit in type {}", value, ty);
+                let range = match ty.as_str() {
+                    "u8" => Some("0 to 255"),
+                    "i8" => Some("-128 to 127"),
+                    "u16" => Some("0 to 65535"),
+                    "i16" => Some("-32768 to 32767"),
+                    _ => None,
+                };
+                let mut msg = format!("constant value {} does not fit in type {}", value, ty);
+                if let Some(r) = range {
+                    msg.push_str(&format!("\n  = note: `{}` holds {}", ty, r));
+                }
                 format!(
                     "error: constant overflow\n{}",
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::WriteOnlyRead { name, span } => {
-                let msg = format!("cannot read from write-only address '{}'", name);
+                let msg = format!(
+                    "cannot read from write-only address '{}'\n  = help: declare it \
+                     `read addr` or `read write addr` to read it back",
+                    name
+                );
                 format!(
-                    "error: {}\n{}",
-                    msg,
+                    "error: cannot read from write-only address '{}'\n{}",
+                    name,
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
             SemaError::ReadOnlyWrite { name, span } => {
-                let msg = format!("cannot write to read-only address '{}'", name);
+                let msg = format!(
+                    "cannot write to read-only address '{}'\n  = help: declare it \
+                     `write addr` or `read write addr` to write to it",
+                    name
+                );
                 format!(
-                    "error: {}\n{}",
-                    msg,
+                    "error: cannot write to read-only address '{}'\n{}",
+                    name,
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
@@ -466,10 +509,10 @@ impl SemaError {
 impl std::fmt::Display for SemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SemaError::UndefinedSymbol { name, span } => {
+            SemaError::UndefinedSymbol { name, span, .. } => {
                 write!(
                     f,
-                    "undefined symbol '{}' at {}..{}",
+                    "cannot find `{}` in this scope at {}..{}",
                     name, span.start, span.end
                 )
             }
@@ -750,14 +793,24 @@ impl Warning {
     /// draw its own context.
     pub fn parts(&self) -> (String, &Span) {
         match self {
-            Warning::UnusedVariable { name, span } => {
-                (format!("unused variable: `{}`", name), span)
-            }
+            Warning::UnusedVariable { name, span } => (
+                format!(
+                    "unused variable: `{}`\n  = help: if this is intentional, prefix it with \
+                     an underscore: `_{}`",
+                    name, name
+                ),
+                span,
+            ),
             Warning::UnusedImport { name, span } => (format!("unused import: `{}`", name), span),
             Warning::UnreachableCode { span } => ("unreachable code".to_string(), span),
-            Warning::UnusedParameter { name, span } => {
-                (format!("unused parameter: `{}`", name), span)
-            }
+            Warning::UnusedParameter { name, span } => (
+                format!(
+                    "unused parameter: `{}`\n  = help: if this is intentional, prefix it with \
+                     an underscore: `_{}`",
+                    name, name
+                ),
+                span,
+            ),
             Warning::UnusedFunction { name, span } => {
                 (format!("unused function: `{}`", name), span)
             }
@@ -775,7 +828,11 @@ impl Warning {
                 )
             }
             Warning::NonUppercaseConstant { name, span } => (
-                format!("constant `{}` should have an uppercase name", name),
+                format!(
+                    "constant `{}` should have an uppercase name\n  = help: rename it to `{}`",
+                    name,
+                    name.to_uppercase()
+                ),
                 span,
             ),
             Warning::ParameterOverflow {

@@ -412,3 +412,62 @@ fn unary_bitnot_binds_postfix_index() {
     "#);
     assert_eq!(e.mem(0x0900), 0xF0);
 }
+
+// ---------------------------------------------------------------------------
+// Division / modulo by zero is defined (0xFF), not undefined behavior
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u8_divide_by_zero_yields_a_defined_sentinel() {
+    // The zero path once fell through and loaded an uninitialized temp ("leave A
+    // as-is"); it now yields 0xFF, matching div16's 0xFFFF all-ones sentinel.
+    assert_eq!(eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a / b;"), 0xFF);
+}
+
+#[test]
+fn u8_modulo_by_zero_yields_a_defined_sentinel() {
+    assert_eq!(eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a % b;"), 0xFF);
+}
+
+// ---------------------------------------------------------------------------
+// Literal and precedence details (regression locks; both already correct)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn underscores_in_a_numeric_literal_are_digit_separators() {
+    // `1_000` is 1000, not `1` followed by an identifier `_000`.
+    assert_eq!(
+        eval_u16("let x: u16 = 1_000; LO = x.low; HI = x.high;"),
+        1000
+    );
+    assert_eq!(eval_u8("let x: u8 = 0b1010_0101; OUT = x;"), 0xA5);
+    assert_eq!(eval_u8("let x: u8 = 0x1_F; OUT = x;"), 0x1F);
+}
+
+#[test]
+fn a_prefix_operator_binds_tighter_than_a_cast() {
+    // `&x as u16` is `(&x) as u16` (the address as a number), matching Rust —
+    // not `&(x as u16)`, which would take the address of a temporary and fail.
+    // The same rule gives `-x as i16` = `(-x) as i16`.
+    let _asm = compile_success(
+        "#[reset]\nfn main() { let x: u8 = 5; let a: u16 = &x as u16; let n: i16 = -x as i16; loop {} }",
+    );
+}
+
+#[test]
+fn u16_bitwise_ops_combine_both_bytes() {
+    // Regression: u16 &/|/^ only combined the low byte, leaving the high byte
+    // of the result equal to the left operand's high byte.
+    assert_eq!(
+        eval_u16("let a: u16 = 0x0001; LO = (a | 0x8000).low; HI = (a | 0x8000).high;"),
+        0x8001
+    );
+    assert_eq!(
+        eval_u16("let a: u16 = 0xFFFF; LO = (a & 0x0F0F).low; HI = (a & 0x0F0F).high;"),
+        0x0F0F
+    );
+    assert_eq!(
+        eval_u16("let a: u16 = 0xFF00; LO = (a ^ 0x0FF0).low; HI = (a ^ 0x0FF0).high;"),
+        0xF0F0
+    );
+}

@@ -780,20 +780,9 @@ fn adding_an_integer_to_a_pointer_is_rejected() {
 }
 
 #[test]
-fn comparing_pointers_directly_is_rejected_but_their_addresses_compare() {
-    // Deferred rather than forbidden: the 16-bit compare paths expect A:Y, and
-    // a pointer arrives in A:X. Going through `as u16` puts it in the right
-    // register pair, which is also the null check a linked list needs.
-    let err = expect_error(
-        r#"
-        const R0: addr = 0x0900;
-        static A: u8 = 0;
-        #[reset]
-        fn main() { let p: &u8 = &A; let q: &u8 = &A; if p == q { R0 = 1; } loop {} }
-    "#,
-    );
-    assert!(err.contains("as u16"), "{err}");
-
+fn pointers_compare_directly_and_through_a_u16_cast() {
+    // `p == q` now compares the two-byte address directly (a dedicated A:X
+    // sequence); the older `p as u16 == q as u16` form still works too.
     assert_eq!(
         run(r#"
             const R0: addr = 0x0900;
@@ -806,8 +795,8 @@ fn comparing_pointers_directly_is_rejected_but_their_addresses_compare() {
                 let r: &u8 = &B;
                 let same: u8 = 0;
                 let diff: u8 = 0;
-                if p as u16 == q as u16 { same = 1; }
-                if p as u16 == r as u16 { diff = 1; }
+                if p == q { same = 1; }               // direct
+                if p as u16 == r as u16 { diff = 1; } // via cast
                 R0 = same * 2 + diff;
                 loop {}
             }
@@ -888,4 +877,87 @@ fn a_pointer_store_after_a_call_reloads_y() {
     "#);
     assert_eq!(e.mem(0x0900), 0x33, "the second store reached A, not A+Y");
     assert_eq!(e.mem(0x0901), 9);
+}
+
+// ---------------------------------------------------------------------------
+// Pointer equality: == / != compare the two-byte address
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_pointers_to_the_same_variable_are_equal() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let x: u8 = 7;
+            let p: &u8 = &x;
+            let q: &u8 = &x;
+            OUT = 0;
+            if p == q { OUT = 1; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 1, "&x == &x");
+}
+
+#[test]
+fn pointers_to_different_variables_are_not_equal() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let x: u8 = 1;
+            let y: u8 = 2;
+            let p: &u8 = &x;
+            let q: &u8 = &y;
+            OUT = 5;
+            if p != q { OUT = 9; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 9, "&x != &y");
+}
+
+#[test]
+fn a_pointer_can_be_null_checked_against_a_cast_zero() {
+    // The linked-list null check the feature is for: `p == 0 as &u8`.
+    let eval = |init: &str, expect: u8| {
+        let src = format!(
+            r#"
+            const OUT: addr = 0x0900;
+            #[reset]
+            fn main() {{
+                let x: u8 = 42;
+                {init}
+                OUT = 0;
+                if p == 0 as &u8 {{ OUT = 1; }} else {{ OUT = 2; }}
+                loop {{}}
+            }}
+        "#
+        );
+        assert_eq!(run(&src).mem(0x0900), expect);
+    };
+    eval("let p: &u8 = 0 as &u8;", 1); // null -> then branch
+    eval("let p: &u8 = &x;", 2); // non-null -> else branch
+}
+
+#[test]
+fn pointer_ordering_and_arithmetic_stay_rejected() {
+    // Only == / != opened up; `<` and `+` on pointers remain errors.
+    let lt = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { let x: u8 = 1; let p: &u8 = &x; let q: &u8 = &x; if p < q { OUT = 1; } loop {} }
+    "#,
+    );
+    assert!(lt.contains("Lt") || lt.contains("compare"), "{lt}");
+    let add = expect_error(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { let x: u8 = 1; let p: &u8 = &x; let q: &u8 = &x; let r: &u8 = p + q; loop {} }
+    "#,
+    );
+    assert!(add.contains("Add") || add.contains("index"), "{add}");
 }

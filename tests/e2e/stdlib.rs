@@ -233,7 +233,7 @@ fn divmod_returns_quotient_and_remainder() {
 #[test]
 fn rand_is_deterministic_and_varies() {
     // With a fixed seed the sequence is reproducible; consecutive draws differ
-    // (the LFSR advances) and stay in range. Emit four draws to four addresses.
+    // (the generator advances) and stay in range. Four draws to four addresses.
     let mut e = run(r#"
         import { rand, srand } from "std/math.wr";
         const R0: addr = 0x0400;
@@ -273,6 +273,53 @@ fn rand_is_deterministic_and_varies() {
     "#);
     assert_eq!(e2.mem(0x0400), seq[0], "deterministic first draw");
     assert_eq!(e2.mem(0x0401), seq[1], "deterministic second draw");
+}
+
+#[test]
+fn xorshift16_matches_the_reference_for_a_known_seed() {
+    // Marsaglia xorshift16, triple (7, 9, 8), seed 1:
+    //   x ^= x << 7  -> 0x0081
+    //   x ^= x >> 9  -> 0x0081
+    //   x ^= x << 8  -> 0x8181
+    // so rand16() returns 0x8181 (low 0x81, high 0x81).
+    let mut e = run(r#"
+        import { rand16, srand } from "std/math.wr";
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            srand(1 as u16);
+            let v: u16 = rand16();
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x81, "low byte of xorshift16(1)");
+    assert_eq!(e.mem(0x0401), 0x81, "high byte of xorshift16(1)");
+}
+
+#[test]
+fn xorshift16_zero_seed_is_replaced() {
+    // xorshift is stuck at zero; srand(0) must substitute a nonzero state so the
+    // generator still advances.
+    let mut e = run(r#"
+        import { rand16, srand } from "std/math.wr";
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            srand(0 as u16);
+            let v: u16 = rand16();
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert!(
+        e.mem(0x0400) != 0 || e.mem(0x0401) != 0,
+        "zero seed must be replaced, not left stuck at zero"
+    );
 }
 
 #[test]

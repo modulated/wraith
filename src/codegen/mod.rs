@@ -31,7 +31,18 @@ pub enum TargetCpu {
 }
 
 impl TargetCpu {
-    /// True on a 65C02, where `SMB`/`RMB`/`BBR`/`BBS` are available.
+    /// True on any 65C02, where the WDC base additions are available: `STZ`,
+    /// `BRA`, `PHX`/`PLX`/`PHY`/`PLY`, accumulator `INC A`/`DEC A`, `TSB`/`TRB`.
+    pub fn is_cmos(self) -> bool {
+        matches!(self, TargetCpu::Cmos65C02)
+    }
+
+    /// True where the Rockwell bit ops `SMB`/`RMB`/`BBR`/`BBS` are available.
+    /// On this two-variant enum that is the same set as [`is_cmos`], but the
+    /// distinction is real hardware — some 65C02s omit the Rockwell ops — and
+    /// keeping it separate documents which extension each call site relies on.
+    ///
+    /// [`is_cmos`]: Self::is_cmos
     pub fn has_rockwell_bit_ops(self) -> bool {
         matches!(self, TargetCpu::Cmos65C02)
     }
@@ -942,9 +953,10 @@ pub fn generate(
     }
 
     // Apply peephole optimizations
+    let target = emitter.target;
     let asm = emitter.finish();
     let lines = peephole::parse_assembly(&asm);
-    let optimized = peephole::optimize(&lines, &volatile);
+    let optimized = peephole::optimize(&lines, &volatile, target);
     let final_asm = peephole::lines_to_string(&optimized);
 
     Ok((final_asm, section_alloc))

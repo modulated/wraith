@@ -2,6 +2,15 @@
 
 A systems programming language designed specifically for the 6502 processor, taking modern inspiration while remaining simple and explicit.
 
+<!--
+  Examples fenced ```rust,compile are complete, self-contained programs that
+  the test suite compiles on every run (tests/e2e/spec_examples.rs). Tag an
+  example that way when it should build on its own; leave illustrative
+  fragments (which reference peripherals or functions defined elsewhere) as
+  plain ```rust.
+-->
+
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -219,7 +228,7 @@ x = 20;  // OK - variables are mutable
 
 Use the `const` keyword to declare compile-time constants. Constants are evaluated at compile time and cannot be reassigned.
 
-```rust
+```rust,compile
 const MAX_SPRITES: u8 = 8;
 const SCREEN_WIDTH: u16 = 320;
 const PI_TIMES_100: u16 = 314;
@@ -243,7 +252,7 @@ const INVALID: u8 = 256;  // ERROR: constant overflow (256 doesn't fit in u8)
 must be **written at runtime and shared across functions** — including interrupt
 handlers:
 
-```rust
+```rust,compile
 static RX_HEAD: u8 = 0;
 static RX_BUF: [u8; 64] = [0; 64];
 static TICKS: u16 = 0;
@@ -296,7 +305,7 @@ configured region.
 
 Use the `addr` keyword to declare memory-mapped I/O addresses:
 
-```rust
+```rust,compile
 const LED: addr = 0x6000;      // Memory-mapped LED
 const BUTTON: addr = 0x6001;   // Memory-mapped button
 
@@ -360,7 +369,7 @@ fn calculate() {
 
 Bind a new name instead, and let the frame allocator share the storage:
 
-```rust
+```rust,compile
 fn calculate() {
     let x: u8 = 5;
     let x_wide: u16 = x as u16;  // OK - a distinct name
@@ -380,7 +389,7 @@ instead of surprising.
 
 The 6502's zero page ($0000-$00FF) provides faster access (one fewer cycle than absolute addressing), shorter instruction encoding, and is required for indirect/indexed addressing modes. **Every local variable and function parameter is automatically allocated to zero page** - there is no `zp` keyword or manual opt-in; the compiler handles placement for you.
 
-```rust
+```rust,compile
 fn fast_loop() {
     let counter: u8 = 0;   // Automatically allocated in zero page
     let temp: u16 = 0;     // 2 bytes, automatically allocated in zero page
@@ -419,7 +428,7 @@ All items completed.
 
 ### Function Declaration
 
-```rust
+```rust,compile
 fn function_name(arg1: u8, arg2: u16) -> u8 {
     return arg1;
 }
@@ -437,7 +446,7 @@ Function attributes control code generation, placement, and calling conventions.
 
 Inlines the function body at each call site, eliminating JSR/RTS overhead:
 
-```rust
+```rust,compile
 #[inline]
 fn add_two(x: u8) -> u8 {
     return x + 2;
@@ -615,7 +624,7 @@ default_section = "CODE"
 
 Wraith automatically optimizes tail-recursive functions to use JMP instead of JSR, eliminating stack growth:
 
-```rust
+```rust,compile
 // Tail-recursive factorial - optimized to loop
 fn factorial(n: u8, acc: u16) -> u16 {
     if n == 0 {
@@ -671,7 +680,7 @@ Every parameter, of every type and in every position (including the first), is p
 - Arrays, strings, and enum values: a 2-byte pointer in A (low byte) and X (high byte)
 
 **Example:**
-```rust
+```rust,compile
 fn add(a: u8, b: u8) -> u8 {
     return a + b;
 }
@@ -693,7 +702,7 @@ Because parameters live in the callee's own frame rather than shared fixed regis
 A function's bare name used as a value is its address. The type is written
 `fn(params) -> ret` (the `-> ret` is omitted for a function returning nothing):
 
-```rust
+```rust,compile
 fn double(x: u8) -> u8 { return x + x; }
 
 fn main() {
@@ -989,7 +998,7 @@ let success: Result = Result::Ok(1000);
 
 **Pattern Matching with Tuple Variants** (⚠️ EXPERIMENTAL - Limited Testing):
 
-```rust
+```rust,compile
 enum Option {
     None,
     Some(u8),
@@ -1298,7 +1307,7 @@ checking.
 
 ### Slice Memory Representation
 
-```rust
+```rust,compile
 const DATA: [u8; 6] = [0, 1, 2, 3, 4, 5];
 
 fn process(slice: &[u8]) {
@@ -1415,13 +1424,14 @@ struct Node { value: u8, next: &Node }   // 3 bytes
 `p[i]` has no bounds check: a pointer carries no length. When the length
 matters, use a slice (`&[T]`), which carries one.
 
-No binary operator applies to a pointer. Arithmetic is indexing — `p[i]`,
-scaled by the element width, rather than `p + n` on a raw byte offset — and
-comparison goes through `as u16`, which is also the null check a linked list
-needs:
+Two pointers of the same type compare for equality with `==` / `!=` — the null
+check a linked list needs. Ordering (`<`, `>`, …) and arithmetic do not apply:
+arithmetic is indexing (`p[i]`, scaled by the element width, rather than `p + n`
+on a raw byte offset), and a relative order between two addresses is rarely
+meaningful.
 
 ```rust
-if p as u16 == 0 { ... }
+if p == 0 as &Node { ... }   // null check
 ```
 
 Nor is there `&mut`: the language has one pointer kind, and no `mut` keyword to
@@ -1543,7 +1553,7 @@ compile-time constant, `0`–`255`. At runtime a `str<N>` **is** a `str` — a
 2-byte pointer to `[len][bytes]` — so every `str` operation (`.len`, indexing,
 `==`, iteration, passing to a `fn(s: str)`) works on it unchanged.
 
-```rust
+```rust,compile
 fn main() {
     let s: str<16> = "cat";   // capacity 16, current length 3, in RAM
     s[0] = 'b';               // "bat"  — edit a character in place
@@ -1672,7 +1682,7 @@ for (i, c) in message {
 
 A `str` parameter is a 2-byte pointer that, like every other parameter, is passed directly in its own zero-page frame slot (see [Zero Page Allocation](#zero-page-allocation)). Because it's already in zero page, every access reads it in place - there is no separate pointer-caching layer:
 
-```rust
+```rust,compile
 fn process_string(s: str) {
     let len1: u16 = s.len;
     let len2: u16 = s.len;  // Reads the same zero-page slot again
@@ -2017,7 +2027,7 @@ let wide: i16 = positive as i16; // 0x007F (zero extended for positive)
 ```
 
 **Manual Sign Extension (if needed):**
-```rust
+```rust,compile
 fn sign_extend_u8_to_u16(value: u8) -> u16 {
     if value >= 128 {  // Negative in i8
         return (value as u16) | 0xFF00;  // Sign extend
@@ -2036,7 +2046,7 @@ All items completed.
 
 ### Basic Assembly Block
 
-```rust
+```rust,compile
 fn increment() {
     asm {
         "clc",
@@ -2047,7 +2057,7 @@ fn increment() {
 
 ### Assembly with Variable Substitution
 
-```rust
+```rust,compile
 fn add_with_carry(a: u8, b: u8) -> u8 {
     let result: u8 = 0;
     asm {
@@ -2066,7 +2076,7 @@ Variables in `{}` are substituted with their memory locations.
 
 Inline assembly can modify registers without compiler tracking:
 
-```rust
+```rust,compile
 fn custom_operation() -> u8 {
     let result: u8 = 0;
     asm {
@@ -2088,7 +2098,7 @@ fn custom_operation() -> u8 {
 ### Common Assembly Patterns
 
 **Reading Hardware Registers:**
-```rust
+```rust,compile
 fn read_timer() -> u8 {
     let value: u8 = 0;
     asm {
@@ -2100,7 +2110,7 @@ fn read_timer() -> u8 {
 ```
 
 **Bit Manipulation:**
-```rust
+```rust,compile
 fn set_interrupt_mask(mask: u8) {
     asm {
         "LDA {mask}",
@@ -2110,7 +2120,7 @@ fn set_interrupt_mask(mask: u8) {
 ```
 
 **Timing-Critical Code:**
-```rust
+```rust,compile
 #[inline]
 fn wait_cycles(count: u8) {
     asm {
@@ -2140,7 +2150,7 @@ fn fast_clear(addr: u16, len: u8) {
 
 Use labels for loops and branches within asm blocks:
 
-```rust
+```rust,compile
 fn find_byte(haystack: u16, needle: u8, len: u8) -> u8 {
     let result: u8 = 0;
     asm {
@@ -2187,7 +2197,7 @@ fn find_byte(haystack: u16, needle: u8, len: u8) -> u8 {
 
 Inline assembly is treated as opaque by the optimizer:
 
-```rust
+```rust,compile
 fn example() {
     let x: u8 = 10;
 
@@ -2252,7 +2262,7 @@ named — an imported function may call private siblings the importing program c
 never refer to — so without this, using one helper from a library dragged in all
 of it:
 
-```rust
+```rust,compile
 import { * } from "math.wr";   // ~18 functions
 
 #[reset]
@@ -2317,7 +2327,7 @@ inspect.
 
 #### Example: Public Items
 
-```rust
+```rust,compile
 // file: math_utils.wr
 
 // Public function - can be imported
@@ -2410,7 +2420,7 @@ error: import error
 
 The `pub` keyword enables explicit API boundaries:
 
-```rust
+```rust,compile
 // file: graphics_lib.wr
 
 // Public API - stable interface
@@ -2559,7 +2569,7 @@ fn main() {
 ```
 
 **Example lib/graphics.wr:**
-```rust
+```rust,compile
 import {memset} from "mem.wr";  // stdlib import
 
 const SCREEN: addr = 0x0400;
@@ -2595,7 +2605,7 @@ fn draw_sprite(x: u8, y: u8, sprite_id: u8) {
    - Add comments at the top of each file explaining its purpose
    - List major exports
 
-```rust
+```rust,compile
 // lib/graphics.wr
 // Graphics system for 6502 display
 // Exports: init_graphics(), draw_sprite(), clear_screen()
@@ -3373,7 +3383,7 @@ let OUTPUT: write addr = 0x6002;  // Write-only address
 ```
 
 **Inline Assembly:**
-```rust
+```rust,compile
 fn custom_operation() {
     asm {
         "LDA #$42",
@@ -3534,7 +3544,7 @@ Wraith supports three types of comments: single-line comments, multi-line commen
 
 Single-line comments start with `//` and continue to the end of the line:
 
-```rust
+```rust,compile
 fn calculate() -> u8 {
     let x: u8 = 42;  // Initialize x to 42
     // This entire line is a comment
@@ -3546,7 +3556,7 @@ fn calculate() -> u8 {
 
 Multi-line comments begin with `/*` and end with `*/`. They can span multiple lines:
 
-```rust
+```rust,compile
 /*
    This is a multi-line comment.
    It can span across multiple lines.
@@ -3567,7 +3577,7 @@ fn complex_function() {
 
 Documentation comments use triple slashes (`///`) and are used to document functions, structs, and other items. These are commonly used in the standard library:
 
-```rust
+```rust,compile
 /// Enable interrupts by clearing the interrupt disable flag
 /// Maps to: CLI (Clear Interrupt Disable)
 /// Cycles: 2
@@ -3597,7 +3607,7 @@ Documentation comments are typically placed immediately before the item they doc
 
 Comments can be used within inline assembly blocks. Both comment styles work:
 
-```rust
+```rust,compile
 fn example_asm() {
     asm {
         // Single-line comment in assembly
@@ -3615,7 +3625,7 @@ fn example_asm() {
 
 **Important**: Assembly string literals themselves are passed directly to the assembler and should use the assembler's comment syntax (typically `;` for 6502 assemblers):
 
-```rust
+```rust,compile
 fn with_assembler_comments() {
     asm {
         "LDA #$42    ; Assembler comment (inside the string)",
@@ -3634,7 +3644,7 @@ fn with_assembler_comments() {
 - Explain "why" rather than "what" in regular comments
 - Use comments to mark TODO items or known limitations
 
-```rust
+```rust,compile
 /// Fast integer division by 10 using multiplication and shifts
 /// Cycles: ~45 (much faster than div16)
 fn div10_fast(value: u8) -> u8 {
@@ -3668,7 +3678,7 @@ let delay: u8 = software_delay(100);
 
 Comments are stripped during lexical analysis and do not affect code generation. This means:
 
-```rust
+```rust,compile
 fn test() {
     let x: u8 = 10 /* comment in middle */ + 5;  // Valid, equals 15
 }
@@ -3773,7 +3783,8 @@ Applied roughly in this order during compilation:
 | $0200-$02FF | Default `STACK` section — software stack (recursion frame save/restore, operand spill) |
 | $0400-$07FF | Default `BSS` section (1KB) — **RAM** for mutable globals (`static`) |
 | $8000-$BFFF | Default `CODE` section (16KB) |
-| $D000-$EFFF | Default `DATA` section (8KB) |
+| $D000-$DFFF | Default `DATA` section (4KB) |
+| $E000-$EFFF | Memory-mapped I/O window (device `addr` registers); unmanaged |
 | $FFFA-$FFFF | 6502 hardware vectors (NMI, RESET, IRQ) |
 
 Only `BSS` is written at runtime; `CODE` and `DATA` are read-only on a ROM-based
