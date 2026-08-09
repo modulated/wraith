@@ -164,8 +164,7 @@ Also open:
   import-merge half is already done.
 - **De-duplicate codegen.** Six near-identical unsigned compare routines; the
   ZeroPage/Absolute arms of `generate_index_assignment`; `generate_divide_i16` /
-  `generate_modulo_i16`; the `emit_signed_lt` closure copied verbatim into two
-  files. The statement codegen is now split into a `stmt/` module (`assign`,
+  `generate_modulo_i16`. The statement codegen is now split into a `stmt/` module (`assign`,
   `loops`, `match_stmt`, `asm_stmt`); the remaining win there is a shared
   `store_value_to_slot(ty, loc)` helper for the repeated byte-store sequences in
   `assign.rs`.

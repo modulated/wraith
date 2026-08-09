@@ -272,29 +272,19 @@ fn generate_match_sequential(
                              target: &str,
                              tag: &str,
                              far: bool| {
-                                emitter.emit_inst("LDA", "$20");
-                                let branch = |emitter: &mut Emitter, target: &str, tag: &str| {
-                                    if far {
-                                        emit_far_arm_branch(
-                                            emitter,
-                                            "BMI",
-                                            target,
-                                            &format!("match_{}_arm_{}_{}far", match_id, i, tag),
-                                        );
-                                    } else {
-                                        emitter.emit_inst("BMI", target);
-                                    }
-                                };
-                                if bound == 0 {
-                                    branch(emitter, target, tag); // value < 0 == sign set
+                                let nov = format!("match_{}_arm_{}_{}", match_id, i, tag);
+                                crate::codegen::expr::compare::emit_signed_lt_flag(
+                                    emitter, bound, &nov,
+                                );
+                                if far {
+                                    emit_far_arm_branch(
+                                        emitter,
+                                        "BMI",
+                                        target,
+                                        &format!("match_{}_arm_{}_{}far", match_id, i, tag),
+                                    );
                                 } else {
-                                    let nov = format!("match_{}_arm_{}_{}", match_id, i, tag);
-                                    emitter.emit_inst("SEC", "");
-                                    emitter.emit_inst("SBC", &format!("#${:02X}", bound as u8));
-                                    emitter.emit_inst("BVC", &nov);
-                                    emitter.emit_inst("EOR", "#$80");
-                                    emitter.emit_label(&nov);
-                                    branch(emitter, target, tag);
+                                    emitter.emit_inst("BMI", target);
                                 }
                             };
                         emit_signed_lt(emitter, *start_val, &skip_label, "v1", false); // < start -> skip

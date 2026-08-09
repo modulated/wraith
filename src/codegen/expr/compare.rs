@@ -12,6 +12,28 @@ use crate::sema::ProgramInfo;
 // Import generate_expr from parent module for recursive calls
 use super::generate_expr;
 
+/// Emit `LDA $20` and set N so that a following `BMI` is taken iff the signed
+/// value at `$20` is `< bound`.
+///
+/// For `bound == 0` this is just the sign-bit test (no subtraction). Otherwise
+/// it computes `value - bound` and folds `N ⊕ V` into N via `EOR #$80` on
+/// overflow, so a single `BMI` decides the signed comparison. `nov_label` is a
+/// caller-unique label for the overflow-correction skip. The caller emits the
+/// branch (near `BMI`, or a far branch) itself.
+///
+/// Shared by the match-range codegen in both the statement and expression paths
+/// (`stmt::match_stmt` and `expr`), which differ only in how they branch.
+pub(crate) fn emit_signed_lt_flag(emitter: &mut Emitter, bound: i64, nov_label: &str) {
+    emitter.emit_inst("LDA", "$20");
+    if bound != 0 {
+        emitter.emit_inst("SEC", "");
+        emitter.emit_inst("SBC", &format!("#${:02X}", bound as u8));
+        emitter.emit_inst("BVC", nov_label);
+        emitter.emit_inst("EOR", "#$80");
+        emitter.emit_label(nov_label);
+    }
+}
+
 /// Emit a *signed* ordering comparison, leaving a 0/1 boolean in A.
 ///
 /// Left is in A (low) / Y (high for u16); right is at TEMP (/ TEMP+1). After a

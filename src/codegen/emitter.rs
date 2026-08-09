@@ -17,8 +17,6 @@ pub struct LoopContext {
 
 pub struct Emitter {
     output: String,
-    #[allow(dead_code)]
-    indent: usize,
     pub label_counter: usize,
     pub match_counter: u32,
     pub memory_layout: MemoryLayout,
@@ -64,7 +62,6 @@ impl Emitter {
     pub fn new(verbosity: CommentVerbosity) -> Self {
         Self {
             output: String::with_capacity(4096),
-            indent: 0,
             label_counter: 0,
             match_counter: 0,
             memory_layout: MemoryLayout::new(),
