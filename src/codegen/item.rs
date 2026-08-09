@@ -78,27 +78,14 @@ pub fn generate_item(
 /// handler can preempt main code mid-expression, it must preserve the shared
 /// codegen scratch/pools/math region plus the frame span its own call graph
 /// touches (frames overlap main frames under unified coloring).
+///
+/// The address list itself lives on `InterruptSaveInfo` so that sema's
+/// hardware-stack depth check counts exactly the bytes this emits.
 pub(super) fn interrupt_zp_save_addrs(info: &ProgramInfo, name: &str) -> Vec<u8> {
-    let mut addrs = Vec::new();
-    if let Some(si) = info.interrupt_save_info.get(name) {
-        if si.save_scratch {
-            addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
-            addrs.extend(0xE0u8..=0xEF); // indirect-arg staging block: an NMI
-            // landing between staging and the callee's prologue copy would
-            // otherwise destroy in-flight args when the handler itself calls
-            // indirectly
-            addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
-        }
-        if si.save_math {
-            addrs.extend(0xD0u8..=0xDC); // mul16/div16 working storage + params
-        }
-        for (base, len) in &si.shared_frames {
-            for i in 0..*len {
-                addrs.push(base.wrapping_add(i));
-            }
-        }
-    }
-    addrs
+    info.interrupt_save_info
+        .get(name)
+        .map(|si| si.zp_save_addrs())
+        .unwrap_or_default()
 }
 
 pub(super) fn emit_interrupt_zp_save(emitter: &mut Emitter, addrs: &[u8]) {

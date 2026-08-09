@@ -14,7 +14,9 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::codegen::memory_layout::{FRAME_REGION_END, FRAME_REGION_START, SOFTWARE_STACK_BYTES};
+use crate::codegen::memory_layout::{
+    FRAME_REGION_END, FRAME_REGION_START, HARDWARE_STACK_BYTES, SOFTWARE_STACK_BYTES,
+};
 use crate::sema::table::SymbolLocation;
 use crate::sema::{FrameInfo, InterruptSaveInfo, SemaError, Warning};
 
@@ -226,6 +228,7 @@ impl SemanticAnalyzer {
         self.layout_array_blocks(&sccs, &scc_preds, &topo, &irq_reachable)?;
 
         self.warn_deep_recursion(&recursive_call_edges, &function_frames);
+        self.warn_interrupt_stack_depth(&handlers, &adj, &interrupt_save_info, source);
 
         self.rewrite_frame_offsets(&function_frames)?;
 
@@ -294,6 +297,129 @@ impl SemanticAnalyzer {
                 }
             }
         }
+    }
+
+    /// Warn when interrupt handlers' worst-case hardware-stack (page 1) usage
+    /// leaves little headroom.
+    ///
+    /// A handler entry costs, on `$0100-$01FF`: 3 bytes for the CPU sequence
+    /// (PCH, PCL, P), 3 for the A/X/Y prologue pushes, the zero-page save (up to
+    /// ~220 bytes for a handler whose graph touches the scratch, math and frame
+    /// regions), and 2 more per nested `JSR` on its deepest call chain. Handlers
+    /// are summed rather than maxed: an NMI can preempt an IRQ, so both entries
+    /// can be live at once.
+    ///
+    /// Recursion inside a handler is already a hard error (above), so every
+    /// handler's subgraph is acyclic and its deepest chain is a plain memoized
+    /// DFS.
+    fn warn_interrupt_stack_depth(
+        &mut self,
+        handlers: &[String],
+        adj: &HashMap<String, Vec<String>>,
+        interrupt_save_info: &HashMap<String, InterruptSaveInfo>,
+        source: &crate::ast::SourceFile,
+    ) {
+        /// Bytes the CPU pushes on interrupt entry: PCH, PCL, P.
+        const CPU_ENTRY_BYTES: usize = 3;
+        /// A, X, Y — three pushes on both the NMOS and CMOS prologue paths.
+        const REGISTER_SAVE_BYTES: usize = 3;
+        /// A `JSR` pushes a 2-byte return address.
+        const JSR_BYTES: usize = 2;
+        /// Warn once free space drops below this. Generous, because the true
+        /// headroom is unknown: whatever the platform ROM left on the stack
+        /// before `main` is already spent.
+        const MIN_FREE_BYTES: usize = 32;
+
+        if handlers.is_empty() {
+            return;
+        }
+
+        // Depth through a function pointer is unknowable — `call_edges` records
+        // no edge for an indirect call — so a handler that can reach one gets no
+        // number rather than a wrong one.
+        let indirect_risk = |reachable: &HashSet<String>| {
+            reachable
+                .iter()
+                .any(|f| self.address_taken_functions.contains(f))
+        };
+
+        let mut per_handler: Vec<(String, usize, usize)> = Vec::new();
+        let mut total = 0usize;
+        for handler in handlers {
+            let reachable = reachable_from(handler, adj);
+            if indirect_risk(&reachable) {
+                return;
+            }
+            let call_depth = self.max_call_depth(handler, adj, &mut HashMap::default());
+            let entry_bytes = CPU_ENTRY_BYTES
+                + REGISTER_SAVE_BYTES
+                + interrupt_save_info
+                    .get(handler)
+                    .map_or(0, |si| si.zp_save_bytes());
+            total += entry_bytes + call_depth * JSR_BYTES;
+            per_handler.push((handler.clone(), entry_bytes, call_depth));
+        }
+
+        if total + MIN_FREE_BYTES <= HARDWARE_STACK_BYTES {
+            return;
+        }
+
+        // Attribute to the costliest handler. Its span comes from the AST rather
+        // than `declared_functions`, which deliberately omits `#[irq]`/`#[nmi]`
+        // (they are never "unused"). A handler defined in an imported module is
+        // not in this `source` and is skipped, matching `warn_deep_recursion`.
+        per_handler.sort_by_key(|(_, entry, depth)| entry + depth * JSR_BYTES);
+        if let Some((handler, entry_bytes, call_depth)) = per_handler.last()
+            && let Some(span) = source.items.iter().find_map(|item| match &item.node {
+                crate::ast::Item::Function(f) if f.name.node == *handler => Some(f.name.span),
+                _ => None,
+            })
+        {
+            self.warnings.push(Warning::InterruptStackDepth {
+                handler: handler.clone(),
+                entry_bytes: *entry_bytes,
+                call_depth: *call_depth,
+                total_bytes: total,
+                span,
+            });
+        }
+    }
+
+    /// Deepest chain of nested `JSR`s reachable from `f`, memoized.
+    ///
+    /// Inline functions emit no `JSR`, so they cost nothing themselves but still
+    /// contribute their callees. Tail-recursive self-calls compile to `JMP` and
+    /// are likewise free — the same exemption `warn_deep_recursion` applies. The
+    /// caller guarantees an acyclic subgraph, but `visiting` still guards against
+    /// a cycle so a bug elsewhere cannot hang the compiler.
+    fn max_call_depth(
+        &self,
+        f: &str,
+        adj: &HashMap<String, Vec<String>>,
+        memo: &mut HashMap<String, usize>,
+    ) -> usize {
+        if let Some(d) = memo.get(f) {
+            return *d;
+        }
+        // Mark in-progress so a cycle resolves to 0 rather than recursing forever.
+        memo.insert(f.to_string(), 0);
+        let deepest = adj
+            .get(f)
+            .map(|callees| {
+                callees
+                    .iter()
+                    .filter(|c| c.as_str() != f) // self-recursion: JMP, not JSR
+                    .map(|c| {
+                        let below = self.max_call_depth(c, adj, memo);
+                        let is_inline = self.function_metadata.get(c).is_some_and(|m| m.is_inline);
+                        if is_inline { below } else { below + 1 }
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        memo.insert(f.to_string(), deepest);
+        deepest
     }
 
     /// Rewrite every `FrameOffset(off)` into `ZeroPage(base + off)` across all

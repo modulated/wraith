@@ -57,6 +57,17 @@ pub const INDIRECT_ARG_MAX: u8 = 8;
 /// recursion depth is bounded by this divided by the frame size.
 pub const SOFTWARE_STACK_BYTES: usize = 256;
 
+/// Size of the 6502 hardware stack (page 1, `$0100-$01FF`). Fixed by the
+/// processor, not configurable.
+///
+/// Wraith never puts *data* here — operand spills and recursive frame saves go
+/// to the software stack above. Page 1 holds only what the hardware and the
+/// calling convention require: `JSR` return addresses (2 bytes each), the
+/// interrupt entry sequence (3 bytes), and an interrupt handler's register and
+/// zero-page save. The real headroom is smaller than this by however much the
+/// platform ROM left on the stack before `main`, which the compiler cannot know.
+pub const HARDWARE_STACK_BYTES: usize = 256;
+
 /// Memory layout configuration for 6502 code generation.
 ///
 /// Variable/parameter placement is handled by frame allocation (see

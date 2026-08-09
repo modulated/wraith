@@ -146,9 +146,13 @@ table is new.
 - **Sema-level multi-error reporting.** The parser recovers and reports multiple
   errors; sema still stops at the first. This is a structural change with a real
   soundness risk — see the plan below before starting.
-- **Interrupt hardware-stack depth check.** Frame coloring computes what a handler
-  saves, but nothing checks that a handler's own call depth fits the hardware
-  stack.
+- **Interrupt hardware-stack depth check.** Done
+  (`warn_interrupt_stack_depth`, `src/sema/analyze/frames.rs`). Sums each
+  handler's entry cost (3 CPU + 3 register bytes + the zero-page save, which can
+  reach ~220 bytes) plus 2 per nested `JSR` on its deepest chain, and warns when
+  page 1 has under 32 bytes spare. Handlers sum rather than max because an NMI
+  can preempt an IRQ; a handler reachable from an indirect call is skipped, since
+  depth through a function pointer is unknowable.
 - **Compile the spec's examples as tests.** Done for the opt-in
   ` ```rust,compile ` blocks (`tests/e2e/spec_examples.rs`); the remaining plain
   ` ```rust ` fragments reference peripherals/functions defined elsewhere and are
