@@ -253,15 +253,25 @@ impl SemanticAnalyzer {
                 // arm gets its own scope with the pattern's bindings in it, so
                 // variable and enum-payload bindings resolve to real storage
                 // (mirrors the match-statement path).
+                // Sibling arms are mutually exclusive, so they share frame
+                // storage: each starts from the same base, and the widest sets
+                // the peak (mirrors the match-statement path).
+                let arms_base = self.frame_cursor;
+                let saved_free = self.loop_bound_free.clone();
+                let mut arms_peak = arms_base;
                 let mut arm_types = Vec::new();
                 for arm in arms {
                     self.check_pattern_type(&arm.pattern, &match_ty)?;
+                    self.reset_frame_to_match_base(arms_base, &saved_free);
                     self.table.enter_scope();
                     self.add_pattern_bindings(&arm.pattern.node, arm.pattern.span, &match_ty)?;
                     let arm_ty = self.check_expr(&arm.body)?;
                     self.table.exit_scope();
+                    arms_peak = arms_peak.max(self.frame_cursor);
                     arm_types.push(arm_ty);
                 }
+                self.frame_cursor = arms_peak;
+                self.loop_bound_free = saved_free;
 
                 // All arms must have the same type (or be compatible)
                 if arm_types.is_empty() {

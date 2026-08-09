@@ -143,13 +143,6 @@ Also open:
 
 ---
 
-## Polish
-
-- **Match-arm binding slots.** Each arm allocates fresh frame slots; siblings could
-  share (cf. `loop_bound_free`).
-
----
-
 ## Future / larger
 
 - 65816 target support (16-bit mode).

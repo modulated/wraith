@@ -155,7 +155,12 @@ impl SemanticAnalyzer {
                     self.check_match_exhaustiveness(enum_name, arms, stmt.span)?;
                 }
 
-                // Analyze each arm
+                // Analyze each arm. Sibling arms share frame storage (see
+                // `reset_frame_to_match_base`): each starts from the same base
+                // and the widest arm sets the peak for later locals.
+                let arms_base = self.frame_cursor;
+                let saved_free = self.loop_bound_free.clone();
+                let mut arms_peak = arms_base;
                 for arm in arms {
                     // The pattern must make sense for the scrutinee before it
                     // is trusted for bindings: a pattern naming a different
@@ -164,6 +169,8 @@ impl SemanticAnalyzer {
                     // emitted CMP (`match x { 300 => ... }` with `x: u8`
                     // matched x == 44).
                     self.check_pattern_type(&arm.pattern, &match_ty)?;
+
+                    self.reset_frame_to_match_base(arms_base, &saved_free);
 
                     // Enter new scope for pattern bindings
                     self.table.enter_scope();
@@ -175,7 +182,10 @@ impl SemanticAnalyzer {
                     self.analyze_stmt(&arm.body)?;
 
                     self.table.exit_scope();
+                    arms_peak = arms_peak.max(self.frame_cursor);
                 }
+                self.frame_cursor = arms_peak;
+                self.loop_bound_free = saved_free;
             }
             Stmt::Asm { lines } => {
                 // Parse inline assembly to extract variable references
@@ -1130,6 +1140,23 @@ impl SemanticAnalyzer {
             });
         }
         Ok(())
+    }
+
+    /// Reset the frame allocator to the state captured before a match's arms.
+    ///
+    /// Sibling arms are mutually exclusive at runtime, so their pattern-binding
+    /// and body-local slots can share frame storage: rewinding to the same base
+    /// before each arm makes every arm allocate as if it were the only one, and
+    /// the caller keeps the peak so later locals sit above the widest arm.
+    ///
+    /// Both the frame cursor and the loop-bound free list are snapshotted — an
+    /// arm whose body contains a loop could otherwise reuse a bound slot freed
+    /// by an earlier arm, which after the rewind would alias this arm's own
+    /// bindings.
+    pub(super) fn reset_frame_to_match_base(&mut self, base: u8, saved_free: &[(u8, u8)]) {
+        self.frame_cursor = base;
+        self.loop_bound_free.clear();
+        self.loop_bound_free.extend_from_slice(saved_free);
     }
 
     pub(super) fn add_pattern_bindings(
