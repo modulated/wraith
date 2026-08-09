@@ -961,3 +961,26 @@ fn pointer_ordering_and_arithmetic_stay_rejected() {
     );
     assert!(add.contains("Add") || add.contains("index"), "{add}");
 }
+
+#[test]
+fn a_write_through_a_pointer_to_a_pointer_keeps_both_address_bytes() {
+    // `*pp = q` writes a two-byte pointer through `pp: &&u8`. The store used to
+    // treat only a u16 pointee as two bytes, so a pointer pointee dropped its
+    // high byte — and a pointer's high byte lives in X, not Y. B sits at an
+    // address whose high byte differs from A's, so a lost byte reads the wrong
+    // static.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        static A: u8 = 10;
+        static B: u8 = 20;
+        #[reset]
+        fn main() {
+            let p: &u8 = &A;
+            let pp: &&u8 = &p;
+            *pp = &B;      // redirect p to B, through pp
+            OUT = *p;      // reads B (20) only if the full address survived
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 20, "the redirected pointer must reach B");
+}

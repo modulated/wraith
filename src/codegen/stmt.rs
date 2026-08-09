@@ -1644,7 +1644,6 @@ fn generate_index_assignment(
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
-    use crate::ast::PrimitiveType;
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
@@ -1679,14 +1678,7 @@ fn generate_index_assignment(
     // by the element width and stored as a low/high pair. Function pointers are
     // what installing a driver into a table (`handlers[i] = drv`) writes, so
     // omitting them here stored only the low byte at an unscaled offset.
-    let is_multibyte = element_type.is_some_and(|t| {
-        matches!(
-            t,
-            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16)
-                | Type::Function(..)
-                | Type::Pointer(..)
-        )
-    });
+    let is_multibyte = element_type.is_some_and(crate::codegen::expr::is_two_byte_value);
 
     // A runtime index into a fixed-size array whose scaled offset would exceed
     // the 8-bit index register silently wraps (`ASL` drops its carry; `base,Y`
@@ -2255,20 +2247,14 @@ fn generate_slice_assignment(
             s, actual_end
         ));
 
-        // Determine element width: u16/i16/b16 arrays store two bytes per
-        // element and index by a byte offset (element index * 2), matching
-        // generate_index_assignment. Truncating to one byte and using the raw
-        // element index (as the original code did) silently corrupts u16 arrays.
-        use crate::ast::PrimitiveType;
+        // Determine element width: a two-byte element indexes by a scaled byte
+        // offset (element index * 2), matching generate_index_assignment.
+        // Truncating to one byte and using the raw element index silently
+        // corrupts u16 (and pointer) arrays.
         use crate::sema::types::Type;
         let element_is_multibyte = matches!(
             info.resolved_types.get(&object.span),
-            Some(Type::Array(elem, _)) if matches!(
-                &**elem,
-                Type::Primitive(PrimitiveType::U16)
-                    | Type::Primitive(PrimitiveType::I16)
-                    | Type::Primitive(PrimitiveType::B16)
-            )
+            Some(Type::Array(elem, _)) if crate::codegen::expr::is_two_byte_value(elem)
         );
         let elem_size = if element_is_multibyte { 2usize } else { 1usize };
 
@@ -2398,7 +2384,7 @@ fn generate_field_assignment(
             })?;
         // Function-pointer fields are 2-byte code addresses, so they must be
         // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
-        let is_multibyte = crate::codegen::expr::field_is_two_bytes(&field_info.ty);
+        let is_multibyte = crate::codegen::expr::is_two_byte_value(&field_info.ty);
         // Sema rejects assigning through a `const`, so a read-only base here
         // would mean a store quietly aimed at ROM.
         if base.is_read_only() {
@@ -2481,7 +2467,7 @@ fn generate_field_assignment(
         // Check if field is multi-byte
         // Function-pointer fields hold a 2-byte code address, so they are stored
         // as a pair like u16 — a device vtable depends on it.
-        let is_multibyte = crate::codegen::expr::field_is_two_bytes(&field_info.ty);
+        let is_multibyte = crate::codegen::expr::is_two_byte_value(&field_info.ty);
 
         emitter.emit_comment(&format!("Field assignment: {}.{}", var_name, field.node));
 
@@ -2553,7 +2539,7 @@ fn generate_field_assignment(
 /// struct field. A `&T` arrives in A:X like every other pointer-like value;
 /// a u16 or a function pointer arrives in A:Y.
 fn store_high(ty: &crate::sema::types::Type) -> &'static str {
-    if crate::codegen::expr::field_high_byte_in_x(ty) {
+    if crate::codegen::expr::high_byte_in_x(ty) {
         "STX"
     } else {
         "STY"
@@ -3169,20 +3155,21 @@ fn generate_deref_assignment(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    use crate::ast::PrimitiveType;
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
-    let is_multibyte = matches!(
-        info.resolved_types.get(&ptr_expr.span),
-        Some(Type::Pointer(inner))
-            if matches!(
-                **inner,
-                Type::Primitive(PrimitiveType::U16)
-                    | Type::Primitive(PrimitiveType::I16)
-                    | Type::Primitive(PrimitiveType::B16)
-            )
-    );
+    // The pointee's ABI: a two-byte pointee (u16/i16/b16, but also a `&T` or a
+    // function pointer — a `&&u8` or `&fn(..)`) stores both bytes. Its high byte
+    // arrives in X for a pointer/function value and in Y for a 16-bit scalar, so
+    // ask the shared predicates rather than re-listing the variants here — the
+    // list that omitted pointers is exactly what dropped the high byte of
+    // `*pp = q`.
+    let pointee = match info.resolved_types.get(&ptr_expr.span) {
+        Some(Type::Pointer(inner)) => Some(inner.as_ref()),
+        _ => None,
+    };
+    let is_multibyte = pointee.is_some_and(crate::codegen::expr::is_two_byte_value);
+    let high_in_x = pointee.is_some_and(crate::codegen::expr::high_byte_in_x);
     let width: u8 = if is_multibyte { 2 } else { 1 };
 
     // Park the value while the pointer is set up. Not $20/$21 — those are
@@ -3197,8 +3184,9 @@ fn generate_deref_assignment(
     generate_expr(value, emitter, info, string_collector)?;
     emitter.emit_inst("STA", &format!("${:02X}", save));
     if is_multibyte {
-        // A 16-bit value arrives as A:Y.
-        emitter.emit_inst("STY", &format!("${:02X}", save + 1));
+        // High byte: X for a pointer/function value, Y for a 16-bit scalar.
+        let reg = if high_in_x { "STX" } else { "STY" };
+        emitter.emit_inst(reg, &format!("${:02X}", save + 1));
     }
 
     // Resolve the pointer into a zero-page pair we can use with `(zp),Y`.
