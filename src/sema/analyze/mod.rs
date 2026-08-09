@@ -2,7 +2,7 @@
 //!
 //! Traverses the AST to populate the symbol table and perform type checking.
 
-mod escape;
+pub(crate) mod escape;
 mod expr;
 mod frames;
 mod register;
@@ -525,8 +525,15 @@ impl SemanticAnalyzer {
             };
             self.current_return_type = Some(return_type);
 
-            // For inline functions, track symbols before body analysis
-            let resolved_before = if is_inline {
+            // Capture inline symbols for `#[inline]` functions and for auto-inline
+            // candidates (the codegen inliner may expand either), tracking the
+            // symbol set before body analysis to diff out this function's own.
+            let capture_inline = is_inline
+                || self
+                    .function_metadata
+                    .get(&func.name.node)
+                    .is_some_and(|m| m.inline_candidate);
+            let resolved_before = if capture_inline {
                 Some(self.resolved_symbols.clone())
             } else {
                 None
@@ -639,9 +646,9 @@ impl SemanticAnalyzer {
             self.frame_sizes
                 .insert(func_name.clone(), self.frame_cursor);
 
-            // For inline functions, capture all symbols that were added during body analysis
-            // This includes both parameter definitions and all references to them
-            if is_inline && let Some(before) = resolved_before {
+            // For inline functions and auto-inline candidates, capture all symbols
+            // added during body analysis (parameter definitions and references).
+            if capture_inline && let Some(before) = resolved_before {
                 // Collect all NEW symbols that were added during parameter registration and body analysis
                 let mut inline_symbols = std::collections::HashMap::default();
                 for (span, info) in &self.resolved_symbols {

@@ -7,11 +7,70 @@
 //! high byte compiles to entirely reasonable assembly), so the values are now
 //! read back.
 
+use crate::common::compile_success;
 use crate::common::exec::run;
 
 /// Run a program and read the u8 left at `$0900`.
 fn out8(src: &str) -> u8 {
     run(src).mem(0x0900)
+}
+
+#[test]
+fn a_constant_enum_payload_lives_in_data_not_behind_a_jmp() {
+    // Constant payloads are collected into DATA and referenced by label, so the
+    // construction is just the two address loads — no inline `.BYTE`s and no
+    // `JMP` to skip over them in the instruction stream.
+    let asm = compile_success(
+        r#"
+        enum Msg { Ping, Data(u16) }
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let m: Msg = Msg::Data(0x1234);
+            OUT = 0;
+            loop {}
+        }
+    "#,
+    );
+    assert!(
+        asm.contains("Constant Enum Payloads"),
+        "payload should be emitted in the DATA pass"
+    );
+    assert!(
+        asm.contains("LDA #<ed_"),
+        "construction should load the DATA payload label"
+    );
+    // The old inline form jumped over embedded data with an `es_` skip label.
+    assert!(
+        !asm.contains("es_"),
+        "no JMP-over-inline-data skip label should remain: {asm}"
+    );
+}
+
+#[test]
+fn identical_constant_payloads_are_deduplicated() {
+    // Two constructions of the same variant with the same payload share one
+    // DATA copy, so exactly one payload label is defined and both loads use it.
+    let asm = compile_success(
+        r#"
+        enum Msg { Ping, Data(u16) }
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: Msg = Msg::Data(0xBEEF);
+            let b: Msg = Msg::Data(0xBEEF);
+            OUT = 0;
+            loop {}
+        }
+    "#,
+    );
+    let payload_defs = asm.matches("ed_0:").count();
+    assert_eq!(payload_defs, 1, "the shared payload is defined once");
+    // Both constructions reference the same label.
+    assert!(
+        asm.matches("LDA #<ed_0").count() >= 2,
+        "both constructions should load the deduplicated label"
+    );
 }
 
 // ============================================================================

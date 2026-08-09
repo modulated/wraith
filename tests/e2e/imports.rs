@@ -109,7 +109,12 @@ fn defined_functions(asm: &str) -> Vec<String> {
 
 #[test]
 fn unused_imported_functions_are_not_emitted() {
-    let asm = compile_success(&source("{ * }", "OUT = double(4);"));
+    // Keep `double` out-of-line (address-taken) so this stays a test about
+    // whether a *used* function is emitted, not about the inliner.
+    let asm = compile_success(&source(
+        "{ * }",
+        "let _k: fn(u8) -> u8 = double; OUT = double(4);",
+    ));
     let defined = defined_functions(&asm);
 
     assert!(

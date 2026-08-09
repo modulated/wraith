@@ -247,7 +247,7 @@ fn check_org_is_placeable(
 /// invalidates all register tracking. Seeding it from the previous function's
 /// leftover state — as this did when it ran inline — could elide a load the
 /// real pass then emits, measuring the function short.
-fn measure(
+pub(crate) fn measure(
     func: &Function,
     info: &ProgramInfo,
     verbosity: CommentVerbosity,
@@ -322,5 +322,10 @@ fn measure(
     // only ever removes instructions, but the real emit can differ by a few
     // bytes where the measuring pass cannot reproduce the surrounding context
     // exactly.
-    Ok(e.byte_count() + 10)
+    Ok(e.byte_count() + MEASURE_SLACK)
 }
+
+/// Safety margin added to every measured function size so a reservation is
+/// never smaller than the real emission. Callers wanting the raw body size
+/// (e.g. the inliner's size heuristic) subtract it back off.
+pub(crate) const MEASURE_SLACK: u16 = 10;

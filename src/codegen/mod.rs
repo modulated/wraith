@@ -1,4 +1,3 @@
-pub mod address_allocator;
 pub mod comment_utils;
 pub mod emitter;
 pub mod expr;
@@ -129,6 +128,13 @@ impl std::error::Error for CodegenError {}
 /// Uses a global pool for cross-module string deduplication
 pub struct StringCollector {
     strings: HashMap<String, String>, // content -> label
+    /// Constant enum payloads (tag byte + field bytes), collected here so they
+    /// land in DATA instead of inline in the instruction stream behind a `JMP`.
+    /// Insertion order is preserved for a deterministic DATA layout; the map
+    /// deduplicates identical blobs so two constructions of the same variant
+    /// with the same payload share one copy.
+    enum_blobs: Vec<(String, Vec<u8>)>, // (label, bytes) in insertion order
+    enum_blob_labels: HashMap<Vec<u8>, String>, // bytes -> label, for dedup
     next_id: usize,
 }
 
@@ -142,8 +148,64 @@ impl StringCollector {
     pub fn new() -> Self {
         Self {
             strings: HashMap::default(),
+            enum_blobs: Vec::new(),
+            enum_blob_labels: HashMap::default(),
             next_id: 0,
         }
+    }
+
+    /// Register a constant enum payload and return its DATA label. Identical
+    /// blobs are deduplicated to a single copy.
+    pub fn add_enum_blob(&mut self, bytes: Vec<u8>) -> String {
+        if let Some(label) = self.enum_blob_labels.get(&bytes) {
+            return label.clone();
+        }
+        let label = format!("ed_{}", self.next_id);
+        self.next_id += 1;
+        self.enum_blob_labels.insert(bytes.clone(), label.clone());
+        self.enum_blobs.push((label.clone(), bytes));
+        label
+    }
+
+    /// Emit all collected constant enum payloads into the DATA section.
+    pub fn emit_enum_data(
+        &self,
+        emitter: &mut Emitter,
+        section_alloc: &mut SectionAllocator,
+    ) -> Result<(), CodegenError> {
+        if self.enum_blobs.is_empty() {
+            return Ok(());
+        }
+
+        emitter.emit_comment("============================");
+        emitter.emit_comment("Constant Enum Payloads");
+        emitter.emit_comment("============================");
+
+        for (label, bytes) in &self.enum_blobs {
+            let size = bytes.len() as u16;
+            let addr = section_alloc
+                .allocate("DATA", size)
+                .map_err(CodegenError::SectionError)?;
+            section_alloc.record_allocation(
+                format!("enum payload {}", label),
+                addr,
+                size,
+                AllocationSource::Section("DATA".to_string()),
+                None,
+            );
+            emitter.emit_org(addr);
+            emitter.emit_label(label);
+            for chunk in bytes.chunks(16) {
+                let bytes_str = chunk
+                    .iter()
+                    .map(|b| format!("${:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                emitter.emit_raw(&format!("    .BYTE {}", bytes_str));
+            }
+        }
+
+        Ok(())
     }
 
     /// Register a string and get its label (deduplicated automatically)
@@ -329,9 +391,13 @@ fn emit_stdlib_math_functions(
     emitter.emit_comment("============================================================");
 
     if emitter.needs_mul16 {
+        // Exact machine-code size of the routine below; verified against the
+        // emitted bytes at the end of the block.
+        const MUL16_BYTES: u16 = 61;
         let org_addr = section_alloc
-            .allocate("CODE", 74)
+            .allocate("CODE", MUL16_BYTES)
             .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mul16");
         emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
@@ -376,12 +442,15 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    LDA $D2");
         emitter.emit_raw("    LDY $D3");
         emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("mul16", emitter.output_since(start), MUL16_BYTES)?;
     }
 
     if emitter.needs_div16 {
+        const DIV16_BYTES: u16 = 92;
         let org_addr = section_alloc
-            .allocate("CODE", 110)
+            .allocate("CODE", DIV16_BYTES)
             .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: div16");
         emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
@@ -468,12 +537,15 @@ fn emit_stdlib_math_functions(
 
         emitter.emit_raw("    div16_done:");
         emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("div16", emitter.output_since(start), DIV16_BYTES)?;
     }
 
     if emitter.needs_mod16 {
+        const MOD16_BYTES: u16 = 92;
         let org_addr = section_alloc
-            .allocate("CODE", 110)
+            .allocate("CODE", MOD16_BYTES)
             .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
         emitter.emit_org(org_addr);
         emitter.emit_comment("Function: mod16");
         emitter.emit_comment("  Params: a: u16 in $D9-$DA, b: u16 in $DB-$DC");
@@ -560,8 +632,23 @@ fn emit_stdlib_math_functions(
 
         emitter.emit_raw("    mod16_done:");
         emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("mod16", emitter.output_since(start), MOD16_BYTES)?;
     }
 
+    Ok(())
+}
+
+/// Fail the build if a hand-written raw stdlib routine grew past the ROM window
+/// reserved for it, instead of letting the following `.ORG` silently overlap its
+/// tail. `emitted` is the routine's assembly text (from `output_since`).
+fn verify_raw_routine_fits(name: &str, emitted: &str, reserved: u16) -> Result<(), CodegenError> {
+    let actual = Emitter::measure_asm(emitted);
+    if actual > reserved {
+        return Err(CodegenError::SectionError(format!(
+            "stdlib `{name}` is {actual} bytes but only {reserved} were reserved; \
+             update its reservation in emit_stdlib_math_functions"
+        )));
+    }
     Ok(())
 }
 
@@ -645,9 +732,155 @@ pub(crate) fn is_live(item: &crate::ast::Spanned<crate::ast::Item>, program: &Pr
     }
 }
 
+/// Find a function's AST node by name, in the root module or an imported one.
+fn find_function<'a>(
+    ast: &'a SourceFile,
+    program: &'a ProgramInfo,
+    name: &str,
+) -> Option<&'a crate::ast::Function> {
+    ast.items
+        .iter()
+        .chain(program.imported_items.iter())
+        .find_map(|item| match &item.node {
+            crate::ast::Item::Function(f) if f.name.node == name => Some(&**f),
+            _ => None,
+        })
+}
+
+/// Decide which auto-inline candidates to actually inline, and mark them
+/// `is_inline` so placement and emission skip their bodies and every call site
+/// expands them.
+///
+/// Candidacy (non-entry, non-`#[inline]`, no explicit placement, scalar/void
+/// return, body+params captured) was set in sema. Here we add the constraints
+/// that need the whole-program view — never inline an address-taken function
+/// (its pointer needs a real address) or one in a call cycle (infinite
+/// expansion) — and apply the size/reuse heuristic against real measured sizes:
+///
+/// - a single call site always wins (the out-of-line body disappears);
+/// - a leaf body of ≤3 bytes (smaller than the `JSR` it replaces) wins anywhere;
+/// - a larger leaf body wins where it stays size-neutral: `B·(N−1) ≤ 3N+1`.
+///
+/// Inlining a candidate is always *correct*; the heuristic only governs whether
+/// it is a size win, so an imperfect call count can never miscompile.
+fn select_auto_inline(
+    ast: &SourceFile,
+    program: &mut ProgramInfo,
+    verbosity: CommentVerbosity,
+    target: TargetCpu,
+    layout: &memory_layout::MemoryLayout,
+) -> Result<(), CodegenError> {
+    use crate::ast::Expr;
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    // Count direct call sites per callee across the whole program, note callers
+    // that make any call at all (non-leaf), and collect every identifier that
+    // appears in an inline-asm block. A function a `JSR`/`JMP` inside inline asm
+    // targets by name is not visible as an `Expr::Call`, so inlining it would
+    // drop its definition and leave that reference dangling — exclude any
+    // function named anywhere in inline asm (over-broad but always safe; asm
+    // blocks are rare).
+    let mut call_sites: FxHashMap<String, u32> = FxHashMap::default();
+    let mut non_leaf: FxHashSet<String> = FxHashSet::default();
+    // Functions that contain inline asm, or are named inside inline asm.
+    // Inlining an asm-containing function is unreliable — inline expansion runs
+    // `uniquify_asm_labels`, which mangles bare operands (an external `JSR
+    // asm_only` becomes `JSR asm_only_1`). And a function a `JSR` inside asm
+    // targets by name is invisible to the `Expr::Call` count, so dropping its
+    // definition would dangle that reference. Exclude both (asm blocks are rare).
+    let mut asm_unsafe: FxHashSet<String> = FxHashSet::default();
+    for item in ast.items.iter().chain(program.imported_items.iter()) {
+        if let crate::ast::Item::Function(f) = &item.node {
+            let caller = f.name.node.clone();
+            crate::sema::analyze::escape::walk_stmts(&f.body, &mut |s| {
+                if let crate::ast::Stmt::Asm { lines } = &s.node {
+                    asm_unsafe.insert(caller.clone());
+                    for line in lines {
+                        for tok in line
+                            .instruction
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        {
+                            if !tok.is_empty() {
+                                asm_unsafe.insert(tok.to_string());
+                            }
+                        }
+                    }
+                }
+                crate::sema::analyze::escape::walk_exprs_in_stmt(s, &mut |e| {
+                    if let Expr::Call { function, .. } = &e.node {
+                        *call_sites.entry(function.node.clone()).or_insert(0) += 1;
+                        non_leaf.insert(caller.clone());
+                    }
+                });
+            });
+        }
+    }
+
+    // Functions in any call cycle (direct or mutual recursion) must never be
+    // inlined; owned so it doesn't borrow `program` across the mutation below.
+    let recursive: FxHashSet<String> = program
+        .recursive_call_edges
+        .iter()
+        .flat_map(|(a, b)| [a.clone(), b.clone()])
+        .collect();
+
+    let candidates: Vec<String> = program
+        .function_metadata
+        .iter()
+        .filter(|(_, m)| m.inline_candidate)
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    let mut to_inline: Vec<String> = Vec::new();
+    for name in &candidates {
+        if program.address_taken_functions.contains(name)
+            || recursive.contains(name)
+            || asm_unsafe.contains(name)
+        {
+            continue;
+        }
+        let n = call_sites.get(name).copied().unwrap_or(0);
+        if n == 0 {
+            continue; // unreachable; dead-code elimination handles it
+        }
+        let Some(func) = find_function(ast, program, name) else {
+            continue;
+        };
+        let is_leaf = !non_leaf.contains(name);
+        let inline = if n == 1 {
+            true
+        } else if is_leaf {
+            // `measure` pads every function by a safety slack; subtract it to
+            // get the true body size the heuristic reasons about.
+            let size = placement::measure(
+                func,
+                program,
+                verbosity,
+                target,
+                layout,
+                &mut StringCollector::new(),
+            )?
+            .saturating_sub(placement::MEASURE_SLACK) as u32;
+            size <= 3 || size * (n - 1) <= 3 * n + 1
+        } else {
+            false
+        };
+        if inline {
+            to_inline.push(name.clone());
+        }
+    }
+
+    for name in to_inline {
+        if let Some(m) = program.function_metadata.get_mut(&name) {
+            m.is_inline = true;
+        }
+    }
+    Ok(())
+}
+
 pub fn generate(
     ast: &SourceFile,
-    program: &ProgramInfo,
+    program: &mut ProgramInfo,
     verbosity: CommentVerbosity,
     target: TargetCpu,
 ) -> Result<(String, SectionAllocator), CodegenError> {
@@ -663,6 +896,18 @@ pub fn generate(
     }
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
+
+    // Automatic inlining: promote auto-inline candidates whose expansion is a
+    // size win to `is_inline`, before placement so the layout already excludes
+    // their bodies and every call site expands them. Doing it here (not in sema)
+    // is what lets the heuristic use real measured function sizes.
+    select_auto_inline(
+        ast,
+        program,
+        verbosity,
+        target,
+        &emitter.memory_layout.clone(),
+    )?;
 
     // Decide where every function goes before emitting anything. Doing this up
     // front is what lets `#[org]` reserve its range: the allocator can only
@@ -893,6 +1138,7 @@ pub fn generate(
     // Emit collected string literals to DATA section
     // Content-based labels ensure cross-module deduplication
     string_collector.emit_strings(&mut emitter, &mut section_alloc)?;
+    string_collector.emit_enum_data(&mut emitter, &mut section_alloc)?;
 
     // Emit stdlib math functions if needed
     emit_stdlib_math_functions(&mut emitter, &mut section_alloc)?;

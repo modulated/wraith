@@ -229,6 +229,34 @@ fn struct_return_by_value_u16_field() {
 }
 
 #[test]
+fn struct_return_by_value_uses_the_copy_loop_past_three_bytes() {
+    // A struct of 6 bytes crosses the unroll->loop threshold, so the copy is
+    // emitted as an INY/CPY/BNE loop. Every field must still land correctly.
+    let mut e = run(r#"
+        struct Big { a: u16, b: u16, c: u16 }
+        const AV: addr = 0x0400;
+        const BV: addr = 0x0401;
+        const CV: addr = 0x0402;
+        fn build() -> Big { return Big { a: 0x1111, b: 0x2222, c: 0x3333 }; }
+        #[reset]
+        fn main() {
+            let s: Big = build();
+            AV = s.a.low;   // 0x11
+            BV = s.b.low;   // 0x22
+            CV = s.c.high;  // 0x33
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0x11, "s.a low");
+    assert_eq!(e.mem(0x0401), 0x22, "s.b low");
+    assert_eq!(
+        e.mem(0x0402),
+        0x33,
+        "s.c high — last byte of the looped copy"
+    );
+}
+
+#[test]
 fn struct_return_by_value_reassignment() {
     // `p = make(...)` (assignment, not let) must also copy the struct.
     let mut e = run(r#"

@@ -93,18 +93,17 @@ outset (`Emitter::emit_label` already does this for registers).
 ### Smaller code
 
 - **Reclaim BSS from dropped statics.** Dead statics are no longer emitted, but
-  sema assigns their RAM addresses before liveness is known, so the space stays
-  reserved. Ordering BSS allocation after the liveness walk recovers it.
-- **Consolidate duplicate enum variant data.** Two constructions of the same
-  variant with the same payload emit the same bytes twice.
-- **Move const enum payloads out of the instruction stream.** They are emitted
-  inline with a `JMP` over them; placing them in `DATA` removes the jump.
-- **Automatic inlining of small functions.** `#[inline]` is explicit only; a leaf
-  function smaller than its call sequence is always worth inlining, and the size
-  is already measured in the first pass of `generate_function`.
-- **stdlib math ROM over-allocation** (~49 bytes across `mul16`/`div16`/`mod16`);
-  **copy loops unrolled per byte** (6 code bytes per byte copied — a `DEX/BNE`
-  loop pays off beyond ~3 bytes); **`LDA #$00; LDY #$00` → `LDA #$00; TAY`**.
+  the registration pass (`register.rs` `bss_alloc`) assigns every mutable
+  static a RAM address before liveness (`reachable_symbols`) is known, so a
+  dropped static still reserves its bytes. A naive "allocate after the liveness
+  walk" reorder does not work directly: initializer `&OTHER_STATIC` references
+  and the flattened init bytes are resolved at registration time, in
+  declaration order, from the already-assigned addresses. Recovering the space
+  means splitting static registration into phases — declare symbols and collect
+  refs, run liveness, then assign BSS addresses to the live statics (still in
+  declaration order) and flatten their init bytes — and keeping the shared
+  `bss_cursor` consistent before `finalize_frames` lays local-array blocks
+  above it.
 
 ---
 
@@ -162,8 +161,10 @@ Also open:
   import-merge half is already done.
 - **De-duplicate codegen.** Six near-identical unsigned compare routines; the
   ZeroPage/Absolute arms of `generate_index_assignment`; `generate_divide_i16` /
-  `generate_modulo_i16`; the `emit_signed_lt` closure copied verbatim into two
-  files. `stmt.rs` (~4,300 lines) wants a `store_value_to_slot(ty, loc)` helper.
+  `generate_modulo_i16`. The statement codegen is now split into a `stmt/` module (`assign`,
+  `loops`, `match_stmt`, `asm_stmt`); the remaining win there is a shared
+  `store_value_to_slot(ty, loc)` helper for the repeated byte-store sequences in
+  `assign.rs`.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable (`cpu_flags.rs`, and parts of `frames.rs` / `types.rs` /
   `control_flow.rs` / `memory.rs`).
@@ -172,12 +173,8 @@ Also open:
 
 ## Polish
 
-- **Dead code.** `address_allocator.rs` (188 lines) is unused; `is_primary_free`,
-  `TempAllocStats`, `ParseErrorKind::InvalidInteger` / `InvalidType` are dead.
 - **Match-arm binding slots.** Each arm allocates fresh frame slots; siblings could
   share (cf. `loop_bound_free`).
-- **Test isolation.** `tests/visibility_errors.rs` writes fixed filenames into the
-  shared temp dir, risking parallel-run flakiness.
 
 ---
 

@@ -11,6 +11,8 @@
 //! analysis that succeeded — because the buffer under the cursor often does not
 //! parse (you have just typed `foo.` and there is no expression yet).
 
+use std::path::PathBuf;
+
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use wraith::ast::SourceFile;
 use wraith::sema::ProgramInfo;
@@ -30,7 +32,13 @@ pub struct Analysis {
     pub good: Option<Analyzed>,
 }
 
-pub fn analyze_text(text: &str, index: &LineIndex) -> Analysis {
+/// Analyze `text`. `path` is the document's filesystem path when it has one
+/// (an unsaved buffer has none). It is what lets a relative `import` resolve
+/// against the file's own directory — exactly as the CLI does via
+/// `analyze_with_path`. Without it, sema resolves imports against the language
+/// server's working directory, which is wherever the editor happened to launch
+/// it, and imports that compile fine on the command line report "No such file".
+pub fn analyze_text(text: &str, index: &LineIndex, path: Option<PathBuf>) -> Analysis {
     // Lex.
     let tokens = match wraith::lexer::lex(text) {
         Ok(t) => t,
@@ -56,8 +64,13 @@ pub fn analyze_text(text: &str, index: &LineIndex) -> Analysis {
         }
     };
 
-    // Analyze.
-    match wraith::sema::analyze(&ast) {
+    // Analyze. With a known path, resolve imports relative to the file (as the
+    // CLI does); otherwise fall back to the pathless entry point.
+    let result = match path {
+        Some(p) => wraith::sema::analyze_with_path(&ast, p),
+        None => wraith::sema::analyze(&ast),
+    };
+    match result {
         Ok(info) => {
             // A clean parse+analyze: the only diagnostics are warnings.
             let diagnostics = info

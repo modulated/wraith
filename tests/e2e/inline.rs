@@ -422,3 +422,93 @@ fn an_early_return_inside_a_nested_inline_call_wins() {
     "#;
     assert_eq!(run(src).mem(0x0900), 3);
 }
+
+// ---------------------------------------------------------------------------
+// Automatic inlining (no `#[inline]` attribute): the codegen inliner expands
+// small/single-use scalar functions and drops their out-of-line bodies.
+// ---------------------------------------------------------------------------
+
+use crate::common::compile_success;
+
+#[test]
+fn a_single_use_function_is_inlined_and_still_correct() {
+    // `helper` is called exactly once, so Rule 1 inlines it: no `JSR helper`
+    // and no `helper:` body — but the result must be identical.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        fn helper(a: u8) -> u8 { return a + 5; }
+        #[reset]
+        fn main() { OUT = helper(30); loop {} }
+    "#;
+    let asm = compile_success(src);
+    assert!(
+        !asm.contains("JSR helper"),
+        "single-use helper should be inlined"
+    );
+    assert!(
+        !asm.contains("\nhelper:"),
+        "inlined helper needs no out-of-line body"
+    );
+    assert_eq!(out8(src), 35, "the inlined call must still compute a + 5");
+}
+
+#[test]
+fn a_tiny_function_called_several_times_is_inlined() {
+    // `two` compiles to ~3 bytes (LDA #2 / RTS), smaller than the JSR it would
+    // replace, so Rule 2 inlines it at every site regardless of reuse.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        fn two() -> u8 { return 2; }
+        #[reset]
+        fn main() { OUT = two() + two() + two(); loop {} }
+    "#;
+    let asm = compile_success(src);
+    assert!(
+        !asm.contains("JSR two"),
+        "a sub-JSR-size leaf should be inlined"
+    );
+    assert_eq!(out8(src), 6);
+}
+
+#[test]
+fn a_recursive_function_is_not_inlined() {
+    // Inlining a function in a call cycle would expand forever; it must stay
+    // out-of-line and still run correctly.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        fn countdown(n: u8) -> u8 {
+            if n == 0 { return 0; }
+            return countdown(n - 1);
+        }
+        #[reset]
+        fn main() { OUT = countdown(5) + 9; loop {} }
+    "#;
+    let asm = compile_success(src);
+    assert!(
+        asm.contains("countdown:"),
+        "a recursive function must not be inlined"
+    );
+    assert_eq!(out8(src), 9);
+}
+
+#[test]
+fn an_address_taken_function_is_not_inlined() {
+    // Its address is observable, so the out-of-line body must exist even though
+    // it also has a single direct caller.
+    let src = r#"
+        const OUT: addr = 0x0900;
+        fn scale(x: u8) -> u8 { return x + x; }
+        #[reset]
+        fn main() {
+            let fp: fn(u8) -> u8 = scale;
+            OUT = fp(6) + scale(1);
+            loop {}
+        }
+    "#;
+    let asm = compile_success(src);
+    assert!(
+        asm.contains("scale:"),
+        "an address-taken function keeps its body"
+    );
+    assert_eq!(out8(src), 14, "fp(6)=12 + scale(1)=2");
+}

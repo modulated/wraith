@@ -70,6 +70,49 @@ fn smoke_u8_addition() {
 }
 
 #[test]
+fn a_sixteen_bit_zero_keeps_both_bytes_after_the_transfer_fold() {
+    // `LDA #$00; LDY #$00` is folded to `LDA #$00; TAY`; the high byte must
+    // still come out zero. Returning a u16 zero exercises the A:Y path.
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn zero16() -> u16 { return 0; }
+        #[reset]
+        fn main() {
+            let z: u16 = zero16();
+            LO = z.low;
+            HI = z.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0400), 0, "low byte of a u16 zero");
+    assert_eq!(e.mem(0x0401), 0, "high byte must survive the TAY fold");
+}
+
+#[test]
+fn a_symbol_named_a_is_usable() {
+    // `A` collides with the accumulator token in assembly; the assembler only
+    // reads `A` as the accumulator for accumulator-mode mnemonics, so a const
+    // literally named `A` (emitted as `LDA A` / `STA A`) round-trips.
+    let mut e = run(r#"
+        const A: addr = 0x0400;
+        const OUT: addr = 0x0401;
+        #[reset]
+        fn main() {
+            A = 42;
+            A += 1;      // load/modify/store through the accumulator
+            OUT = A;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0401),
+        43,
+        "a const named `A` reads and writes correctly"
+    );
+}
+
+#[test]
 fn smoke_u8_subtraction_is_not_reversed() {
     // Non-commutative: verifies operand order (a - b, not b - a).
     let mut e = run(r#"

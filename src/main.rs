@@ -200,7 +200,7 @@ fn main() {
 
     // Semantic analysis
     let file_path = PathBuf::from(&file);
-    let program_info = match wraith::sema::analyze_with_path(&ast, file_path) {
+    let mut program_info = match wraith::sema::analyze_with_path(&ast, file_path) {
         Ok(info) => info,
         Err(e) => {
             eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));
@@ -218,7 +218,8 @@ fn main() {
     }
 
     // Code generation
-    let (code, section_alloc) = match codegen::generate(&ast, &program_info, verbosity, target) {
+    let (code, section_alloc) = match codegen::generate(&ast, &mut program_info, verbosity, target)
+    {
         Ok(result) => result,
         Err(e) => {
             eprintln!("{}", e.format_with_source_and_file(&source, Some(&file)));

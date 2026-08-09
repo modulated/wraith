@@ -14,7 +14,7 @@ mod binary;
 mod bitop;
 mod call;
 mod cast;
-mod compare;
+pub(crate) mod compare;
 mod literal;
 mod unary;
 
@@ -654,18 +654,9 @@ fn generate_match_expr(
                     if scrutinee_is_signed {
                         let emit_signed_lt =
                             |emitter: &mut Emitter, bound: i64, target: &str, tag: &str| {
-                                emitter.emit_inst("LDA", "$20");
-                                if bound == 0 {
-                                    emitter.emit_inst("BMI", target);
-                                } else {
-                                    let nov = format!("mnr_{}_{}_{}", match_id, i, tag);
-                                    emitter.emit_inst("SEC", "");
-                                    emitter.emit_inst("SBC", &format!("#${:02X}", bound as u8));
-                                    emitter.emit_inst("BVC", &nov);
-                                    emitter.emit_inst("EOR", "#$80");
-                                    emitter.emit_label(&nov);
-                                    emitter.emit_inst("BMI", target);
-                                }
+                                let nov = format!("mnr_{}_{}_{}", match_id, i, tag);
+                                compare::emit_signed_lt_flag(emitter, bound, &nov);
+                                emitter.emit_inst("BMI", target);
                             };
                         // value < start -> skip this arm.
                         emit_signed_lt(emitter, *start_val, &next_label, "v1");

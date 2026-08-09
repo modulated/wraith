@@ -40,7 +40,7 @@ pub fn compile_with_target(source: &str, target: TargetCpu) -> CompileResult {
     };
 
     // Semantic analysis
-    let program = match analyze(&ast) {
+    let mut program = match analyze(&ast) {
         Ok(program) => program,
         Err(e) => return CompileResult::SemaError(e.format_with_source_and_file(source, None)),
     };
@@ -54,7 +54,7 @@ pub fn compile_with_target(source: &str, target: TargetCpu) -> CompileResult {
         .join("\n");
 
     // Code generation
-    match generate(&ast, &program, CommentVerbosity::Normal, target) {
+    match generate(&ast, &mut program, CommentVerbosity::Normal, target) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
         Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
     }
@@ -76,7 +76,7 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
     };
 
     // Semantic analysis with base path
-    let program = match analyze_with_path(&ast, PathBuf::from(base_path)) {
+    let mut program = match analyze_with_path(&ast, PathBuf::from(base_path)) {
         Ok(program) => program,
         Err(e) => return CompileResult::SemaError(e.format_with_source_and_file(source, None)),
     };
@@ -92,7 +92,7 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
     // Code generation
     match generate(
         &ast,
-        &program,
+        &mut program,
         CommentVerbosity::Normal,
         TargetCpu::default(),
     ) {

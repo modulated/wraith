@@ -10,6 +10,9 @@ fn function_call_no_args() {
         fn foo() {
         }
         fn main() {
+            // Address-taken keeps foo out-of-line under the auto-inliner, so the
+            // direct-call convention (JSR/label) is what's exercised here.
+            let _keep: fn() = foo;
             foo();
         }
     "#,
@@ -31,6 +34,7 @@ fn function_call_with_args() {
             return a + b;
         }
         fn main() {
+            let _keep: fn(u8, u8) -> u8 = add; // keep add out-of-line
             let result: u8 = add(5, 10);
         }
     "#,
@@ -48,6 +52,7 @@ fn function_return_value() {
             return 42;
         }
         fn main() {
+            let _keep: fn() -> u8 = get_value; // keep get_value out-of-line
             let x: u8 = get_value();
         }
     "#,

@@ -984,6 +984,12 @@ pub struct FunctionMetadata {
     pub org_address: Option<u16>,
     pub section: Option<String>,
     pub is_inline: bool,
+    /// Eligible for the codegen auto-inliner: a non-`#[inline]`, non-entry
+    /// function with no explicit placement and a scalar/void return, whose body
+    /// and parameters were captured (like `#[inline]`) so codegen can expand it
+    /// if the size/reuse heuristic picks it. The final decision (and setting
+    /// `is_inline`) happens in `codegen::generate` once real sizes are known.
+    pub inline_candidate: bool,
     /// True if this function is an interrupt handler (#[irq]/#[nmi]/#[interrupt]).
     /// Handlers can preempt main code, so `finalize_frames` computes the zero-page
     /// state they must save; reset is NOT a handler.

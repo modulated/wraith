@@ -20,10 +20,6 @@ pub enum ParseErrorKind {
     },
     /// Unexpected end of input
     UnexpectedEof { expected: String },
-    /// Invalid integer literal
-    InvalidInteger(String),
-    /// Invalid type
-    InvalidType(String),
     /// Custom error message
     Custom(String),
     /// Custom error with prefix (note) and suffix (help text)
@@ -163,10 +159,6 @@ impl ParseError {
                         "error",
                         format!("unexpected end of file, expected {}", expected),
                     ),
-                    ParseErrorKind::InvalidInteger(s) => {
-                        ("error", format!("invalid integer: {}", s))
-                    }
-                    ParseErrorKind::InvalidType(s) => ("error", format!("invalid type: {}", s)),
                     ParseErrorKind::Custom(msg) => ("error", msg.clone()),
                     _ => unreachable!(),
                 };
@@ -296,12 +288,6 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorKind::UnexpectedEof { expected } => {
                 write!(f, "unexpected end of file, expected {}", expected)
-            }
-            ParseErrorKind::InvalidInteger(s) => {
-                write!(f, "invalid integer: {}", s)
-            }
-            ParseErrorKind::InvalidType(s) => {
-                write!(f, "invalid type: {}", s)
             }
             ParseErrorKind::Custom(msg) => {
                 write!(f, "{} at {}..{}", msg, self.span.start, self.span.end)

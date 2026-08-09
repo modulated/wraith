@@ -5,11 +5,20 @@
 use crate::common::*;
 use std::env;
 use std::fs;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-// Helper to write a temp file and return its formatted string path (for imports)
+// Helper to write a temp file and return its formatted string path (for imports).
+//
+// Fixtures go in a per-process directory with a per-call counter prefix, so two
+// concurrent `cargo test` runs — or files left behind by an earlier run — can
+// never collide on a shared `/tmp` path (the old code wrote fixed names like
+// `test_vis_lib1.wr` straight into the temp dir).
 fn write_temp_file(filename: &str, content: &str) -> String {
-    let temp_dir = env::temp_dir();
-    let file_path = temp_dir.join(filename);
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = env::temp_dir().join(format!("wraith-vis-tests-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join(format!("{}-{}", n, filename));
     fs::write(&file_path, content).unwrap();
     // Return path with forward slashes for Wraith import compatibility
     file_path.to_string_lossy().replace("\\", "/")
