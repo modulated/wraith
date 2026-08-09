@@ -51,7 +51,7 @@ pub(crate) fn check_runtime_index_range(
         && crate::sema::const_eval::eval_const_expr(index).is_err()
         && !info.folded_constants.contains_key(&index.span)
     {
-        let max_elems = if elem_size == 0 { len } else { 256 / elem_size };
+        let max_elems = 256usize.checked_div(elem_size).unwrap_or(len);
         return Err(CodegenError::UnsupportedOperation(format!(
             "array of {len} elements of {elem_size} bytes is too large to index by a \
              runtime value: the scaled offset would exceed the 8-bit index register \
