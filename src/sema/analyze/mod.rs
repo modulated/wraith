@@ -285,6 +285,7 @@ impl SemanticAnalyzer {
             Type::String => 2,   // String is represented as a pointer
             Type::Function(_, _) => 2, // Function pointer is 16-bit
             Type::Void => 0,
+            Type::Error => 0, // Poison; analysis has already failed
             Type::Named(name) => {
                 // Look up in struct registry
                 if let Some(struct_def) = self.type_registry.structs.get(name) {
@@ -357,6 +358,22 @@ impl SemanticAnalyzer {
     pub(super) fn record(&mut self, error: SemaError) {
         if self.errors.len() < Self::MAX_ERRORS {
             self.errors.push(error);
+        }
+    }
+
+    /// Record a failed subexpression and yield the poison type in its place.
+    ///
+    /// Only for positions whose siblings are genuinely independent — each
+    /// argument of a call, each operand of a binary op — so that two mistakes in
+    /// one expression both report. The `Type::Error` result keeps every
+    /// downstream check quiet about the value it could not determine.
+    pub(super) fn poison_on_err(&mut self, result: Result<Type, SemaError>) -> Type {
+        match result {
+            Ok(t) => t,
+            Err(e) => {
+                self.record(e);
+                Type::Error
+            }
         }
     }
 

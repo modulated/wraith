@@ -159,3 +159,55 @@ fn a_lone_error_is_reported_exactly_as_before() {
     assert!(e.starts_with("error: cannot find `y` in this scope"), "{e}");
     assert!(!e.contains("semantic errors:"), "not wrapped:\n{e}");
 }
+
+// ---------------------------------------------------------------------------
+// Expression-level recovery (Type::Error poisoning)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_bad_call_argument_reports() {
+    // Arguments are independent of each other, so one bad argument must not
+    // hide the next.
+    let e = errors_of(
+        r#"
+        fn f(a: u8, b: u8) -> u8 { return a; }
+        #[reset]
+        fn main() { let v: u8 = f(bad1, bad2); loop {} }
+    "#,
+    );
+    assert!(e.contains("bad1"), "{e}");
+    assert!(e.contains("bad2"), "{e}");
+}
+
+#[test]
+fn both_operands_of_a_binary_op_report() {
+    let e = errors_of(
+        r#"
+        #[reset]
+        fn main() { let a: u8 = p + q; loop {} }
+    "#,
+    );
+    assert!(
+        e.contains("`p`") && e.contains("`q`"),
+        "both operands:\n{e}"
+    );
+}
+
+#[test]
+fn a_poisoned_value_does_not_produce_a_follow_on_type_error() {
+    // The argument that failed to resolve must not also be reported as a
+    // mismatch against the parameter type: `<unknown>` is not a user-facing
+    // type, and the cause was already named.
+    let e = errors_of(
+        r#"
+        fn f(a: u8) -> u8 { return a; }
+        #[reset]
+        fn main() { let v: u8 = f(nope); loop {} }
+    "#,
+    );
+    assert_eq!(e.matches("error:").count(), 1, "one cause, one error:\n{e}");
+    assert!(
+        !e.contains("<unknown>"),
+        "the poison type must never surface to the user:\n{e}"
+    );
+}
