@@ -273,9 +273,18 @@ fn generate_match_sequential(
                              tag: &str,
                              far: bool| {
                                 let nov = format!("match_{}_arm_{}_{}", match_id, i, tag);
-                                crate::codegen::expr::compare::emit_signed_lt_flag(
-                                    emitter, bound, &nov,
-                                );
+                                // An i16 must subtract both bytes; the 8-bit
+                                // helper reads only $20, which compared the low
+                                // byte alone and made 300 test as < 100.
+                                if scrutinee_is_u16 {
+                                    crate::codegen::expr::compare::emit_signed_lt_flag_16(
+                                        emitter, bound, &nov,
+                                    );
+                                } else {
+                                    crate::codegen::expr::compare::emit_signed_lt_flag(
+                                        emitter, bound, &nov,
+                                    );
+                                }
                                 if far {
                                     emit_far_arm_branch(
                                         emitter,
@@ -288,20 +297,75 @@ fn generate_match_sequential(
                                 }
                             };
                         emit_signed_lt(emitter, *start_val, &skip_label, "v1", false); // < start -> skip
-                        emit_signed_lt(emitter, upper_bound, &arm_label, "v2", true); // <= end -> match
+
+                        // `end + 1` can leave the type: `0..=127` on an i8 asks
+                        // "is it < 128", which no i8 is not. Comparing against
+                        // the truncated bound would read as -128 and match
+                        // nothing, so branch outright instead.
+                        let signed_max: i64 = if scrutinee_is_u16 { 32767 } else { 127 };
+                        if upper_bound > signed_max {
+                            emitter.emit_inst("JMP", &arm_label);
+                        } else {
+                            emit_signed_lt(emitter, upper_bound, &arm_label, "v2", true);
+                            // <= end -> match
+                        }
+                    } else if scrutinee_is_u16 {
+                        // A 16-bit scrutinee needs a 16-bit compare. Testing
+                        // only the low byte (which is what this did) makes 300
+                        // match `0..=100`, because 300's low byte is 44 — a
+                        // silent wrong branch. Worse, a bound above 255
+                        // formatted straight into `CMP #$0100`, which is not a
+                        // valid instruction and only surfaced at assembly time.
+                        //
+                        // `LDA lo; CMP #<b; LDA hi; SBC #>b` leaves carry clear
+                        // exactly when value < b.
+                        let emit_lt = |emitter: &mut Emitter, bound: i64| {
+                            emitter.emit_inst("LDA", "$20");
+                            emitter.emit_inst("CMP", &format!("#${:02X}", (bound as u16) & 0xFF));
+                            emitter.emit_inst("LDA", "$21");
+                            emitter.emit_inst(
+                                "SBC",
+                                &format!("#${:02X}", ((bound as u16) >> 8) & 0xFF),
+                            );
+                        };
+
+                        // value < start -> this arm cannot match.
+                        emit_lt(emitter, *start_val);
+                        emitter.emit_inst("BCC", &skip_label);
+
+                        // value < end+1 -> match. An inclusive range ending at
+                        // the type maximum has no representable end+1, and the
+                        // test would be vacuously true, so branch outright.
+                        if upper_bound > 0xFFFF {
+                            emitter.emit_inst("JMP", &arm_label);
+                        } else {
+                            emit_lt(emitter, upper_bound);
+                            emit_far_arm_branch(
+                                emitter,
+                                "BCC",
+                                &arm_label,
+                                &format!("match_{}_arm_{}_far", match_id, i),
+                            );
+                        }
                     } else {
                         emitter.emit_inst("LDA", "$20");
                         // Check if value < start, skip this arm
-                        emitter.emit_inst("CMP", &format!("#${:02X}", start_val));
+                        emitter.emit_inst("CMP", &format!("#${:02X}", start_val & 0xFF));
                         emitter.emit_inst("BCC", &skip_label);
-                        // Check if value <= end (or < end+1)
-                        emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
-                        emit_far_arm_branch(
-                            emitter,
-                            "BCC",
-                            &arm_label,
-                            &format!("match_{}_arm_{}_far", match_id, i),
-                        );
+                        // Check if value <= end (or < end+1). An 8-bit range
+                        // ending at 255 has no representable end+1; everything
+                        // that got past the lower bound is in range.
+                        if upper_bound > 0xFF {
+                            emitter.emit_inst("JMP", &arm_label);
+                        } else {
+                            emitter.emit_inst("CMP", &format!("#${:02X}", upper_bound));
+                            emit_far_arm_branch(
+                                emitter,
+                                "BCC",
+                                &arm_label,
+                                &format!("match_{}_arm_{}_far", match_id, i),
+                            );
+                        }
                     }
 
                     emitter.emit_label(&skip_label);

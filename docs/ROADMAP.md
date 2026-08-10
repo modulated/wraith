@@ -103,6 +103,58 @@ table is new.
 
 ---
 
+## Known limits found by stress testing
+
+A differential battery (~150 programs with hand-computed results, run on the
+emulator) turned these up. The silent-miscompile findings from that run are
+fixed and regression-tested in `tests/e2e/match_ranges.rs`; what follows is what
+it found and left standing.
+
+### Silent stack corruption past ~85 levels of recursion
+
+A non-tail recursive function saves its whole frame to the 256-byte software
+stack per call, so the safe depth is `256 / frame_size`. A three-byte frame
+gives 85: `fn s(n: u8) -> u16` summing `1..=n` is exact to `s(85)` and returns
+garbage from `s(86)` on, with no diagnostic at compile time and no trap at run
+time.
+
+The existing deep-recursion warning does not cover this. It fires on a *large*
+frame, on the reasoning (see `frames.rs::small_frame_recursion_not_flagged`)
+that a small frame is bounded instead by the ~128-level hardware-stack limit.
+But 85 < 128, so for small frames the software stack is what runs out first and
+nothing warns. The warning's threshold should be derived from
+`SOFTWARE_STACK_BYTES / frame_size` rather than from frame size alone, and the
+message should name the depth it computed.
+
+### Arrays inside structs
+
+A struct field wider than two bytes is rejected at initialization — "struct
+field type with size 4 not yet supported" — so `struct S { a: [u8; 4], b: u8 }`
+cannot be constructed. A `[u8; 2]` field is accepted but then `s.a[1]` fails
+with "only variable array indexing is currently supported". Nested *struct*
+fields of the same width work, because that path recurses field by field; the
+array field has no equivalent. Making array fields work means giving them the
+same treatment.
+
+### Slices are read-only
+
+`s[i]` reads, `for x in s` iterates, but `s[0] = 9` is rejected ("Can only index
+arrays, pointers, and string buffers"). A slice is the natural way to hand a
+sub-range of a buffer to a function, and not being able to write through one
+makes it half a feature.
+
+`for i in 0..s.len` also fails: `.len` is `u16` and the loop wants a `u8` bound,
+so it needs `s.len as u8` spelled out. The mismatch is reported as a bare
+"mismatched types" that does not mention the cast.
+
+### Exclusive ranges in match patterns
+
+`match n { 0..300 => … }` is a parse error ("expected FatArrow, found '..'");
+only `..=` is accepted in a pattern. Ranges elsewhere (`for i in 0..n`) take
+both forms, so the restriction is surprising.
+
+---
+
 ## Correctness & diagnostics
 
 Multi-error reporting covers declarations, bodies, statements and independent

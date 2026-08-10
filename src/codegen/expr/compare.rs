@@ -34,6 +34,25 @@ pub(crate) fn emit_signed_lt_flag(emitter: &mut Emitter, bound: i64, nov_label: 
     }
 }
 
+/// The 16-bit form of [`emit_signed_lt_flag`]: leaves N set exactly when the
+/// signed 16-bit value in `$20`(low)/`$21`(high) is less than `bound`.
+///
+/// The 8-bit version reads only `$20`, so using it on an `i16` compares the low
+/// byte alone — which made `300` (`0x012C`, low byte 44) test as less than 100.
+/// Subtracting both bytes and folding `N ⊕ V` back into N keeps a single `BMI`
+/// as the decision, exactly as the 8-bit path does.
+pub(crate) fn emit_signed_lt_flag_16(emitter: &mut Emitter, bound: i64, nov_label: &str) {
+    let b = bound as u16;
+    emitter.emit_inst("LDA", "$20");
+    emitter.emit_inst("SEC", "");
+    emitter.emit_inst("SBC", &format!("#${:02X}", b & 0xFF));
+    emitter.emit_inst("LDA", "$21");
+    emitter.emit_inst("SBC", &format!("#${:02X}", (b >> 8) & 0xFF));
+    emitter.emit_inst("BVC", nov_label);
+    emitter.emit_inst("EOR", "#$80");
+    emitter.emit_label(nov_label);
+}
+
 /// Emit a *signed* ordering comparison, leaving a 0/1 boolean in A.
 ///
 /// Left is in A (low) / Y (high for u16); right is at TEMP (/ TEMP+1). After a

@@ -27,6 +27,7 @@ mod interrupts_exec;
 mod language_features;
 mod local_arrays;
 mod loop_sweep;
+mod match_ranges;
 mod math16;
 mod memory;
 mod multi_error;
