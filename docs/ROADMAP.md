@@ -120,12 +120,51 @@ fields of the same width work, because that path recurses field by field; the
 array field has no equivalent. Making array fields work means giving them the
 same treatment.
 
-### Slices are read-only
+### `&const_array[i]` computes the wrong address
+
+An immutable `const` stays at `SymbolLocation::Absolute(0)` — it is ROM data
+referenced by label, and sema never learns the label's address. But
+`generate_addr_of_element`'s `Absolute(base)` arm computes `base + offset`, so
+for a const array that is `0 + offset`: `&A[1]` emits `LDA #$01 / LDX #$00` and
+yields the pointer `$0001`, the *index* rather than the address. A store through
+it silently scribbles on zero page ($00-$1F, system reserved).
+
+Statics are fine (they have a real BSS address) and locals are fine (the slot
+holds a runtime pointer); only the const/ROM case is wrong.
+
+This also slips past the guard that already exists one level up: `A[1] = 9` on
+a const is a clean sema error ("a const lives in ROM, so the store would
+silently do nothing on real hardware"), but routing the same write through
+`&A[1]` is accepted.
+
+The address itself should be emitted label-relative (`#<A+1` / `#>A+1`, the form
+the string and struct paths already use) rather than numerically. What to do
+about *writes* through such a pointer is a design call: either track ROM
+provenance and reject them the way direct const writes are rejected, or accept
+that they are silent no-ops on hardware as they are for any ROM store.
+
+### Slices are read-only, and only ever RAM-backed
 
 `s[i]` reads, `for x in s` iterates, but `s[0] = 9` is rejected ("Can only index
-arrays, pointers, and string buffers"). A slice is the natural way to hand a
-sub-range of a buffer to a function, and not being able to write through one
-makes it half a feature.
+arrays, pointers, and string buffers"). That is an unimplemented store path, not
+a safety rule.
+
+Mutability is safe to add *today* because a slice's backing store can only ever
+be RAM: the source must be a zero-page local (`static` and `const` sources are
+both rejected with "slice source array must be a zero-page local"). So there is
+no ROM-backed slice to protect against.
+
+That changes the moment slice sources widen, which the spec already promises
+they do — "Data: Stored wherever array is allocated (const data, stack, etc.)"
+describes a compiler that does not exist yet. When a `&[T]` can name a `const`
+array or a string literal, writing through one has to be rejected, and the
+language already has the pattern for it: `str` (ROM literal) is read-only while
+`str<N>` (RAM buffer) is writable, each with its own diagnostic. Slices want the
+same split rather than a fresh mechanism.
+
+Order matters here: widening slice sources before adding the guard would make
+ROM-backed slices writable in the window between, which is exactly the silent
+no-op the `str`/`str<N>` split exists to prevent.
 
 `for i in 0..s.len` also fails: `.len` is `u16` and the loop wants a `u8` bound,
 so it needs `s.len as u8` spelled out. The mismatch is reported as a bare
