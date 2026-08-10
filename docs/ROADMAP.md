@@ -122,12 +122,19 @@ work the rest did not:
 
 Also open:
 
-- **Widen the spec-example harness.** Only the opt-in ` ```rust,compile ` blocks
-  are compiled (`tests/e2e/spec_examples.rs`); the plain ` ```rust ` fragments
-  reference peripherals defined elsewhere in the prose. Making more of them
-  self-contained and tagging them widens the net.
+- **Widen the spec-example harness further.** 82 of the spec's ~210 code blocks
+  are now compiled on every run (`tests/e2e/spec_examples.rs`), via
+  ` ```rust,compile ` for whole programs and ` ```rust,compile,fragment ` for
+  statement runs wrapped in a generated `main`. Most of what is still untagged
+  is untaggable by design — deliberate error examples, and the stdlib reference
+  section's bodyless signatures. The remainder needs a peripheral or helper
+  supplied to become self-contained, one block at a time.
 - **More error-message golden tests** as new diagnostics land, in the
-  exact-position style of `tests/e2e/error_diagnostics.rs`.
+  exact-position style of `tests/e2e/error_diagnostics.rs` (33 cases).
+  `TypeMismatch`, `InvalidUnaryOp`, `BreakOutsideLoop`, `EscapingPointer`,
+  `InvalidAddrUsage`, `InstructionConflict`, `DuplicateSymbol` and
+  `FrameRegionOverflow` are pinned; `ReturnTypeMismatch`, `OutOfZeroPage` and
+  the import diagnostics are not.
 
 ---
 
@@ -138,8 +145,13 @@ Also open:
   single recursion helper shared by all analysis walkers would close it; the
   import-merge half is already done.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
-  is assertable (`cpu_flags.rs`, and parts of `frames.rs` / `types.rs` /
-  `control_flow.rs` / `memory.rs`).
+  is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
+  `types.rs` and `control_flow.rs` were already behavioral or are asserting
+  genuinely assembly-level properties (emitted data layout, the symbolic
+  `PORT = $6000` form). What remains is the same judgement applied to the rest
+  of `tests/e2e/`, keeping the assembly assertion wherever execution cannot see
+  the property — that the spill avoids the hardware stack, that a given number
+  of calls was emitted.
 
 ---
 

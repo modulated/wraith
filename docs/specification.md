@@ -3,11 +3,25 @@
 A systems programming language designed specifically for the 6502 processor, taking modern inspiration while remaining simple and explicit.
 
 <!--
-  Examples fenced ```rust,compile are complete, self-contained programs that
-  the test suite compiles on every run (tests/e2e/spec_examples.rs). Tag an
-  example that way when it should build on its own; leave illustrative
-  fragments (which reference peripherals or functions defined elsewhere) as
-  plain ```rust.
+  The test suite compiles tagged examples on every run
+  (tests/e2e/spec_examples.rs), so they cannot drift out of date:
+
+    ```rust,compile           a complete translation unit, compiled as written.
+                              Use for anything declaring its own fn / struct /
+                              enum / static / const / import at the top level.
+
+    ```rust,compile,fragment  a run of statements, compiled inside a generated
+                              `#[reset] fn main() { … loop {} }`. Use for the
+                              many examples that illustrate one expression or
+                              declaration, so the prose does not have to show a
+                              wrapper the reader does not care about. A fragment
+                              must not declare top-level items — the suite
+                              checks this.
+
+  Leave a block as plain ```rust when it references peripherals or functions
+  defined elsewhere in the prose, or when it deliberately shows code that does
+  not compile (an error example). Making such a block self-contained and
+  tagging it is a welcome change.
 -->
 
 
@@ -103,7 +117,7 @@ characters are allowed — `'é'` is a compile error. A `char` is a distinct
 1-byte type: convert to and from `u8` with an explicit cast, and it
 zero-extends to `u16`/`i16` like any other unsigned byte.
 
-```rust
+```rust,compile,fragment
 let c: char = 'A';
 let code: u8 = c as u8;      // 0x41
 let back: char = 66 as char; // 'B'
@@ -135,7 +149,7 @@ BCD types (`b8` and `b16`) leverage the 6502's hardware decimal mode for efficie
 - ASCII digit conversion
 
 **Operations:**
-```rust
+```rust,compile,fragment
 let score: b16 = 1000 as b16;
 let points: b16 = 50 as b16;
 
@@ -167,7 +181,7 @@ const TOOBIG: b8 = 100;     // ERROR: BCD b8 max is 99
 
 **Runtime Overflow:**
 Runtime arithmetic wraps on overflow (no panic, no error):
-```rust
+```rust,compile,fragment
 let x: u8 = 255;
 x = x + 1;           // Wraps to 0
 
@@ -193,7 +207,7 @@ All types are naturally aligned to their size:
 - `u16` at address `0x1000`: low byte at `0x1000`, high byte at `0x1001`
 
 **Accessing Multi-byte Components:**
-```rust
+```rust,compile,fragment
 let value: u16 = 0x1234;
 let low: u8 = value.low;    // 0x34
 let high: u8 = value.high;  // 0x12
@@ -209,7 +223,7 @@ All items completed.
 
 ### Declaration Syntax
 
-```rust
+```rust,compile,fragment
 let x: u8 = 42;
 let delta: i16 = -500;
 let flag: bool = true;
@@ -219,7 +233,7 @@ let flag: bool = true;
 
 **All variables are mutable by default**. This is a low-level systems language that trusts the programmer.
 
-```rust
+```rust,compile,fragment
 let x: u8 = 10;
 x = 20;  // OK - variables are mutable
 ```
@@ -334,7 +348,7 @@ fn main() {
 
 Variables follow block-scoped visibility rules:
 
-```rust
+```rust,compile
 fn main() {
     let x: u8 = 10;    // Scope: entire function
 
@@ -473,7 +487,9 @@ fn main() {
 
 Marks function as IRQ (maskable interrupt) handler:
 
-```rust
+```rust,compile
+const TIMER_STATUS: addr = 0x6004;
+
 #[irq]
 fn irq_handler() {
     // Handle timer interrupt, peripheral I/O, etc.
@@ -497,7 +513,10 @@ The compiler generates appropriate interrupt vectors. In bare-metal systems:
 
 Marks function as NMI (non-maskable interrupt) handler:
 
-```rust
+```rust,compile
+const NMI_FLAG: addr = 0x0300;
+const STATUS_LED: addr = 0x6000;
+
 #[nmi]
 fn nmi_handler() {
     // Handle critical interrupts (cannot be disabled)
@@ -725,7 +744,11 @@ Function pointers can be stored in struct fields and called through them. This
 is how a driver or device interface is expressed: the calling code names only the
 struct, not the implementation.
 
-```rust
+```rust,compile
+const UART_BASE: read addr  = 0xE000;
+const UART_TX:   write addr = 0xE001;
+const VIA_PORTA: read addr  = 0x6001;
+
 struct Device {
     read:  fn(u8) -> u8,
     write: fn(u8),
@@ -764,7 +787,7 @@ All items completed.
 
 ### Declaration
 
-```rust
+```rust,compile
 struct Point {
     x: u8,
     y: u8,
@@ -804,7 +827,7 @@ let m: u16 = a.len;  // the built-in: 4
 
 Structs are laid out sequentially in memory with no padding:
 
-```rust
+```rust,compile
 struct Point {
     x: u8,    // Offset 0
     y: u8,    // Offset 1
@@ -900,7 +923,9 @@ A function may return a struct by value. The result is copied into the
 destination variable's storage, so returning and binding a struct is a true
 copy:
 
-```rust
+```rust,compile
+struct Point { x: u8, y: u8 }
+
 fn make() -> Point {
     return Point { x: 7, y: 9 };
 }
@@ -937,7 +962,7 @@ let dir: Direction = Direction::North;
 Each variant has a one-byte discriminant. Writing `= N` sets it; omitting it
 continues from the previous variant, starting at 0:
 
-```rust
+```rust,compile
 enum Code { A = 10, B, C = 20, D }   // 10, 11, 20, 21
 ```
 
@@ -952,7 +977,9 @@ A unit variant's discriminant *is* its runtime value, so `as` yields exactly the
 number written in the declaration. This is how an enum naming hardware states is
 written to a register:
 
-```rust
+```rust,compile
+const DDRA: addr = 0x6003;       // VIA port A data-direction register
+
 pub enum Direction {
     OUTPUT = 0xFF,
     INPUT  = 0x00,
@@ -1062,7 +1089,7 @@ Memory layout for enum variants:
 ```
 
 **Example**:
-```rust
+```rust,compile
 enum Color {
     RGB(u8, u8, u8),  // Tag 0
 }
@@ -1108,7 +1135,7 @@ let input3: Input = Input::MouseClick { x: 100, y: 50 };
 
 If not specified, discriminants start at 0 and increment:
 
-```rust
+```rust,compile
 enum Status {
     Idle,      // 0 (implicit)
     Running,   // 1 (implicit)
@@ -1196,7 +1223,7 @@ let raw: u8 = s as u8;     // Cast to u8: 1
 
 ### Fixed Arrays
 
-```rust
+```rust,compile,fragment
 let buffer: [u8; 10] = [0; 10];  // 10 bytes, all zeros
 let data: [u16; 5] = [100, 200, 300, 400, 500];
 
@@ -1249,7 +1276,7 @@ Slices are references to a sub-range of an array, carrying a base pointer and a
 runtime length. A slice value is produced by slicing an array with `arr[a..b]`
 (or `arr[a..=b]`) and bound to a `&[T]` variable:
 
-```rust
+```rust,compile,fragment
 let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
 let s: &[u8] = a[1..5];   // elements a[1]..a[4]
 
@@ -1340,7 +1367,7 @@ let screen: [[u8; 8]; 4] = [
 **Workaround:** flatten to one dimension and index manually, or use an array
 of structs:
 
-```rust
+```rust,compile,fragment
 // 4 rows × 8 columns, flattened: element (r, c) lives at r * 8 + c
 let screen: [u8; 32] = [0; 32];
 screen[1 * 8 + 3] = 2;              // row 1, column 3
@@ -1379,7 +1406,7 @@ All items completed.
 A pointer is the address of a value. It is written `&T`, taken with `&x`, and
 read through with `*p`.
 
-```rust
+```rust,compile,fragment
 let x: u8 = 41;
 let p: &u8 = &x;
 *p = *p + 1;        // x is now 42
@@ -1403,7 +1430,7 @@ occupies 2 bytes wherever it is stored, and `&Node` inside `struct Node` is
 therefore fine: the size of a pointer never depends on the size of what it
 points at.
 
-```rust
+```rust,compile
 struct Node { value: u8, next: &Node }   // 3 bytes
 ```
 
@@ -1514,7 +1541,7 @@ with respect to the caller's and the usual guarantee does not hold.
 A `static` can hold a pointer, initialised either from a literal address or
 from another static's address:
 
-```rust
+```rust,compile
 static COUNT: u8 = 0;
 static P: &u8 = &COUNT;
 static UART: &u8 = 0xD012 as &u8;
@@ -1532,7 +1559,7 @@ silent zero.
 
 Strings in Wraith are length-prefixed byte sequences optimized for the 6502. The string type is declared as `str`.
 
-```rust
+```rust,compile,fragment
 let message: str = "Hello, World!";
 let empty: str = "";
 ```
@@ -1582,7 +1609,7 @@ Editing the length (append/truncate) and higher-level helpers (`push`, `append`,
 
 String literals support escape sequences:
 
-```rust
+```rust,compile,fragment
 let msg1: str = "Hello\n";          // Newline
 let msg2: str = "Tab\there";        // Tab
 let msg3: str = "Quote: \"Hi\"";    // Escaped quotes
@@ -1593,7 +1620,7 @@ let msg4: str = "Backslash: \\";    // Backslash
 
 Access string metadata:
 
-```rust
+```rust,compile,fragment
 let msg: str = "Hello";
 let len: u16 = msg.len;      // Get length (5)
 ```
@@ -1603,7 +1630,7 @@ let len: u16 = msg.len;      // Get length (5)
 A string is semantically an array of `char`, so indexing yields a `char`. Use
 `as u8` when you want the raw byte value (for arithmetic or a hardware register):
 
-```rust
+```rust,compile,fragment
 let msg: str = "ABC";
 let first: char = msg[0];       // 'A'
 let second: char = msg[1];      // 'B'
@@ -1617,7 +1644,7 @@ let byte: u8 = msg[0] as u8;    // 0x41, for byte-level work
 
 Concatenate strings at compile time using the `+` operator:
 
-```rust
+```rust,compile
 const GREETING: str = "Hello, " + "World!";
 const PATH: str = "data/" + "level" + ".txt";
 ```
@@ -1633,7 +1660,7 @@ Compare two strings for equality with `==` / `!=` (result is `bool`). The
 comparison runs at runtime: the length bytes are compared first, then each
 character.
 
-```rust
+```rust,compile,fragment
 let a: str = "hello";
 let b: str = "hello";
 if a == b { /* equal */ }
@@ -1644,7 +1671,7 @@ if a != "world" { /* differs */ }
 
 Extract substrings at compile time:
 
-```rust
+```rust,compile
 const FULL: str = "Hello, World!";
 const GREETING: str = FULL[0..5];     // "Hello"
 const NAME: str = FULL[7..12];        // "World"
@@ -1920,7 +1947,7 @@ A binary operation requires both operands to have the same type; two **variables
 of different widths (e.g. `u16 + u8`) are a type error and must be reconciled with
 an explicit cast:
 
-```rust
+```rust,compile,fragment
 let a: u16 = 300;
 let b: u8 = 5;
 let c: u16 = a + (b as u16);   // explicit widening required
@@ -1956,7 +1983,7 @@ let f: u16 = e + 300;          // error: `e` is u8 and 300 does not fit u8
 ### Valid Cast Combinations
 
 **Integer Widening (Safe):**
-```rust
+```rust,compile,fragment
 let small: u8 = 100;
 let large: u16 = small as u16;  // 100 -> 100 (zero-extended)
 
@@ -1965,7 +1992,7 @@ let wide: i16 = signed as i16;  // -10 -> -10 (sign-extended)
 ```
 
 **Integer Narrowing (Truncation):**
-```rust
+```rust,compile,fragment
 let large: u16 = 0x1234;
 let small: u8 = large as u8;  // 0x1234 -> 0x34 (truncate high byte)
 
@@ -1983,7 +2010,7 @@ let positive: u8 = negative as u8;  // -10 -> 246 (reinterpret bits)
 ```
 
 **BCD Conversions:**
-```rust
+```rust,compile,fragment
 let bcd: b8 = 0x42 as b8;    // Binary 42 -> BCD 42
 let bin: u8 = bcd as u8;     // BCD 42 -> Binary 0x42
 
@@ -1992,7 +2019,7 @@ let raw: u16 = score as u16;  // BCD 1234 -> 0x1234
 ```
 
 **Boolean Conversions:**
-```rust
+```rust,compile,fragment
 let flag: bool = true;
 let num: u8 = flag as u8;    // true -> 1, false -> 0
 
@@ -2004,7 +2031,7 @@ let is_set: bool = value as bool;  // 0 -> false, nonzero -> true
 
 When casting to a smaller type, high bytes are discarded:
 
-```rust
+```rust,compile,fragment
 let value: u16 = 0xABCD;
 let low: u8 = value as u8;    // 0xCD (low byte)
 let high: u8 = (value >> 8) as u8;  // 0xAB (high byte, shifted first)
@@ -2018,7 +2045,7 @@ let small: u8 = big as u8;    // 0x34
 
 Signed casts preserve the sign by extending the sign bit:
 
-```rust
+```rust,compile,fragment
 let small: i8 = -1;          // 0xFF in binary
 let large: i16 = small as i16;  // 0xFFFF (sign extended)
 
@@ -2238,7 +2265,7 @@ import {symbol1, symbol2, symbol3} from "module.wr";
 A `*` imports every `pub` item of a module, so a library can be pulled in
 without listing its API:
 
-```rust
+```rust,compile
 import { * } from "math.wr";     // every pub item
 import * from "math.wr";         // braces optional around a bare *
 import { min, * } from "math.wr"; // legal; naming min is redundant
@@ -2460,7 +2487,7 @@ import {bar} from "../lib/helper.wr";
 
 **Non-relative imports**: Searched in standard library directory first, then current directory
 
-```rust
+```rust,compile
 import {memcpy} from "mem.wr";  // Searches stdlib first
 ```
 
@@ -2646,7 +2673,7 @@ Wraith includes a small standard library optimized for 6502 architecture.
 Low-level CPU control functions that map directly to 6502 instructions. All functions are inlined for zero overhead.
 
 **Import:**
-```rust
+```rust,compile
 import { enable_interrupts, disable_interrupts, nop } from "intrinsics.wr";
 ```
 
@@ -2853,7 +2880,7 @@ fn reset_handler() {
 Memory manipulation functions optimized for 6502.
 
 **Import:**
-```rust
+```rust,compile
 import { memcpy, memset, memcmp, mem_read, mem_write } from "mem.wr";
 ```
 
@@ -2998,7 +3025,7 @@ mem_jump(0x8000);
 Mathematical operations optimized for 6502/65C02. Focus on unsigned 8-bit values with efficient assembly implementations.
 
 **Import:**
-```rust
+```rust,compile
 import { min, max, clamp, set_bit, clear_bit, saturating_add, mul16, div16 } from "math.wr";
 ```
 
@@ -3349,7 +3376,7 @@ No additional keywords are currently planned for future versions.
 ### Keyword Usage Examples
 
 **Type Keywords:**
-```rust
+```rust,compile,fragment
 let count: u8 = 10;         // Unsigned 8-bit
 let delta: i16 = -500;      // Signed 16-bit
 let score: b16 = 1234 as b16;  // BCD 16-bit
@@ -3438,7 +3465,7 @@ Individual bits of an integer are read and written with built-in methods, where
 `n` is a compile-time constant in range for the value's width (0-7 for an 8-bit
 value, 0-15 for a 16-bit one):
 
-```rust
+```rust,compile,fragment
 let flags: u8 = 0;
 flags.set_bit(7);        // set bit 7  -> 0x80
 flags.clear_bit(3);      // clear bit 3
@@ -3495,7 +3522,7 @@ let w: u8 = a + b << 2;     // (a + b) << 2 (addition before shift)
 
 All arithmetic operators wrap on overflow with no error checking:
 
-```rust
+```rust,compile,fragment
 let x: u8 = 255 + 1;     // 0 (wraps)
 let y: u8 = 0 - 1;       // 255 (wraps)
 let z: u8 = 200 * 2;     // 144 (400 % 256)
@@ -3686,7 +3713,7 @@ fn test() {
 
 However, comments inside assembly string literals are **not** processed by Wraith:
 
-```rust
+```rust,compile,fragment
 asm {
     "LDA #$42  ; This semicolon comment goes to the assembler",
     // This slash comment is processed by Wraith
