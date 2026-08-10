@@ -2,11 +2,12 @@
 //!
 //! Type checking for all expression variants in the AST.
 
-use crate::ast::{BinaryOp, Expr, PrimitiveType, Spanned};
+use crate::ast::{BinaryOp, Expr, PrimitiveType, Spanned, Stmt};
 use crate::sema::SemaError;
 use crate::sema::const_eval::eval_const_expr_with_env;
 use crate::sema::table::SymbolKind;
 use crate::sema::types::Type;
+use rustc_hash::FxHashMap as HashMap;
 
 use super::SemanticAnalyzer;
 
@@ -1217,6 +1218,208 @@ impl SemanticAnalyzer {
         );
         let entry = self.array_block_sizes.entry(f).or_insert(0);
         *entry = (*entry).max(self.array_cursor);
+    }
+
+    /// Record, per callee, the bytes of binary-operand spill that are live
+    /// across a call to it from `func_name`.
+    ///
+    /// `warn_deep_recursion` needs the true per-level cost of a recursive call,
+    /// and the frame save is only part of it. When a binary operation's *right*
+    /// operand contains a call, codegen cannot keep the left operand in a
+    /// register or the zero-page pool across the `JSR`, so it spills it to the
+    /// same 256-byte software stack the frame save uses (see
+    /// `codegen::expr::binary`, `needs_spill`). Nested binaries stack their
+    /// spills, so the cost along a path is their sum.
+    ///
+    /// This is what made the old warning miss the plainest possible case:
+    /// `return (n as u16) + s(n - 1)` saves a one-byte frame but *also* spills
+    /// the two-byte left operand across the call, so each level costs three
+    /// bytes and the real limit is 85, not 256.
+    ///
+    /// Keyed by callee because only calls that close a recursion cycle matter;
+    /// the caller side is resolved once SCCs are known.
+    pub(super) fn record_call_spills(&mut self, func_name: &str, body: &Spanned<Stmt>) {
+        let mut spills: HashMap<String, u16> = HashMap::default();
+        self.walk_stmt_spills(body, 0, &mut spills);
+        if !spills.is_empty() {
+            self.call_spill_bytes.insert(func_name.to_string(), spills);
+        }
+    }
+
+    fn walk_stmt_spills(&self, stmt: &Spanned<Stmt>, carried: u16, out: &mut HashMap<String, u16>) {
+        match &stmt.node {
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.walk_stmt_spills(s, carried, out);
+                }
+            }
+            Stmt::VarDecl { init, .. } => self.walk_expr_spills(init, carried, out),
+            Stmt::Assign { target, value } => {
+                self.walk_expr_spills(target, carried, out);
+                self.walk_expr_spills(value, carried, out);
+            }
+            Stmt::Expr(e) => self.walk_expr_spills(e, carried, out),
+            Stmt::Return(Some(e)) => self.walk_expr_spills(e, carried, out),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.walk_expr_spills(condition, carried, out);
+                self.walk_stmt_spills(then_branch, carried, out);
+                if let Some(e) = else_branch {
+                    self.walk_stmt_spills(e, carried, out);
+                }
+            }
+            Stmt::While { condition, body } => {
+                self.walk_expr_spills(condition, carried, out);
+                self.walk_stmt_spills(body, carried, out);
+            }
+            Stmt::Loop { body } => self.walk_stmt_spills(body, carried, out),
+            Stmt::For { body, .. } => self.walk_stmt_spills(body, carried, out),
+            Stmt::ForEach { iterable, body, .. } => {
+                self.walk_expr_spills(iterable, carried, out);
+                self.walk_stmt_spills(body, carried, out);
+            }
+            Stmt::Match { expr, arms } => {
+                self.walk_expr_spills(expr, carried, out);
+                for arm in arms {
+                    self.walk_stmt_spills(&arm.body, carried, out);
+                }
+            }
+        }
+    }
+
+    fn walk_expr_spills(&self, expr: &Spanned<Expr>, carried: u16, out: &mut HashMap<String, u16>) {
+        match &expr.node {
+            Expr::Binary { left, right, .. } => {
+                // Codegen spills the left operand only when evaluating the right
+                // one runs a call that would clobber it.
+                let spill = if Self::expr_contains_call(right) {
+                    self.spill_width(left)
+                } else {
+                    0
+                };
+                self.walk_expr_spills(left, carried, out);
+                self.walk_expr_spills(right, carried + spill, out);
+            }
+            Expr::Call { function, args } => {
+                let e = out.entry(function.node.clone()).or_insert(0);
+                *e = (*e).max(carried);
+                for a in args {
+                    self.walk_expr_spills(a, carried, out);
+                }
+            }
+            Expr::CallIndirect { callee, args } => {
+                self.walk_expr_spills(callee, carried, out);
+                for a in args {
+                    self.walk_expr_spills(a, carried, out);
+                }
+            }
+            Expr::Unary { operand, .. } => self.walk_expr_spills(operand, carried, out),
+            Expr::Cast { expr: inner, .. }
+            | Expr::Paren(inner)
+            | Expr::SliceLen(inner)
+            | Expr::U16Low(inner)
+            | Expr::U16High(inner) => self.walk_expr_spills(inner, carried, out),
+            Expr::Field { object, .. } => self.walk_expr_spills(object, carried, out),
+            Expr::Index { object, index } => {
+                self.walk_expr_spills(object, carried, out);
+                self.walk_expr_spills(index, carried, out);
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                self.walk_expr_spills(object, carried, out);
+                self.walk_expr_spills(start, carried, out);
+                self.walk_expr_spills(end, carried, out);
+            }
+            Expr::BitOp { object, bit, .. } => {
+                self.walk_expr_spills(object, carried, out);
+                self.walk_expr_spills(bit, carried, out);
+            }
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                for f in fields {
+                    self.walk_expr_spills(&f.value, carried, out);
+                }
+            }
+            Expr::EnumVariant { data, .. } => match data {
+                crate::ast::VariantData::Unit => {}
+                crate::ast::VariantData::Tuple(elems) => {
+                    for d in elems {
+                        self.walk_expr_spills(d, carried, out);
+                    }
+                }
+                crate::ast::VariantData::Struct(fields) => {
+                    for f in fields {
+                        self.walk_expr_spills(&f.value, carried, out);
+                    }
+                }
+            },
+            Expr::Match { expr: inner, arms } => {
+                self.walk_expr_spills(inner, carried, out);
+                for arm in arms {
+                    self.walk_expr_spills(&arm.body, carried, out);
+                }
+            }
+            Expr::Literal(crate::ast::Literal::Array(elems)) => {
+                for e in elems {
+                    self.walk_expr_spills(e, carried, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Bytes codegen spills for a left operand: two for a 16-bit value, one
+    /// otherwise (`codegen::expr::binary` picks the same way).
+    fn spill_width(&self, left: &Spanned<Expr>) -> u16 {
+        match self.resolved_types.get(&left.span) {
+            Some(t) if self.type_size(t) >= 2 => 2,
+            _ => 1,
+        }
+    }
+
+    /// Whether evaluating `expr` can run a `JSR`.
+    fn expr_contains_call(expr: &Spanned<Expr>) -> bool {
+        match &expr.node {
+            Expr::Call { .. } | Expr::CallIndirect { .. } => true,
+            Expr::Binary { left, right, .. } => {
+                Self::expr_contains_call(left) || Self::expr_contains_call(right)
+            }
+            Expr::Unary { operand, .. } => Self::expr_contains_call(operand),
+            Expr::Cast { expr: i, .. }
+            | Expr::Paren(i)
+            | Expr::SliceLen(i)
+            | Expr::U16Low(i)
+            | Expr::U16High(i) => Self::expr_contains_call(i),
+            Expr::Field { object, .. } => Self::expr_contains_call(object),
+            Expr::Index { object, index } => {
+                Self::expr_contains_call(object) || Self::expr_contains_call(index)
+            }
+            Expr::BitOp { object, bit, .. } => {
+                Self::expr_contains_call(object) || Self::expr_contains_call(bit)
+            }
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                fields.iter().any(|f| Self::expr_contains_call(&f.value))
+            }
+            Expr::EnumVariant { data, .. } => match data {
+                crate::ast::VariantData::Unit => false,
+                crate::ast::VariantData::Tuple(elems) => elems.iter().any(Self::expr_contains_call),
+                crate::ast::VariantData::Struct(fields) => {
+                    fields.iter().any(|f| Self::expr_contains_call(&f.value))
+                }
+            },
+            Expr::Match { expr: i, arms } => {
+                Self::expr_contains_call(i)
+                    || arms.iter().any(|a| Self::expr_contains_call(&a.body))
+            }
+            Expr::Literal(crate::ast::Literal::Array(elems)) => {
+                elems.iter().any(Self::expr_contains_call)
+            }
+            _ => false,
+        }
     }
 
     fn check_struct_init_fields(

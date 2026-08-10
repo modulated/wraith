@@ -93,6 +93,10 @@ pub struct SemanticAnalyzer {
     pub(super) string_buffers: HashMap<Span, crate::sema::LocalArray>,
     /// Scratch RAM for computed struct literals; see `ProgramInfo::struct_temps`.
     pub(super) struct_temps: HashMap<Span, crate::sema::LocalArray>,
+    /// Per function, the binary-operand spill bytes live across a call to each
+    /// callee. `warn_deep_recursion` adds these to the frame save to get the
+    /// true software-stack cost of one level of recursion.
+    pub(super) call_spill_bytes: HashMap<String, HashMap<String, u16>>,
     /// Bytes of local-array data each function needs, consumed by
     /// `finalize_frames` to lay the blocks out in RAM.
     pub(super) array_block_sizes: HashMap<String, u16>,
@@ -197,6 +201,7 @@ impl SemanticAnalyzer {
             enum_blocks: HashMap::default(),
             string_buffers: HashMap::default(),
             struct_temps: HashMap::default(),
+            call_spill_bytes: HashMap::default(),
             array_block_sizes: HashMap::default(),
             array_cursor: 0,
             resolved_types: HashMap::default(),
@@ -650,6 +655,12 @@ impl SemanticAnalyzer {
             if let Err(e) = self.analyze_stmt(&func.body) {
                 self.record(e);
             }
+
+            // Operand spills that straddle a call cost software-stack bytes on
+            // top of the frame save; recorded here, while the body is in hand,
+            // and consumed by `warn_deep_recursion` once the call graph shows
+            // which of those calls actually recurse.
+            self.record_call_spills(&func_name, &func.body);
 
             // A declared return type is a promise to every caller. Falling off
             // the end of the body breaks it silently on a 6502: the caller

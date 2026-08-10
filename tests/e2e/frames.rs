@@ -490,24 +490,112 @@ fn tail_recursion_not_flagged_even_with_large_frame() {
     );
 }
 
-/// A small-frame recursive function is bounded by the ~128-level hardware-stack
-/// limit shared by all non-tail recursion, not by frame size, so it is not
-/// flagged by the (frame-size-specific) deep-recursion warning.
+/// Recursion whose per-call cost is at most two bytes can nest at least 128
+/// levels, which is already the cap the hardware stack imposes on any non-tail
+/// recursion (256 bytes of page 1, two per `JSR` return address). The software
+/// stack tells the programmer nothing new there, so it is not flagged.
+///
+/// The call sits in the *left* operand, so nothing has to be held across it and
+/// the only per-call cost is the one-byte frame.
 #[test]
-fn small_frame_recursion_not_flagged() {
+fn recursion_the_software_stack_does_not_bound_is_not_flagged() {
     let warnings = warnings_of(
         r#"
-        fn deep_sum(n: u8) -> u16 {
+        fn depth(n: u8) -> u8 {
             if n == 0 { return 0; }
-            return (n as u16) + deep_sum(n - 1);
+            return depth(n - 1) + 1;
         }
         #[reset]
-        fn main() { let x: u16 = deep_sum(200); loop {} }
+        fn main() { let x: u8 = depth(100); loop {} }
         "#,
     );
     assert!(
         !warnings.contains("software stack"),
-        "small-frame recursion should not get a deep-recursion warning, got:\n{}",
+        "one-byte-per-call recursion outlasts the hardware-stack cap, so it \
+         should not be flagged; got:\n{}",
         warnings
+    );
+}
+
+/// ...and that unflagged shape really does survive the depth it is used at.
+#[test]
+fn unflagged_recursion_is_correct_at_depth() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0400;
+        fn depth(n: u8) -> u8 {
+            if n == 0 { return 0; }
+            return depth(n - 1) + 1;
+        }
+        #[reset]
+        fn main() { OUT = depth(100); loop {} }
+    "#);
+    assert_eq!(e.mem(0x0400), 100, "100 levels, one byte pushed per level");
+}
+
+/// The case the old warning missed. `(n as u16) + s(n - 1)` puts the call in the
+/// *right* operand, so codegen spills the two-byte left operand to the same
+/// software stack the frame save uses: three bytes a level, not one.
+///
+/// Keying the warning on frame size alone computed 256 levels and said nothing,
+/// while the program went silently wrong from level 86. The exact numbers are
+/// asserted because they are the actionable part — a reader needs the depth,
+/// not just the existence of a risk.
+#[test]
+fn a_spill_across_a_recursive_call_counts_toward_the_depth_limit() {
+    let warnings = warnings_of(
+        r#"
+        fn s(n: u8) -> u16 {
+            if n == 0 { return 0; }
+            return (n as u16) + s(n - 1);
+        }
+        #[reset]
+        fn main() { let x: u16 = s(50); loop {} }
+        "#,
+    );
+    assert!(
+        warnings.contains("software stack"),
+        "expected a deep-recursion warning:\n{warnings}"
+    );
+    assert!(
+        warnings.contains("3 bytes per call") && warnings.contains("1-byte frame plus 2 bytes"),
+        "the warning must break the cost down, so the reader can see where it \
+         came from:\n{warnings}"
+    );
+    assert!(
+        warnings.contains("85 levels") && warnings.contains("At 86 levels"),
+        "expected the computed depth and the first bad level:\n{warnings}"
+    );
+}
+
+/// The depth the warning reports is the real one: exact at 85, wrong at 86.
+/// This is what makes the number worth printing rather than a vague caution.
+#[test]
+fn the_reported_recursion_depth_is_where_it_actually_breaks() {
+    const SRC: &str = r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        fn s(n: u8) -> u16 {
+            if n == 0 { return 0; }
+            return (n as u16) + s(n - 1);
+        }
+        #[reset]
+        fn main() { let r: u16 = s(NN); LO = r.low; HI = r.high; loop {} }
+    "#;
+
+    let mut at_85 = run(&SRC.replace("NN", "85"));
+    assert_eq!(
+        at_85.mem16(0x0400),
+        85 * 86 / 2,
+        "the last depth the warning calls safe must still be exact"
+    );
+
+    // Not asserting a particular wrong value at 86 — the corruption is not
+    // specified, only that the stack has wrapped.
+    let mut at_86 = run(&SRC.replace("NN", "86"));
+    assert_ne!(
+        at_86.mem16(0x0400),
+        86 * 87 / 2,
+        "86 levels should overflow the software stack; if this now passes, the \
+         per-call cost changed and the warning's arithmetic needs revisiting"
     );
 }

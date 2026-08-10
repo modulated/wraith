@@ -830,7 +830,13 @@ pub enum Warning {
     /// frames across recursion. Deep recursion will silently overflow it.
     DeepRecursionRisk {
         function: String,
+        /// Frame bytes saved per recursive call.
         frame_bytes: u8,
+        /// Binary-operand spill bytes held across the recursive call, on the
+        /// same software stack. Counting only `frame_bytes` is what let
+        /// `return (n as u16) + s(n - 1)` — one frame byte, two spill bytes —
+        /// look like it could nest 256 levels when the real limit is 85.
+        spill_bytes: u16,
         safe_depth: usize,
         span: Span,
     },
@@ -957,18 +963,38 @@ impl Warning {
             Warning::DeepRecursionRisk {
                 function,
                 frame_bytes,
+                spill_bytes,
                 safe_depth,
                 span,
-            } => (
-                format!(
-                    "recursive function `{}` has a {}-byte frame; each recursive call saves it \
-                     to the 256-byte software stack, so recursion deeper than ~{} levels will \
-                     silently overflow it and corrupt data. Use tail recursion (which compiles \
-                     to a loop) or an explicit loop for deep recursion.",
-                    function, frame_bytes, safe_depth
-                ),
-                span,
-            ),
+            } => {
+                let cost = if *spill_bytes > 0 {
+                    format!(
+                        "{} bytes per call ({}-byte frame plus {} bytes of operand \
+                             spilled across the call)",
+                        *frame_bytes as u16 + spill_bytes,
+                        frame_bytes,
+                        spill_bytes
+                    )
+                } else {
+                    format!("{} bytes per call (its frame)", frame_bytes)
+                };
+                (
+                    format!(
+                        "recursive function `{}` pushes {} onto the 256-byte software \
+                             stack, so it can nest about {} levels deep. At {} levels the \
+                             stack wraps and silently corrupts the saved frames — the 6502 \
+                             has no stack-limit detection, so nothing reports it at run time \
+                             and the function simply returns wrong answers. If the depth can \
+                             reach that, use tail recursion (which compiles to a loop and \
+                             pushes nothing) or an explicit loop.",
+                        function,
+                        cost,
+                        safe_depth,
+                        safe_depth + 1
+                    ),
+                    span,
+                )
+            }
             Warning::InterruptStackDepth {
                 handler,
                 entry_bytes,
