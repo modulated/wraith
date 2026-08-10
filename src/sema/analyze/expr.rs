@@ -148,11 +148,19 @@ impl SemanticAnalyzer {
                 }
 
                 self.check_struct_init_fields(&name.node, fields)?;
+                self.reserve_struct_temp(&name.node, fields, expr.span);
 
                 Type::Named(name.node.clone())
             }
 
-            Expr::AnonStructInit { fields } => self.check_anon_struct_init(fields, expr.span)?,
+            Expr::AnonStructInit { fields } => {
+                let ty = self.check_anon_struct_init(fields, expr.span)?;
+                if let Type::Named(n) = &ty {
+                    let n = n.clone();
+                    self.reserve_struct_temp(&n, fields, expr.span);
+                }
+                ty
+            }
 
             Expr::EnumVariant {
                 enum_name,
@@ -1160,6 +1168,57 @@ impl SemanticAnalyzer {
     /// type as its expected type, so a literal adopts the field's width and a
     /// value of the wrong type errors. An omitted field is fine — the
     /// flattener zero-fills it.
+    /// Reserve scratch RAM for a struct literal that cannot be emitted as
+    /// constant bytes.
+    ///
+    /// A literal whose fields are all constants is emitted into the CODE
+    /// section and evaluates to a pointer at those bytes — nothing to build at
+    /// run time. One with a computed field has to be *assembled* somewhere
+    /// writable, and ROM is not it. The block is allocated per literal site
+    /// from the same call-graph-colored region local array data uses, so
+    /// functions that can never be active at once share the space.
+    ///
+    /// Reserved for every computed literal, including those that turn out to
+    /// be initializing a variable directly (where codegen writes the fields
+    /// straight to the destination and never touches this block). Predicting
+    /// that here would mean duplicating codegen's destination rules and
+    /// silently emitting a "constant expressions only" error whenever the two
+    /// drifted apart; a colored block per site is the cheaper mistake.
+    fn reserve_struct_temp(
+        &mut self,
+        struct_name: &str,
+        fields: &[crate::ast::FieldInit],
+        span: crate::ast::Span,
+    ) {
+        let all_constant = fields
+            .iter()
+            .all(|f| matches!(f.value.node, crate::ast::Expr::Literal(_)));
+        if all_constant {
+            return;
+        }
+
+        let bytes = self.type_size(&Type::Named(struct_name.to_string())) as u16;
+        if bytes == 0 {
+            return;
+        }
+
+        let Some(f) = self.current_function.clone() else {
+            return;
+        };
+        let at = self.array_cursor;
+        self.array_cursor += bytes;
+        self.struct_temps.insert(
+            span,
+            crate::sema::LocalArray {
+                addr: at,
+                size: bytes,
+                function: f.clone(),
+            },
+        );
+        let entry = self.array_block_sizes.entry(f).or_insert(0);
+        *entry = (*entry).max(self.array_cursor);
+    }
+
     fn check_struct_init_fields(
         &mut self,
         struct_name: &str,

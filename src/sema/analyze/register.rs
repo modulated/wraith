@@ -1016,6 +1016,9 @@ impl SemanticAnalyzer {
         for (span, eb) in &imported_analyzer.enum_blocks {
             self.enum_blocks.insert(*span, eb.clone());
         }
+        for (span, st) in &imported_analyzer.struct_temps {
+            self.struct_temps.insert(*span, st.clone());
+        }
         for (name, size) in &imported_analyzer.array_block_sizes {
             self.array_block_sizes.entry(name.clone()).or_insert(*size);
         }

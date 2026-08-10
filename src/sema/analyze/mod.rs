@@ -91,6 +91,8 @@ pub struct SemanticAnalyzer {
     /// marks the declaration as a *writable* string, which is what lets
     /// `s[i] = c` past the "can't write a str literal" guard.
     pub(super) string_buffers: HashMap<Span, crate::sema::LocalArray>,
+    /// Scratch RAM for computed struct literals; see `ProgramInfo::struct_temps`.
+    pub(super) struct_temps: HashMap<Span, crate::sema::LocalArray>,
     /// Bytes of local-array data each function needs, consumed by
     /// `finalize_frames` to lay the blocks out in RAM.
     pub(super) array_block_sizes: HashMap<String, u16>,
@@ -194,6 +196,7 @@ impl SemanticAnalyzer {
             local_arrays: HashMap::default(),
             enum_blocks: HashMap::default(),
             string_buffers: HashMap::default(),
+            struct_temps: HashMap::default(),
             array_block_sizes: HashMap::default(),
             array_cursor: 0,
             resolved_types: HashMap::default(),
@@ -444,6 +447,7 @@ impl SemanticAnalyzer {
             local_arrays: self.local_arrays.clone(),
             enum_blocks: self.enum_blocks.clone(),
             string_buffers: self.string_buffers.clone(),
+            struct_temps: self.struct_temps.clone(),
             type_registry: self.type_registry.clone(),
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),

@@ -987,7 +987,7 @@ pub(super) fn generate_var_decl(
                 crate::codegen::expr::generate_struct_init_runtime(
                     struct_name,
                     fields,
-                    addr,
+                    addr as u16,
                     emitter,
                     info,
                     string_collector,
@@ -1115,7 +1115,7 @@ pub(super) fn generate_var_decl(
                 crate::codegen::expr::generate_struct_init_runtime(
                     elem_struct,
                     fields,
-                    elem_addr,
+                    elem_addr as u16,
                     emitter,
                     info,
                     string_collector,
@@ -1407,12 +1407,13 @@ pub(super) fn generate_assign(
                 use crate::sema::table::SymbolKind;
                 use crate::sema::types::Type;
 
-                // Struct-by-value assignment from a call, e.g.
-                // `p = make();`. The value expression (already generated
-                // above) left a pointer to the struct bytes in A:X; copy
-                // the whole struct into the target's inline storage
-                // rather than storing just the low byte of the pointer.
-                if matches!(&value.node, crate::ast::Expr::Call { .. })
+                // Struct-by-value assignment from a call (`p = make();`) or
+                // from a computed struct literal (`p = P { x: a + 1 };`). The
+                // value expression (already generated above) left a pointer to
+                // the struct bytes in A:X; copy the whole struct into the
+                // target's inline storage rather than storing just the low byte
+                // of the pointer.
+                if crate::codegen::expr::yields_struct_pointer(value, info)
                     && let Type::Named(sname) = &sym.ty
                     && let Some(sdef) = info.type_registry.get_struct(sname)
                     && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location

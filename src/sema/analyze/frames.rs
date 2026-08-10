@@ -526,6 +526,7 @@ impl SemanticAnalyzer {
             .values_mut()
             .chain(self.enum_blocks.values_mut())
             .chain(self.string_buffers.values_mut())
+            .chain(self.struct_temps.values_mut())
         {
             let base = function_base
                 .get(&arr.function)

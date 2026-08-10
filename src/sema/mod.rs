@@ -1172,6 +1172,16 @@ pub struct ProgramInfo {
     /// declaration's name span. `size` is the full block (`1 + capacity`).
     /// Presence marks the string as writable; see `analyze_var_decl`.
     pub string_buffers: HashMap<Span, LocalArray>,
+    /// Scratch RAM for a struct literal whose fields are not all compile-time
+    /// constants, keyed by the literal expression's span.
+    ///
+    /// A constant struct literal is emitted as bytes in the CODE section and
+    /// evaluates to a pointer at them. A computed one has no bytes until it
+    /// runs, so it needs somewhere writable to be built — ROM will not do. The
+    /// block is allocated per literal *site* and colored with the call graph
+    /// like local array data, so two functions that can never be active at
+    /// once share it.
+    pub struct_temps: HashMap<Span, LocalArray>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
     /// Map of expression spans to their resolved types

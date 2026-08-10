@@ -310,12 +310,37 @@ pub(super) fn generate_index(
     }
 }
 
+/// A struct literal in expression position — a `return`, a call argument,
+/// anything without a destination of its own.
+///
+/// When every field is a constant the struct is emitted as bytes in the CODE
+/// section and the expression evaluates to a pointer at them, which costs no
+/// RAM and no cycles. When a field has to be *computed* there are no bytes
+/// until the program runs, so sema reserved a block of writable RAM for this
+/// literal site (`ProgramInfo::struct_temps`) and the fields are assembled into
+/// it at run time. Either way the result is the same pointer convention: low
+/// byte in A, high byte in X.
 pub(super) fn generate_struct_init(
     name: &Spanned<String>,
     fields: &[crate::ast::FieldInit],
+    span: crate::ast::Span,
     emitter: &mut Emitter,
     info: &ProgramInfo,
+    string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    // A computed literal is built in RAM. Sema reserves the block for exactly
+    // the literals that need one, so its presence is the signal.
+    if let Some(block) = info.struct_temps.get(&span) {
+        return generate_struct_init_runtime(
+            &name.node,
+            fields,
+            block.addr,
+            emitter,
+            info,
+            string_collector,
+        );
+    }
+
     emitter.emit_comment(&format!("Struct init: {}", name.node));
 
     // Look up the struct definition
@@ -397,13 +422,17 @@ pub(super) fn generate_struct_init(
     Ok(())
 }
 
-/// Generate runtime struct initialization directly to a zero page address.
-/// This stores field values directly to ZP memory instead of creating ROM data.
-/// Returns with A containing the base address (for chained operations).
+/// Generate runtime struct initialization directly to a writable address.
+/// This stores field values to RAM instead of creating ROM data.
+///
+/// `dest_addr` is a full 16-bit address: a zero-page frame slot when a variable
+/// is being initialized in place, or a block in the call-graph-colored struct
+/// scratch region when the literal appears in expression position (a `return`,
+/// an argument) and so has no destination of its own.
 pub fn generate_struct_init_runtime(
     struct_name: &str,
     fields: &[crate::ast::FieldInit],
-    dest_addr: u8,
+    dest_addr: u16,
     emitter: &mut Emitter,
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
@@ -433,7 +462,7 @@ pub fn generate_struct_init_runtime(
 
     // Initialize each field in order (respecting struct layout)
     for field_info in &field_layout {
-        let field_addr = dest_addr + field_info.offset as u8;
+        let field_addr = dest_addr + field_info.offset as u16;
         let field_size = type_byte_size(&field_info.ty, info);
 
         if let Some(value_expr) = field_values.get(&field_info.name) {
@@ -486,7 +515,7 @@ pub fn generate_struct_init_runtime(
                     generate_struct_init_runtime(
                         elem_struct,
                         el_fields,
-                        field_addr + (j as u8) * esize,
+                        field_addr + (j as u16) * esize as u16,
                         emitter,
                         info,
                         string_collector,
@@ -500,18 +529,18 @@ pub fn generate_struct_init_runtime(
 
             // Store to field address
             if field_size == 1 {
-                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                emitter.emit_inst("STA", &addr_operand(field_addr));
             } else if field_size == 2 {
                 // A holds the low byte; the high byte is in Y for a u16 or a
                 // function pointer, but in X for a `&T` — the pointer
                 // convention every other pointer-like value uses.
-                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
+                emitter.emit_inst("STA", &addr_operand(field_addr));
                 let hi = if high_byte_in_x(&field_info.ty) {
                     "STX"
                 } else {
                     "STY"
                 };
-                emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
+                emitter.emit_inst(hi, &addr_operand(field_addr + 1));
             } else {
                 return Err(CodegenError::UnsupportedOperation(format!(
                     "struct field type with size {} not yet supported",
@@ -522,7 +551,7 @@ pub fn generate_struct_init_runtime(
             // Field not provided - initialize to zero
             emitter.emit_inst("LDA", "#$00");
             for i in 0..field_size {
-                emitter.emit_inst("STA", &format!("${:02X}", field_addr + i as u8));
+                emitter.emit_inst("STA", &addr_operand(field_addr + i as u16));
             }
         }
     }
@@ -533,10 +562,48 @@ pub fn generate_struct_init_runtime(
     // final LDA is raw and leaves A untracked, which is correct.
     emitter.invalidate_registers();
 
-    // Return base address in A (for use in expressions)
-    emitter.emit_inst("LDA", &format!("#${:02X}", dest_addr));
+    // Return the base address the way every struct-valued expression does:
+    // low byte in A, high byte in X. A zero-page block still needs the explicit
+    // zero high byte — a caller copying through the pointer reads X whatever
+    // page the block happens to be on.
+    emitter.emit_inst("LDA", &format!("#${:02X}", dest_addr & 0xFF));
+    emitter.emit_inst("LDX", &format!("#${:02X}", dest_addr >> 8));
 
     Ok(())
+}
+
+/// Whether evaluating `expr` leaves a *pointer* to struct bytes in A:X rather
+/// than a value in A.
+///
+/// Two expressions do this: a call to a struct-returning function, and a struct
+/// literal that had to be built at run time (a constant one is also a pointer,
+/// but into ROM — same convention). Consumers that bind the result have to copy
+/// `size` bytes through the pointer; storing A alone writes the pointer's low
+/// byte into the destination's first field, which is what every one of these
+/// sites did before the computed-literal path existed and only a call could
+/// reach them.
+pub(crate) fn yields_struct_pointer(expr: &Spanned<Expr>, info: &ProgramInfo) -> bool {
+    match &expr.node {
+        Expr::Call { .. } => true,
+        Expr::StructInit { .. } | Expr::AnonStructInit { .. } => {
+            info.struct_temps.contains_key(&expr.span)
+        }
+        _ => false,
+    }
+}
+
+/// Format a store/load operand, picking zero-page or absolute form by address.
+///
+/// A struct block lives in the zero-page frame region when it *is* a variable's
+/// storage, and in the colored RAM scratch region when it backs a computed
+/// literal in expression position. Both go through here so a single store site
+/// serves either.
+fn addr_operand(addr: u16) -> String {
+    if addr < 0x100 {
+        format!("${:02X}", addr)
+    } else {
+        format!("${:04X}", addr)
+    }
 }
 
 /// Which register holds the high byte of a two-byte value once loaded.

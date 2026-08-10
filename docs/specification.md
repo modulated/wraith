@@ -952,7 +952,9 @@ fn update_entity(e: Entity) {
 To work on a copy, bind a local and copy field by field (or return a fresh
 struct):
 
-```rust
+```rust,compile
+struct Point { x: u8, y: u8 }
+
 fn move_point(p: Point, dx: u8, dy: u8) -> Point {
     return Point { x: p.x + dx, y: p.y + dy };
 }
@@ -976,6 +978,34 @@ fn main() {
     p = make();              // reassignment copies too
 }
 ```
+
+#### Where a struct literal lives
+
+A struct literal whose fields are all constants is emitted as bytes in the
+`CODE` section, and the expression evaluates to a pointer at them. It costs no
+RAM and no cycles to build.
+
+A literal with a *computed* field has no bytes until the program runs, so it is
+assembled at run time into a block of RAM reserved for that literal. The block
+is per literal site and is colored by the call graph exactly like local array
+data, so two functions that can never be active at once share the space. This
+is what makes `move_point` above work; the two forms are interchangeable in
+source, and only the cost differs:
+
+```rust,compile
+struct Point { x: u8, y: u8 }
+
+#[reset]
+fn main() {
+    let dx: u8 = 3;
+    let fixed: Point = Point { x: 1, y: 2 };         // bytes in ROM
+    let computed: Point = Point { x: dx + 1, y: 2 }; // assembled in RAM
+    loop {}
+}
+```
+
+Initializing a variable directly writes the fields straight into the variable's
+own storage, with no intermediate block at all.
 
 ### Completion Status
 
