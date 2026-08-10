@@ -143,32 +143,29 @@ about *writes* through such a pointer is a design call: either track ROM
 provenance and reject them the way direct const writes are rejected, or accept
 that they are silent no-ops on hardware as they are for any ROM store.
 
-### Slices are read-only, and only ever RAM-backed
+### A mutable slice type
 
-`s[i]` reads, `for x in s` iterates, but `s[0] = 9` is rejected ("Can only index
-arrays, pointers, and string buffers"). That is an unimplemented store path, not
-a safety rule.
+Slices are read-only views and now borrow from any storage — a local, a
+`static`, or a `const` array in ROM. That is deliberate: the descriptor is a
+bare address and length, so it cannot know whether its target is writable, and
+`s[i] = v` is rejected everywhere rather than being legal or not according to a
+declaration somewhere else.
 
-Mutability is safe to add *today* because a slice's backing store can only ever
-be RAM: the source must be a zero-page local (`static` and `const` sources are
-both rejected with "slice source array must be a zero-page local"). So there is
-no ROM-backed slice to protect against.
+What is missing is the writable counterpart, the analogue of `str<N>` against
+`str`. Whatever spelling it takes (`&mut [T]`, or a distinct type), the
+constraint is that it must only be constructible from RAM-backed storage —
+a local or a `static`, never a `const` — because a store into ROM is a silent
+no-op on real hardware and nothing at run time will catch it.
 
-That changes the moment slice sources widen, which the spec already promises
-they do — "Data: Stored wherever array is allocated (const data, stack, etc.)"
-describes a compiler that does not exist yet. When a `&[T]` can name a `const`
-array or a string literal, writing through one has to be rejected, and the
-language already has the pattern for it: `str` (ROM literal) is read-only while
-`str<N>` (RAM buffer) is writable, each with its own diagnostic. Slices want the
-same split rather than a fresh mechanism.
+Until then, code that needs to write a sub-range passes the array itself plus
+explicit bounds.
 
-Order matters here: widening slice sources before adding the guard would make
-ROM-backed slices writable in the window between, which is exactly the silent
-no-op the `str`/`str<N>` split exists to prevent.
-
-`for i in 0..s.len` also fails: `.len` is `u16` and the loop wants a `u8` bound,
-so it needs `s.len as u8` spelled out. The mismatch is reported as a bare
-"mismatched types" that does not mention the cast.
+Also still open: `for i in 0..s.len` fails because `.len` is `u16` and the loop
+wants a `u8` bound, so it needs `s.len as u8` spelled out, and the mismatch is
+reported as a bare "mismatched types" that does not mention the cast. And a
+slice *expression* cannot yet be a call argument — `total(a[1..4])` is rejected
+with "Slice expressions can only be used as assignment targets"; it must be
+bound to a variable first.
 
 ### Exclusive ranges in match patterns
 

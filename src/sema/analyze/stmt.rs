@@ -460,6 +460,27 @@ impl SemanticAnalyzer {
                 });
             }
         }
+
+        // A slice is a read-only view. It can name a `const` array in ROM, where
+        // a store would silently do nothing on real hardware, and the descriptor
+        // carries no record of which storage class it came from — so the rule
+        // cannot depend on the source without making the same expression legal
+        // or not according to a declaration somewhere else. Rejecting every
+        // write keeps `&[T]` one thing.
+        //
+        // This is the same split `str` (ROM literal, read-only) and `str<N>`
+        // (RAM buffer, writable) already draw; a writable slice type would be
+        // the analogue of `str<N>` and does not exist yet.
+        if let Expr::Index { object, .. } = &target.node
+            && matches!(self.resolved_types.get(&object.span), Some(Type::Slice(_)))
+        {
+            return Err(SemaError::Custom {
+                message: "cannot write through a slice: `&[T]` is a read-only view. \
+                          Write to the array it borrows from, or pass the array itself"
+                    .to_string(),
+                span: target.span,
+            });
+        }
         // Give the value the target type as its expected type so a literal (or
         // negative literal) infers against the destination, e.g. `RESULT = -10`
         // storing 246 into a u8, or `x = 127` into an i8.

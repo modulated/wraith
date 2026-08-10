@@ -181,10 +181,69 @@ pub(super) fn generate_index_assignment(
     Ok(())
 }
 
+/// Where an array's data lives, and therefore how to get its base address.
+///
+/// A slice descriptor holds a real 16-bit pointer, so it does not care which of
+/// these it came from — but the three are reached differently, and a slice used
+/// to be restricted to the first because it was the only one implemented.
+enum ArrayBase {
+    /// A local array: its zero-page slot holds a pointer to the data, which is
+    /// laid out in the call-graph-colored RAM block.
+    Pointer(u8),
+    /// A mutable `static`: sema assigned it a fixed BSS address.
+    Fixed(u16),
+    /// An immutable `const`: ROM data emitted at an assembler label. Sema
+    /// leaves these at `Absolute(0)` because the address is the linker's to
+    /// decide, so the label is the only way to name it.
+    Label(String),
+}
+
+impl ArrayBase {
+    /// Resolve the array a slice is being taken of.
+    fn of(sym: &crate::sema::table::SymbolInfo, name: &str) -> Result<Self, CodegenError> {
+        use crate::sema::table::{SymbolKind, SymbolLocation};
+        match (&sym.location, &sym.kind) {
+            (SymbolLocation::ZeroPage(a), _) => Ok(ArrayBase::Pointer(*a)),
+            // A const's `Absolute(0)` is a placeholder, not an address.
+            (SymbolLocation::Absolute(_), SymbolKind::Constant) | (SymbolLocation::None, _) => {
+                Ok(ArrayBase::Label(name.to_string()))
+            }
+            (SymbolLocation::Absolute(a), _) => Ok(ArrayBase::Fixed(*a)),
+            _ => Err(CodegenError::UnsupportedOperation(format!(
+                "cannot take a slice of '{}': its storage has no address",
+                name
+            ))),
+        }
+    }
+
+    /// Emit `LDA <base low byte>`. Followed by `CLC; ADC <offset low>` at the
+    /// call site, so all three forms share one arithmetic sequence.
+    fn emit_load_low(&self, emitter: &mut Emitter) {
+        match self {
+            ArrayBase::Pointer(slot) => emitter.emit_inst("LDA", &format!("${:02X}", slot)),
+            ArrayBase::Fixed(addr) => emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF)),
+            ArrayBase::Label(name) => emitter.emit_inst("LDA", &format!("#<{}", name)),
+        }
+    }
+
+    /// Emit `LDA <base high byte>`, to be followed by `ADC <offset high>`.
+    fn emit_load_high(&self, emitter: &mut Emitter) {
+        match self {
+            ArrayBase::Pointer(slot) => emitter.emit_inst("LDA", &format!("${:02X}", slot + 1)),
+            ArrayBase::Fixed(addr) => {
+                emitter.emit_inst("LDA", &format!("#${:02X}", (addr >> 8) & 0xFF))
+            }
+            ArrayBase::Label(name) => emitter.emit_inst("LDA", &format!("#>{}", name)),
+        }
+    }
+}
+
 /// Materialize a slice descriptor `arr[start..end]` into the 4-byte frame slot
-/// at `dest`: `dest[0..1] = base` (arr's data pointer + start*elem_size),
-/// `dest[2..3] = len` (element count). Bounds must be compile-time constants for
-/// now; the array must be a zero-page local (its slot holds the data pointer).
+/// at `dest`: `dest[0..1] = base` (arr's data address + start*elem_size),
+/// `dest[2..3] = len` (element count).
+///
+/// The source array may be a local, a `static`, or a `const` — a slice is a
+/// read-only view, so ROM-backed data is as valid a target as RAM.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn generate_slice_materialize(
     dest: u8,
@@ -199,7 +258,6 @@ pub(super) fn generate_slice_materialize(
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
     use crate::sema::const_eval::eval_const_expr_with_env;
-    use crate::sema::table::SymbolLocation;
 
     let elem_size = elem.size().max(1);
 
@@ -216,15 +274,7 @@ pub(super) fn generate_slice_materialize(
         .get(&object.span)
         .or_else(|| info.table.lookup(arr_name))
         .ok_or_else(|| CodegenError::SymbolNotFound(arr_name.clone()))?;
-    let arr_addr = match arr_sym.location {
-        SymbolLocation::ZeroPage(a) => a,
-        _ => {
-            return Err(CodegenError::UnsupportedOperation(format!(
-                "slice source array '{}' must be a zero-page local",
-                arr_name
-            )));
-        }
-    };
+    let arr_base = ArrayBase::of(arr_sym, arr_name)?;
 
     let env = HashMap::default();
     let const_s = eval_const_expr_with_env(start, &env)
@@ -255,11 +305,11 @@ pub(super) fn generate_slice_materialize(
             "Slice materialize: base = {}+{}, len = {}",
             arr_name, byte_offset, len
         ));
-        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+        arr_base.emit_load_low(emitter);
         emitter.emit_inst("CLC", "");
         emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
         emitter.emit_inst("STA", &format!("${:02X}", dest));
-        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+        arr_base.emit_load_high(emitter);
         emitter.emit_inst(
             "ADC",
             &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8),
@@ -338,11 +388,11 @@ pub(super) fn generate_slice_materialize(
     }
 
     // base = arr pointer + byte offset (16-bit add).
-    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+    arr_base.emit_load_low(emitter);
     emitter.emit_inst("CLC", "");
     emitter.emit_inst("ADC", "$22");
     emitter.emit_inst("STA", &format!("${:02X}", dest));
-    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+    arr_base.emit_load_high(emitter);
     emitter.emit_inst("ADC", "$23");
     emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
 

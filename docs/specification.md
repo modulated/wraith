@@ -1397,7 +1397,7 @@ fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
 - Size: 4 bytes (2-byte base address + 2-byte length)
 - View into array data; length tracked at runtime
 - Created with `arr[a..b]` (constant or runtime bounds)
-- `.len`, indexing `s[i]`, and `for x in s` iteration
+- `.len`, indexing `s[i]` (read-only), and `for x in s` iteration
 - Re-sliceable (`s[a..b]`), reassignable, and passed to / returned from
   functions by value
 
@@ -1405,9 +1405,54 @@ Bounds may be `u8`/`i8` or `u16`/`i16` (the latter lets constant-bounds slices
 exceed 255 elements), inclusive ranges accept a runtime end, and `for x in s`
 iterates the full length with a 16-bit counter.
 
+**Slices are read-only.** `s[i]` reads, `for x in s` iterates, and a slice can
+be re-sliced, reassigned, and passed to or returned from functions — but
+`s[i] = v` is a compile error:
+
+```rust
+let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+let s: &[u8] = a[1..4];
+s[0] = 9;      // ERROR: cannot write through a slice: `&[T]` is a read-only view
+a[1] = 9;      // OK - write to the array it borrows from
+```
+
+This is what lets a slice borrow from *any* storage. The source array may be a
+local, a `static`, or a `const`:
+
+```rust,compile
+const TABLE: [u8; 4] = [10, 20, 30, 40];   // ROM
+static BUFFER: [u8; 4] = [0; 4];           // RAM
+
+fn total(v: &[u8]) -> u8 {
+    let acc: u8 = 0;
+    let n: u8 = v.len as u8;
+    for i in 0..n { acc = acc + v[i]; }
+    return acc;
+}
+
+#[reset]
+fn main() {
+    let rom: &[u8] = TABLE[0..4];
+    let ram: &[u8] = BUFFER[0..4];
+    let a: u8 = total(rom);
+    let b: u8 = total(ram);
+    loop {}
+}
+```
+
+A `const` array lives in ROM, where a store is a silent no-op on real hardware.
+Since a slice descriptor is just a base address and a length, it carries no
+record of which storage it came from — so the rule cannot depend on the source
+without making the same expression legal or not according to a declaration
+elsewhere. Rejecting every write keeps `&[T]` one thing, and mirrors the split
+between `str` (may be a ROM literal, read-only) and `str<N>` (owns RAM,
+writable). A writable slice type would be the analogue of `str<N>`; it does not
+exist yet.
+
 Current limits: element widths above 2 bytes are not yet supported, runtime
-(non-constant) slice bounds must be `u8`, and there is no runtime bounds
-checking.
+(non-constant) slice bounds must be `u8`, a slice expression must be bound to a
+variable before it can be passed as a call argument, and there is no runtime
+bounds checking.
 
 ### Slice Memory Representation
 
@@ -1424,7 +1469,9 @@ fn process(slice: &[u8]) {
 - Slice parameter: 4 bytes total (base address + length)
 - Base address: 2 bytes pointing to first element
 - Length: 2 bytes for element count
-- Data: Stored wherever array is allocated (const data, stack, etc.)
+- Data: stays wherever the borrowed array lives — a `const` array's ROM, a
+  `static`'s RAM, or a local's frame block. The descriptor holds an address, so
+  a slice never copies the data it views.
 
 ### Multidimensional Arrays
 
