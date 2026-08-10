@@ -69,6 +69,15 @@ pub enum SemaError {
         span: Span,
     },
 
+    /// A function with a declared return type can finish without returning a
+    /// value. The 6502 has no notion of an uninitialized return, so falling off
+    /// the end leaves whatever the last expression happened to put in A.
+    MissingReturn {
+        function: String,
+        expected: String,
+        span: Span,
+    },
+
     /// Return outside of function
     ReturnOutsideFunction { span: Span },
 
@@ -170,6 +179,7 @@ impl SemaError {
             | ArityMismatch { span, .. }
             | ImmutableAssignment { span, .. }
             | ReturnTypeMismatch { span, .. }
+            | MissingReturn { span, .. }
             | ReturnOutsideFunction { span }
             | BreakOutsideLoop { span }
             | DuplicateSymbol { span, .. }
@@ -329,6 +339,20 @@ impl SemaError {
                 let msg = format!("expected {}, found {}", expected, found);
                 format!(
                     "error: return type mismatch\n{}",
+                    span.format_error_context_of(source, filename, &msg, file)
+                )
+            }
+            SemaError::MissingReturn {
+                function,
+                expected,
+                span,
+            } => {
+                let msg = format!("this function must return a value of type `{}`", expected);
+                format!(
+                    "error: missing return in function '{}'\n{}\n  = help: every path through the \
+                     function body must end in a `return`; a path that falls off the end would \
+                     leave the caller reading whatever happened to be in the accumulator",
+                    function,
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
@@ -603,6 +627,17 @@ impl std::fmt::Display for SemaError {
                     f,
                     "return type mismatch at {}..{}: expected {}, found {}",
                     span.start, span.end, expected, found
+                )
+            }
+            SemaError::MissingReturn {
+                function,
+                expected,
+                span,
+            } => {
+                write!(
+                    f,
+                    "missing return in function '{}' at {}..{}: must return {}",
+                    function, span.start, span.end, expected
                 )
             }
             SemaError::ReturnOutsideFunction { span } => {

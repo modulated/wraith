@@ -452,6 +452,47 @@ fn no_return(x: u8) {
 }
 ```
 
+#### Returns are checked
+
+A function that declares a return type must return a value of that type on
+every path, and a function that declares none must not return a value at all.
+Both are compile errors rather than warnings, because neither is detectable at
+run time: the calling convention passes the result in the accumulator, so a
+caller reads a value either way — a missing return just hands it whatever the
+last statement happened to leave there.
+
+```rust
+fn incomplete(n: u8) -> u8 {
+    if n == 0 { return 1; }
+}                              // ERROR: missing return in function 'incomplete'
+
+fn nothing_to_give() {
+    return 5;                  // ERROR: return type mismatch, expected void
+}
+```
+
+A path "returns" if it ends in a `return`, or if it cannot complete at all.
+That makes each of these complete:
+
+- an `if`/`else` where **both** arms return (one arm alone is not enough — the
+  other falls through);
+- a `loop` with no `break` out of it, which never completes, so a trailing
+  `loop {}` is a valid way to end a value-returning function;
+- a `match` that returns in every arm **and** covers every value, either through
+  a wildcard arm or by naming every variant of an enum;
+- a whole-function `asm` block, which is trusted to leave the result in the
+  accumulator (this is how much of the standard library is written).
+
+A `while` or `for` loop never counts, even if its body returns: it may run zero
+times, so the path that skips it still falls through.
+
+Ordinary conversion rules apply to the returned value — lossless widening is
+implicit, narrowing needs an explicit cast:
+
+```rust,compile,fragment
+let widened: u16 = 3;      // a `-> u16` function may `return` a u8
+```
+
 ### Function Attributes
 
 Function attributes control code generation, placement, and calling conventions. They are specified using `#[attribute]` syntax before the function declaration.
@@ -3604,7 +3645,7 @@ fn complex_function() {
 
 Documentation comments use triple slashes (`///`) and are used to document functions, structs, and other items. These are commonly used in the standard library:
 
-```rust,compile
+```rust
 /// Enable interrupts by clearing the interrupt disable flag
 /// Maps to: CLI (Clear Interrupt Disable)
 /// Cycles: 2
@@ -3671,7 +3712,7 @@ fn with_assembler_comments() {
 - Explain "why" rather than "what" in regular comments
 - Use comments to mark TODO items or known limitations
 
-```rust,compile
+```rust
 /// Fast integer division by 10 using multiplication and shifts
 /// Cycles: ~45 (much faster than div16)
 fn div10_fast(value: u8) -> u8 {

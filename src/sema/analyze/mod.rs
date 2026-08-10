@@ -120,6 +120,11 @@ pub struct SemanticAnalyzer {
     pub(super) called_functions: HashSet<String>,
     /// Track unreachable statements for dead code elimination
     pub(super) unreachable_stmts: HashSet<Span>,
+    /// Spans of `match` statements proven to cover every possible value —
+    /// either through an irrefutable arm or, for an enum scrutinee, by naming
+    /// every variant. `always_returns` consults this: a match can only
+    /// guarantee a return if control cannot slip past it unmatched.
+    pub(super) exhaustive_matches: HashSet<Span>,
     /// True when checking an assignment target (not reading a value)
     pub(super) checking_assignment_target: bool,
     /// Expected type for type inference (e.g., for anonymous struct literals)
@@ -206,6 +211,7 @@ impl SemanticAnalyzer {
             declared_functions: Vec::with_capacity(16),
             called_functions: HashSet::default(),
             unreachable_stmts: HashSet::default(),
+            exhaustive_matches: HashSet::default(),
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::default(),
@@ -639,6 +645,22 @@ impl SemanticAnalyzer {
             // that the next function is still analyzed.
             if let Err(e) = self.analyze_stmt(&func.body) {
                 self.record(e);
+            }
+
+            // A declared return type is a promise to every caller. Falling off
+            // the end of the body breaks it silently on a 6502: the caller
+            // reads the accumulator regardless, so it gets whatever the last
+            // statement left there. Checked after the body walk because
+            // `always_returns` consults match exhaustiveness recorded during it.
+            if let Some(ret_ty) = self.current_return_type.clone()
+                && ret_ty != Type::Void
+                && !self.always_returns(&func.body)
+            {
+                self.record(SemaError::MissingReturn {
+                    function: func_name.clone(),
+                    expected: ret_ty.display_name(),
+                    span: func.name.span,
+                });
             }
 
             // Record this function's frame size (params + locals + any temp slots).

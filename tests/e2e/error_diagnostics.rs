@@ -363,3 +363,27 @@ fn frame_overflow_reports_the_budget_it_blew() {
     );
     assert!(e.contains("main"), "expected the offending chain:\n{e}");
 }
+
+#[test]
+fn missing_return_points_at_the_function_name() {
+    // Not at the closing brace: the name is what the reader scans for, and the
+    // fix (adding a `return`) is not necessarily at the end of the body.
+    let e = render(
+        "fn f(n: u8) -> u8 { if n == 0 { return 1; } }\n#[reset]\nfn main() { let x: u8 = f(2); loop {} }\n",
+    );
+    assert_at(&e, "--> 1:4", "must return a value of type `u8`");
+    assert!(
+        e.contains("missing return in function 'f'"),
+        "expected the function named in the summary:\n{e}"
+    );
+    assert!(
+        e.contains("= help:") && e.contains("every path"),
+        "expected a help line naming the requirement:\n{e}"
+    );
+}
+
+#[test]
+fn returning_a_value_from_a_void_function() {
+    let e = render("fn f() { return 5; }\n#[reset]\nfn main() { f(); loop {} }\n");
+    assert_at(&e, "--> 1:17", "expected void, found u8");
+}
