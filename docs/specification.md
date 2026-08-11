@@ -1390,7 +1390,11 @@ let s2: &[u8] = s[1..3];       // re-slice a slice (offsets compose)
 s = a[2..6];                   // reassign to a new view
 for x in s { /* iterate elements */ }
 
-fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
+total(a[1..5]);                // a slice expression may be an argument
+total(s[1..3]);                // including a re-slice
+
+// Returning one still needs a binding first:
+fn middle(v: &[u8]) -> &[u8] { let m: &[u8] = v[1..4]; return m; }
 ```
 
 **Slice Characteristics:**
@@ -1451,8 +1455,8 @@ exist yet.
 
 Current limits: element widths above 2 bytes are not yet supported, runtime
 (non-constant) slice bounds must be `u8`, a slice expression must be bound to a
-variable before it can be passed as a call argument, and there is no runtime
-bounds checking.
+variable before it can be *returned* (`return v[1..4]` is rejected; assign it
+first), and there is no runtime bounds checking.
 
 ### Slice Memory Representation
 

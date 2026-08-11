@@ -245,7 +245,7 @@ impl ArrayBase {
 /// The source array may be a local, a `static`, or a `const` — a slice is a
 /// read-only view, so ROM-backed data is as valid a target as RAM.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn generate_slice_materialize(
+pub(crate) fn generate_slice_materialize(
     dest: u8,
     elem: &crate::sema::types::Type,
     object: &Spanned<crate::ast::Expr>,

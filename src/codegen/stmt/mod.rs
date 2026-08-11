@@ -9,7 +9,7 @@ pub(super) use crate::sema::ProgramInfo;
 pub(super) use rustc_hash::FxHashMap as HashMap;
 
 mod asm_stmt;
-mod assign;
+pub(crate) mod assign;
 mod loops;
 mod match_stmt;
 

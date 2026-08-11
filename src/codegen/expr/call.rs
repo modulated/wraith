@@ -319,22 +319,55 @@ pub(super) fn generate_call(
         let param_is_slice = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
-        if is_slice_arg
-            && param_is_slice
-            && let crate::ast::Expr::Variable(var_name) = &arg.node
-            && let Some(sym) = info
-                .resolved_symbols
-                .get(&arg.span)
-                .or_else(|| info.table.lookup(var_name))
-            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
-        {
-            for k in 0..4u8 {
-                emitter.emit_inst("LDA", &format!("${:02X}", addr + k));
-                emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
+        if is_slice_arg && param_is_slice {
+            // A bound slice variable: copy its descriptor across.
+            if let crate::ast::Expr::Variable(var_name) = &arg.node
+                && let Some(sym) = info
+                    .resolved_symbols
+                    .get(&arg.span)
+                    .or_else(|| info.table.lookup(var_name))
+                && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+            {
+                for k in 0..4u8 {
+                    emitter.emit_inst("LDA", &format!("${:02X}", addr + k));
+                    emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
+                }
+                temp_offset += 4;
+                arg_info.push((temp_addr, 4));
+                continue;
             }
-            temp_offset += 4;
-            arg_info.push((temp_addr, 4));
-            continue;
+
+            // A slice *expression* — `total(a[1..4])`. The staging slot is a
+            // zero-page address and the materializer writes a descriptor to
+            // exactly that, so it can build in place; there is no intermediate
+            // to allocate and nothing to copy afterwards.
+            if let crate::ast::Expr::Slice {
+                object,
+                start,
+                end,
+                inclusive,
+            } = &arg.node
+            {
+                let Some(Type::Slice(elem)) = arg_type else {
+                    return Err(CodegenError::Internal(
+                        "slice argument without a slice type".to_string(),
+                    ));
+                };
+                crate::codegen::stmt::assign::generate_slice_materialize(
+                    temp_addr,
+                    elem,
+                    object,
+                    start,
+                    end,
+                    *inclusive,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                temp_offset += 4;
+                arg_info.push((temp_addr, 4));
+                continue;
+            }
         }
 
         // Check if this PARAMETER (not argument) is a 16-bit type
