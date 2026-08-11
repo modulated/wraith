@@ -345,7 +345,90 @@ impl SemanticAnalyzer {
             self.folded_constants.insert(expr.span, v);
         }
 
+        // A cast changes width on purpose, so the wrapping evaluator treats it
+        // as a leaf and re-derives its operand in full precision — losing the
+        // operand's own wrapping. `((15397 << 13) % 27617) as i8` is 31 through
+        // a `u16` variable and something else entirely at full precision. The
+        // operand's corrected fold is already in hand; narrow that instead.
+        if let Some(v) = self.refold_through(expr, &result_ty) {
+            self.folded_constants
+                .insert(expr.span, crate::sema::const_eval::ConstValue::Integer(v));
+        }
+
+        // A `bool`-valued node has no width of its own, so the rule above
+        // cannot reach it — and the full-precision fold underneath is wrong for
+        // exactly the same reason: `(94 << 6) >= 229` is false at `u8` width
+        // (the shift wraps to 128) and true in `i64` (6016). Recompute it from
+        // the operands, which the rule above has already corrected, since every
+        // subexpression is checked before its parent.
+        if matches!(result_ty, Type::Primitive(PrimitiveType::Bool))
+            && self.folded_constants.contains_key(&expr.span)
+            && let Some(v) = self.refold_bool(expr)
+        {
+            self.folded_constants
+                .insert(expr.span, crate::sema::const_eval::ConstValue::Bool(v));
+        }
+
         Ok(result_ty)
+    }
+
+    /// An integer node that only passes its operand through — a cast or a pair
+    /// of parentheses — recomputed from that operand's corrected fold, narrowed
+    /// to this node's own width.
+    fn refold_through(&self, expr: &Spanned<Expr>, ty: &Type) -> Option<i64> {
+        let (bits, signed) = int_width_of(ty)?;
+        let inner = match &expr.node {
+            Expr::Paren(inner) => inner,
+            Expr::Cast { expr: inner, .. } => inner,
+            _ => return None,
+        };
+        let v = self.folded_constants.get(&inner.span)?.as_integer()?;
+        Some(crate::sema::const_eval::narrow(v, bits, signed))
+    }
+
+    /// The already-folded value of a subexpression, as a truth value.
+    fn folded_truth(&self, expr: &Spanned<Expr>) -> Option<bool> {
+        use crate::sema::const_eval::ConstValue;
+        match self.folded_constants.get(&expr.span)? {
+            ConstValue::Bool(b) => Some(*b),
+            ConstValue::Integer(v) => Some(*v != 0),
+            ConstValue::String(_) => None,
+        }
+    }
+
+    /// Recompute a constant `bool` from its operands' corrected folds.
+    fn refold_bool(&self, expr: &Spanned<Expr>) -> Option<bool> {
+        use crate::ast::UnaryOp;
+        match &expr.node {
+            Expr::Paren(inner) => self.folded_truth(inner),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => Some(!self.folded_truth(operand)?),
+            Expr::Binary { left, op, right } => match op {
+                BinaryOp::And => Some(self.folded_truth(left)? && self.folded_truth(right)?),
+                BinaryOp::Or => Some(self.folded_truth(left)? || self.folded_truth(right)?),
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {
+                    let a = self.folded_constants.get(&left.span)?.as_integer()?;
+                    let b = self.folded_constants.get(&right.span)?.as_integer()?;
+                    Some(match op {
+                        BinaryOp::Eq => a == b,
+                        BinaryOp::Ne => a != b,
+                        BinaryOp::Lt => a < b,
+                        BinaryOp::Le => a <= b,
+                        BinaryOp::Gt => a > b,
+                        _ => a >= b,
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Find a common type for two arm/branch types: identical types unify to
@@ -528,9 +611,11 @@ impl SemanticAnalyzer {
         Ok(info.ty)
     }
 
-    /// Is this operand a bare integer literal for width-adaptation purposes?
-    /// Accepts an integer literal, a unary-negated integer literal (`-5`), and
-    /// either wrapped in parentheses.
+    /// Is this operand an integer expression whose type nothing pins down, so
+    /// it can adopt the other operand's? An integer literal, a unary-negated
+    /// one (`-5`), any of those in parentheses, and any binary combination of
+    /// them: `(37 >> 1)` is as free to be `i8` as `18` is. A cast is
+    /// deliberately excluded — it names the type it produces.
     fn is_adaptable_int_literal(expr: &Expr) -> bool {
         use crate::ast::{Literal, UnaryOp};
         match expr {
@@ -540,8 +625,83 @@ impl SemanticAnalyzer {
                 operand,
             } => matches!(&operand.node, Expr::Literal(Literal::Integer(_))),
             Expr::Paren(inner) => Self::is_adaptable_int_literal(&inner.node),
+            Expr::Binary { left, right, .. } => {
+                Self::is_adaptable_int_literal(&left.node)
+                    && Self::is_adaptable_int_literal(&right.node)
+            }
             _ => false,
         }
+    }
+
+    /// Every literal value written inside an adaptable expression. The type is
+    /// chosen to hold the literals as the programmer wrote them, not the value
+    /// the expression computes — that value depends on the type, which is what
+    /// is being decided.
+    fn collect_adaptable_ints(expr: &Expr, out: &mut Vec<i64>) {
+        use crate::ast::{Literal, UnaryOp};
+        match expr {
+            Expr::Literal(Literal::Integer(v)) => out.push(*v),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => {
+                if let Expr::Literal(Literal::Integer(v)) = &operand.node {
+                    out.push(-*v);
+                }
+            }
+            Expr::Paren(inner) => Self::collect_adaptable_ints(&inner.node, out),
+            Expr::Binary { left, right, .. } => {
+                Self::collect_adaptable_ints(&left.node, out);
+                Self::collect_adaptable_ints(&right.node, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn literal_fits(v: i64, p: PrimitiveType) -> bool {
+        match p {
+            PrimitiveType::U8 => (0..=255).contains(&v),
+            PrimitiveType::I8 => (-128..=127).contains(&v),
+            PrimitiveType::U16 | PrimitiveType::Addr => (0..=65535).contains(&v),
+            PrimitiveType::I16 => (-32768..=32767).contains(&v),
+            _ => false,
+        }
+    }
+
+    /// The type two bare literal operands should share. The ambient expectation
+    /// wins when it holds both values (so `let x: i16 = 3 - 5;` still computes
+    /// at 16 bits); otherwise the narrowest type that holds both.
+    fn common_literal_type(left: &Expr, right: &Expr, expected: Option<&Type>) -> Option<Type> {
+        let fallback = expected.cloned();
+        let mut values = Vec::new();
+        Self::collect_adaptable_ints(left, &mut values);
+        Self::collect_adaptable_ints(right, &mut values);
+        if values.is_empty() {
+            return fallback;
+        }
+        if let Some(Type::Primitive(p)) = expected
+            && values.iter().all(|v| Self::literal_fits(*v, *p))
+        {
+            return fallback;
+        }
+        let lo = *values.iter().min().unwrap();
+        let hi = *values.iter().max().unwrap();
+        let prim = if lo >= 0 {
+            if hi <= 255 {
+                PrimitiveType::U8
+            } else if hi <= 65535 {
+                PrimitiveType::U16
+            } else {
+                return fallback;
+            }
+        } else if lo >= -128 && hi <= 127 {
+            PrimitiveType::I8
+        } else if lo >= -32768 && hi <= 32767 {
+            PrimitiveType::I16
+        } else {
+            return fallback;
+        };
+        Some(Type::Primitive(prim))
     }
 
     fn check_binary(
@@ -579,6 +739,20 @@ impl SemanticAnalyzer {
             let lt = self.check_expr(left);
             self.expected_type = saved;
             (lt?, rt)
+        } else if left_is_int_lit && right_is_int_lit {
+            // Two bare literals inform nothing about each other, so each falls
+            // back to its own default — `-5` to `i8`, `3` to `u8` — and the
+            // operator then rejects the pair even though one type holds both
+            // values. Give them a shared expected type: the ambient one when it
+            // holds both, else the narrowest that does. `if (-5 - 3) < n` is the
+            // shape that hits this, where no ambient type exists to adopt.
+            let common =
+                Self::common_literal_type(&left.node, &right.node, self.expected_type.as_ref());
+            let saved = std::mem::replace(&mut self.expected_type, common);
+            let lt = self.check_expr(left);
+            let rt = self.check_expr(right);
+            self.expected_type = saved;
+            (self.poison_on_err(lt), self.poison_on_err(rt))
         } else {
             // Neither side informs the other's type, so check both: two bad
             // names in `p + q` should report together rather than one per

@@ -124,20 +124,7 @@ pub(super) fn emit_far_arm_branch(
     arm_label: &str,
     skip_label: &str,
 ) {
-    let inv = match cond {
-        "BEQ" => "BNE",
-        "BNE" => "BEQ",
-        "BCC" => "BCS",
-        "BCS" => "BCC",
-        "BMI" => "BPL",
-        "BPL" => "BMI",
-        "BVC" => "BVS",
-        "BVS" => "BVC",
-        other => unreachable!("not an invertible branch: {}", other),
-    };
-    emitter.emit_inst(inv, skip_label);
-    emitter.emit_inst("JMP", arm_label);
-    emitter.emit_label(skip_label);
+    emitter.emit_branch_far(cond, arm_label, skip_label);
 }
 
 /// Generate match statement using sequential CMP/BEQ comparisons

@@ -113,37 +113,68 @@ what is emitted. Both are prerequisites rather than features.
 
 `tests/fuzz_exec.rs` generates random programs, runs them on the emulator, and
 checks the answers two independent ways: against an **oracle** (the generator
-builds the expression tree, so evaluating it in Rust is exact) and against
-**itself** in four surface forms — inline, returned from a function, inside a
+builds the program as a tree, so running it in Rust is exact) and against
+**itself** in four surface forms — inline, inside a called function, inside a
 `match` arm, inside a single-iteration loop — which must all agree. The second
 catches what the first cannot: a misunderstanding the generator and the
 compiler share, where one form still diverges.
 
+What it generates is a small imperative language: `u8`/`u16`/`i8`/`i16`, ten
+binary operators, casts, comparisons and boolean connectives, assignment,
+`if`/`else`, counted `for` and condition-driven `while`, nested. Every variable's
+final value is written out, so one program checks four results.
+
 It is deterministic and seeded per iteration, so a failure reports a seed that
 reproduces it and CI sees the same programs every run. `WRAITH_FUZZ_ITERS` and
-`WRAITH_FUZZ_SEED` widen the search locally.
+`WRAITH_FUZZ_SEED` widen the search locally. A failing program is **shrunk**
+before it is reported — one-step simplifications, re-run each time, keeping the
+same *kind* of failure — so what lands in the output is a handful of lines
+rather than thirty of dense arithmetic.
 
-It found a real bug on its first run: constant folding evaluated in `i64` and
-truncated once, while generated code wraps at every step, so `(94 << 6) >> 3`
-folded to 240 where the identical expression through a variable computed 16.
-Fixed, with regression tests in `tests/e2e/const_folding.rs`.
+Six real bugs so far, all silent:
+
+1. Constant folding evaluated in `i64` and truncated once, while generated code
+   wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
+   through a variable computed 16.
+2. The same gap in the two places the width rule could not reach — a folded
+   *comparison* (its type is `bool`, so it has no width of its own) and a folded
+   *cast* (its type is the target, which hides the operand's width).
+3. Widening casts extended by the destination's signedness rather than the
+   source's, so `200u8 as i16` was −56 and `-1i8 as u16` was 255.
+4. Short-circuit `&&` left its exit "with A already zero" — true as emitted,
+   false once the peephole collapsed the left comparison into a bare branch.
+   Fixed on both sides: the codegen loads the zero, and the peephole no longer
+   collapses a boolean whose value is still live.
+5. Two bare integer literals in one operator each fell back to their own default
+   (`-5` to `i8`, `3` to `u8`) and the operator then rejected the pair, so
+   `if (-5 - 3) < n` did not compile.
+6. A conditional branch spanning the right operand of `&&` overflowed its
+   ±127-byte range once that operand was large enough — an assembly-time failure
+   with no source-level fix.
+
+Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/int_conversions.rs`,
+`tests/e2e/short_circuit.rs`.
 
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
 
-- **Signed types.** `i8`/`i16` need arithmetic shift and signed division
-  mirrored exactly.
-- **Division by zero.** Currently sidestepped with nonzero literal divisors.
-  Pinning the behaviour first would let the generator use arbitrary divisors.
+- **Division by zero.** Currently sidestepped with nonzero positive literal
+  divisors (positive also keeps `i8::MIN / -1` out). Pinning the behaviour first
+  would let the generator use arbitrary divisors.
 - **Precedence.** Expressions are fully parenthesised so a precedence
   disagreement cannot masquerade as a codegen bug; a separate generator that
   omits parentheses and compares against a parenthesised twin would test it
   metamorphically.
-- **Statements, not just expressions.** Loops with computed bounds, nested
-  control flow, calls with several arguments — the shapes where the spill and
-  frame machinery live.
+- **Mixed widths.** One type per program today, because mixed-width arithmetic
+  brings the implicit widening rules into the oracle.
+- **Calls with several arguments**, and recursion — the shapes where the spill
+  and frame machinery live. The four surface forms exercise one call each; none
+  passes an argument.
 - **Aggregates.** Structs, arrays and slices, where several bugs have already
   been found by hand.
+- **Shift counts at or past the width**, and constant expressions standing alone
+  (typed by their own literals, not by the program around them — see the
+  specification). Both are defined; neither is in the oracle.
 
 ### Code-size benchmark
 
@@ -161,8 +192,9 @@ and does not, on its own, say whether a change made a program *faster*.
 
 These items are not independent, and the natural order is not one-per-category:
 
-1. ~~Execution-checked fuzzing first~~ — done for `u8`/`u16` expressions; widen
-   it (see above) as the optimization work approaches.
+1. ~~Execution-checked fuzzing first~~ — done for all four integer types,
+   expressions and control flow; widen it further (see above) as the
+   optimization work approaches.
 2. **Then the known correctness bugs**, which are small and specific.
 3. **Then the usability gaps** (array fields in structs is the largest).
 4. ~~Then the size benchmark~~ — done; extend it with cycle counts when the

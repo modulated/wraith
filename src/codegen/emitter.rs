@@ -116,6 +116,38 @@ impl Emitter {
         self.reg_state.invalidate_all();
     }
 
+    /// A conditional branch whose target may be arbitrarily far away — past a
+    /// body of user code whose size nothing here bounds. A 6502 conditional
+    /// branch reaches ±127 bytes, so emit the *inverse* branch over a `JMP`
+    /// instead: the hop is always 3 bytes and the reach is the whole address
+    /// space.
+    ///
+    /// Use this wherever the distance depends on how much code the program
+    /// contains, and a plain `emit_inst("BEQ", …)` wherever it is fixed (a hop
+    /// over two or three instructions this function itself emitted). The
+    /// difference is not stylistic: a plain branch over a large body fails at
+    /// assembly time, which is a build the programmer cannot fix from the
+    /// source.
+    ///
+    /// `skip` is the label for the fall-through, supplied by the caller because
+    /// every current site already names one.
+    pub fn emit_branch_far(&mut self, cond: &str, target: &str, skip: &str) {
+        let inverse = match cond {
+            "BEQ" => "BNE",
+            "BNE" => "BEQ",
+            "BCC" => "BCS",
+            "BCS" => "BCC",
+            "BMI" => "BPL",
+            "BPL" => "BMI",
+            "BVC" => "BVS",
+            "BVS" => "BVC",
+            other => unreachable!("not an invertible branch: {other}"),
+        };
+        self.emit_inst(inverse, skip);
+        self.emit_inst("JMP", target);
+        self.emit_label(skip);
+    }
+
     pub fn emit_inst(&mut self, mnemonic: &str, operand: &str) {
         self.output.push_str("    ");
         self.output.push_str(mnemonic);

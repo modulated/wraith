@@ -432,11 +432,24 @@ pub(super) fn generate_logical_and(
     // Evaluate left operand
     generate_expr(left, emitter, info, string_collector)?;
 
-    // If left is false (0), result is false
+    // If left is false, the result is false. Load that zero explicitly rather
+    // than jumping to `end_label` on the strength of A already holding it: the
+    // peephole is free to collapse a comparison into a bare branch, and then
+    // what A holds on this path is the comparison's intermediate, not its
+    // boolean. (`if (v < -102) && …` with `v == 0` took the branch on
+    // `0 - 0x9A = 0x66`, a truthy "false".)
+    //
+    // Loading it also keeps the branch short: it hops the five bytes to the
+    // right operand rather than reaching past all of it, which for a large
+    // right operand would exceed a branch's ±127-byte range outright.
+    let eval_right_label = emitter.next_label("ar");
     emitter.emit_inst("CMP", "#$00");
-    emitter.emit_inst("BEQ", &end_label); // If zero, A is already 0, done
+    emitter.emit_inst("BNE", &eval_right_label);
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_inst("JMP", &end_label);
 
     // Left was true, evaluate right
+    emitter.emit_label(&eval_right_label);
     generate_expr(right, emitter, info, string_collector)?;
 
     // Convert right to boolean (0 or 1)

@@ -717,7 +717,7 @@ pub fn eval_const_expr_wrapping(
 }
 
 /// Truncate `v` to `bits`, sign-extending when the type is signed.
-fn narrow(v: i64, bits: u32, signed: bool) -> i64 {
+pub(crate) fn narrow(v: i64, bits: u32, signed: bool) -> i64 {
     if bits == 0 || bits >= 64 {
         return v;
     }

@@ -121,13 +121,26 @@ pub(super) fn generate_type_cast(
                         return Ok(());
                     }
 
-                    // Casting from 8-bit to 16-bit: Need to handle high byte
-                    // For u8 -> u16: zero-extend (A has low byte, Y should be 0)
-                    // For i8 -> i16: sign-extend (A has low byte, Y should be sign-extended)
+                    // Casting from 8-bit to 16-bit. Which extension applies is
+                    // a property of the *source*, not the destination: a signed
+                    // source carries its sign into the high byte, an unsigned
+                    // one carries zero. Reading it off the destination instead
+                    // gets both mixed cases backwards — `200u8 as i16` came out
+                    // −56 rather than 200, and `-1i8 as u16` came out 255 rather
+                    // than 65535. With no resolved source type to consult, fall
+                    // back to the destination, which is right whenever the two
+                    // agree.
+                    let source_is_signed = match source_type {
+                        Some(crate::sema::types::Type::Primitive(p)) => {
+                            matches!(p, PrimitiveType::I8 | PrimitiveType::I16)
+                        }
+                        None => matches!(target_prim, PrimitiveType::I16),
+                        _ => false,
+                    };
 
                     emitter.emit_comment(&format!("Cast to {:?}", target_prim));
 
-                    if matches!(target_prim, PrimitiveType::I16) {
+                    if source_is_signed {
                         // Sign extension: if bit 7 of A is set, Y = $FF, else Y = $00
                         if emitter.is_verbose() {
                             emitter.emit_comment(

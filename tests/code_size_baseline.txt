@@ -14,13 +14,13 @@ interrupt_counter 824 0
 interrupts 575 0
 intrinsics_demo 529 0
 loop_unroll_demo 0 0
-monitor_standalone 2691 153
-pointers 605 0
+monitor_standalone 2711 153
+pointers 610 0
 slice_assign 119 0
 slice_test 2756 0
 stack_overflow_demo 165 0
 string_concat 102 22
-string_features_demo 1047 55
+string_features_demo 1052 55
 string_iteration 484 6
 string_slicing 117 12
 strings 337 21

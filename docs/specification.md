@@ -2084,11 +2084,31 @@ let b: u8 = 5;
 let c: u16 = a + (b as u16);   // explicit widening required
 ```
 
-The single exception is a bare **integer literal** operand: it adopts the other
-operand's integer type when its value fits, in any operand position and for any
-operator (arithmetic *and* comparison). This is a compile-time typing of the
-literal, not a runtime conversion, so the no-implicit-conversion rule is
-preserved. A negated literal (`-5`) counts as a literal.
+The single exception is an operand built only from **integer literals**: it
+adopts the other operand's integer type when its values fit, in any operand
+position and for any operator (arithmetic *and* comparison). This is a
+compile-time typing of the literals, not a runtime conversion, so the
+no-implicit-conversion rule is preserved. A negated literal (`-5`) counts, as
+does a whole subexpression of literals — `(37 >> 1)` is as free to be `i8` as
+`18` is. A cast does not: it names the type it produces.
+
+When **both** operands are literals there is nothing to adopt from, so the pair
+takes the narrowest type that holds every literal written in it — signed if any
+of them is negative — unless a declared type is in scope and holds them all, in
+which case that wins:
+
+```rust,compile,fragment
+let n: i8 = 1;
+if (-5 - 3) < n { }            // ok: -5 and 3 are both i8; -8 < 1
+
+let big: i16 = 3 - 5;          // i16, from the declaration: -2, not 254
+```
+
+Note what this means for a constant expression standing on its own: its type
+comes from the literals in it, not from the code around it. In a program full of
+`i8` values, `0 >= (3 << 7)` is still a `u8` comparison, and the shift wraps at
+eight bits accordingly. Anchor it with a variable, or annotate it, if the
+program's width is what you meant.
 
 The same rule applies wherever a target type is known, notably array elements:
 
@@ -2183,6 +2203,21 @@ let large: i16 = small as i16;  // 0xFFFF (sign extended)
 let positive: i8 = 127;      // 0x7F
 let wide: i16 = positive as i16; // 0x007F (zero extended for positive)
 ```
+
+Which extension a widening cast performs is decided by the **source** type, not
+the destination. A signed source carries its sign into the new high byte; an
+unsigned one carries zero. The two mixed cases follow from that and are worth
+stating outright:
+
+```rust,compile,fragment
+let big: u8 = 200;
+let as_signed: i16 = big as i16;   // 200 — a u8 has no sign bit to extend
+
+let neg: i8 = -1;
+let as_unsigned: u16 = neg as u16; // 0xFFFF — the value, reinterpreted
+```
+
+Narrowing is unaffected: it keeps the low byte whichever way the signs go.
 
 **Manual Sign Extension (if needed):**
 ```rust,compile

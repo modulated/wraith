@@ -97,3 +97,85 @@ fn a_chain_of_wrapping_intermediates_agrees() {
     assert_eq!(folded, runtime);
     assert_eq!(folded, 160);
 }
+
+// ---------------------------------------------------------------------------
+// Folds the width rule could not reach
+// ---------------------------------------------------------------------------
+//
+// The re-fold above is keyed on the expression's own integer width, which two
+// shapes do not have: a comparison (its type is `bool`) and a cast (its type is
+// the *target*, so the operand's width is invisible). Both fell back to the
+// full-precision fold, and both disagreed with the code they replaced.
+
+/// Compare a constant condition against the same condition through a variable.
+fn condition_both_ways(ty: &str, seed: &str, folded: &str, runtime: &str) -> (u8, u8) {
+    let mut e = run(&format!(
+        "const OUT: addr = 0x0900;\nconst OUT2: addr = 0x0902;\n\
+         #[reset]\nfn main() {{\n    let v: {ty} = {seed};\n\
+         \x20   OUT = 0;\n    OUT2 = 0;\n\
+         \x20   if {folded} {{ OUT = 1; }}\n\
+         \x20   if {runtime} {{ OUT2 = 1; }}\n    loop {{}}\n}}\n"
+    ));
+    (e.mem(0x0900), e.mem(0x0902))
+}
+
+/// The case the fuzzer found: the comparison folded in full precision, where
+/// the shift had not wrapped.
+#[test]
+fn a_folded_comparison_uses_the_operands_width() {
+    let (folded, runtime) = condition_both_ways("u8", "94", "(94 << 6) >= 229", "(v << 6) >= 229");
+    assert_eq!(folded, runtime, "folded and runtime conditions must agree");
+    assert_eq!(folded, 0, "94 << 6 wraps to 128, which is below 229");
+}
+
+#[test]
+fn a_folded_comparison_agrees_at_sixteen_bits() {
+    let (folded, runtime) =
+        condition_both_ways("u16", "60000", "(60000 * 2) < 20000", "(v * 2) < 20000");
+    assert_eq!(folded, runtime);
+    assert_eq!(folded, 0, "60000 * 2 wraps to 54464, which is above 20000");
+}
+
+/// The connectives fold from their operands, so a wrong operand would have
+/// propagated through them too.
+#[test]
+fn a_folded_connective_agrees_with_its_operands() {
+    let (folded, runtime) = condition_both_ways(
+        "u8",
+        "94",
+        "((94 << 6) >= 229) || ((94 * 3) > 200)",
+        "((v << 6) >= 229) || ((v * 3) > 200)",
+    );
+    assert_eq!(folded, runtime);
+    // 94 << 6 wraps to 128 (< 229); 94 * 3 wraps to 26 (< 200).
+    assert_eq!(folded, 0);
+}
+
+/// A cast's operand has its own width, which the cast's type hides.
+#[test]
+fn a_fold_through_a_cast_wraps_the_operand_first() {
+    let (folded, runtime) = both_ways(
+        "u16",
+        "15397",
+        "(((15397 << 13) % 27617) as i8) as u16",
+        "(((v << 13) % 27617) as i8) as u16",
+    );
+    assert_eq!(folded, runtime, "folded and runtime forms must agree");
+    // 15397 << 13 wraps to 40960; % 27617 is 13343; as i8 keeps 0x1F = 31.
+    assert_eq!(folded, 31);
+}
+
+#[test]
+fn a_fold_through_a_narrowing_cast_agrees() {
+    let (folded, runtime) = both_ways(
+        "u8",
+        "200",
+        "((200 * 2) as u16) as u8",
+        "((v * 2) as u16) as u8",
+    );
+    assert_eq!(folded, runtime);
+    assert_eq!(
+        folded, 144,
+        "the u8 product wraps before the cast widens it"
+    );
+}
