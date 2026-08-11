@@ -1,0 +1,30 @@
+# Bytes emitted per example, by section. Regenerate with:
+#   WRAITH_BLESS_SIZES=1 cargo test --test code_size
+# name code data
+adt_demo 1166 14
+bcd_score 626 0
+const_array_demo 37 24
+countdown_tail 103 0
+dead_code_demo 20 0
+factorial_tail 334 0
+fib_recurse 243 0
+fibonacci 212 0
+fsm 484 4
+interrupt_counter 824 0
+interrupts 575 0
+intrinsics_demo 529 0
+loop_unroll_demo 0 0
+monitor_standalone 2691 153
+pointers 605 0
+slice_assign 119 0
+slice_test 2756 0
+stack_overflow_demo 165 0
+string_concat 102 22
+string_features_demo 1047 55
+string_iteration 484 6
+string_slicing 117 12
+strings 337 21
+struct 231 0
+struct_nested 91 0
+syntax_demo 70 0
+tuple 900 21

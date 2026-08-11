@@ -134,13 +134,15 @@ immediately.
 
 ### Code-size benchmark
 
-There is no `benches/`, and CI runs only test/clippy/fmt plus a fuzz-target
-build. So there is no way to tell whether an optimization helped, or whether an
-unrelated change made every program bigger. Recording bytes emitted per example
-program — and eventually cycle counts, which the disassembly item below would
-supply — turns "smaller code" from an assertion into a measurement.
+`tests/code_size.rs` compiles every `examples/*.wr` and checks the bytes emitted
+per section against `tests/code_size_baseline.txt`. A change either way fails,
+with a per-program and overall delta; `WRAITH_BLESS_SIZES=1 cargo test --test
+code_size` re-blesses, so an optimization's win shows up in the diff rather than
+in a claim. It runs under plain `cargo test`, so CI already guards it.
 
-Nothing in *Code generation & optimization* can be evaluated until this exists.
+Still to add: **cycle counts**, which need the instruction timing table the
+disassembly item above would build. Size is the cheaper half of the measurement
+and does not, on its own, say whether a change made a program *faster*.
 
 ### Sequencing
 
@@ -150,7 +152,8 @@ These items are not independent, and the natural order is not one-per-category:
    work safe to attempt.
 2. **Then the known correctness bugs**, which are small and specific.
 3. **Then the usability gaps** (array fields in structs is the largest).
-4. **Then the size benchmark**, before any optimization it would measure.
+4. ~~Then the size benchmark~~ — done; extend it with cycle counts when the
+   timing table exists.
 5. **Branch/flag tracking last.** It is the biggest single efficiency prize and
    the one whose predecessor already produced several silent miscompiles.
    Attempting it before differential testing exists is how the next silent
