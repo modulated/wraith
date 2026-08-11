@@ -111,26 +111,39 @@ what is emitted. Both are prerequisites rather than features.
 
 ### Execution-checked fuzzing
 
-`fuzz/fuzz_targets/fuzz_full_stack.rs` drives lex → parse → sema → codegen and
-discards the result. It proves the compiler does not *crash*; nothing proves it
-does not *lie*. Every miscompile found so far — the u16 match ranges, the
-struct-argument pointer high byte, the X clobber across a recursive call, the
-recursion depth model — compiled cleanly and returned a wrong answer, so the
-existing fuzzer is structurally incapable of finding any of them.
+`tests/fuzz_exec.rs` generates random programs, runs them on the emulator, and
+checks the answers two independent ways: against an **oracle** (the generator
+builds the expression tree, so evaluating it in Rust is exact) and against
+**itself** in four surface forms — inline, returned from a function, inside a
+`match` arm, inside a single-iteration loop — which must all agree. The second
+catches what the first cannot: a misunderstanding the generator and the
+compiler share, where one form still diverges.
 
-A hand-written battery of ~150 programs with computed expected results found
-four. That hit rate is the argument for automating it: generate random
-well-typed programs, run them on the emulator harness (`tests/common/exec.rs`),
-and compare against what they should produce.
+It is deterministic and seeded per iteration, so a failure reports a seed that
+reproduces it and CI sees the same programs every run. `WRAITH_FUZZ_ITERS` and
+`WRAITH_FUZZ_SEED` widen the search locally.
 
-The cheaper form, which needs no reference interpreter, is **metamorphic**:
-generate a program and a semantically equivalent variant — `x * 2` against
-`x + x`, an `if`/`else` chain against the equivalent `match`, a constant loop
-bound against a runtime one holding the same value, a slice bound to a variable
-against the same slice expression inline — compile both, and assert they agree.
-Any disagreement is a compiler bug without anyone having to say what the right
-answer was. The u16 match-range bug would have fallen out of the third of those
-immediately.
+It found a real bug on its first run: constant folding evaluated in `i64` and
+truncated once, while generated code wraps at every step, so `(94 << 6) >> 3`
+folded to 240 where the identical expression through a variable computed 16.
+Fixed, with regression tests in `tests/e2e/const_folding.rs`.
+
+**To widen**, in rough order of value — each needs the oracle extended to match,
+and an oracle that is merely *probably* right is worse than no oracle:
+
+- **Signed types.** `i8`/`i16` need arithmetic shift and signed division
+  mirrored exactly.
+- **Division by zero.** Currently sidestepped with nonzero literal divisors.
+  Pinning the behaviour first would let the generator use arbitrary divisors.
+- **Precedence.** Expressions are fully parenthesised so a precedence
+  disagreement cannot masquerade as a codegen bug; a separate generator that
+  omits parentheses and compares against a parenthesised twin would test it
+  metamorphically.
+- **Statements, not just expressions.** Loops with computed bounds, nested
+  control flow, calls with several arguments — the shapes where the spill and
+  frame machinery live.
+- **Aggregates.** Structs, arrays and slices, where several bugs have already
+  been found by hand.
 
 ### Code-size benchmark
 
@@ -148,8 +161,8 @@ and does not, on its own, say whether a change made a program *faster*.
 
 These items are not independent, and the natural order is not one-per-category:
 
-1. **Execution-checked fuzzing first.** It is what makes the risky optimization
-   work safe to attempt.
+1. ~~Execution-checked fuzzing first~~ — done for `u8`/`u16` expressions; widen
+   it (see above) as the optimization work approaches.
 2. **Then the known correctness bugs**, which are small and specific.
 3. **Then the usability gaps** (array fields in structs is the largest).
 4. ~~Then the size benchmark~~ — done; extend it with cycle counts when the

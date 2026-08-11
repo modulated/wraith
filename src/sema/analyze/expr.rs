@@ -11,6 +11,18 @@ use rustc_hash::FxHashMap as HashMap;
 
 use super::SemanticAnalyzer;
 
+/// The width in bits of an integer type, and whether it is signed. `None` for
+/// anything whose arithmetic does not wrap at a fixed width.
+fn int_width_of(ty: &Type) -> Option<(u32, bool)> {
+    match ty {
+        Type::Primitive(PrimitiveType::U8) => Some((8, false)),
+        Type::Primitive(PrimitiveType::I8) => Some((8, true)),
+        Type::Primitive(PrimitiveType::U16) => Some((16, false)),
+        Type::Primitive(PrimitiveType::I16) => Some((16, true)),
+        _ => None,
+    }
+}
+
 impl SemanticAnalyzer {
     /// Check if an expression contains any references to addr symbols (runtime values)
     pub(super) fn contains_addr_reference(&self, expr: &Spanned<Expr>) -> bool {
@@ -311,6 +323,27 @@ impl SemanticAnalyzer {
 
         // Store the resolved type for this expression so codegen can access it
         self.resolved_types.insert(expr.span, result_ty.clone());
+
+        // Re-fold at the expression's own width now that it is known.
+        //
+        // The fold above runs before typing and so works in `i64`, truncating
+        // once at the end. The generated code wraps after *every* operation, so
+        // the two disagree whenever an intermediate leaves the type's range:
+        // `(94 << 6) >> 3` on a `u8` folds to 240 in full precision but
+        // computes 16 at run time, and the same expression written with a
+        // variable took the run-time path — so a constant and its identical
+        // runtime form gave different answers.
+        if self.folded_constants.contains_key(&expr.span)
+            && let Some((bits, signed)) = int_width_of(&result_ty)
+            && let Ok(v) = crate::sema::const_eval::eval_const_expr_wrapping(
+                expr,
+                &self.const_env,
+                bits,
+                signed,
+            )
+        {
+            self.folded_constants.insert(expr.span, v);
+        }
 
         Ok(result_ty)
     }

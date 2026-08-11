@@ -2,6 +2,10 @@
 //!
 //! Provides functions to compile programs at different stages
 //! and handle errors appropriately.
+//!
+//! Shared test infrastructure: compiled into several test binaries but only
+//! exercised by some, so unused-item warnings are expected.
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 use wraith::ast::SourceFile;

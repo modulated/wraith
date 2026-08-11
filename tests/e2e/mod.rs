@@ -9,6 +9,7 @@ mod bcd_validation;
 mod bitfields;
 mod cmos;
 mod complex_features;
+mod const_folding;
 mod consts;
 mod control_flow;
 mod cpu_flags;

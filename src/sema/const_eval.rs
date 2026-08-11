@@ -607,6 +607,129 @@ fn apply_type_cast(
     }
 }
 
+/// Fold `expr` the way the *generated code* would compute it: wrapping at
+/// `bits` after every operation, rather than in full precision with one
+/// truncation at the end.
+///
+/// The difference is observable. `(94 << 6) >> 3` on a `u8` wraps the shift to
+/// 128 and yields 16; evaluated in `i64` it is 6016 >> 3 = 752, which truncates
+/// to 240. The same expression written with a variable runs at u8 width and
+/// gives 16, so folding it to 240 made a constant disagree with the identical
+/// runtime computation. Multiplication has the same shape: `(200 * 2) / 4` is
+/// 36 at u8 width and 100 in full precision.
+///
+/// Comparisons and non-integer results are left to the ordinary evaluator; only
+/// integer arithmetic needs narrowing. A `Cast` deliberately changes width, so
+/// it is evaluated by the ordinary path and then narrowed to the *outer* width
+/// like any other leaf.
+pub fn eval_const_expr_wrapping(
+    expr: &Spanned<Expr>,
+    env: &ConstEnv,
+    bits: u32,
+    signed: bool,
+) -> Result<ConstValue, SemaError> {
+    let narrowed = |v: i64| ConstValue::Integer(narrow(v, bits, signed));
+
+    match &expr.node {
+        Expr::Paren(inner) => eval_const_expr_wrapping(inner, env, bits, signed),
+
+        Expr::Binary { left, op, right } => {
+            // Only arithmetic narrows; a comparison yields a bool, and the
+            // logical operators take bools.
+            if !matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+            ) {
+                return eval_const_expr_with_env(expr, env);
+            }
+
+            let l = eval_const_expr_wrapping(left, env, bits, signed)?;
+            let r = eval_const_expr_wrapping(right, env, bits, signed)?;
+            let (Some(a), Some(b)) = (l.as_integer(), r.as_integer()) else {
+                return eval_const_expr_with_env(expr, env);
+            };
+
+            let v = match op {
+                BinaryOp::Add => a.wrapping_add(b),
+                BinaryOp::Sub => a.wrapping_sub(b),
+                BinaryOp::Mul => a.wrapping_mul(b),
+                BinaryOp::Div => {
+                    if b == 0 {
+                        return Err(SemaError::Custom {
+                            message: "division by zero in constant expression".to_string(),
+                            span: expr.span,
+                        });
+                    }
+                    a.wrapping_div(b)
+                }
+                BinaryOp::Mod => {
+                    if b == 0 {
+                        return Err(SemaError::Custom {
+                            message: "modulo by zero in constant expression".to_string(),
+                            span: expr.span,
+                        });
+                    }
+                    a.wrapping_rem(b)
+                }
+                BinaryOp::BitAnd => a & b,
+                BinaryOp::BitOr => a | b,
+                BinaryOp::BitXor => a ^ b,
+                // A shift of the width or more clears the value, which is what
+                // the emitted code does; `checked_shl` would instead give None
+                // and abandon the fold.
+                BinaryOp::Shl => {
+                    if !(0..i64::from(bits)).contains(&b) {
+                        0
+                    } else {
+                        a.wrapping_shl(b as u32)
+                    }
+                }
+                BinaryOp::Shr => {
+                    if !(0..i64::from(bits)).contains(&b) {
+                        0
+                    } else {
+                        // Narrow first so an unsigned shift does not drag down
+                        // sign bits that the value does not have at this width.
+                        narrow(a, bits, signed).wrapping_shr(b as u32)
+                    }
+                }
+                _ => unreachable!("filtered above"),
+            };
+            Ok(narrowed(v))
+        }
+
+        // Everything else is a leaf as far as width is concerned: evaluate it
+        // normally and narrow the result to this expression's width.
+        _ => match eval_const_expr_with_env(expr, env)? {
+            ConstValue::Integer(v) => Ok(narrowed(v)),
+            other => Ok(other),
+        },
+    }
+}
+
+/// Truncate `v` to `bits`, sign-extending when the type is signed.
+fn narrow(v: i64, bits: u32, signed: bool) -> i64 {
+    if bits == 0 || bits >= 64 {
+        return v;
+    }
+    let mask = (1i64 << bits) - 1;
+    let t = v & mask;
+    if signed && (t >> (bits - 1)) & 1 == 1 {
+        t - (1i64 << bits)
+    } else {
+        t
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
