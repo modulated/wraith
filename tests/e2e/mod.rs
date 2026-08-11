@@ -2,6 +2,7 @@
 //!
 //! Tests complete language features from source to assembly output
 
+mod addr_of_rom;
 mod aggregate_init;
 mod bcd;
 mod bcd_validation;

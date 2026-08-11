@@ -5,6 +5,7 @@
 //! - Bitwise NOT (`~x`): Bitwise complement
 //! - Logical NOT (`!x`): Boolean negation (converts to 0 or 1)
 
+use super::aggregate::StaticBase;
 use crate::ast::{Spanned, UnaryOp};
 use crate::codegen::{CodegenError, Emitter, StringCollector};
 use crate::sema::ProgramInfo;
@@ -162,10 +163,9 @@ fn generate_addr_of(
             emitter.emit_inst("LDA", &format!("#${:02X}", addr));
             emitter.emit_inst("LDX", "#$00");
         }
-        SymbolLocation::Absolute(addr) => {
+        SymbolLocation::Absolute(_) | SymbolLocation::None => {
             emitter.emit_comment(&format!("Address of '{}'", sym.name));
-            emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
-            emitter.emit_inst("LDX", &format!("#${:02X}", addr >> 8));
+            static_base_of(sym).emit_as_pointer(emitter);
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(format!(
@@ -258,13 +258,14 @@ fn generate_addr_of_element(
     let offset = (idx as usize * elem_size) as u16;
 
     match sym.location {
-        // A global array lives at its own label, so the element address is a
-        // compile-time constant.
-        SymbolLocation::Absolute(base) => {
-            let addr = base.wrapping_add(offset);
+        // A global array lives at its own address (a mutable static) or its own
+        // label (a const in ROM), so the element address is fixed at compile
+        // time — but a const's `Absolute(0)` is a placeholder, not an address,
+        // so it must be named through the label.
+        SymbolLocation::Absolute(_) | SymbolLocation::None => {
+            let base = static_base_of(sym);
             emitter.emit_comment(&format!("Address of {}[{}]", sym.name, idx));
-            emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
-            emitter.emit_inst("LDX", &format!("#${:02X}", addr >> 8));
+            base.plus(offset).emit_as_pointer(emitter);
         }
         // A local array's slot holds a pointer to its data, so the offset has
         // to be added at run time.
@@ -294,6 +295,20 @@ fn generate_addr_of_element(
     }
     emitter.reg_state.modify_a();
     Ok(())
+}
+
+/// Where a non-local symbol's storage is named from.
+///
+/// A mutable `static` has a real BSS address. An immutable `const` is ROM data
+/// at an assembler label, and sema leaves it at `Absolute(0)` because the
+/// address is the linker's to choose — so reading that placeholder as a number
+/// is what made `&A[1]` come out as `$0001`.
+fn static_base_of(sym: &crate::sema::table::SymbolInfo) -> StaticBase {
+    use crate::sema::table::{SymbolKind, SymbolLocation};
+    match (&sym.location, &sym.kind) {
+        (SymbolLocation::Absolute(a), k) if *k != SymbolKind::Constant => StaticBase::Addr(*a),
+        _ => StaticBase::Label(sym.name.clone(), 0),
+    }
 }
 
 /// Emit `&object.field` — the struct's base plus the field's offset.
@@ -365,10 +380,8 @@ fn generate_addr_of_field(
                 emitter.emit_inst("LDA", &format!("${:02X}", tmp));
             }
         }
-        SymbolLocation::Absolute(base) => {
-            let addr = base.wrapping_add(offset);
-            emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF));
-            emitter.emit_inst("LDX", &format!("#${:02X}", addr >> 8));
+        SymbolLocation::Absolute(_) | SymbolLocation::None => {
+            static_base_of(sym).plus(offset).emit_as_pointer(emitter);
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(format!(

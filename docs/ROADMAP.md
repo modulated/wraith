@@ -103,6 +103,61 @@ table is new.
 
 ---
 
+## Testing and measurement infrastructure
+
+Two gaps that gate the work below them: nothing currently checks that compiled
+programs produce the *right answers* at scale, and nothing measures the size of
+what is emitted. Both are prerequisites rather than features.
+
+### Execution-checked fuzzing
+
+`fuzz/fuzz_targets/fuzz_full_stack.rs` drives lex → parse → sema → codegen and
+discards the result. It proves the compiler does not *crash*; nothing proves it
+does not *lie*. Every miscompile found so far — the u16 match ranges, the
+struct-argument pointer high byte, the X clobber across a recursive call, the
+recursion depth model — compiled cleanly and returned a wrong answer, so the
+existing fuzzer is structurally incapable of finding any of them.
+
+A hand-written battery of ~150 programs with computed expected results found
+four. That hit rate is the argument for automating it: generate random
+well-typed programs, run them on the emulator harness (`tests/common/exec.rs`),
+and compare against what they should produce.
+
+The cheaper form, which needs no reference interpreter, is **metamorphic**:
+generate a program and a semantically equivalent variant — `x * 2` against
+`x + x`, an `if`/`else` chain against the equivalent `match`, a constant loop
+bound against a runtime one holding the same value, a slice bound to a variable
+against the same slice expression inline — compile both, and assert they agree.
+Any disagreement is a compiler bug without anyone having to say what the right
+answer was. The u16 match-range bug would have fallen out of the third of those
+immediately.
+
+### Code-size benchmark
+
+There is no `benches/`, and CI runs only test/clippy/fmt plus a fuzz-target
+build. So there is no way to tell whether an optimization helped, or whether an
+unrelated change made every program bigger. Recording bytes emitted per example
+program — and eventually cycle counts, which the disassembly item below would
+supply — turns "smaller code" from an assertion into a measurement.
+
+Nothing in *Code generation & optimization* can be evaluated until this exists.
+
+### Sequencing
+
+These items are not independent, and the natural order is not one-per-category:
+
+1. **Execution-checked fuzzing first.** It is what makes the risky optimization
+   work safe to attempt.
+2. **Then the known correctness bugs**, which are small and specific.
+3. **Then the usability gaps** (array fields in structs is the largest).
+4. **Then the size benchmark**, before any optimization it would measure.
+5. **Branch/flag tracking last.** It is the biggest single efficiency prize and
+   the one whose predecessor already produced several silent miscompiles.
+   Attempting it before differential testing exists is how the next silent
+   miscompile gets written.
+
+---
+
 ## Known limits found by stress testing
 
 A differential battery (~150 programs with hand-computed results, run on the
@@ -119,29 +174,6 @@ with "only variable array indexing is currently supported". Nested *struct*
 fields of the same width work, because that path recurses field by field; the
 array field has no equivalent. Making array fields work means giving them the
 same treatment.
-
-### `&const_array[i]` computes the wrong address
-
-An immutable `const` stays at `SymbolLocation::Absolute(0)` — it is ROM data
-referenced by label, and sema never learns the label's address. But
-`generate_addr_of_element`'s `Absolute(base)` arm computes `base + offset`, so
-for a const array that is `0 + offset`: `&A[1]` emits `LDA #$01 / LDX #$00` and
-yields the pointer `$0001`, the *index* rather than the address. A store through
-it silently scribbles on zero page ($00-$1F, system reserved).
-
-Statics are fine (they have a real BSS address) and locals are fine (the slot
-holds a runtime pointer); only the const/ROM case is wrong.
-
-This also slips past the guard that already exists one level up: `A[1] = 9` on
-a const is a clean sema error ("a const lives in ROM, so the store would
-silently do nothing on real hardware"), but routing the same write through
-`&A[1]` is accepted.
-
-The address itself should be emitted label-relative (`#<A+1` / `#>A+1`, the form
-the string and struct paths already use) rather than numerically. What to do
-about *writes* through such a pointer is a design call: either track ROM
-provenance and reject them the way direct const writes are rejected, or accept
-that they are silent no-ops on hardware as they are for any ROM store.
 
 ### A mutable slice type
 

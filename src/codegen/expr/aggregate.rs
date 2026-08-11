@@ -696,6 +696,29 @@ impl StaticBase {
     pub(crate) fn is_read_only(&self) -> bool {
         matches!(self, StaticBase::Label(..))
     }
+
+    /// Emit this address itself as a value, low byte in A and high byte in X —
+    /// the pointer convention.
+    ///
+    /// A label has to go through `#<`/`#>` rather than arithmetic: an immutable
+    /// `const` is ROM data whose address the linker chooses, so sema leaves it
+    /// at `Absolute(0)` and there is no number to add an offset to. Sites that
+    /// computed `base + offset` from that placeholder produced the *offset* as
+    /// the address — `&A[1]` came out as `$0001`, a pointer into system-reserved
+    /// zero page.
+    pub(crate) fn emit_as_pointer(&self, emitter: &mut Emitter) {
+        match self {
+            StaticBase::Addr(a) => {
+                emitter.emit_inst("LDA", &format!("#${:02X}", a & 0xFF));
+                emitter.emit_inst("LDX", &format!("#${:02X}", a >> 8));
+            }
+            StaticBase::Label(..) => {
+                let name = self.operand(0);
+                emitter.emit_inst("LDA", &format!("#<{}", name));
+                emitter.emit_inst("LDX", &format!("#>{}", name));
+            }
+        }
+    }
 }
 
 /// Resolve a chain of *local* (inline, non-pointer) struct accesses to a static
