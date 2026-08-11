@@ -402,3 +402,176 @@ fn a_reslice_expression_can_be_a_call_argument() {
         "CA[1..5] re-sliced from 1 starts at CA[2]"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Returning a slice expression
+//
+// A returned slice hands the caller a pointer to its 4-byte descriptor, so the
+// descriptor needs storage that outlives the expression. A bound variable has a
+// frame slot already; sema now reserves the equivalent for the expression form,
+// keyed by its span and colored with the call graph like any local.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_slice_expression_can_be_returned() {
+    let mut e = run(&format!(
+        "{SOURCES}
+        fn middle(v: &[u8]) -> &[u8] {{ return v[1..3]; }}
+        #[reset]
+        fn main() {{
+            let s: &[u8] = CA[0..6];
+            let m: &[u8] = middle(s);
+            OUT = m[0];
+            OUT1 = m[1];
+            OUT2 = m.len as u8;
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(
+        e.mem(0x0900),
+        20,
+        "CA[1] — offsets compose through the call"
+    );
+    assert_eq!(e.mem(0x0901), 30);
+    assert_eq!(e.mem(0x0902), 2);
+}
+
+/// Returning a slice of a `const` array directly, with no parameter involved.
+#[test]
+fn a_returned_slice_expression_may_name_rom_directly() {
+    let mut e = run(&format!(
+        "{SOURCES}
+        fn table() -> &[u8] {{ return CA[2..5]; }}
+        #[reset]
+        fn main() {{
+            let t: &[u8] = table();
+            OUT = t[0];
+            OUT1 = t[2];
+            OUT2 = t.len as u8;
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(e.mem(0x0900), 30, "CA[2]");
+    assert_eq!(e.mem(0x0901), 50, "CA[4]");
+    assert_eq!(e.mem(0x0902), 3);
+}
+
+/// The bound form must keep working, and agree with the expression form.
+#[test]
+fn the_returned_bound_and_expression_forms_agree() {
+    let mut e = run(&format!(
+        "{SOURCES}
+        fn expr_form(v: &[u8]) -> &[u8] {{ return v[1..4]; }}
+        fn bound_form(v: &[u8]) -> &[u8] {{ let m: &[u8] = v[1..4]; return m; }}
+        #[reset]
+        fn main() {{
+            let s: &[u8] = CA[0..6];
+            let a: &[u8] = expr_form(s);
+            let b: &[u8] = bound_form(s);
+            OUT = a[0];
+            OUT1 = b[0];
+            OUT2 = a.len as u8;
+            OUT3 = b.len as u8;
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(e.mem(0x0900), e.mem(0x0901), "same base");
+    assert_eq!(e.mem(0x0902), e.mem(0x0903), "same length");
+    assert_eq!(e.mem(0x0900), 20);
+}
+
+/// Two functions each returning a slice expression get their own descriptor
+/// slots; sharing one would have the second overwrite the first.
+#[test]
+fn two_returned_slice_expressions_do_not_share_a_descriptor() {
+    let mut e = run(&format!(
+        "{SOURCES}
+        fn head(v: &[u8]) -> &[u8] {{ return v[0..2]; }}
+        fn tail(v: &[u8]) -> &[u8] {{ return v[4..6]; }}
+        #[reset]
+        fn main() {{
+            let s: &[u8] = CA[0..6];
+            let h: &[u8] = head(s);
+            let t: &[u8] = tail(s);
+            OUT = h[0];
+            OUT1 = t[0];
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(e.mem(0x0900), 10, "CA[0]");
+    assert_eq!(e.mem(0x0901), 50, "CA[4]");
+}
+
+/// Runtime bounds in a returned slice expression.
+#[test]
+fn a_returned_slice_expression_accepts_runtime_bounds() {
+    let mut e = run(&format!(
+        "{SOURCES}
+        fn window(v: &[u8], i: u8, j: u8) -> &[u8] {{ return v[i..j]; }}
+        #[reset]
+        fn main() {{
+            let s: &[u8] = CA[0..6];
+            let w: &[u8] = window(s, 2, 5);
+            OUT = w[0];
+            OUT1 = w.len as u8;
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(e.mem(0x0900), 30, "CA[2]");
+    assert_eq!(e.mem(0x0901), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Indexing with a 16-bit value
+// ---------------------------------------------------------------------------
+
+/// `.len` is a `u16`, so `for i in 0..s.len` types `i` as one and `s[i]` then
+/// fails the 8-bit index gate. That is a real constraint — indexed addressing
+/// goes through an 8-bit register — so the diagnostic has to name the cast
+/// rather than leave the reader comparing two operands.
+#[test]
+fn a_sixteen_bit_index_explains_the_cast() {
+    let e = write_error(
+        "const OUT: addr = 0x0900;\n#[reset]\nfn main() { let a: [u8; 6] = [1,2,3,4,5,6]; let s: &[u8] = a[1..4]; let t: u8 = 0; for i in 0..s.len { t = t + s[i]; } OUT = t; loop {} }\n",
+    );
+    assert!(e.contains("index must be `u8` or `i8`"), "{e}");
+    assert!(
+        e.contains("[i as u8]"),
+        "expected the cast spelled out:\n{e}"
+    );
+    assert!(
+        e.contains("`.len` is a `u16`"),
+        "expected the cause named:\n{e}"
+    );
+}
+
+/// Both spellings the diagnostic suggests must actually work.
+#[test]
+fn the_suggested_index_casts_work() {
+    let mut cast_at_use = run(&format!(
+        "{SOURCES}
+        #[reset]
+        fn main() {{
+            let s: &[u8] = CA[1..4];
+            let t: u8 = 0;
+            for i in 0..s.len {{ t = t + s[i as u8]; }}
+            OUT = t;
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(cast_at_use.mem(0x0900), 90, "20 + 30 + 40");
+
+    let mut bound_first = run(&format!(
+        "{SOURCES}
+        #[reset]
+        fn main() {{
+            let s: &[u8] = CA[1..4];
+            let n: u8 = s.len as u8;
+            let t: u8 = 0;
+            for i in 0..n {{ t = t + s[i]; }}
+            OUT = t;
+            loop {{}}
+        }}"
+    ));
+    assert_eq!(bound_first.mem(0x0900), 90);
+}

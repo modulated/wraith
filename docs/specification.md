@@ -1393,8 +1393,7 @@ for x in s { /* iterate elements */ }
 total(a[1..5]);                // a slice expression may be an argument
 total(s[1..3]);                // including a re-slice
 
-// Returning one still needs a binding first:
-fn middle(v: &[u8]) -> &[u8] { let m: &[u8] = v[1..4]; return m; }
+fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // and may be returned
 ```
 
 **Slice Characteristics:**
@@ -1453,10 +1452,14 @@ between `str` (may be a ROM literal, read-only) and `str<N>` (owns RAM,
 writable). A writable slice type would be the analogue of `str<N>`; it does not
 exist yet.
 
+Indexing takes a `u8`/`i8`, because indexed addressing goes through an 8-bit
+register. `.len` is a `u16`, so `for i in 0..s.len` types `i` as one and needs
+`s[i as u8]` — or bind the bound first (`let n: u8 = s.len as u8;`) and the loop
+variable is a `u8` throughout. `for x in s` sidesteps the question entirely.
+
 Current limits: element widths above 2 bytes are not yet supported, runtime
-(non-constant) slice bounds must be `u8`, a slice expression must be bound to a
-variable before it can be *returned* (`return v[1..4]` is rejected; assign it
-first), and there is no runtime bounds checking.
+(non-constant) slice bounds must be `u8`, and there is no runtime bounds
+checking.
 
 ### Slice Memory Representation
 

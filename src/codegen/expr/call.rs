@@ -910,6 +910,7 @@ fn generate_inline_call(
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
+            slice_return_temps: info.slice_return_temps.clone(),
             local_arrays: info.local_arrays.clone(),
             enum_blocks: info.enum_blocks.clone(),
             string_buffers: info.string_buffers.clone(),

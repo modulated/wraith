@@ -1676,6 +1676,28 @@ impl SemanticAnalyzer {
             index_ty,
             Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
         ) {
+            // A 16-bit index is the common way to arrive here, because `.len`
+            // is a `u16` and `for i in 0..s.len` therefore types `i` as one.
+            // Indexed addressing goes through an 8-bit register, so the index
+            // genuinely has to narrow — but say where the cast goes rather than
+            // leaving the reader to work out which of two operands is wrong.
+            if matches!(
+                index_ty,
+                Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16)
+            ) {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "index must be `u8` or `i8`, found `{}`\n  = help: indexed \
+                         addressing uses an 8-bit register, so a 16-bit index has to \
+                         narrow — write `[i as u8]`\n  = note: `.len` is a `u16`, so \
+                         `for i in 0..s.len` gives `i` that type; binding the bound \
+                         first (`let n: u8 = s.len as u8;`) types the loop variable \
+                         `u8` instead",
+                        index_ty.display_name()
+                    ),
+                    span: index.span,
+                });
+            }
             return Err(SemaError::TypeMismatch {
                 expected: "u8 or i8".to_string(),
                 found: index_ty.display_name(),

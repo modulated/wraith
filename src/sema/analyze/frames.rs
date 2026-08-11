@@ -737,8 +737,13 @@ impl SemanticAnalyzer {
             }
         }
 
-        // Hidden loop-bound slots: same rebasing as ordinary symbols.
-        for info in self.loop_bound_slots.values_mut() {
+        // Hidden loop-bound and returned-slice slots: same rebasing as
+        // ordinary symbols.
+        for info in self
+            .loop_bound_slots
+            .values_mut()
+            .chain(self.slice_return_temps.values_mut())
+        {
             if let SymbolLocation::FrameOffset(off) = info.location {
                 let base = frame_base(frames, info.containing_function.as_deref())?;
                 info.location = SymbolLocation::ZeroPage(base + off);

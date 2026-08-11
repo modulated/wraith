@@ -69,6 +69,34 @@ impl SemanticAnalyzer {
                     Type::Void
                 };
 
+                // A returned slice hands the caller a *pointer* to its 4-byte
+                // descriptor, so the descriptor needs storage that outlives the
+                // expression. A bound slice variable already has a frame slot;
+                // reserve the equivalent for the expression form, keyed by its
+                // span, so `return v[1..4]` needs no `let` first.
+                if let Some(e) = expr
+                    && matches!(e.node, Expr::Slice { .. })
+                    && matches!(expr_ty, Type::Slice(_))
+                {
+                    let offset = self.frame_alloc(4);
+                    let f = self.current_function.clone();
+                    self.slice_return_temps.insert(
+                        e.span,
+                        SymbolInfo {
+                            name: "<returned slice descriptor>".to_string(),
+                            kind: SymbolKind::Variable,
+                            ty: expr_ty.clone(),
+                            location: SymbolLocation::FrameOffset(offset),
+                            mutable: true,
+                            access_mode: None,
+                            is_pub: false,
+                            containing_function: f,
+                            is_param: false,
+                            decl_span: None,
+                        },
+                    );
+                }
+
                 if let Some(ret_ty) = &self.current_return_type {
                     // Check if return expression type can be implicitly converted to return type
                     if !expr_ty.is_implicitly_convertible_to(ret_ty) {

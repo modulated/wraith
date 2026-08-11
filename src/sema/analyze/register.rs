@@ -1035,6 +1035,9 @@ impl SemanticAnalyzer {
         // Merge loop-bound slots so for-loops in imported functions keep their
         // hidden frame slots when emitted from this module. They stay at
         // FrameOffset until the root finalize pass rewrites them.
+        for (span, info) in &imported_analyzer.slice_return_temps {
+            self.slice_return_temps.insert(*span, info.clone());
+        }
         for (span, info) in &imported_analyzer.loop_bound_slots {
             self.loop_bound_slots.insert(*span, info.clone());
         }

@@ -182,21 +182,6 @@ no-op on real hardware and nothing at run time will catch it.
 Until then, code that needs to write a sub-range passes the array itself plus
 explicit bounds.
 
-Also still open:
-
-- **Returning a slice expression.** `return v[1..4]` is rejected with "Slice
-  expressions can only be used as assignment targets"; it has to be bound
-  first. A returned slice leaves a *pointer* to its 4-byte descriptor in A:X and
-  the caller copies through it, so the descriptor needs somewhere in the
-  callee's frame to live — the same per-expression-site reservation
-  `struct_temps` does for computed struct literals, keyed by the slice
-  expression's span. Argument position needed no such thing because the
-  argument staging slot is already a zero-page address the materializer can
-  write straight into.
-- **`for i in 0..s.len`** fails because `.len` is `u16` and the loop wants a
-  `u8` bound, so it needs `s.len as u8` spelled out. The mismatch is reported as
-  a bare "mismatched types" that does not mention the cast.
-
 ### Exclusive ranges in match patterns
 
 `match n { 0..300 => … }` is a parse error ("expected FatArrow, found '..'");

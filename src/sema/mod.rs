@@ -1186,6 +1186,12 @@ pub struct ProgramInfo {
     /// with the call graph) so nested loops, scratch-using expressions, and
     /// calls in the loop body cannot clobber a live bound.
     pub loop_bound_slots: HashMap<Span, SymbolInfo>,
+    /// Hidden 4-byte frame slots holding the descriptor of a slice *expression*
+    /// being returned, keyed by that expression's span. A returned slice hands
+    /// back a pointer to its descriptor, so the descriptor needs storage that
+    /// outlives the expression; a bound slice variable already has some, and
+    /// this gives the expression form the equivalent.
+    pub slice_return_temps: HashMap<Span, SymbolInfo>,
     /// Where each local array's data lives in RAM, keyed by the declaration's
     /// name span. Local array *data* used to be emitted inline in the CODE
     /// section with only a pointer in the frame slot, which meant writing to a

@@ -75,6 +75,9 @@ pub struct SemanticAnalyzer {
     /// loops, scratch-using expressions, and calls in the body cannot clobber
     /// a live bound.
     pub(super) loop_bound_slots: HashMap<Span, SymbolInfo>,
+    /// Frame slots for returned slice expressions; see
+    /// `ProgramInfo::slice_return_temps`.
+    pub(super) slice_return_temps: HashMap<Span, SymbolInfo>,
     /// Where each local array's *data* lives, keyed by the declaration's name
     /// span. During analysis this holds an offset within the declaring
     /// function's array block; `finalize_frames` rewrites it to an absolute RAM
@@ -197,6 +200,7 @@ impl SemanticAnalyzer {
             function_metadata: HashMap::default(),
             folded_constants: HashMap::default(),
             loop_bound_slots: HashMap::default(),
+            slice_return_temps: HashMap::default(),
             local_arrays: HashMap::default(),
             enum_blocks: HashMap::default(),
             string_buffers: HashMap::default(),
@@ -449,6 +453,7 @@ impl SemanticAnalyzer {
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
+            slice_return_temps: self.slice_return_temps.clone(),
             local_arrays: self.local_arrays.clone(),
             enum_blocks: self.enum_blocks.clone(),
             string_buffers: self.string_buffers.clone(),
