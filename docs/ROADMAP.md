@@ -165,16 +165,6 @@ emulator) turned these up. The silent-miscompile findings from that run are
 fixed and regression-tested in `tests/e2e/match_ranges.rs`; what follows is what
 it found and left standing.
 
-### Arrays inside structs
-
-A struct field wider than two bytes is rejected at initialization — "struct
-field type with size 4 not yet supported" — so `struct S { a: [u8; 4], b: u8 }`
-cannot be constructed. A `[u8; 2]` field is accepted but then `s.a[1]` fails
-with "only variable array indexing is currently supported". Nested *struct*
-fields of the same width work, because that path recurses field by field; the
-array field has no equivalent. Making array fields work means giving them the
-same treatment.
-
 ### A mutable slice type
 
 Slices are read-only views and now borrow from any storage — a local, a

@@ -44,6 +44,7 @@ mod spec_examples;
 mod statics;
 mod stdlib;
 mod strings_slices;
+mod struct_array_fields;
 mod struct_exprs;
 mod temp_pools;
 mod types;

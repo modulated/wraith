@@ -99,8 +99,32 @@ pub(super) fn generate_index_assignment(
         emitter.emit_inst("INY", "");
     }
 
-    // Step 6: Get array base address
-    // For now, only support simple variable arrays
+    // Step 6: Get array base address.
+    //
+    // An array reached through a field (`s.a[i]`, `s.inner.a[i]`) is laid out
+    // inline in its owner, so it has a fixed base and stores exactly like a
+    // mutable static: absolute-indexed, no pointer to load.
+    if let Some((base, _elem_ty)) = crate::codegen::expr::array_field_base(object, info) {
+        if is_multibyte {
+            emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+            emitter.emit_inst("TYA", "");
+            emitter.emit_inst("ASL", "A");
+            emitter.emit_inst("TAY", "");
+        }
+        let at = base.operand_abs(0);
+        emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+        emitter.emit_inst("STA", &format!("{},Y", at));
+        if is_multibyte {
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+            emitter.emit_inst("STA", &format!("{},Y", at));
+        }
+        emitter.invalidate_registers();
+        emitter.temp_alloc.free_high(save, 2);
+        return Ok(());
+    }
+
+    // For now, only support simple variable arrays otherwise
     if let Expr::Variable(array_name) = &object.node {
         let sym = info
             .resolved_symbols
@@ -835,7 +859,7 @@ pub(super) fn generate_deref_assignment(
 /// in RAM and has to be written at run time, on every call — an unavoidable cost
 /// of the array being writable at all. A uniform fill becomes a loop when it is
 /// worth one; explicit elements are stored individually.
-pub(super) fn generate_local_array_init(
+pub(crate) fn generate_local_array_init(
     addr: u16,
     size: u16,
     elem_size: usize,

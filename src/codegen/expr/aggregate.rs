@@ -142,6 +142,71 @@ fn emit_indexed_load(
     Ok(())
 }
 
+/// The base address and element type of an array reached through struct fields
+/// (`s.a`, `s.inner.a`), or `None` when it is not statically addressable.
+pub(crate) fn array_field_base(
+    object: &Spanned<Expr>,
+    info: &ProgramInfo,
+) -> Option<(StaticBase, crate::sema::types::Type)> {
+    use crate::sema::types::Type;
+    // Only a field chain; a bare variable is handled by the paths above.
+    if !matches!(object.node, Expr::Field { .. }) {
+        return None;
+    }
+    match resolve_static_addr(object, info)? {
+        (base, Type::Array(elem, _)) => Some((base, *elem)),
+        _ => None,
+    }
+}
+
+/// Load `base[index]` where `base` is a fixed address: absolute indexed for a
+/// runtime index, a plain load when the index folds to a constant.
+fn emit_static_indexed_load(
+    base: &StaticBase,
+    elem_ty: &crate::sema::types::Type,
+    index: &Spanned<Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
+    let esize = type_byte_size(elem_ty, info).max(1);
+    let is_multibyte = is_two_byte_value(elem_ty);
+
+    // A constant index needs no index register at all.
+    if let Some(idx) = const_index(index, info) {
+        let at = base.plus((idx * esize) as u16);
+        emitter.emit_inst("LDA", &at.operand(0));
+        if is_multibyte {
+            let hi = if high_byte_in_x(elem_ty) {
+                "LDX"
+            } else {
+                "LDY"
+            };
+            emitter.emit_inst(hi, &at.operand(1));
+        }
+        emitter.reg_state.modify_a();
+        return Ok(());
+    }
+
+    generate_expr(index, emitter, info, string_collector)?;
+    emit_scale_index(emitter, esize);
+    emitter.emit_inst("TAY", "");
+    emitter.emit_inst("LDA", &format!("{},Y", base.operand_abs(0)));
+    if is_multibyte {
+        emitter.emit_inst("PHA", "");
+        emitter.emit_inst("LDA", &format!("{},Y", base.operand_abs(1)));
+        let hi = if high_byte_in_x(elem_ty) {
+            "TAX"
+        } else {
+            "TAY"
+        };
+        emitter.emit_inst(hi, "");
+        emitter.emit_inst("PLA", "");
+    }
+    emitter.reg_state.modify_a();
+    Ok(())
+}
+
 pub(super) fn generate_index(
     object: &Spanned<Expr>,
     index: &Spanned<Expr>,
@@ -302,7 +367,19 @@ pub(super) fn generate_index(
             }
         }
         _ => {
-            // Complex array expressions not yet supported
+            // An array reached through a field — `s.a[i]`, `s.inner.a[i]` — is
+            // laid out inline in its owner, so it has a static base address
+            // even though the object is not a bare variable.
+            if let Some((base, elem_ty)) = array_field_base(object, info) {
+                return emit_static_indexed_load(
+                    &base,
+                    &elem_ty,
+                    index,
+                    emitter,
+                    info,
+                    string_collector,
+                );
+            }
             Err(CodegenError::UnsupportedOperation(
                 "only variable array indexing is currently supported".to_string(),
             ))
@@ -488,6 +565,33 @@ pub fn generate_struct_init_runtime(
                     emitter,
                     info,
                     string_collector,
+                )?;
+                continue;
+            }
+
+            // An array field of scalars is laid out inline, so its bytes are
+            // written element by element at the field's address — the same job
+            // a local array declaration does, at a different address.
+            //
+            // Without this an array field fell through to the scalar path,
+            // where a two-byte one was stored as though it *were* a two-byte
+            // value: the array literal evaluated to a pointer at its data and
+            // the field ended up holding that pointer (with a garbage high
+            // byte, since the scalar path reads Y while an address arrives in
+            // X). Anything wider was rejected outright as "struct field type
+            // with size N not yet supported".
+            if let crate::sema::types::Type::Array(elem, n) = &field_info.ty
+                && !matches!(&**elem, crate::sema::types::Type::Named(t)
+                    if info.type_registry.get_struct(t).is_some())
+            {
+                let esize = type_byte_size(elem, info).max(1);
+                crate::codegen::stmt::assign::generate_local_array_init(
+                    field_addr,
+                    (esize * n) as u16,
+                    esize,
+                    value_expr,
+                    emitter,
+                    info,
                 )?;
                 continue;
             }
@@ -685,7 +789,7 @@ impl StaticBase {
 
     /// Always the two-byte form, for indexed addressing where zero-page,Y does
     /// not exist for `LDA`.
-    fn operand_abs(&self, extra: u16) -> String {
+    pub(crate) fn operand_abs(&self, extra: u16) -> String {
         match self {
             StaticBase::Addr(a) => format!("${:04X}", a.wrapping_add(extra)),
             StaticBase::Label(..) => self.operand(extra),
