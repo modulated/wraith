@@ -642,8 +642,7 @@ impl Parser<'_> {
                     let element = self.parse_type()?;
                     self.expect(&Token::RBracket)?;
                     let span = start.merge(self.previous_span());
-                    // All slices are mutable (no mut keyword in language)
-                    Ok(Spanned::new(TypeExpr::slice(element, true), span))
+                    Ok(Spanned::new(TypeExpr::slice(element), span))
                 } else {
                     let pointee = self.parse_type()?;
                     let span = start.merge(self.previous_span());

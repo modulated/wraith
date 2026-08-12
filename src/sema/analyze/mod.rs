@@ -763,10 +763,7 @@ impl SemanticAnalyzer {
                 }
                 Ok(ty)
             }
-            TypeExpr::Slice {
-                element,
-                mutable: _,
-            } => {
+            TypeExpr::Slice { element } => {
                 // Slice is a fat pointer with base address and length
                 let element_type = self.resolve_type(&element.node)?;
                 Ok(Type::Slice(Box::new(element_type)))

@@ -1716,7 +1716,7 @@ mod coverage {
                 note(s, "TypeExpr", "Array");
                 w_type(&element.node, s);
             }
-            TypeExpr::Slice { element, .. } => {
+            TypeExpr::Slice { element } => {
                 note(s, "TypeExpr", "Slice");
                 w_type(&element.node, s);
             }

@@ -77,11 +77,12 @@ pub enum TypeExpr {
         size: usize,
     },
 
-    /// Slice type: &[T] or &[mut T]
-    Slice {
-        element: Box<Spanned<TypeExpr>>,
-        mutable: bool,
-    },
+    /// Slice type: `&[T]`. A read-only view — base address plus length — over
+    /// storage that lives somewhere else. There is no mutable counterpart yet
+    /// (see the roadmap): the descriptor cannot know whether its target is
+    /// writable, so `s[i] = v` is rejected everywhere rather than depending on
+    /// a declaration elsewhere.
+    Slice { element: Box<Spanned<TypeExpr>> },
 
     /// Pointer type: &T. A 16-bit address of a single value.
     ///
@@ -117,10 +118,9 @@ impl TypeExpr {
     }
 
     /// Create a slice type
-    pub fn slice(element: Spanned<TypeExpr>, mutable: bool) -> Self {
+    pub fn slice(element: Spanned<TypeExpr>) -> Self {
         TypeExpr::Slice {
             element: Box::new(element),
-            mutable,
         }
     }
 

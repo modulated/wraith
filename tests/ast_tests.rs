@@ -50,8 +50,8 @@ fn test_type_expressions() {
     assert!(matches!(array_type, TypeExpr::Array { size: 10, .. }));
 
     // Slice type
-    let slice_type = TypeExpr::slice(element, true);
-    assert!(matches!(slice_type, TypeExpr::Slice { mutable: true, .. }));
+    let slice_type = TypeExpr::slice(element);
+    assert!(matches!(slice_type, TypeExpr::Slice { .. }));
 }
 
 #[test]

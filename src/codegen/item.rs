@@ -25,13 +25,7 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
         TypeExpr::Array { element, size } => {
             format!("[{}; {}]", format_type(element), size)
         }
-        TypeExpr::Slice { element, mutable } => {
-            if *mutable {
-                format!("&mut [{}]", format_type(element))
-            } else {
-                format!("&[{}]", format_type(element))
-            }
-        }
+        TypeExpr::Slice { element } => format!("&[{}]", format_type(element)),
         TypeExpr::Pointer { pointee } => format!("&{}", format_type(pointee)),
         TypeExpr::Named(name) => name.clone(),
         TypeExpr::StringBuf { capacity } => format!("str<{}>", capacity),

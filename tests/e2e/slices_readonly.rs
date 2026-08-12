@@ -12,7 +12,7 @@
 //! message that says so.
 
 use crate::common::exec::run;
-use crate::common::harness::{CompileResult, compile};
+use crate::common::harness::{CompileResult, compile, compile_success};
 
 /// The three storage classes a slice can name, each with distinct values so a
 /// slice reading the wrong one is visible rather than coincidentally right.
@@ -574,4 +574,34 @@ fn the_suggested_index_casts_work() {
         }}"
     ));
     assert_eq!(bound_first.mem(0x0900), 90);
+}
+
+/// A slice is read-only, and the emitted listing has to say so. The AST carried
+/// a `mutable` flag that the parser hardcoded to `true`, sema discarded, and
+/// `Type::Slice` had no counterpart for — so nothing depended on it except the
+/// signature comment, which called every slice `&mut [T]`. Removing the flag
+/// removed the one place it could mislead.
+#[test]
+fn a_slice_parameter_is_documented_as_read_only() {
+    let asm = compile_success(
+        "const OUT: addr = 0x0900;\n\
+         fn total(xs: &[u8]) -> u8 {\n\
+         \x20   let s: u8 = 0;\n\
+         \x20   let n: u8 = xs.len as u8;\n\
+         \x20   for i in 0..n { s = s + xs[i]; }\n\
+         \x20   return s;\n\
+         }\n\
+         #[reset]\nfn main() {\n\
+         \x20   let a: [u8; 4] = [1, 2, 3, 4];\n\
+         \x20   OUT = total(a[1..3]);\n\
+         \x20   loop {}\n}\n",
+    );
+    assert!(
+        asm.contains("xs: &[u8]"),
+        "expected the parameter listed as `&[u8]`, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("&mut ["),
+        "no slice is mutable, so nothing should be spelled `&mut [T]`:\n{asm}"
+    );
 }
