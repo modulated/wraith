@@ -683,9 +683,13 @@ fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
 /// pattern in the language (`if (x > 3)`), worth 6 instructions per site.
 ///
 /// Safe only when the labels are used nowhere else (so the removed region
-/// has no other entrants) and no flags are live after the BNE: the rewrite
-/// leaves the original compare's flags, not `CMP #$00`'s, on the fall-through
-/// path.
+/// has no other entrants), no flags are live after the BNE (the rewrite leaves
+/// the original compare's flags, not `CMP #$00`'s, on the fall-through path),
+/// and **A is not live after it either**. That last condition is what makes
+/// this a rewrite of a *test* rather than of a *value*: the deleted `LDA`s are
+/// the only thing that put the boolean in A, so a reader downstream would get
+/// the comparison's intermediate instead. `(v < -102) && …` read `0 - 0x9A`
+/// as a truthy "false" that way.
 fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
     // How many times `label` appears as an operand or a definition.
     let uses = |lines: &[Line], label: &str| {
@@ -700,6 +704,7 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
     };
 
     let live_out = compute_flag_liveness(lines);
+    let a_live_out = compute_a_liveness(lines);
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -782,6 +787,7 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
                 && uses(lines, true_label) == 2
                 && uses(lines, end_label) == 2
                 && live_out[w[7]] == 0
+                && a_live_out[w[7]] == 0
             {
                 result.push(Line::Instruction {
                     mnemonic: br.clone(),
@@ -1061,6 +1067,37 @@ fn flags_read(mnemonic: &str) -> u8 {
     }
 }
 
+/// Whether an instruction reads the accumulator. Anything leaving the analyzed
+/// stream is treated as reading it: a callee may take it as an argument and a
+/// caller may take it as a return value.
+fn a_read(mnemonic: &str, operand: Option<&str>) -> u8 {
+    match mnemonic {
+        "STA" | "TAX" | "TAY" | "PHA" | "AND" | "ORA" | "EOR" | "ADC" | "SBC" | "CMP" => 1,
+        // Accumulator addressing: `LSR` with no operand shifts A, `LSR $40`
+        // shifts memory.
+        "ASL" | "LSR" | "ROL" | "ROR" => u8::from(operand.is_none_or(|o| o.is_empty() || o == "A")),
+        "JSR" | "RTS" | "RTI" | "BRK" => 1,
+        _ => 0,
+    }
+}
+
+/// Whether an instruction writes the accumulator.
+fn a_written(mnemonic: &str, operand: Option<&str>) -> u8 {
+    match mnemonic {
+        "LDA" | "TXA" | "TYA" | "PLA" | "AND" | "ORA" | "EOR" | "ADC" | "SBC" => 1,
+        "ASL" | "LSR" | "ROL" | "ROR" => u8::from(operand.is_none_or(|o| o.is_empty() || o == "A")),
+        // A call returns in A, but it also reads it, so `a_read` keeps it live
+        // on the way in.
+        "JSR" => 1,
+        _ => 0,
+    }
+}
+
+/// Where the accumulator may still be read after each line executes.
+fn compute_a_liveness(lines: &[Line]) -> Vec<u8> {
+    compute_liveness(lines, a_read, a_written, 1)
+}
+
 fn is_branch_mnemonic(m: &str) -> bool {
     matches!(
         m,
@@ -1075,6 +1112,23 @@ fn is_branch_mnemonic(m: &str) -> bool {
 /// branch/JMP label edges. Unknown control flow (indirect JMP, missing label)
 /// is treated as all-flags-live. Non-instruction lines pass liveness through.
 fn compute_flag_liveness(lines: &[Line]) -> Vec<u8> {
+    compute_liveness(
+        lines,
+        |m, _| flags_read(m),
+        |m, _| flags_written(m),
+        FLAG_ALL,
+    )
+}
+
+/// The same backward fixpoint, over any one-bit-per-resource liveness lattice:
+/// `read`/`write` report what an instruction uses and defines, and `all` is the
+/// conservative answer at control flow this pass cannot see through.
+fn compute_liveness(
+    lines: &[Line],
+    read: impl Fn(&str, Option<&str>) -> u8,
+    write: impl Fn(&str, Option<&str>) -> u8,
+    all: u8,
+) -> Vec<u8> {
     use std::collections::HashMap;
 
     // Label name -> line index.
@@ -1103,7 +1157,7 @@ fn compute_flag_liveness(lines: &[Line]) -> Vec<u8> {
                         // Indirect JMP or unknown target: assume all live.
                         match operand.as_deref().and_then(|op| label_at.get(op)) {
                             Some(&t) => out |= live_in[t],
-                            None => out = FLAG_ALL,
+                            None => out = all,
                         }
                     } else if mnemonic == "RTS" || mnemonic == "RTI" || mnemonic == "BRK" {
                         // No successor inside this stream; reads handled below.
@@ -1112,11 +1166,12 @@ fn compute_flag_liveness(lines: &[Line]) -> Vec<u8> {
                         if is_branch_mnemonic(mnemonic) {
                             match operand.as_deref().and_then(|op| label_at.get(op)) {
                                 Some(&t) => out |= live_in[t],
-                                None => out = FLAG_ALL,
+                                None => out = all,
                             }
                         }
                     }
-                    let inn = flags_read(mnemonic) | (out & !flags_written(mnemonic));
+                    let op = operand.as_deref();
+                    let inn = read(mnemonic, op) | (out & !write(mnemonic, op));
                     (out, inn)
                 }
                 // Labels, comments, directives, empty lines: pass through.

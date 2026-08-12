@@ -10,6 +10,12 @@
 //! The snippets are written so the interesting token sits at a stable column;
 //! `compile` renders with no filename, so the position line is a bare
 //! `--> line:col`.
+//!
+//! A diagnostic that is a property of the whole program rather than of one
+//! token carries no span, and so goes through `render_spanless` instead. That
+//! is a deliberately narrow exemption: everything that *can* point at a token
+//! must, and using the spanless helper for a diagnostic that should have had a
+//! caret is the mistake this split exists to make visible.
 
 use crate::common::harness::{CompileResult, compile};
 
@@ -32,6 +38,24 @@ fn render(src: &str) -> String {
         "SemaError::",
         "TokenKind::",
     ] {
+        assert!(!err.contains(leak), "diagnostic leaks `{leak}`:\n{err}");
+    }
+    err
+}
+
+/// Compile `src` and return the rendered diagnostic without requiring a caret
+/// excerpt. A few diagnostics are properties of the whole program rather than
+/// of one token (the frame budget is the standing example) and so carry no
+/// span; they still must not leak internals.
+fn render_spanless(src: &str) -> String {
+    let err = match compile(src) {
+        CompileResult::SemaError(e)
+        | CompileResult::ParseError(e)
+        | CompileResult::LexError(e)
+        | CompileResult::CodegenError(e) => e,
+        CompileResult::Success(..) => panic!("expected a compile error, but it compiled"),
+    };
+    for leak in ["Span {", "Error {", "SemaError::", "TokenKind::"] {
         assert!(!err.contains(leak), "diagnostic leaks `{leak}`:\n{err}");
     }
     err
@@ -180,4 +204,186 @@ fn self_referential_struct() {
 fn parse_error_points_at_the_token() {
     let e = render("#[reset]\nfn main() { let x: u8 = ; loop {} }\n");
     assert_at(&e, "--> 2:25", "expected expression, found ';'");
+}
+
+// ===========================================================================
+// Type errors
+//
+// `mismatched types` is one variant covering many situations, and the useful
+// part is the `expected X, found Y` line: it is what tells a reader whether the
+// compiler understood the expression at all. These pin the wording for each
+// shape that reaches it, so a refactor that collapses them into a generic
+// "type error" is caught.
+// ===========================================================================
+
+#[test]
+fn mismatched_types_in_a_let_initializer() {
+    let e = render("#[reset]\nfn main() { let x: u8 = 1; let p: bool = x; loop {} }\n");
+    assert_at(&e, "--> 2:42", "expected `bool`, found `u8`");
+}
+
+#[test]
+fn mismatched_argument_type_names_both_types() {
+    let e = render(
+        "fn f(a: u8) -> u8 { return a; }\n#[reset]\nfn main() { let s: str = \"x\"; let y: u8 = f(s); loop {} }\n",
+    );
+    assert_at(&e, "--> 3:45", "expected `u8`, found `string`");
+}
+
+#[test]
+fn calling_a_non_function_says_what_was_expected() {
+    // The caret sits on the callee, not on the argument list.
+    let e = render("#[reset]\nfn main() { let v: u8 = 3; let x: u8 = v(); loop {} }\n");
+    assert_at(&e, "--> 2:40", "expected `function`, found `u8`");
+}
+
+#[test]
+fn indexing_a_non_array_lists_the_indexable_types() {
+    // The "expected" side enumerates what *would* have worked, which is the
+    // actionable half of the message.
+    let e = render("#[reset]\nfn main() { let v: u8 = 3; let x: u8 = v[0]; loop {} }\n");
+    assert_at(
+        &e,
+        "--> 2:40",
+        "expected `array, slice, pointer, or string`",
+    );
+}
+
+#[test]
+fn field_access_on_a_non_struct() {
+    let e = render("#[reset]\nfn main() { let v: u8 = 3; let x: u8 = v.foo; loop {} }\n");
+    assert_at(&e, "--> 2:40", "expected `struct`, found `u8`");
+}
+
+#[test]
+fn invalid_unary_operand_names_the_operator_and_the_type() {
+    let e = render("#[reset]\nfn main() { let s: str = \"hi\"; let x: u8 = -s; loop {} }\n");
+    assert_at(&e, "--> 2:44", "cannot apply '-' to type string");
+}
+
+// ===========================================================================
+// Structs and enums
+// ===========================================================================
+
+#[test]
+fn unknown_field_in_a_struct_initializer() {
+    // Distinct from `field_not_found` above, which reads a field; this is the
+    // initializer path, and the caret must land on the offending key.
+    let e = render(
+        "struct P { x: u8 }\n#[reset]\nfn main() { let p: P = P { x: 1, z: 2 }; loop {} }\n",
+    );
+    assert_at(&e, "--> 3:34", "field 'z' not found in struct 'P'");
+}
+
+#[test]
+fn unknown_enum_variant_names_the_enum() {
+    let e = render("enum E { A, B }\n#[reset]\nfn main() { let e: E = E::C; loop {} }\n");
+    assert_at(&e, "--> 3:27", "variant 'C' not found in enum 'E'");
+}
+
+// ===========================================================================
+// Statement and declaration placement
+// ===========================================================================
+
+#[test]
+fn break_outside_a_loop() {
+    let e = render("#[reset]\nfn main() { break; loop {} }\n");
+    assert_at(&e, "--> 2:13", "break/continue outside loop");
+}
+
+#[test]
+fn a_statement_at_top_level_is_a_parse_error() {
+    // The parser is item-driven at top level, so a stray statement reports
+    // "expected item" against the keyword that starts it.
+    let e = render("#[reset]\nfn main() { loop {} }\nreturn 1;\n");
+    assert_at(&e, "--> 3:1", "expected item, found keyword 'return'");
+}
+
+#[test]
+fn addr_outside_a_const_declaration_says_where_it_is_allowed() {
+    // The caret is on the type, not the variable, and the message names the one
+    // context that does work.
+    let e = render("#[reset]\nfn main() { let a: addr = 0x10; loop {} }\n");
+    assert_at(
+        &e,
+        "--> 2:20",
+        "addr type can only be used in const declarations",
+    );
+}
+
+#[test]
+fn a_duplicate_definition_points_at_the_redefinition() {
+    // Not at the original: the second one is the line to delete.
+    let e = render(
+        "fn f() -> u8 { return 1; }\nfn f() -> u8 { return 2; }\n#[reset]\nfn main() { let x: u8 = f(); loop {} }\n",
+    );
+    assert_at(&e, "--> 2:4", "duplicate symbol 'f'");
+}
+
+#[test]
+fn a_name_colliding_with_a_mnemonic_is_rejected() {
+    // Inline asm resolves bare identifiers, so a function named `LDA` would be
+    // ambiguous inside an `asm` block.
+    let e = render("fn LDA() { }\n#[reset]\nfn main() { LDA(); loop {} }\n");
+    assert_at(&e, "--> 1:4", "conflicts with instruction mnemonic");
+}
+
+// ===========================================================================
+// Whole-program diagnostics
+// ===========================================================================
+
+#[test]
+fn an_escaping_pointer_explains_why_it_is_unsafe() {
+    // The message has to carry the *reason*: "returns a pointer to a local" is
+    // meaningless on a machine whose frames are statically colored unless it
+    // also says the frame gets reused.
+    let e = render(
+        "fn f() -> &u8 { let local: u8 = 1; return &local; }\n#[reset]\nfn main() { let p: &u8 = f(); loop {} }\n",
+    );
+    assert_at(&e, "--> 1:43", "pointer escapes its frame");
+    assert!(
+        e.contains("reused by unrelated functions"),
+        "expected the diagnostic to explain the reuse hazard:\n{e}"
+    );
+}
+
+#[test]
+fn frame_overflow_reports_the_budget_it_blew() {
+    // Spanless by nature: no single token is at fault, so the diagnostic has to
+    // carry the numbers instead — what was needed, what was available, and
+    // which functions made up the deepest chain.
+    let e = render_spanless(
+        "struct Big { data: [u8; 200] }\n#[reset]\nfn main() { let b: Big = { data: [0; 200] }; b.data[0] = 1; loop {} }\n",
+    );
+    assert!(e.contains("zero-page frame region overflow"), "{e}");
+    assert!(e.contains("200 bytes"), "expected the requirement:\n{e}");
+    assert!(
+        e.contains("$40-$CF, 144 bytes"),
+        "expected the frame region and its size:\n{e}"
+    );
+    assert!(e.contains("main"), "expected the offending chain:\n{e}");
+}
+
+#[test]
+fn missing_return_points_at_the_function_name() {
+    // Not at the closing brace: the name is what the reader scans for, and the
+    // fix (adding a `return`) is not necessarily at the end of the body.
+    let e = render(
+        "fn f(n: u8) -> u8 { if n == 0 { return 1; } }\n#[reset]\nfn main() { let x: u8 = f(2); loop {} }\n",
+    );
+    assert_at(&e, "--> 1:4", "must return a value of type `u8`");
+    assert!(
+        e.contains("missing return in function 'f'"),
+        "expected the function named in the summary:\n{e}"
+    );
+    assert!(
+        e.contains("= help:") && e.contains("every path"),
+        "expected a help line naming the requirement:\n{e}"
+    );
+}
+
+#[test]
+fn returning_a_value_from_a_void_function() {
+    let e = render("fn f() { return 5; }\n#[reset]\nfn main() { f(); loop {} }\n");
+    assert_at(&e, "--> 1:17", "expected void, found u8");
 }

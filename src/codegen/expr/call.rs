@@ -319,22 +319,55 @@ pub(super) fn generate_call(
         let param_is_slice = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
-        if is_slice_arg
-            && param_is_slice
-            && let crate::ast::Expr::Variable(var_name) = &arg.node
-            && let Some(sym) = info
-                .resolved_symbols
-                .get(&arg.span)
-                .or_else(|| info.table.lookup(var_name))
-            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
-        {
-            for k in 0..4u8 {
-                emitter.emit_inst("LDA", &format!("${:02X}", addr + k));
-                emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
+        if is_slice_arg && param_is_slice {
+            // A bound slice variable: copy its descriptor across.
+            if let crate::ast::Expr::Variable(var_name) = &arg.node
+                && let Some(sym) = info
+                    .resolved_symbols
+                    .get(&arg.span)
+                    .or_else(|| info.table.lookup(var_name))
+                && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
+            {
+                for k in 0..4u8 {
+                    emitter.emit_inst("LDA", &format!("${:02X}", addr + k));
+                    emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
+                }
+                temp_offset += 4;
+                arg_info.push((temp_addr, 4));
+                continue;
             }
-            temp_offset += 4;
-            arg_info.push((temp_addr, 4));
-            continue;
+
+            // A slice *expression* — `total(a[1..4])`. The staging slot is a
+            // zero-page address and the materializer writes a descriptor to
+            // exactly that, so it can build in place; there is no intermediate
+            // to allocate and nothing to copy afterwards.
+            if let crate::ast::Expr::Slice {
+                object,
+                start,
+                end,
+                inclusive,
+            } = &arg.node
+            {
+                let Some(Type::Slice(elem)) = arg_type else {
+                    return Err(CodegenError::Internal(
+                        "slice argument without a slice type".to_string(),
+                    ));
+                };
+                crate::codegen::stmt::assign::generate_slice_materialize(
+                    temp_addr,
+                    elem,
+                    object,
+                    start,
+                    end,
+                    *inclusive,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                temp_offset += 4;
+                arg_info.push((temp_addr, 4));
+                continue;
+            }
         }
 
         // Check if this PARAMETER (not argument) is a 16-bit type
@@ -402,7 +435,28 @@ pub(super) fn generate_call(
                 arg_info.push((temp_addr, 2)); // 2-byte pointer
                 continue;
             }
-            // If not a simple variable, fall through to normal expression handling
+
+            // Any other struct-valued argument — a struct literal, or a call
+            // returning a struct — evaluates to a pointer to the bytes in A:X.
+            // This used to fall through to the scalar path, which staged only
+            // A: the callee then dereferenced an address whose high byte was
+            // whatever the staging temp already held. A constant literal
+            // (`sum(P { x: 6, y: 7 })`) points into ROM and so has a non-zero
+            // high byte, which is why dropping it was a silent miscompile
+            // rather than merely a zero-page assumption.
+            if matches!(
+                &arg.node,
+                crate::ast::Expr::StructInit { .. }
+                    | crate::ast::Expr::AnonStructInit { .. }
+                    | crate::ast::Expr::Call { .. }
+            ) {
+                generate_expr(arg, emitter, info, string_collector)?;
+                emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+                emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
+                temp_offset += 2;
+                arg_info.push((temp_addr, 2)); // 2-byte pointer
+                continue;
+            }
         }
 
         // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
@@ -469,15 +523,38 @@ pub(super) fn generate_call(
     // (called function may modify any register; only A/Y contain known return value)
     emitter.reg_state.invalidate_all();
 
-    // RECURSION RESTORE: restore the callee frame saved above. pop_frame clobbers
-    // A and X, so stash the return low byte in $20 across the pop and reload it
-    // (the high byte, if any, is in Y, which pop_frame leaves untouched). No
-    // hardware stack is used.
+    // RECURSION RESTORE: restore the callee frame saved above. pop_frame
+    // clobbers A and X, so stash the return low byte across the pop and reload
+    // it. No hardware stack is used.
+    //
+    // A 16-bit scalar keeps its high byte in Y, which pop_frame leaves alone.
+    // A struct, a `&T` or a `str` returns a *pointer* whose high byte is in X —
+    // the register pop_frame uses as its stack index — so that one has to be
+    // stashed too. Without this a recursive struct-returning function
+    // dereferenced its own software-stack pointer as the result's high byte.
     if is_recursive_edge && let Some(frame) = callee_frame {
+        let high_byte_in_x = info
+            .table
+            .lookup(&function.node)
+            .and_then(|sym| match &sym.ty {
+                Type::Function(_, ret) => Some(matches!(
+                    ret.as_ref(),
+                    Type::Named(_) | Type::Pointer(_) | Type::String
+                )),
+                _ => None,
+            })
+            .unwrap_or(false);
+
         let tmp = emitter.memory_layout.temp_reg();
         emitter.emit_inst("STA", &format!("${:02X}", tmp));
+        if high_byte_in_x {
+            emitter.emit_inst("STX", &format!("${:02X}", tmp + 1));
+        }
         emitter.pop_frame(frame.base, frame.size);
         emitter.emit_inst("LDA", &format!("${:02X}", tmp));
+        if high_byte_in_x {
+            emitter.emit_inst("LDX", &format!("${:02X}", tmp + 1));
+        }
         emitter.reg_state.invalidate_all();
     }
 
@@ -833,9 +910,11 @@ fn generate_inline_call(
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
+            slice_return_temps: info.slice_return_temps.clone(),
             local_arrays: info.local_arrays.clone(),
             enum_blocks: info.enum_blocks.clone(),
             string_buffers: info.string_buffers.clone(),
+            struct_temps: info.struct_temps.clone(),
             type_registry: info.type_registry.clone(),
             resolved_types: info.resolved_types.clone(),
             imported_items: info.imported_items.clone(),

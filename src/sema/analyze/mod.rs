@@ -75,6 +75,9 @@ pub struct SemanticAnalyzer {
     /// loops, scratch-using expressions, and calls in the body cannot clobber
     /// a live bound.
     pub(super) loop_bound_slots: HashMap<Span, SymbolInfo>,
+    /// Frame slots for returned slice expressions; see
+    /// `ProgramInfo::slice_return_temps`.
+    pub(super) slice_return_temps: HashMap<Span, SymbolInfo>,
     /// Where each local array's *data* lives, keyed by the declaration's name
     /// span. During analysis this holds an offset within the declaring
     /// function's array block; `finalize_frames` rewrites it to an absolute RAM
@@ -91,6 +94,12 @@ pub struct SemanticAnalyzer {
     /// marks the declaration as a *writable* string, which is what lets
     /// `s[i] = c` past the "can't write a str literal" guard.
     pub(super) string_buffers: HashMap<Span, crate::sema::LocalArray>,
+    /// Scratch RAM for computed struct literals; see `ProgramInfo::struct_temps`.
+    pub(super) struct_temps: HashMap<Span, crate::sema::LocalArray>,
+    /// Per function, the binary-operand spill bytes live across a call to each
+    /// callee. `warn_deep_recursion` adds these to the frame save to get the
+    /// true software-stack cost of one level of recursion.
+    pub(super) call_spill_bytes: HashMap<String, HashMap<String, u16>>,
     /// Bytes of local-array data each function needs, consumed by
     /// `finalize_frames` to lay the blocks out in RAM.
     pub(super) array_block_sizes: HashMap<String, u16>,
@@ -120,6 +129,11 @@ pub struct SemanticAnalyzer {
     pub(super) called_functions: HashSet<String>,
     /// Track unreachable statements for dead code elimination
     pub(super) unreachable_stmts: HashSet<Span>,
+    /// Spans of `match` statements proven to cover every possible value —
+    /// either through an irrefutable arm or, for an enum scrutinee, by naming
+    /// every variant. `always_returns` consults this: a match can only
+    /// guarantee a return if control cannot slip past it unmatched.
+    pub(super) exhaustive_matches: HashSet<Span>,
     /// True when checking an assignment target (not reading a value)
     pub(super) checking_assignment_target: bool,
     /// Expected type for type inference (e.g., for anonymous struct literals)
@@ -186,9 +200,12 @@ impl SemanticAnalyzer {
             function_metadata: HashMap::default(),
             folded_constants: HashMap::default(),
             loop_bound_slots: HashMap::default(),
+            slice_return_temps: HashMap::default(),
             local_arrays: HashMap::default(),
             enum_blocks: HashMap::default(),
             string_buffers: HashMap::default(),
+            struct_temps: HashMap::default(),
+            call_spill_bytes: HashMap::default(),
             array_block_sizes: HashMap::default(),
             array_cursor: 0,
             resolved_types: HashMap::default(),
@@ -206,6 +223,7 @@ impl SemanticAnalyzer {
             declared_functions: Vec::with_capacity(16),
             called_functions: HashSet::default(),
             unreachable_stmts: HashSet::default(),
+            exhaustive_matches: HashSet::default(),
             checking_assignment_target: false,
             expected_type: None,
             resolved_struct_names: HashMap::default(),
@@ -435,9 +453,11 @@ impl SemanticAnalyzer {
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
+            slice_return_temps: self.slice_return_temps.clone(),
             local_arrays: self.local_arrays.clone(),
             enum_blocks: self.enum_blocks.clone(),
             string_buffers: self.string_buffers.clone(),
+            struct_temps: self.struct_temps.clone(),
             type_registry: self.type_registry.clone(),
             resolved_types: self.resolved_types.clone(),
             imported_items: self.imported_items.clone(),
@@ -639,6 +659,28 @@ impl SemanticAnalyzer {
             // that the next function is still analyzed.
             if let Err(e) = self.analyze_stmt(&func.body) {
                 self.record(e);
+            }
+
+            // Operand spills that straddle a call cost software-stack bytes on
+            // top of the frame save; recorded here, while the body is in hand,
+            // and consumed by `warn_deep_recursion` once the call graph shows
+            // which of those calls actually recurse.
+            self.record_call_spills(&func_name, &func.body);
+
+            // A declared return type is a promise to every caller. Falling off
+            // the end of the body breaks it silently on a 6502: the caller
+            // reads the accumulator regardless, so it gets whatever the last
+            // statement left there. Checked after the body walk because
+            // `always_returns` consults match exhaustiveness recorded during it.
+            if let Some(ret_ty) = self.current_return_type.clone()
+                && ret_ty != Type::Void
+                && !self.always_returns(&func.body)
+            {
+                self.record(SemaError::MissingReturn {
+                    function: func_name.clone(),
+                    expected: ret_ty.display_name(),
+                    span: func.name.span,
+                });
             }
 
             // Record this function's frame size (params + locals + any temp slots).

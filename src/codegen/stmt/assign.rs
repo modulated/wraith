@@ -99,8 +99,32 @@ pub(super) fn generate_index_assignment(
         emitter.emit_inst("INY", "");
     }
 
-    // Step 6: Get array base address
-    // For now, only support simple variable arrays
+    // Step 6: Get array base address.
+    //
+    // An array reached through a field (`s.a[i]`, `s.inner.a[i]`) is laid out
+    // inline in its owner, so it has a fixed base and stores exactly like a
+    // mutable static: absolute-indexed, no pointer to load.
+    if let Some((base, _elem_ty)) = crate::codegen::expr::array_field_base(object, info) {
+        if is_multibyte {
+            emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+            emitter.emit_inst("TYA", "");
+            emitter.emit_inst("ASL", "A");
+            emitter.emit_inst("TAY", "");
+        }
+        let at = base.operand_abs(0);
+        emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+        emitter.emit_inst("STA", &format!("{},Y", at));
+        if is_multibyte {
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+            emitter.emit_inst("STA", &format!("{},Y", at));
+        }
+        emitter.invalidate_registers();
+        emitter.temp_alloc.free_high(save, 2);
+        return Ok(());
+    }
+
+    // For now, only support simple variable arrays otherwise
     if let Expr::Variable(array_name) = &object.node {
         let sym = info
             .resolved_symbols
@@ -133,62 +157,37 @@ pub(super) fn generate_index_assignment(
             return Ok(());
         }
 
-        match sym.location {
-            SymbolLocation::ZeroPage(addr) => {
-                // For u8 arrays: direct indexed addressing
-                if !is_multibyte {
-                    // Restore value
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    // Store to array[index]
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
-                } else {
-                    // For u16 arrays: need to scale index by 2
-                    emitter.emit_comment("Scale index for u16 array (multiply by 2)");
-                    emitter.emit_inst("TYA", ""); // Get index back to A
-                    emitter.emit_inst("ASL", "A"); // Multiply by 2
-                    emitter.emit_inst("TAY", ""); // Back to Y
-
-                    // Restore and store low byte
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
-
-                    // Store high byte at next position
-                    emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr));
-                }
-            }
-            SymbolLocation::Absolute(addr) if addr < 256 => {
-                let addr_u8 = addr as u8;
-                // For u8 arrays: direct indexed addressing
-                if !is_multibyte {
-                    // Restore value
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    // Store to array[index]
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
-                } else {
-                    // For u16 arrays: need to scale index by 2
-                    emitter.emit_comment("Scale index for u16 array (multiply by 2)");
-                    emitter.emit_inst("TYA", ""); // Get index back to A
-                    emitter.emit_inst("ASL", "A"); // Multiply by 2
-                    emitter.emit_inst("TAY", ""); // Back to Y
-
-                    // Restore and store low byte
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
-
-                    // Store high byte at next position
-                    emitter.emit_inst("INY", "");
-                    emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
-                    emitter.emit_inst("STA", &format!("(${:02X}),Y", addr_u8));
-                }
-            }
+        // A local array's slot holds a pointer, whether the slot lives in the
+        // zero page proper or at a low absolute address — both reach it with the
+        // same `(zp),Y` indirect store, so derive the one-byte pointer address
+        // and share the store body.
+        let ptr = match sym.location {
+            SymbolLocation::ZeroPage(addr) => addr,
+            SymbolLocation::Absolute(addr) if addr < 256 => addr as u8,
             _ => {
                 return Err(CodegenError::UnsupportedOperation(format!(
                     "'{}' must be in zero page for indexed assignment",
                     array_name
                 )));
             }
+        };
+        if !is_multibyte {
+            // Restore the saved value and store it at array[index].
+            emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        } else {
+            // Scale the index by the 2-byte element width, then store low/high.
+            emitter.emit_comment("Scale index for u16 array (multiply by 2)");
+            emitter.emit_inst("TYA", "");
+            emitter.emit_inst("ASL", "A");
+            emitter.emit_inst("TAY", "");
+
+            emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
         }
     } else {
         return Err(CodegenError::UnsupportedOperation(
@@ -206,12 +205,71 @@ pub(super) fn generate_index_assignment(
     Ok(())
 }
 
+/// Where an array's data lives, and therefore how to get its base address.
+///
+/// A slice descriptor holds a real 16-bit pointer, so it does not care which of
+/// these it came from — but the three are reached differently, and a slice used
+/// to be restricted to the first because it was the only one implemented.
+enum ArrayBase {
+    /// A local array: its zero-page slot holds a pointer to the data, which is
+    /// laid out in the call-graph-colored RAM block.
+    Pointer(u8),
+    /// A mutable `static`: sema assigned it a fixed BSS address.
+    Fixed(u16),
+    /// An immutable `const`: ROM data emitted at an assembler label. Sema
+    /// leaves these at `Absolute(0)` because the address is the linker's to
+    /// decide, so the label is the only way to name it.
+    Label(String),
+}
+
+impl ArrayBase {
+    /// Resolve the array a slice is being taken of.
+    fn of(sym: &crate::sema::table::SymbolInfo, name: &str) -> Result<Self, CodegenError> {
+        use crate::sema::table::{SymbolKind, SymbolLocation};
+        match (&sym.location, &sym.kind) {
+            (SymbolLocation::ZeroPage(a), _) => Ok(ArrayBase::Pointer(*a)),
+            // A const's `Absolute(0)` is a placeholder, not an address.
+            (SymbolLocation::Absolute(_), SymbolKind::Constant) | (SymbolLocation::None, _) => {
+                Ok(ArrayBase::Label(name.to_string()))
+            }
+            (SymbolLocation::Absolute(a), _) => Ok(ArrayBase::Fixed(*a)),
+            _ => Err(CodegenError::UnsupportedOperation(format!(
+                "cannot take a slice of '{}': its storage has no address",
+                name
+            ))),
+        }
+    }
+
+    /// Emit `LDA <base low byte>`. Followed by `CLC; ADC <offset low>` at the
+    /// call site, so all three forms share one arithmetic sequence.
+    fn emit_load_low(&self, emitter: &mut Emitter) {
+        match self {
+            ArrayBase::Pointer(slot) => emitter.emit_inst("LDA", &format!("${:02X}", slot)),
+            ArrayBase::Fixed(addr) => emitter.emit_inst("LDA", &format!("#${:02X}", addr & 0xFF)),
+            ArrayBase::Label(name) => emitter.emit_inst("LDA", &format!("#<{}", name)),
+        }
+    }
+
+    /// Emit `LDA <base high byte>`, to be followed by `ADC <offset high>`.
+    fn emit_load_high(&self, emitter: &mut Emitter) {
+        match self {
+            ArrayBase::Pointer(slot) => emitter.emit_inst("LDA", &format!("${:02X}", slot + 1)),
+            ArrayBase::Fixed(addr) => {
+                emitter.emit_inst("LDA", &format!("#${:02X}", (addr >> 8) & 0xFF))
+            }
+            ArrayBase::Label(name) => emitter.emit_inst("LDA", &format!("#>{}", name)),
+        }
+    }
+}
+
 /// Materialize a slice descriptor `arr[start..end]` into the 4-byte frame slot
-/// at `dest`: `dest[0..1] = base` (arr's data pointer + start*elem_size),
-/// `dest[2..3] = len` (element count). Bounds must be compile-time constants for
-/// now; the array must be a zero-page local (its slot holds the data pointer).
+/// at `dest`: `dest[0..1] = base` (arr's data address + start*elem_size),
+/// `dest[2..3] = len` (element count).
+///
+/// The source array may be a local, a `static`, or a `const` — a slice is a
+/// read-only view, so ROM-backed data is as valid a target as RAM.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn generate_slice_materialize(
+pub(crate) fn generate_slice_materialize(
     dest: u8,
     elem: &crate::sema::types::Type,
     object: &Spanned<crate::ast::Expr>,
@@ -224,7 +282,6 @@ pub(super) fn generate_slice_materialize(
 ) -> Result<(), CodegenError> {
     use crate::ast::Expr;
     use crate::sema::const_eval::eval_const_expr_with_env;
-    use crate::sema::table::SymbolLocation;
 
     let elem_size = elem.size().max(1);
 
@@ -241,15 +298,7 @@ pub(super) fn generate_slice_materialize(
         .get(&object.span)
         .or_else(|| info.table.lookup(arr_name))
         .ok_or_else(|| CodegenError::SymbolNotFound(arr_name.clone()))?;
-    let arr_addr = match arr_sym.location {
-        SymbolLocation::ZeroPage(a) => a,
-        _ => {
-            return Err(CodegenError::UnsupportedOperation(format!(
-                "slice source array '{}' must be a zero-page local",
-                arr_name
-            )));
-        }
-    };
+    let arr_base = ArrayBase::of(arr_sym, arr_name)?;
 
     let env = HashMap::default();
     let const_s = eval_const_expr_with_env(start, &env)
@@ -280,11 +329,11 @@ pub(super) fn generate_slice_materialize(
             "Slice materialize: base = {}+{}, len = {}",
             arr_name, byte_offset, len
         ));
-        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+        arr_base.emit_load_low(emitter);
         emitter.emit_inst("CLC", "");
         emitter.emit_inst("ADC", &format!("#${:02X}", (byte_offset & 0xFF) as u8));
         emitter.emit_inst("STA", &format!("${:02X}", dest));
-        emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+        arr_base.emit_load_high(emitter);
         emitter.emit_inst(
             "ADC",
             &format!("#${:02X}", ((byte_offset >> 8) & 0xFF) as u8),
@@ -363,11 +412,11 @@ pub(super) fn generate_slice_materialize(
     }
 
     // base = arr pointer + byte offset (16-bit add).
-    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr));
+    arr_base.emit_load_low(emitter);
     emitter.emit_inst("CLC", "");
     emitter.emit_inst("ADC", "$22");
     emitter.emit_inst("STA", &format!("${:02X}", dest));
-    emitter.emit_inst("LDA", &format!("${:02X}", arr_addr + 1));
+    arr_base.emit_load_high(emitter);
     emitter.emit_inst("ADC", "$23");
     emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
 
@@ -559,9 +608,6 @@ pub(super) fn generate_field_assignment(
                     field.node, struct_name
                 ))
             })?;
-        // Function-pointer fields are 2-byte code addresses, so they must be
-        // stored (and loaded) as a pair like u16 -- a device vtable depends on it.
-        let is_multibyte = crate::codegen::expr::is_two_byte_value(&field_info.ty);
         // Sema rejects assigning through a `const`, so a read-only base here
         // would mean a store quietly aimed at ROM.
         if base.is_read_only() {
@@ -571,11 +617,10 @@ pub(super) fn generate_field_assignment(
         }
         emitter.emit_comment(&format!("Nested field assignment: .{}", field.node));
         generate_expr(value, emitter, info, string_collector)?;
+        // Function-pointer fields are 2-byte code addresses stored as a pair like
+        // u16 — a device vtable depends on it; `store_value_pair` handles the width.
         let at = base.plus(field_info.offset as u16);
-        emitter.emit_inst("STA", &at.operand(0));
-        if is_multibyte {
-            emitter.emit_inst(store_high(&field_info.ty), &at.operand(1));
-        }
+        store_value_pair(emitter, &field_info.ty, &at.operand(0), &at.operand(1));
         return Ok(());
     }
 
@@ -664,10 +709,7 @@ pub(super) fn generate_field_assignment(
             let offset = field_info.offset;
 
             // Save value to temp
-            emitter.emit_inst("STA", "$20"); // Save low byte
-            if is_multibyte {
-                emitter.emit_inst(store_high(&field_info.ty), "$21"); // Save high byte
-            }
+            store_value_pair(emitter, &field_info.ty, "$20", "$21");
 
             // Set Y to field offset and store via indirect
             emitter.emit_inst("LDY", &format!("#${:02X}", offset));
@@ -684,17 +726,20 @@ pub(super) fn generate_field_assignment(
             // Local struct - direct access
             let field_addr = base_addr + field_info.offset as u16;
 
-            let hi = store_high(&field_info.ty);
             if field_addr < 0x100 {
-                emitter.emit_inst("STA", &format!("${:02X}", field_addr));
-                if is_multibyte {
-                    emitter.emit_inst(hi, &format!("${:02X}", field_addr + 1));
-                }
+                store_value_pair(
+                    emitter,
+                    &field_info.ty,
+                    &format!("${:02X}", field_addr),
+                    &format!("${:02X}", field_addr + 1),
+                );
             } else {
-                emitter.emit_inst("STA", &format!("${:04X}", field_addr));
-                if is_multibyte {
-                    emitter.emit_inst(hi, &format!("${:04X}", field_addr + 1));
-                }
+                store_value_pair(
+                    emitter,
+                    &field_info.ty,
+                    &format!("${:04X}", field_addr),
+                    &format!("${:04X}", field_addr + 1),
+                );
             }
         }
 
@@ -720,6 +765,18 @@ fn store_high(ty: &crate::sema::types::Type) -> &'static str {
         "STX"
     } else {
         "STY"
+    }
+}
+
+/// Store a value in A (low byte) to `lo`, and — for a two-byte `ty` — its high
+/// byte (from X or Y per `high_byte_in_x`) to `hi`. `lo`/`hi` are already-formed
+/// operands, so the same store shape serves zero-page, absolute, and indirect
+/// destinations. The one place that decides a value's store width and high-byte
+/// register.
+fn store_value_pair(emitter: &mut Emitter, ty: &crate::sema::types::Type, lo: &str, hi: &str) {
+    emitter.emit_inst("STA", lo);
+    if crate::codegen::expr::is_two_byte_value(ty) {
+        emitter.emit_inst(store_high(ty), hi);
     }
 }
 
@@ -802,7 +859,7 @@ pub(super) fn generate_deref_assignment(
 /// in RAM and has to be written at run time, on every call — an unavoidable cost
 /// of the array being writable at all. A uniform fill becomes a loop when it is
 /// worth one; explicit elements are stored individually.
-pub(super) fn generate_local_array_init(
+pub(crate) fn generate_local_array_init(
     addr: u16,
     size: u16,
     elem_size: usize,
@@ -1004,7 +1061,7 @@ pub(super) fn generate_var_decl(
                 crate::codegen::expr::generate_struct_init_runtime(
                     struct_name,
                     fields,
-                    addr,
+                    addr as u16,
                     emitter,
                     info,
                     string_collector,
@@ -1132,7 +1189,7 @@ pub(super) fn generate_var_decl(
                 crate::codegen::expr::generate_struct_init_runtime(
                     elem_struct,
                     fields,
-                    elem_addr,
+                    elem_addr as u16,
                     emitter,
                     info,
                     string_collector,
@@ -1424,12 +1481,13 @@ pub(super) fn generate_assign(
                 use crate::sema::table::SymbolKind;
                 use crate::sema::types::Type;
 
-                // Struct-by-value assignment from a call, e.g.
-                // `p = make();`. The value expression (already generated
-                // above) left a pointer to the struct bytes in A:X; copy
-                // the whole struct into the target's inline storage
-                // rather than storing just the low byte of the pointer.
-                if matches!(&value.node, crate::ast::Expr::Call { .. })
+                // Struct-by-value assignment from a call (`p = make();`) or
+                // from a computed struct literal (`p = P { x: a + 1 };`). The
+                // value expression (already generated above) left a pointer to
+                // the struct bytes in A:X; copy the whole struct into the
+                // target's inline storage rather than storing just the low byte
+                // of the pointer.
+                if crate::codegen::expr::yields_struct_pointer(value, info)
                     && let Type::Named(sname) = &sym.ty
                     && let Some(sdef) = info.type_registry.get_struct(sname)
                     && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location

@@ -239,21 +239,32 @@ impl SemanticAnalyzer {
         })
     }
 
-    /// Warn about recursive functions whose frame is large enough that the
-    /// software stack (used to save/restore frames across recursion) allows only
-    /// a shallow recursion depth before it silently overflows. Small-frame
-    /// recursion is left unflagged: it is bounded instead by the ~128-level
-    /// hardware-stack limit shared by all non-tail recursion, which is not
-    /// frame-size-specific.
+    /// Warn about recursive functions whose per-call frame save makes the
+    /// software stack run out before the hardware stack does.
+    ///
+    /// Every non-tail recursion is capped by page 1 regardless of frame size:
+    /// two bytes of return address per `JSR`, so roughly 128 levels. A frame
+    /// save costs `frame.size` bytes of the separate 256-byte software stack on
+    /// top of that, giving `256 / frame_size` levels. Whichever is smaller is
+    /// the real limit, and both overflow silently — the 6502 has no stack-limit
+    /// detection.
+    ///
+    /// So the warning fires exactly when the frame save is the binding
+    /// constraint, and reports the depth it computed. It used to fire only
+    /// below a fixed 32 levels, which left a blind spot precisely where the
+    /// limit is least expected: a three-byte frame allows 85 levels, well under
+    /// the hardware cap and well over the old threshold, so
+    /// `fn s(n: u8) -> u16` summing `1..=n` was exact to `s(85)` and silently
+    /// wrong from `s(86)` with nothing reported.
     fn warn_deep_recursion(
         &mut self,
         recursive_call_edges: &HashSet<(String, String)>,
         frames: &HashMap<String, FrameInfo>,
     ) {
-        // Only flag when the estimated safe depth drops below this many levels,
-        // to target genuinely risky large-frame recursion rather than every
-        // small recursive helper.
-        const MIN_SAFE_RECURSION_DEPTH: usize = 32;
+        // Nesting the hardware stack allows on its own: page 1 is 256 bytes and
+        // a JSR return address is two of them. A software-stack limit only
+        // tells the programmer something new when it is tighter than this.
+        const HARDWARE_STACK_CALL_DEPTH: usize = HARDWARE_STACK_BYTES / 2;
 
         // Functions that participate in recursion (either endpoint of a cycle edge).
         let mut recursive_fns: Vec<String> = recursive_call_edges
@@ -280,17 +291,38 @@ impl SemanticAnalyzer {
             let Some(frame) = frames.get(&f) else {
                 continue;
             };
-            if frame.size == 0 {
-                continue; // No per-call software-stack cost from the frame itself.
+            // A level costs the frame save plus any operand spills held across
+            // the recursive call — both go to the same software stack. Only
+            // calls that close the cycle count; a spill across an unrelated
+            // callee is popped before the recursion continues.
+            let spill = self
+                .call_spill_bytes
+                .get(&f)
+                .map(|per_callee| {
+                    per_callee
+                        .iter()
+                        .filter(|(callee, _)| {
+                            recursive_call_edges.contains(&(f.clone(), (*callee).clone()))
+                        })
+                        .map(|(_, bytes)| *bytes)
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+
+            let per_level = frame.size as usize + spill as usize;
+            if per_level == 0 {
+                continue;
             }
-            let safe_depth = SOFTWARE_STACK_BYTES / frame.size as usize;
-            if safe_depth < MIN_SAFE_RECURSION_DEPTH {
+            let safe_depth = SOFTWARE_STACK_BYTES / per_level;
+            if safe_depth < HARDWARE_STACK_CALL_DEPTH {
                 // Attribute the warning to the function's declaration span, if known
                 // (imported functions may not be in declared_functions - skip those).
                 if let Some((_, span)) = self.declared_functions.iter().find(|(n, _)| *n == f) {
                     self.warnings.push(Warning::DeepRecursionRisk {
                         function: f.clone(),
                         frame_bytes: frame.size,
+                        spill_bytes: spill,
                         safe_depth,
                         span: *span,
                     });
@@ -526,6 +558,7 @@ impl SemanticAnalyzer {
             .values_mut()
             .chain(self.enum_blocks.values_mut())
             .chain(self.string_buffers.values_mut())
+            .chain(self.struct_temps.values_mut())
         {
             let base = function_base
                 .get(&arr.function)
@@ -704,8 +737,13 @@ impl SemanticAnalyzer {
             }
         }
 
-        // Hidden loop-bound slots: same rebasing as ordinary symbols.
-        for info in self.loop_bound_slots.values_mut() {
+        // Hidden loop-bound and returned-slice slots: same rebasing as
+        // ordinary symbols.
+        for info in self
+            .loop_bound_slots
+            .values_mut()
+            .chain(self.slice_return_temps.values_mut())
+        {
             if let SymbolLocation::FrameOffset(off) = info.location {
                 let base = frame_base(frames, info.containing_function.as_deref())?;
                 info.location = SymbolLocation::ZeroPage(base + off);

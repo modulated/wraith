@@ -304,6 +304,10 @@ fn returning_a_local_pointer_from_a_for_each_body_is_rejected() {
                 let y: u8 = x;
                 return &y;
             }
+            // A `for` may run zero times, so without this the function could
+            // fall off the end and would be rejected for that instead of for
+            // the escape this test is about.
+            loop {}
         }
         #[reset]
         fn main() { let a: [u8; 4] = [1, 2, 3, 4]; let p: &u8 = leak(a); OUT = *p; loop {} }

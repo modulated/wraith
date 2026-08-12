@@ -1,4 +1,9 @@
 //! Custom assertions for testing assembly output and compiler behavior
+//!
+//! Shared test infrastructure: this module is compiled into several test
+//! binaries but only exercised by some, so unused-item warnings are expected
+//! (the same reason `exec.rs` carries this allow).
+#![allow(dead_code)]
 
 /// Assert that assembly contains specific pattern
 pub fn assert_asm_contains(asm: &str, pattern: &str) {

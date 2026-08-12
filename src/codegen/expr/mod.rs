@@ -34,9 +34,11 @@ use unary::generate_unary;
 
 // Re-export for use in other codegen modules
 pub use aggregate::generate_struct_init_runtime;
+pub(crate) use aggregate::yields_struct_pointer;
 pub(crate) use aggregate::{
-    StaticBase, check_runtime_index_range, emit_array_struct_field_indexed, high_byte_in_x,
-    is_two_byte_value, resolve_static_addr, resolve_static_struct_lvalue, type_byte_size,
+    StaticBase, array_field_base, check_runtime_index_range, emit_array_struct_field_indexed,
+    high_byte_in_x, is_two_byte_value, resolve_static_addr, resolve_static_struct_lvalue,
+    type_byte_size,
 };
 pub(crate) use bitop::bit_test_zp;
 pub use call::generate_tail_recursive_update;
@@ -150,7 +152,9 @@ pub fn generate_expr(
                 "Slice expressions can only be used as assignment targets".to_string(),
             ))
         }
-        Expr::StructInit { name, fields } => generate_struct_init(name, fields, emitter, info),
+        Expr::StructInit { name, fields } => {
+            generate_struct_init(name, fields, expr.span, emitter, info, string_collector)
+        }
         Expr::AnonStructInit { fields } => {
             // Look up the resolved struct name from sema
             let struct_name = info.resolved_struct_names.get(&expr.span).ok_or_else(|| {
@@ -160,7 +164,7 @@ pub fn generate_expr(
             })?;
             // Create a synthetic Spanned<String> for the struct name
             let name = crate::ast::Spanned::new(struct_name.clone(), expr.span);
-            generate_struct_init(&name, fields, emitter, info)
+            generate_struct_init(&name, fields, expr.span, emitter, info, string_collector)
         }
         Expr::Field { object, field } => {
             generate_field_access(object, field, emitter, info, string_collector)

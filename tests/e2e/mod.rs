@@ -2,12 +2,14 @@
 //!
 //! Tests complete language features from source to assembly output
 
+mod addr_of_rom;
 mod aggregate_init;
 mod bcd;
 mod bcd_validation;
 mod bitfields;
 mod cmos;
 mod complex_features;
+mod const_folding;
 mod consts;
 mod control_flow;
 mod cpu_flags;
@@ -22,11 +24,13 @@ mod functions;
 mod import_diagnostics;
 mod imports;
 mod inline;
+mod int_conversions;
 mod interrupts;
 mod interrupts_exec;
 mod language_features;
 mod local_arrays;
 mod loop_sweep;
+mod match_ranges;
 mod math16;
 mod memory;
 mod multi_error;
@@ -37,10 +41,14 @@ mod pointer_casts;
 mod pointer_escape;
 mod pointer_syntax;
 mod pointers;
+mod short_circuit;
+mod slices_readonly;
 mod spec_examples;
 mod statics;
 mod stdlib;
 mod strings_slices;
+mod struct_array_fields;
+mod struct_exprs;
 mod temp_pools;
 mod types;
 mod variables;

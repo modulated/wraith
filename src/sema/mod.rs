@@ -69,6 +69,15 @@ pub enum SemaError {
         span: Span,
     },
 
+    /// A function with a declared return type can finish without returning a
+    /// value. The 6502 has no notion of an uninitialized return, so falling off
+    /// the end leaves whatever the last expression happened to put in A.
+    MissingReturn {
+        function: String,
+        expected: String,
+        span: Span,
+    },
+
     /// Return outside of function
     ReturnOutsideFunction { span: Span },
 
@@ -170,6 +179,7 @@ impl SemaError {
             | ArityMismatch { span, .. }
             | ImmutableAssignment { span, .. }
             | ReturnTypeMismatch { span, .. }
+            | MissingReturn { span, .. }
             | ReturnOutsideFunction { span }
             | BreakOutsideLoop { span }
             | DuplicateSymbol { span, .. }
@@ -329,6 +339,20 @@ impl SemaError {
                 let msg = format!("expected {}, found {}", expected, found);
                 format!(
                     "error: return type mismatch\n{}",
+                    span.format_error_context_of(source, filename, &msg, file)
+                )
+            }
+            SemaError::MissingReturn {
+                function,
+                expected,
+                span,
+            } => {
+                let msg = format!("this function must return a value of type `{}`", expected);
+                format!(
+                    "error: missing return in function '{}'\n{}\n  = help: every path through the \
+                     function body must end in a `return`; a path that falls off the end would \
+                     leave the caller reading whatever happened to be in the accumulator",
+                    function,
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
@@ -605,6 +629,17 @@ impl std::fmt::Display for SemaError {
                     span.start, span.end, expected, found
                 )
             }
+            SemaError::MissingReturn {
+                function,
+                expected,
+                span,
+            } => {
+                write!(
+                    f,
+                    "missing return in function '{}' at {}..{}: must return {}",
+                    function, span.start, span.end, expected
+                )
+            }
             SemaError::ReturnOutsideFunction { span } => {
                 write!(
                     f,
@@ -795,7 +830,13 @@ pub enum Warning {
     /// frames across recursion. Deep recursion will silently overflow it.
     DeepRecursionRisk {
         function: String,
+        /// Frame bytes saved per recursive call.
         frame_bytes: u8,
+        /// Binary-operand spill bytes held across the recursive call, on the
+        /// same software stack. Counting only `frame_bytes` is what let
+        /// `return (n as u16) + s(n - 1)` — one frame byte, two spill bytes —
+        /// look like it could nest 256 levels when the real limit is 85.
+        spill_bytes: u16,
         safe_depth: usize,
         span: Span,
     },
@@ -922,18 +963,38 @@ impl Warning {
             Warning::DeepRecursionRisk {
                 function,
                 frame_bytes,
+                spill_bytes,
                 safe_depth,
                 span,
-            } => (
-                format!(
-                    "recursive function `{}` has a {}-byte frame; each recursive call saves it \
-                     to the 256-byte software stack, so recursion deeper than ~{} levels will \
-                     silently overflow it and corrupt data. Use tail recursion (which compiles \
-                     to a loop) or an explicit loop for deep recursion.",
-                    function, frame_bytes, safe_depth
-                ),
-                span,
-            ),
+            } => {
+                let cost = if *spill_bytes > 0 {
+                    format!(
+                        "{} bytes per call ({}-byte frame plus {} bytes of operand \
+                             spilled across the call)",
+                        *frame_bytes as u16 + spill_bytes,
+                        frame_bytes,
+                        spill_bytes
+                    )
+                } else {
+                    format!("{} bytes per call (its frame)", frame_bytes)
+                };
+                (
+                    format!(
+                        "recursive function `{}` pushes {} onto the 256-byte software \
+                             stack, so it can nest about {} levels deep. At {} levels the \
+                             stack wraps and silently corrupts the saved frames — the 6502 \
+                             has no stack-limit detection, so nothing reports it at run time \
+                             and the function simply returns wrong answers. If the depth can \
+                             reach that, use tail recursion (which compiles to a loop and \
+                             pushes nothing) or an explicit loop.",
+                        function,
+                        cost,
+                        safe_depth,
+                        safe_depth + 1
+                    ),
+                    span,
+                )
+            }
             Warning::InterruptStackDepth {
                 handler,
                 entry_bytes,
@@ -1125,6 +1186,12 @@ pub struct ProgramInfo {
     /// with the call graph) so nested loops, scratch-using expressions, and
     /// calls in the loop body cannot clobber a live bound.
     pub loop_bound_slots: HashMap<Span, SymbolInfo>,
+    /// Hidden 4-byte frame slots holding the descriptor of a slice *expression*
+    /// being returned, keyed by that expression's span. A returned slice hands
+    /// back a pointer to its descriptor, so the descriptor needs storage that
+    /// outlives the expression; a bound slice variable already has some, and
+    /// this gives the expression form the equivalent.
+    pub slice_return_temps: HashMap<Span, SymbolInfo>,
     /// Where each local array's data lives in RAM, keyed by the declaration's
     /// name span. Local array *data* used to be emitted inline in the CODE
     /// section with only a pointer in the frame slot, which meant writing to a
@@ -1137,6 +1204,16 @@ pub struct ProgramInfo {
     /// declaration's name span. `size` is the full block (`1 + capacity`).
     /// Presence marks the string as writable; see `analyze_var_decl`.
     pub string_buffers: HashMap<Span, LocalArray>,
+    /// Scratch RAM for a struct literal whose fields are not all compile-time
+    /// constants, keyed by the literal expression's span.
+    ///
+    /// A constant struct literal is emitted as bytes in the CODE section and
+    /// evaluates to a pointer at them. A computed one has no bytes until it
+    /// runs, so it needs somewhere writable to be built — ROM will not do. The
+    /// block is allocated per literal *site* and colored with the call graph
+    /// like local array data, so two functions that can never be active at
+    /// once share it.
+    pub struct_temps: HashMap<Span, LocalArray>,
     /// Registry of struct and enum type definitions
     pub type_registry: type_defs::TypeRegistry,
     /// Map of expression spans to their resolved types

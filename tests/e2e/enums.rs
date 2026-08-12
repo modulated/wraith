@@ -674,3 +674,45 @@ fn many_runtime_enum_constructions_do_not_exhaust_the_temp_pool() {
         "payload of the 40th construction"
     );
 }
+
+#[test]
+fn sibling_match_arm_bindings_share_frame_storage() {
+    // Arms are mutually exclusive, so their payload bindings reuse one frame
+    // slot instead of one each. Correctness first: every arm must still read
+    // its own payload.
+    let program = |v: &str| {
+        format!(
+            r#"
+            enum E {{ A(u16), B(u16), C(u16), D(u16) }}
+            const OUT: addr = 0x0900;
+            fn pick(e: E) -> u16 {{
+                match e {{
+                    E::A(x) => {{ return x + 1; }}
+                    E::B(y) => {{ return y + 2; }}
+                    E::C(z) => {{ return z + 3; }}
+                    E::D(w) => {{ return w + 4; }}
+                }}
+            }}
+            #[reset]
+            fn main() {{ let _k: fn(E) -> u16 = pick; OUT = pick(E::{v}) as u8; loop {{}} }}
+        "#
+        )
+    };
+    assert_eq!(run(&program("A(100)")).mem(0x0900), 101);
+    assert_eq!(run(&program("C(100)")).mem(0x0900), 103);
+    assert_eq!(run(&program("D(200)")).mem(0x0900), 204);
+
+    // Shape: all four arms copy their payload into the *same* slot.
+    let asm = crate::common::compile_success(&program("A(1)"));
+    let arm_stores: Vec<&str> = asm
+        .lines()
+        .filter(|l| l.trim_start().starts_with("STA $"))
+        .map(|l| l.trim())
+        .collect();
+    // The shared binding low-byte store `STA $44` should appear once per arm.
+    let shared = arm_stores.iter().filter(|s| **s == "STA $44").count();
+    assert!(
+        shared >= 4,
+        "each arm should store its binding to the shared slot, got {arm_stores:?}"
+    );
+}

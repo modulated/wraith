@@ -9,7 +9,7 @@ pub(super) use crate::sema::ProgramInfo;
 pub(super) use rustc_hash::FxHashMap as HashMap;
 
 mod asm_stmt;
-mod assign;
+pub(crate) mod assign;
 mod loops;
 mod match_stmt;
 
@@ -185,7 +185,53 @@ pub fn generate_stmt(
                     })
                     .flatten();
 
-                    if let Some(addr) = slice_var_return {
+                    // A slice *expression* (`return v[1..4]`) has no variable
+                    // to point at, so sema reserved a frame slot for its
+                    // descriptor; build it there and return that address. The
+                    // slot is frame-allocated and so colored with the call
+                    // graph, exactly like the bound form's storage.
+                    let slice_expr_return =
+                        info.slice_return_temps
+                            .get(&e.span)
+                            .and_then(|sym| match sym.location {
+                                crate::sema::table::SymbolLocation::ZeroPage(a) => Some(a),
+                                _ => None,
+                            });
+
+                    if let (
+                        Some(dest),
+                        crate::ast::Expr::Slice {
+                            object,
+                            start,
+                            end,
+                            inclusive,
+                        },
+                    ) = (slice_expr_return, &e.node)
+                    {
+                        let elem = match info.resolved_types.get(&e.span) {
+                            Some(crate::sema::types::Type::Slice(el)) => (**el).clone(),
+                            _ => {
+                                return Err(CodegenError::Internal(
+                                    "returned slice expression has no slice type".to_string(),
+                                ));
+                            }
+                        };
+                        crate::codegen::stmt::assign::generate_slice_materialize(
+                            dest,
+                            &elem,
+                            object,
+                            start,
+                            end,
+                            *inclusive,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?;
+                        emitter.emit_comment("Return slice descriptor pointer (A:X)");
+                        emitter.emit_inst("LDA", &format!("#${:02X}", dest));
+                        emitter.emit_inst("LDX", "#$00");
+                        emitter.mark_a_unknown();
+                    } else if let Some(addr) = slice_var_return {
                         emitter.emit_comment("Return slice descriptor pointer (A:X)");
                         emitter.emit_inst("LDA", &format!("#${:02X}", addr));
                         emitter.emit_inst("LDX", "#$00");

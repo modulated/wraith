@@ -1016,6 +1016,9 @@ impl SemanticAnalyzer {
         for (span, eb) in &imported_analyzer.enum_blocks {
             self.enum_blocks.insert(*span, eb.clone());
         }
+        for (span, st) in &imported_analyzer.struct_temps {
+            self.struct_temps.insert(*span, st.clone());
+        }
         for (name, size) in &imported_analyzer.array_block_sizes {
             self.array_block_sizes.entry(name.clone()).or_insert(*size);
         }
@@ -1032,6 +1035,9 @@ impl SemanticAnalyzer {
         // Merge loop-bound slots so for-loops in imported functions keep their
         // hidden frame slots when emitted from this module. They stay at
         // FrameOffset until the root finalize pass rewrites them.
+        for (span, info) in &imported_analyzer.slice_return_temps {
+            self.slice_return_temps.insert(*span, info.clone());
+        }
         for (span, info) in &imported_analyzer.loop_bound_slots {
             self.loop_bound_slots.insert(*span, info.clone());
         }

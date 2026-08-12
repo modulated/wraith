@@ -69,6 +69,34 @@ impl SemanticAnalyzer {
                     Type::Void
                 };
 
+                // A returned slice hands the caller a *pointer* to its 4-byte
+                // descriptor, so the descriptor needs storage that outlives the
+                // expression. A bound slice variable already has a frame slot;
+                // reserve the equivalent for the expression form, keyed by its
+                // span, so `return v[1..4]` needs no `let` first.
+                if let Some(e) = expr
+                    && matches!(e.node, Expr::Slice { .. })
+                    && matches!(expr_ty, Type::Slice(_))
+                {
+                    let offset = self.frame_alloc(4);
+                    let f = self.current_function.clone();
+                    self.slice_return_temps.insert(
+                        e.span,
+                        SymbolInfo {
+                            name: "<returned slice descriptor>".to_string(),
+                            kind: SymbolKind::Variable,
+                            ty: expr_ty.clone(),
+                            location: SymbolLocation::FrameOffset(offset),
+                            mutable: true,
+                            access_mode: None,
+                            is_pub: false,
+                            containing_function: f,
+                            is_param: false,
+                            decl_span: None,
+                        },
+                    );
+                }
+
                 if let Some(ret_ty) = &self.current_return_type {
                     // Check if return expression type can be implicitly converted to return type
                     if !expr_ty.is_implicitly_convertible_to(ret_ty) {
@@ -150,12 +178,26 @@ impl SemanticAnalyzer {
                 // Check the matched expression type
                 let match_ty = self.check_expr(expr)?;
 
+                // An irrefutable arm covers every value whatever the scrutinee
+                // type; otherwise only an enum match naming every variant does.
+                let irrefutable = arms.iter().any(|arm| {
+                    matches!(arm.pattern.node, Pattern::Wildcard | Pattern::Variable(_))
+                });
+                if irrefutable {
+                    self.exhaustive_matches.insert(stmt.span);
+                }
+
                 // Check exhaustiveness for enum types
                 if let Type::Named(enum_name) = &match_ty {
                     self.check_match_exhaustiveness(enum_name, arms, stmt.span)?;
                 }
 
-                // Analyze each arm
+                // Analyze each arm. Sibling arms share frame storage (see
+                // `reset_frame_to_match_base`): each starts from the same base
+                // and the widest arm sets the peak for later locals.
+                let arms_base = self.frame_cursor;
+                let saved_free = self.loop_bound_free.clone();
+                let mut arms_peak = arms_base;
                 for arm in arms {
                     // The pattern must make sense for the scrutinee before it
                     // is trusted for bindings: a pattern naming a different
@@ -164,6 +206,8 @@ impl SemanticAnalyzer {
                     // emitted CMP (`match x { 300 => ... }` with `x: u8`
                     // matched x == 44).
                     self.check_pattern_type(&arm.pattern, &match_ty)?;
+
+                    self.reset_frame_to_match_base(arms_base, &saved_free);
 
                     // Enter new scope for pattern bindings
                     self.table.enter_scope();
@@ -175,7 +219,10 @@ impl SemanticAnalyzer {
                     self.analyze_stmt(&arm.body)?;
 
                     self.table.exit_scope();
+                    arms_peak = arms_peak.max(self.frame_cursor);
                 }
+                self.frame_cursor = arms_peak;
+                self.loop_bound_free = saved_free;
             }
             Stmt::Asm { lines } => {
                 // Parse inline assembly to extract variable references
@@ -440,6 +487,27 @@ impl SemanticAnalyzer {
                     span: target.span,
                 });
             }
+        }
+
+        // A slice is a read-only view. It can name a `const` array in ROM, where
+        // a store would silently do nothing on real hardware, and the descriptor
+        // carries no record of which storage class it came from — so the rule
+        // cannot depend on the source without making the same expression legal
+        // or not according to a declaration somewhere else. Rejecting every
+        // write keeps `&[T]` one thing.
+        //
+        // This is the same split `str` (ROM literal, read-only) and `str<N>`
+        // (RAM buffer, writable) already draw; a writable slice type would be
+        // the analogue of `str<N>` and does not exist yet.
+        if let Expr::Index { object, .. } = &target.node
+            && matches!(self.resolved_types.get(&object.span), Some(Type::Slice(_)))
+        {
+            return Err(SemaError::Custom {
+                message: "cannot write through a slice: `&[T]` is a read-only view. \
+                          Write to the array it borrows from, or pass the array itself"
+                    .to_string(),
+                span: target.span,
+            });
         }
         // Give the value the target type as its expected type so a literal (or
         // negative literal) infers against the destination, e.g. `RESULT = -10`
@@ -953,6 +1021,90 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
+    /// Whether control leaving `stmt` normally is impossible — i.e. every path
+    /// through it ends in a `return`, or never ends at all.
+    ///
+    /// This is what decides whether a function with a declared return type is
+    /// complete. It is deliberately conservative: it must never claim a return
+    /// that is not there (that would be the miscompile this check exists to
+    /// prevent), and where it is unsure it says `false` and the programmer adds
+    /// an explicit `return`.
+    ///
+    /// Run after the body has been analyzed, so `exhaustive_matches` is filled.
+    pub(super) fn always_returns(&self, stmt: &Spanned<Stmt>) -> bool {
+        match &stmt.node {
+            Stmt::Return(_) => true,
+
+            // A block returns if any statement in it does; anything after that
+            // statement is unreachable (and already warned about).
+            Stmt::Block(stmts) => stmts.iter().any(|s| self.always_returns(s)),
+
+            // Only a two-armed `if` can guarantee anything: without an `else`,
+            // the false path falls straight through.
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => else_branch.as_ref().is_some_and(|else_b| {
+                self.always_returns(then_branch) && self.always_returns(else_b)
+            }),
+
+            // `loop {}` with no `break` out of it never completes, so control
+            // never reaches whatever follows — that is what makes a trailing
+            // `loop {}` a valid end to a non-void function. A `break` gives it
+            // an exit, and then the function can fall through it.
+            Stmt::Loop { body } => !Self::contains_break(body),
+
+            // A conditional loop may run zero times, so it never guarantees a
+            // return no matter what its body does.
+            Stmt::While { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => false,
+
+            // Every arm must return, and the match must leave no value
+            // unmatched — otherwise the unmatched case falls through.
+            Stmt::Match { arms, .. } => {
+                self.exhaustive_matches.contains(&stmt.span)
+                    && arms.iter().all(|arm| self.always_returns(&arm.body))
+            }
+
+            // Inline assembly is the escape hatch, and the calling convention
+            // returns the accumulator, so an `asm` block that leaves the result
+            // in A *is* the return. Much of the stdlib is written this way
+            // (`min`, `max`, `clamp`, `div16` are whole-function `asm` bodies),
+            // and there is nothing here that could check the claim short of
+            // simulating the block. Trusting it is the same bargain `asm` makes
+            // everywhere else.
+            Stmt::Asm { .. } => true,
+
+            _ => false,
+        }
+    }
+
+    /// Whether `stmt` can `break` out of the loop that encloses it. Nested
+    /// loops are not descended into: a `break` inside one exits *that* loop,
+    /// leaving the outer one still infinite.
+    fn contains_break(stmt: &Spanned<Stmt>) -> bool {
+        match &stmt.node {
+            Stmt::Break => true,
+            Stmt::Block(stmts) => stmts.iter().any(Self::contains_break),
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::contains_break(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| Self::contains_break(e))
+            }
+            Stmt::Match { arms, .. } => arms.iter().any(|arm| Self::contains_break(&arm.body)),
+            // A `break` inside a nested loop belongs to that loop.
+            Stmt::Loop { .. } | Stmt::While { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => {
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Check if a match statement exhaustively covers all enum variants
     pub(super) fn check_match_exhaustiveness(
         &mut self,
@@ -1000,6 +1152,10 @@ impl SemanticAnalyzer {
                 missing_patterns: missing_variants,
                 span: match_span,
             });
+        } else {
+            // Every variant is named, so control cannot slip past this match
+            // unmatched even without a wildcard arm.
+            self.exhaustive_matches.insert(match_span);
         }
 
         Ok(())
@@ -1130,6 +1286,23 @@ impl SemanticAnalyzer {
             });
         }
         Ok(())
+    }
+
+    /// Reset the frame allocator to the state captured before a match's arms.
+    ///
+    /// Sibling arms are mutually exclusive at runtime, so their pattern-binding
+    /// and body-local slots can share frame storage: rewinding to the same base
+    /// before each arm makes every arm allocate as if it were the only one, and
+    /// the caller keeps the peak so later locals sit above the widest arm.
+    ///
+    /// Both the frame cursor and the loop-bound free list are snapshotted — an
+    /// arm whose body contains a loop could otherwise reuse a bound slot freed
+    /// by an earlier arm, which after the rewind would alias this arm's own
+    /// bindings.
+    pub(super) fn reset_frame_to_match_base(&mut self, base: u8, saved_free: &[(u8, u8)]) {
+        self.frame_cursor = base;
+        self.loop_bound_free.clear();
+        self.loop_bound_free.extend_from_slice(saved_free);
     }
 
     pub(super) fn add_pattern_bindings(

@@ -2,13 +2,26 @@
 //!
 //! Type checking for all expression variants in the AST.
 
-use crate::ast::{BinaryOp, Expr, PrimitiveType, Spanned};
+use crate::ast::{BinaryOp, Expr, PrimitiveType, Spanned, Stmt};
 use crate::sema::SemaError;
 use crate::sema::const_eval::eval_const_expr_with_env;
 use crate::sema::table::SymbolKind;
 use crate::sema::types::Type;
+use rustc_hash::FxHashMap as HashMap;
 
 use super::SemanticAnalyzer;
+
+/// The width in bits of an integer type, and whether it is signed. `None` for
+/// anything whose arithmetic does not wrap at a fixed width.
+fn int_width_of(ty: &Type) -> Option<(u32, bool)> {
+    match ty {
+        Type::Primitive(PrimitiveType::U8) => Some((8, false)),
+        Type::Primitive(PrimitiveType::I8) => Some((8, true)),
+        Type::Primitive(PrimitiveType::U16) => Some((16, false)),
+        Type::Primitive(PrimitiveType::I16) => Some((16, true)),
+        _ => None,
+    }
+}
 
 impl SemanticAnalyzer {
     /// Check if an expression contains any references to addr symbols (runtime values)
@@ -148,11 +161,19 @@ impl SemanticAnalyzer {
                 }
 
                 self.check_struct_init_fields(&name.node, fields)?;
+                self.reserve_struct_temp(&name.node, fields, expr.span);
 
                 Type::Named(name.node.clone())
             }
 
-            Expr::AnonStructInit { fields } => self.check_anon_struct_init(fields, expr.span)?,
+            Expr::AnonStructInit { fields } => {
+                let ty = self.check_anon_struct_init(fields, expr.span)?;
+                if let Type::Named(n) = &ty {
+                    let n = n.clone();
+                    self.reserve_struct_temp(&n, fields, expr.span);
+                }
+                ty
+            }
 
             Expr::EnumVariant {
                 enum_name,
@@ -253,15 +274,25 @@ impl SemanticAnalyzer {
                 // arm gets its own scope with the pattern's bindings in it, so
                 // variable and enum-payload bindings resolve to real storage
                 // (mirrors the match-statement path).
+                // Sibling arms are mutually exclusive, so they share frame
+                // storage: each starts from the same base, and the widest sets
+                // the peak (mirrors the match-statement path).
+                let arms_base = self.frame_cursor;
+                let saved_free = self.loop_bound_free.clone();
+                let mut arms_peak = arms_base;
                 let mut arm_types = Vec::new();
                 for arm in arms {
                     self.check_pattern_type(&arm.pattern, &match_ty)?;
+                    self.reset_frame_to_match_base(arms_base, &saved_free);
                     self.table.enter_scope();
                     self.add_pattern_bindings(&arm.pattern.node, arm.pattern.span, &match_ty)?;
                     let arm_ty = self.check_expr(&arm.body)?;
                     self.table.exit_scope();
+                    arms_peak = arms_peak.max(self.frame_cursor);
                     arm_types.push(arm_ty);
                 }
+                self.frame_cursor = arms_peak;
+                self.loop_bound_free = saved_free;
 
                 // All arms must have the same type (or be compatible)
                 if arm_types.is_empty() {
@@ -293,7 +324,111 @@ impl SemanticAnalyzer {
         // Store the resolved type for this expression so codegen can access it
         self.resolved_types.insert(expr.span, result_ty.clone());
 
+        // Re-fold at the expression's own width now that it is known.
+        //
+        // The fold above runs before typing and so works in `i64`, truncating
+        // once at the end. The generated code wraps after *every* operation, so
+        // the two disagree whenever an intermediate leaves the type's range:
+        // `(94 << 6) >> 3` on a `u8` folds to 240 in full precision but
+        // computes 16 at run time, and the same expression written with a
+        // variable took the run-time path — so a constant and its identical
+        // runtime form gave different answers.
+        if self.folded_constants.contains_key(&expr.span)
+            && let Some((bits, signed)) = int_width_of(&result_ty)
+            && let Ok(v) = crate::sema::const_eval::eval_const_expr_wrapping(
+                expr,
+                &self.const_env,
+                bits,
+                signed,
+            )
+        {
+            self.folded_constants.insert(expr.span, v);
+        }
+
+        // A cast changes width on purpose, so the wrapping evaluator treats it
+        // as a leaf and re-derives its operand in full precision — losing the
+        // operand's own wrapping. `((15397 << 13) % 27617) as i8` is 31 through
+        // a `u16` variable and something else entirely at full precision. The
+        // operand's corrected fold is already in hand; narrow that instead.
+        if let Some(v) = self.refold_through(expr, &result_ty) {
+            self.folded_constants
+                .insert(expr.span, crate::sema::const_eval::ConstValue::Integer(v));
+        }
+
+        // A `bool`-valued node has no width of its own, so the rule above
+        // cannot reach it — and the full-precision fold underneath is wrong for
+        // exactly the same reason: `(94 << 6) >= 229` is false at `u8` width
+        // (the shift wraps to 128) and true in `i64` (6016). Recompute it from
+        // the operands, which the rule above has already corrected, since every
+        // subexpression is checked before its parent.
+        if matches!(result_ty, Type::Primitive(PrimitiveType::Bool))
+            && self.folded_constants.contains_key(&expr.span)
+            && let Some(v) = self.refold_bool(expr)
+        {
+            self.folded_constants
+                .insert(expr.span, crate::sema::const_eval::ConstValue::Bool(v));
+        }
+
         Ok(result_ty)
+    }
+
+    /// An integer node that only passes its operand through — a cast or a pair
+    /// of parentheses — recomputed from that operand's corrected fold, narrowed
+    /// to this node's own width.
+    fn refold_through(&self, expr: &Spanned<Expr>, ty: &Type) -> Option<i64> {
+        let (bits, signed) = int_width_of(ty)?;
+        let inner = match &expr.node {
+            Expr::Paren(inner) => inner,
+            Expr::Cast { expr: inner, .. } => inner,
+            _ => return None,
+        };
+        let v = self.folded_constants.get(&inner.span)?.as_integer()?;
+        Some(crate::sema::const_eval::narrow(v, bits, signed))
+    }
+
+    /// The already-folded value of a subexpression, as a truth value.
+    fn folded_truth(&self, expr: &Spanned<Expr>) -> Option<bool> {
+        use crate::sema::const_eval::ConstValue;
+        match self.folded_constants.get(&expr.span)? {
+            ConstValue::Bool(b) => Some(*b),
+            ConstValue::Integer(v) => Some(*v != 0),
+            ConstValue::String(_) => None,
+        }
+    }
+
+    /// Recompute a constant `bool` from its operands' corrected folds.
+    fn refold_bool(&self, expr: &Spanned<Expr>) -> Option<bool> {
+        use crate::ast::UnaryOp;
+        match &expr.node {
+            Expr::Paren(inner) => self.folded_truth(inner),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => Some(!self.folded_truth(operand)?),
+            Expr::Binary { left, op, right } => match op {
+                BinaryOp::And => Some(self.folded_truth(left)? && self.folded_truth(right)?),
+                BinaryOp::Or => Some(self.folded_truth(left)? || self.folded_truth(right)?),
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {
+                    let a = self.folded_constants.get(&left.span)?.as_integer()?;
+                    let b = self.folded_constants.get(&right.span)?.as_integer()?;
+                    Some(match op {
+                        BinaryOp::Eq => a == b,
+                        BinaryOp::Ne => a != b,
+                        BinaryOp::Lt => a < b,
+                        BinaryOp::Le => a <= b,
+                        BinaryOp::Gt => a > b,
+                        _ => a >= b,
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Find a common type for two arm/branch types: identical types unify to
@@ -476,9 +611,11 @@ impl SemanticAnalyzer {
         Ok(info.ty)
     }
 
-    /// Is this operand a bare integer literal for width-adaptation purposes?
-    /// Accepts an integer literal, a unary-negated integer literal (`-5`), and
-    /// either wrapped in parentheses.
+    /// Is this operand an integer expression whose type nothing pins down, so
+    /// it can adopt the other operand's? An integer literal, a unary-negated
+    /// one (`-5`), any of those in parentheses, and any binary combination of
+    /// them: `(37 >> 1)` is as free to be `i8` as `18` is. A cast is
+    /// deliberately excluded — it names the type it produces.
     fn is_adaptable_int_literal(expr: &Expr) -> bool {
         use crate::ast::{Literal, UnaryOp};
         match expr {
@@ -488,8 +625,83 @@ impl SemanticAnalyzer {
                 operand,
             } => matches!(&operand.node, Expr::Literal(Literal::Integer(_))),
             Expr::Paren(inner) => Self::is_adaptable_int_literal(&inner.node),
+            Expr::Binary { left, right, .. } => {
+                Self::is_adaptable_int_literal(&left.node)
+                    && Self::is_adaptable_int_literal(&right.node)
+            }
             _ => false,
         }
+    }
+
+    /// Every literal value written inside an adaptable expression. The type is
+    /// chosen to hold the literals as the programmer wrote them, not the value
+    /// the expression computes — that value depends on the type, which is what
+    /// is being decided.
+    fn collect_adaptable_ints(expr: &Expr, out: &mut Vec<i64>) {
+        use crate::ast::{Literal, UnaryOp};
+        match expr {
+            Expr::Literal(Literal::Integer(v)) => out.push(*v),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => {
+                if let Expr::Literal(Literal::Integer(v)) = &operand.node {
+                    out.push(-*v);
+                }
+            }
+            Expr::Paren(inner) => Self::collect_adaptable_ints(&inner.node, out),
+            Expr::Binary { left, right, .. } => {
+                Self::collect_adaptable_ints(&left.node, out);
+                Self::collect_adaptable_ints(&right.node, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn literal_fits(v: i64, p: PrimitiveType) -> bool {
+        match p {
+            PrimitiveType::U8 => (0..=255).contains(&v),
+            PrimitiveType::I8 => (-128..=127).contains(&v),
+            PrimitiveType::U16 | PrimitiveType::Addr => (0..=65535).contains(&v),
+            PrimitiveType::I16 => (-32768..=32767).contains(&v),
+            _ => false,
+        }
+    }
+
+    /// The type two bare literal operands should share. The ambient expectation
+    /// wins when it holds both values (so `let x: i16 = 3 - 5;` still computes
+    /// at 16 bits); otherwise the narrowest type that holds both.
+    fn common_literal_type(left: &Expr, right: &Expr, expected: Option<&Type>) -> Option<Type> {
+        let fallback = expected.cloned();
+        let mut values = Vec::new();
+        Self::collect_adaptable_ints(left, &mut values);
+        Self::collect_adaptable_ints(right, &mut values);
+        if values.is_empty() {
+            return fallback;
+        }
+        if let Some(Type::Primitive(p)) = expected
+            && values.iter().all(|v| Self::literal_fits(*v, *p))
+        {
+            return fallback;
+        }
+        let lo = *values.iter().min().unwrap();
+        let hi = *values.iter().max().unwrap();
+        let prim = if lo >= 0 {
+            if hi <= 255 {
+                PrimitiveType::U8
+            } else if hi <= 65535 {
+                PrimitiveType::U16
+            } else {
+                return fallback;
+            }
+        } else if lo >= -128 && hi <= 127 {
+            PrimitiveType::I8
+        } else if lo >= -32768 && hi <= 32767 {
+            PrimitiveType::I16
+        } else {
+            return fallback;
+        };
+        Some(Type::Primitive(prim))
     }
 
     fn check_binary(
@@ -527,6 +739,20 @@ impl SemanticAnalyzer {
             let lt = self.check_expr(left);
             self.expected_type = saved;
             (lt?, rt)
+        } else if left_is_int_lit && right_is_int_lit {
+            // Two bare literals inform nothing about each other, so each falls
+            // back to its own default — `-5` to `i8`, `3` to `u8` — and the
+            // operator then rejects the pair even though one type holds both
+            // values. Give them a shared expected type: the ambient one when it
+            // holds both, else the narrowest that does. `if (-5 - 3) < n` is the
+            // shape that hits this, where no ambient type exists to adopt.
+            let common =
+                Self::common_literal_type(&left.node, &right.node, self.expected_type.as_ref());
+            let saved = std::mem::replace(&mut self.expected_type, common);
+            let lt = self.check_expr(left);
+            let rt = self.check_expr(right);
+            self.expected_type = saved;
+            (self.poison_on_err(lt), self.poison_on_err(rt))
         } else {
             // Neither side informs the other's type, so check both: two bad
             // names in `p + q` should report together rather than one per
@@ -1150,6 +1376,259 @@ impl SemanticAnalyzer {
     /// type as its expected type, so a literal adopts the field's width and a
     /// value of the wrong type errors. An omitted field is fine — the
     /// flattener zero-fills it.
+    /// Reserve scratch RAM for a struct literal that cannot be emitted as
+    /// constant bytes.
+    ///
+    /// A literal whose fields are all constants is emitted into the CODE
+    /// section and evaluates to a pointer at those bytes — nothing to build at
+    /// run time. One with a computed field has to be *assembled* somewhere
+    /// writable, and ROM is not it. The block is allocated per literal site
+    /// from the same call-graph-colored region local array data uses, so
+    /// functions that can never be active at once share the space.
+    ///
+    /// Reserved for every computed literal, including those that turn out to
+    /// be initializing a variable directly (where codegen writes the fields
+    /// straight to the destination and never touches this block). Predicting
+    /// that here would mean duplicating codegen's destination rules and
+    /// silently emitting a "constant expressions only" error whenever the two
+    /// drifted apart; a colored block per site is the cheaper mistake.
+    fn reserve_struct_temp(
+        &mut self,
+        struct_name: &str,
+        fields: &[crate::ast::FieldInit],
+        span: crate::ast::Span,
+    ) {
+        let all_constant = fields
+            .iter()
+            .all(|f| matches!(f.value.node, crate::ast::Expr::Literal(_)));
+        if all_constant {
+            return;
+        }
+
+        let bytes = self.type_size(&Type::Named(struct_name.to_string())) as u16;
+        if bytes == 0 {
+            return;
+        }
+
+        let Some(f) = self.current_function.clone() else {
+            return;
+        };
+        let at = self.array_cursor;
+        self.array_cursor += bytes;
+        self.struct_temps.insert(
+            span,
+            crate::sema::LocalArray {
+                addr: at,
+                size: bytes,
+                function: f.clone(),
+            },
+        );
+        let entry = self.array_block_sizes.entry(f).or_insert(0);
+        *entry = (*entry).max(self.array_cursor);
+    }
+
+    /// Record, per callee, the bytes of binary-operand spill that are live
+    /// across a call to it from `func_name`.
+    ///
+    /// `warn_deep_recursion` needs the true per-level cost of a recursive call,
+    /// and the frame save is only part of it. When a binary operation's *right*
+    /// operand contains a call, codegen cannot keep the left operand in a
+    /// register or the zero-page pool across the `JSR`, so it spills it to the
+    /// same 256-byte software stack the frame save uses (see
+    /// `codegen::expr::binary`, `needs_spill`). Nested binaries stack their
+    /// spills, so the cost along a path is their sum.
+    ///
+    /// This is what made the old warning miss the plainest possible case:
+    /// `return (n as u16) + s(n - 1)` saves a one-byte frame but *also* spills
+    /// the two-byte left operand across the call, so each level costs three
+    /// bytes and the real limit is 85, not 256.
+    ///
+    /// Keyed by callee because only calls that close a recursion cycle matter;
+    /// the caller side is resolved once SCCs are known.
+    pub(super) fn record_call_spills(&mut self, func_name: &str, body: &Spanned<Stmt>) {
+        let mut spills: HashMap<String, u16> = HashMap::default();
+        self.walk_stmt_spills(body, 0, &mut spills);
+        if !spills.is_empty() {
+            self.call_spill_bytes.insert(func_name.to_string(), spills);
+        }
+    }
+
+    fn walk_stmt_spills(&self, stmt: &Spanned<Stmt>, carried: u16, out: &mut HashMap<String, u16>) {
+        match &stmt.node {
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.walk_stmt_spills(s, carried, out);
+                }
+            }
+            Stmt::VarDecl { init, .. } => self.walk_expr_spills(init, carried, out),
+            Stmt::Assign { target, value } => {
+                self.walk_expr_spills(target, carried, out);
+                self.walk_expr_spills(value, carried, out);
+            }
+            Stmt::Expr(e) => self.walk_expr_spills(e, carried, out),
+            Stmt::Return(Some(e)) => self.walk_expr_spills(e, carried, out),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.walk_expr_spills(condition, carried, out);
+                self.walk_stmt_spills(then_branch, carried, out);
+                if let Some(e) = else_branch {
+                    self.walk_stmt_spills(e, carried, out);
+                }
+            }
+            Stmt::While { condition, body } => {
+                self.walk_expr_spills(condition, carried, out);
+                self.walk_stmt_spills(body, carried, out);
+            }
+            Stmt::Loop { body } => self.walk_stmt_spills(body, carried, out),
+            Stmt::For { body, .. } => self.walk_stmt_spills(body, carried, out),
+            Stmt::ForEach { iterable, body, .. } => {
+                self.walk_expr_spills(iterable, carried, out);
+                self.walk_stmt_spills(body, carried, out);
+            }
+            Stmt::Match { expr, arms } => {
+                self.walk_expr_spills(expr, carried, out);
+                for arm in arms {
+                    self.walk_stmt_spills(&arm.body, carried, out);
+                }
+            }
+        }
+    }
+
+    fn walk_expr_spills(&self, expr: &Spanned<Expr>, carried: u16, out: &mut HashMap<String, u16>) {
+        match &expr.node {
+            Expr::Binary { left, right, .. } => {
+                // Codegen spills the left operand only when evaluating the right
+                // one runs a call that would clobber it.
+                let spill = if Self::expr_contains_call(right) {
+                    self.spill_width(left)
+                } else {
+                    0
+                };
+                self.walk_expr_spills(left, carried, out);
+                self.walk_expr_spills(right, carried + spill, out);
+            }
+            Expr::Call { function, args } => {
+                let e = out.entry(function.node.clone()).or_insert(0);
+                *e = (*e).max(carried);
+                for a in args {
+                    self.walk_expr_spills(a, carried, out);
+                }
+            }
+            Expr::CallIndirect { callee, args } => {
+                self.walk_expr_spills(callee, carried, out);
+                for a in args {
+                    self.walk_expr_spills(a, carried, out);
+                }
+            }
+            Expr::Unary { operand, .. } => self.walk_expr_spills(operand, carried, out),
+            Expr::Cast { expr: inner, .. }
+            | Expr::Paren(inner)
+            | Expr::SliceLen(inner)
+            | Expr::U16Low(inner)
+            | Expr::U16High(inner) => self.walk_expr_spills(inner, carried, out),
+            Expr::Field { object, .. } => self.walk_expr_spills(object, carried, out),
+            Expr::Index { object, index } => {
+                self.walk_expr_spills(object, carried, out);
+                self.walk_expr_spills(index, carried, out);
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                self.walk_expr_spills(object, carried, out);
+                self.walk_expr_spills(start, carried, out);
+                self.walk_expr_spills(end, carried, out);
+            }
+            Expr::BitOp { object, bit, .. } => {
+                self.walk_expr_spills(object, carried, out);
+                self.walk_expr_spills(bit, carried, out);
+            }
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                for f in fields {
+                    self.walk_expr_spills(&f.value, carried, out);
+                }
+            }
+            Expr::EnumVariant { data, .. } => match data {
+                crate::ast::VariantData::Unit => {}
+                crate::ast::VariantData::Tuple(elems) => {
+                    for d in elems {
+                        self.walk_expr_spills(d, carried, out);
+                    }
+                }
+                crate::ast::VariantData::Struct(fields) => {
+                    for f in fields {
+                        self.walk_expr_spills(&f.value, carried, out);
+                    }
+                }
+            },
+            Expr::Match { expr: inner, arms } => {
+                self.walk_expr_spills(inner, carried, out);
+                for arm in arms {
+                    self.walk_expr_spills(&arm.body, carried, out);
+                }
+            }
+            Expr::Literal(crate::ast::Literal::Array(elems)) => {
+                for e in elems {
+                    self.walk_expr_spills(e, carried, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Bytes codegen spills for a left operand: two for a 16-bit value, one
+    /// otherwise (`codegen::expr::binary` picks the same way).
+    fn spill_width(&self, left: &Spanned<Expr>) -> u16 {
+        match self.resolved_types.get(&left.span) {
+            Some(t) if self.type_size(t) >= 2 => 2,
+            _ => 1,
+        }
+    }
+
+    /// Whether evaluating `expr` can run a `JSR`.
+    fn expr_contains_call(expr: &Spanned<Expr>) -> bool {
+        match &expr.node {
+            Expr::Call { .. } | Expr::CallIndirect { .. } => true,
+            Expr::Binary { left, right, .. } => {
+                Self::expr_contains_call(left) || Self::expr_contains_call(right)
+            }
+            Expr::Unary { operand, .. } => Self::expr_contains_call(operand),
+            Expr::Cast { expr: i, .. }
+            | Expr::Paren(i)
+            | Expr::SliceLen(i)
+            | Expr::U16Low(i)
+            | Expr::U16High(i) => Self::expr_contains_call(i),
+            Expr::Field { object, .. } => Self::expr_contains_call(object),
+            Expr::Index { object, index } => {
+                Self::expr_contains_call(object) || Self::expr_contains_call(index)
+            }
+            Expr::BitOp { object, bit, .. } => {
+                Self::expr_contains_call(object) || Self::expr_contains_call(bit)
+            }
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                fields.iter().any(|f| Self::expr_contains_call(&f.value))
+            }
+            Expr::EnumVariant { data, .. } => match data {
+                crate::ast::VariantData::Unit => false,
+                crate::ast::VariantData::Tuple(elems) => elems.iter().any(Self::expr_contains_call),
+                crate::ast::VariantData::Struct(fields) => {
+                    fields.iter().any(|f| Self::expr_contains_call(&f.value))
+                }
+            },
+            Expr::Match { expr: i, arms } => {
+                Self::expr_contains_call(i)
+                    || arms.iter().any(|a| Self::expr_contains_call(&a.body))
+            }
+            Expr::Literal(crate::ast::Literal::Array(elems)) => {
+                elems.iter().any(Self::expr_contains_call)
+            }
+            _ => false,
+        }
+    }
+
     fn check_struct_init_fields(
         &mut self,
         struct_name: &str,
@@ -1404,6 +1883,28 @@ impl SemanticAnalyzer {
             index_ty,
             Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
         ) {
+            // A 16-bit index is the common way to arrive here, because `.len`
+            // is a `u16` and `for i in 0..s.len` therefore types `i` as one.
+            // Indexed addressing goes through an 8-bit register, so the index
+            // genuinely has to narrow — but say where the cast goes rather than
+            // leaving the reader to work out which of two operands is wrong.
+            if matches!(
+                index_ty,
+                Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16)
+            ) {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "index must be `u8` or `i8`, found `{}`\n  = help: indexed \
+                         addressing uses an 8-bit register, so a 16-bit index has to \
+                         narrow — write `[i as u8]`\n  = note: `.len` is a `u16`, so \
+                         `for i in 0..s.len` gives `i` that type; binding the bound \
+                         first (`let n: u8 = s.len as u8;`) types the loop variable \
+                         `u8` instead",
+                        index_ty.display_name()
+                    ),
+                    span: index.span,
+                });
+            }
             return Err(SemaError::TypeMismatch {
                 expected: "u8 or i8".to_string(),
                 found: index_ty.display_name(),

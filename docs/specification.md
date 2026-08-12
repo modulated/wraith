@@ -3,11 +3,25 @@
 A systems programming language designed specifically for the 6502 processor, taking modern inspiration while remaining simple and explicit.
 
 <!--
-  Examples fenced ```rust,compile are complete, self-contained programs that
-  the test suite compiles on every run (tests/e2e/spec_examples.rs). Tag an
-  example that way when it should build on its own; leave illustrative
-  fragments (which reference peripherals or functions defined elsewhere) as
-  plain ```rust.
+  The test suite compiles tagged examples on every run
+  (tests/e2e/spec_examples.rs), so they cannot drift out of date:
+
+    ```rust,compile           a complete translation unit, compiled as written.
+                              Use for anything declaring its own fn / struct /
+                              enum / static / const / import at the top level.
+
+    ```rust,compile,fragment  a run of statements, compiled inside a generated
+                              `#[reset] fn main() { … loop {} }`. Use for the
+                              many examples that illustrate one expression or
+                              declaration, so the prose does not have to show a
+                              wrapper the reader does not care about. A fragment
+                              must not declare top-level items — the suite
+                              checks this.
+
+  Leave a block as plain ```rust when it references peripherals or functions
+  defined elsewhere in the prose, or when it deliberately shows code that does
+  not compile (an error example). Making such a block self-contained and
+  tagging it is a welcome change.
 -->
 
 
@@ -103,7 +117,7 @@ characters are allowed — `'é'` is a compile error. A `char` is a distinct
 1-byte type: convert to and from `u8` with an explicit cast, and it
 zero-extends to `u16`/`i16` like any other unsigned byte.
 
-```rust
+```rust,compile,fragment
 let c: char = 'A';
 let code: u8 = c as u8;      // 0x41
 let back: char = 66 as char; // 'B'
@@ -135,7 +149,7 @@ BCD types (`b8` and `b16`) leverage the 6502's hardware decimal mode for efficie
 - ASCII digit conversion
 
 **Operations:**
-```rust
+```rust,compile,fragment
 let score: b16 = 1000 as b16;
 let points: b16 = 50 as b16;
 
@@ -167,7 +181,7 @@ const TOOBIG: b8 = 100;     // ERROR: BCD b8 max is 99
 
 **Runtime Overflow:**
 Runtime arithmetic wraps on overflow (no panic, no error):
-```rust
+```rust,compile,fragment
 let x: u8 = 255;
 x = x + 1;           // Wraps to 0
 
@@ -193,7 +207,7 @@ All types are naturally aligned to their size:
 - `u16` at address `0x1000`: low byte at `0x1000`, high byte at `0x1001`
 
 **Accessing Multi-byte Components:**
-```rust
+```rust,compile,fragment
 let value: u16 = 0x1234;
 let low: u8 = value.low;    // 0x34
 let high: u8 = value.high;  // 0x12
@@ -209,7 +223,7 @@ All items completed.
 
 ### Declaration Syntax
 
-```rust
+```rust,compile,fragment
 let x: u8 = 42;
 let delta: i16 = -500;
 let flag: bool = true;
@@ -219,7 +233,7 @@ let flag: bool = true;
 
 **All variables are mutable by default**. This is a low-level systems language that trusts the programmer.
 
-```rust
+```rust,compile,fragment
 let x: u8 = 10;
 x = 20;  // OK - variables are mutable
 ```
@@ -334,7 +348,7 @@ fn main() {
 
 Variables follow block-scoped visibility rules:
 
-```rust
+```rust,compile
 fn main() {
     let x: u8 = 10;    // Scope: entire function
 
@@ -408,7 +422,13 @@ Each function gets a **frame**: a contiguous block of zero page holding its para
 
 **Recursion:** a function that calls itself (directly or through a cycle of mutually recursive functions) is a special case - its own frame would otherwise be overwritten by the nested call before the outer call finishes using it. For these calls only, the compiler automatically saves the callee's frame to a small software stack before the call and restores it afterward. This is fully automatic and invisible to the programmer; see [Tail Call Optimization](#tail-call-optimization) for the (zero-overhead) tail-recursive case, which does not need this save/restore at all.
 
-That software stack is a fixed 256-byte region, so a recursive function with a large frame can only nest a shallow number of times (roughly `256 / frame_size`) before it overflows and silently corrupts data - the 6502 has no stack-limit detection, so this is not caught at runtime. To help catch this early, the compiler emits a **compile-time warning** when a non-tail recursive function's frame is large enough that the safe depth is shallow, suggesting tail recursion or an explicit loop instead. (Tail-recursive functions are exempt: they become loops and never grow the stack.) Note the 6502 hardware stack independently caps *any* non-tail recursion at roughly 128 nested calls regardless of frame size.
+That software stack is a fixed 256-byte region, so a recursive function can only nest `256 / bytes_per_call` times before it overflows and silently corrupts data - the 6502 has no stack-limit detection, so this is not caught at runtime.
+
+Two things go on that stack per call, and both count toward the limit: the callee's saved **frame**, and any **operand spilled across the call** (when a binary operation's right-hand side contains a call, the left-hand value cannot stay in a register or the zero-page pool across the `JSR`). A one-byte frame is not automatically safe — `return (n as u16) + s(n - 1)` saves one frame byte but also spills a two-byte operand, so it costs three bytes a level and tops out around 85.
+
+To catch this early, the compiler emits a **compile-time warning** naming the computed depth whenever that per-call cost makes the software stack run out before the hardware stack does. (The 6502 hardware stack independently caps *any* non-tail recursion at roughly 128 nested calls — two bytes of return address per `JSR` in page 1 — so a function that outlasts that is not flagged, since the software stack tells the programmer nothing new.) Tail-recursive functions are exempt entirely: they become loops and push nothing.
+
+The warning is not an error. Recursion depth is a runtime property, and a function that only ever nests a few levels is safe; the warning reports the ceiling so the choice is an informed one. Suggested fixes are tail recursion or an explicit loop.
 
 **Interrupt handlers** (`#[irq]`/`#[nmi]`) can preempt main-line code at any point, including mid-expression. The compiler tracks which zero-page scratch and frames a handler's call graph can touch and automatically saves/restores that state in the handler's prologue/epilogue, so an interrupt firing during an in-progress calculation cannot corrupt it. See [Appendix C: Calling Convention](#appendix-c-calling-convention).
 
@@ -436,6 +456,47 @@ fn function_name(arg1: u8, arg2: u16) -> u8 {
 fn no_return(x: u8) {
     // No return statement needed
 }
+```
+
+#### Returns are checked
+
+A function that declares a return type must return a value of that type on
+every path, and a function that declares none must not return a value at all.
+Both are compile errors rather than warnings, because neither is detectable at
+run time: the calling convention passes the result in the accumulator, so a
+caller reads a value either way — a missing return just hands it whatever the
+last statement happened to leave there.
+
+```rust
+fn incomplete(n: u8) -> u8 {
+    if n == 0 { return 1; }
+}                              // ERROR: missing return in function 'incomplete'
+
+fn nothing_to_give() {
+    return 5;                  // ERROR: return type mismatch, expected void
+}
+```
+
+A path "returns" if it ends in a `return`, or if it cannot complete at all.
+That makes each of these complete:
+
+- an `if`/`else` where **both** arms return (one arm alone is not enough — the
+  other falls through);
+- a `loop` with no `break` out of it, which never completes, so a trailing
+  `loop {}` is a valid way to end a value-returning function;
+- a `match` that returns in every arm **and** covers every value, either through
+  a wildcard arm or by naming every variant of an enum;
+- a whole-function `asm` block, which is trusted to leave the result in the
+  accumulator (this is how much of the standard library is written).
+
+A `while` or `for` loop never counts, even if its body returns: it may run zero
+times, so the path that skips it still falls through.
+
+Ordinary conversion rules apply to the returned value — lossless widening is
+implicit, narrowing needs an explicit cast:
+
+```rust,compile,fragment
+let widened: u16 = 3;      // a `-> u16` function may `return` a u8
 ```
 
 ### Function Attributes
@@ -473,7 +534,9 @@ fn main() {
 
 Marks function as IRQ (maskable interrupt) handler:
 
-```rust
+```rust,compile
+const TIMER_STATUS: addr = 0x6004;
+
 #[irq]
 fn irq_handler() {
     // Handle timer interrupt, peripheral I/O, etc.
@@ -497,7 +560,10 @@ The compiler generates appropriate interrupt vectors. In bare-metal systems:
 
 Marks function as NMI (non-maskable interrupt) handler:
 
-```rust
+```rust,compile
+const NMI_FLAG: addr = 0x0300;
+const STATUS_LED: addr = 0x6000;
+
 #[nmi]
 fn nmi_handler() {
     // Handle critical interrupts (cannot be disabled)
@@ -725,7 +791,11 @@ Function pointers can be stored in struct fields and called through them. This
 is how a driver or device interface is expressed: the calling code names only the
 struct, not the implementation.
 
-```rust
+```rust,compile
+const UART_BASE: read addr  = 0xE000;
+const UART_TX:   write addr = 0xE001;
+const VIA_PORTA: read addr  = 0x6001;
+
 struct Device {
     read:  fn(u8) -> u8,
     write: fn(u8),
@@ -764,7 +834,7 @@ All items completed.
 
 ### Declaration
 
-```rust
+```rust,compile
 struct Point {
     x: u8,
     y: u8,
@@ -804,7 +874,7 @@ let m: u16 = a.len;  // the built-in: 4
 
 Structs are laid out sequentially in memory with no padding:
 
-```rust
+```rust,compile
 struct Point {
     x: u8,    // Offset 0
     y: u8,    // Offset 1
@@ -888,7 +958,9 @@ fn update_entity(e: Entity) {
 To work on a copy, bind a local and copy field by field (or return a fresh
 struct):
 
-```rust
+```rust,compile
+struct Point { x: u8, y: u8 }
+
 fn move_point(p: Point, dx: u8, dy: u8) -> Point {
     return Point { x: p.x + dx, y: p.y + dy };
 }
@@ -900,7 +972,9 @@ A function may return a struct by value. The result is copied into the
 destination variable's storage, so returning and binding a struct is a true
 copy:
 
-```rust
+```rust,compile
+struct Point { x: u8, y: u8 }
+
 fn make() -> Point {
     return Point { x: 7, y: 9 };
 }
@@ -910,6 +984,34 @@ fn main() {
     p = make();              // reassignment copies too
 }
 ```
+
+#### Where a struct literal lives
+
+A struct literal whose fields are all constants is emitted as bytes in the
+`CODE` section, and the expression evaluates to a pointer at them. It costs no
+RAM and no cycles to build.
+
+A literal with a *computed* field has no bytes until the program runs, so it is
+assembled at run time into a block of RAM reserved for that literal. The block
+is per literal site and is colored by the call graph exactly like local array
+data, so two functions that can never be active at once share the space. This
+is what makes `move_point` above work; the two forms are interchangeable in
+source, and only the cost differs:
+
+```rust,compile
+struct Point { x: u8, y: u8 }
+
+#[reset]
+fn main() {
+    let dx: u8 = 3;
+    let fixed: Point = Point { x: 1, y: 2 };         // bytes in ROM
+    let computed: Point = Point { x: dx + 1, y: 2 }; // assembled in RAM
+    loop {}
+}
+```
+
+Initializing a variable directly writes the fields straight into the variable's
+own storage, with no intermediate block at all.
 
 ### Completion Status
 
@@ -937,7 +1039,7 @@ let dir: Direction = Direction::North;
 Each variant has a one-byte discriminant. Writing `= N` sets it; omitting it
 continues from the previous variant, starting at 0:
 
-```rust
+```rust,compile
 enum Code { A = 10, B, C = 20, D }   // 10, 11, 20, 21
 ```
 
@@ -952,7 +1054,9 @@ A unit variant's discriminant *is* its runtime value, so `as` yields exactly the
 number written in the declaration. This is how an enum naming hardware states is
 written to a register:
 
-```rust
+```rust,compile
+const DDRA: addr = 0x6003;       // VIA port A data-direction register
+
 pub enum Direction {
     OUTPUT = 0xFF,
     INPUT  = 0x00,
@@ -1062,7 +1166,7 @@ Memory layout for enum variants:
 ```
 
 **Example**:
-```rust
+```rust,compile
 enum Color {
     RGB(u8, u8, u8),  // Tag 0
 }
@@ -1108,7 +1212,7 @@ let input3: Input = Input::MouseClick { x: 100, y: 50 };
 
 If not specified, discriminants start at 0 and increment:
 
-```rust
+```rust,compile
 enum Status {
     Idle,      // 0 (implicit)
     Running,   // 1 (implicit)
@@ -1196,7 +1300,7 @@ let raw: u8 = s as u8;     // Cast to u8: 1
 
 ### Fixed Arrays
 
-```rust
+```rust,compile,fragment
 let buffer: [u8; 10] = [0; 10];  // 10 bytes, all zeros
 let data: [u16; 5] = [100, 200, 300, 400, 500];
 
@@ -1249,7 +1353,7 @@ Slices are references to a sub-range of an array, carrying a base pointer and a
 runtime length. A slice value is produced by slicing an array with `arr[a..b]`
 (or `arr[a..=b]`) and bound to a `&[T]` variable:
 
-```rust
+```rust,compile,fragment
 let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
 let s: &[u8] = a[1..5];   // elements a[1]..a[4]
 
@@ -1286,20 +1390,72 @@ let s2: &[u8] = s[1..3];       // re-slice a slice (offsets compose)
 s = a[2..6];                   // reassign to a new view
 for x in s { /* iterate elements */ }
 
-fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // return a slice
+total(a[1..5]);                // a slice expression may be an argument
+total(s[1..3]);                // including a re-slice
+
+fn middle(v: &[u8]) -> &[u8] { return v[1..4]; }  // and may be returned
 ```
 
 **Slice Characteristics:**
 - Size: 4 bytes (2-byte base address + 2-byte length)
 - View into array data; length tracked at runtime
 - Created with `arr[a..b]` (constant or runtime bounds)
-- `.len`, indexing `s[i]`, and `for x in s` iteration
+- `.len`, indexing `s[i]` (read-only), and `for x in s` iteration
 - Re-sliceable (`s[a..b]`), reassignable, and passed to / returned from
   functions by value
 
 Bounds may be `u8`/`i8` or `u16`/`i16` (the latter lets constant-bounds slices
 exceed 255 elements), inclusive ranges accept a runtime end, and `for x in s`
 iterates the full length with a 16-bit counter.
+
+**Slices are read-only.** `s[i]` reads, `for x in s` iterates, and a slice can
+be re-sliced, reassigned, and passed to or returned from functions — but
+`s[i] = v` is a compile error:
+
+```rust
+let a: [u8; 6] = [1, 2, 3, 4, 5, 6];
+let s: &[u8] = a[1..4];
+s[0] = 9;      // ERROR: cannot write through a slice: `&[T]` is a read-only view
+a[1] = 9;      // OK - write to the array it borrows from
+```
+
+This is what lets a slice borrow from *any* storage. The source array may be a
+local, a `static`, or a `const`:
+
+```rust,compile
+const TABLE: [u8; 4] = [10, 20, 30, 40];   // ROM
+static BUFFER: [u8; 4] = [0; 4];           // RAM
+
+fn total(v: &[u8]) -> u8 {
+    let acc: u8 = 0;
+    let n: u8 = v.len as u8;
+    for i in 0..n { acc = acc + v[i]; }
+    return acc;
+}
+
+#[reset]
+fn main() {
+    let rom: &[u8] = TABLE[0..4];
+    let ram: &[u8] = BUFFER[0..4];
+    let a: u8 = total(rom);
+    let b: u8 = total(ram);
+    loop {}
+}
+```
+
+A `const` array lives in ROM, where a store is a silent no-op on real hardware.
+Since a slice descriptor is just a base address and a length, it carries no
+record of which storage it came from — so the rule cannot depend on the source
+without making the same expression legal or not according to a declaration
+elsewhere. Rejecting every write keeps `&[T]` one thing, and mirrors the split
+between `str` (may be a ROM literal, read-only) and `str<N>` (owns RAM,
+writable). A writable slice type would be the analogue of `str<N>`; it does not
+exist yet.
+
+Indexing takes a `u8`/`i8`, because indexed addressing goes through an 8-bit
+register. `.len` is a `u16`, so `for i in 0..s.len` types `i` as one and needs
+`s[i as u8]` — or bind the bound first (`let n: u8 = s.len as u8;`) and the loop
+variable is a `u8` throughout. `for x in s` sidesteps the question entirely.
 
 Current limits: element widths above 2 bytes are not yet supported, runtime
 (non-constant) slice bounds must be `u8`, and there is no runtime bounds
@@ -1320,7 +1476,9 @@ fn process(slice: &[u8]) {
 - Slice parameter: 4 bytes total (base address + length)
 - Base address: 2 bytes pointing to first element
 - Length: 2 bytes for element count
-- Data: Stored wherever array is allocated (const data, stack, etc.)
+- Data: stays wherever the borrowed array lives — a `const` array's ROM, a
+  `static`'s RAM, or a local's frame block. The descriptor holds an address, so
+  a slice never copies the data it views.
 
 ### Multidimensional Arrays
 
@@ -1340,7 +1498,7 @@ let screen: [[u8; 8]; 4] = [
 **Workaround:** flatten to one dimension and index manually, or use an array
 of structs:
 
-```rust
+```rust,compile,fragment
 // 4 rows × 8 columns, flattened: element (r, c) lives at r * 8 + c
 let screen: [u8; 32] = [0; 32];
 screen[1 * 8 + 3] = 2;              // row 1, column 3
@@ -1379,7 +1537,7 @@ All items completed.
 A pointer is the address of a value. It is written `&T`, taken with `&x`, and
 read through with `*p`.
 
-```rust
+```rust,compile,fragment
 let x: u8 = 41;
 let p: &u8 = &x;
 *p = *p + 1;        // x is now 42
@@ -1403,7 +1561,7 @@ occupies 2 bytes wherever it is stored, and `&Node` inside `struct Node` is
 therefore fine: the size of a pointer never depends on the size of what it
 points at.
 
-```rust
+```rust,compile
 struct Node { value: u8, next: &Node }   // 3 bytes
 ```
 
@@ -1514,7 +1672,7 @@ with respect to the caller's and the usual guarantee does not hold.
 A `static` can hold a pointer, initialised either from a literal address or
 from another static's address:
 
-```rust
+```rust,compile
 static COUNT: u8 = 0;
 static P: &u8 = &COUNT;
 static UART: &u8 = 0xD012 as &u8;
@@ -1532,7 +1690,7 @@ silent zero.
 
 Strings in Wraith are length-prefixed byte sequences optimized for the 6502. The string type is declared as `str`.
 
-```rust
+```rust,compile,fragment
 let message: str = "Hello, World!";
 let empty: str = "";
 ```
@@ -1582,7 +1740,7 @@ Editing the length (append/truncate) and higher-level helpers (`push`, `append`,
 
 String literals support escape sequences:
 
-```rust
+```rust,compile,fragment
 let msg1: str = "Hello\n";          // Newline
 let msg2: str = "Tab\there";        // Tab
 let msg3: str = "Quote: \"Hi\"";    // Escaped quotes
@@ -1593,7 +1751,7 @@ let msg4: str = "Backslash: \\";    // Backslash
 
 Access string metadata:
 
-```rust
+```rust,compile,fragment
 let msg: str = "Hello";
 let len: u16 = msg.len;      // Get length (5)
 ```
@@ -1603,7 +1761,7 @@ let len: u16 = msg.len;      // Get length (5)
 A string is semantically an array of `char`, so indexing yields a `char`. Use
 `as u8` when you want the raw byte value (for arithmetic or a hardware register):
 
-```rust
+```rust,compile,fragment
 let msg: str = "ABC";
 let first: char = msg[0];       // 'A'
 let second: char = msg[1];      // 'B'
@@ -1617,7 +1775,7 @@ let byte: u8 = msg[0] as u8;    // 0x41, for byte-level work
 
 Concatenate strings at compile time using the `+` operator:
 
-```rust
+```rust,compile
 const GREETING: str = "Hello, " + "World!";
 const PATH: str = "data/" + "level" + ".txt";
 ```
@@ -1633,7 +1791,7 @@ Compare two strings for equality with `==` / `!=` (result is `bool`). The
 comparison runs at runtime: the length bytes are compared first, then each
 character.
 
-```rust
+```rust,compile,fragment
 let a: str = "hello";
 let b: str = "hello";
 if a == b { /* equal */ }
@@ -1644,7 +1802,7 @@ if a != "world" { /* differs */ }
 
 Extract substrings at compile time:
 
-```rust
+```rust,compile
 const FULL: str = "Hello, World!";
 const GREETING: str = FULL[0..5];     // "Hello"
 const NAME: str = FULL[7..12];        // "World"
@@ -1920,17 +2078,37 @@ A binary operation requires both operands to have the same type; two **variables
 of different widths (e.g. `u16 + u8`) are a type error and must be reconciled with
 an explicit cast:
 
-```rust
+```rust,compile,fragment
 let a: u16 = 300;
 let b: u8 = 5;
 let c: u16 = a + (b as u16);   // explicit widening required
 ```
 
-The single exception is a bare **integer literal** operand: it adopts the other
-operand's integer type when its value fits, in any operand position and for any
-operator (arithmetic *and* comparison). This is a compile-time typing of the
-literal, not a runtime conversion, so the no-implicit-conversion rule is
-preserved. A negated literal (`-5`) counts as a literal.
+The single exception is an operand built only from **integer literals**: it
+adopts the other operand's integer type when its values fit, in any operand
+position and for any operator (arithmetic *and* comparison). This is a
+compile-time typing of the literals, not a runtime conversion, so the
+no-implicit-conversion rule is preserved. A negated literal (`-5`) counts, as
+does a whole subexpression of literals — `(37 >> 1)` is as free to be `i8` as
+`18` is. A cast does not: it names the type it produces.
+
+When **both** operands are literals there is nothing to adopt from, so the pair
+takes the narrowest type that holds every literal written in it — signed if any
+of them is negative — unless a declared type is in scope and holds them all, in
+which case that wins:
+
+```rust,compile,fragment
+let n: i8 = 1;
+if (-5 - 3) < n { }            // ok: -5 and 3 are both i8; -8 < 1
+
+let big: i16 = 3 - 5;          // i16, from the declaration: -2, not 254
+```
+
+Note what this means for a constant expression standing on its own: its type
+comes from the literals in it, not from the code around it. In a program full of
+`i8` values, `0 >= (3 << 7)` is still a `u8` comparison, and the shift wraps at
+eight bits accordingly. Anchor it with a variable, or annotate it, if the
+program's width is what you meant.
 
 The same rule applies wherever a target type is known, notably array elements:
 
@@ -1956,7 +2134,7 @@ let f: u16 = e + 300;          // error: `e` is u8 and 300 does not fit u8
 ### Valid Cast Combinations
 
 **Integer Widening (Safe):**
-```rust
+```rust,compile,fragment
 let small: u8 = 100;
 let large: u16 = small as u16;  // 100 -> 100 (zero-extended)
 
@@ -1965,7 +2143,7 @@ let wide: i16 = signed as i16;  // -10 -> -10 (sign-extended)
 ```
 
 **Integer Narrowing (Truncation):**
-```rust
+```rust,compile,fragment
 let large: u16 = 0x1234;
 let small: u8 = large as u8;  // 0x1234 -> 0x34 (truncate high byte)
 
@@ -1983,7 +2161,7 @@ let positive: u8 = negative as u8;  // -10 -> 246 (reinterpret bits)
 ```
 
 **BCD Conversions:**
-```rust
+```rust,compile,fragment
 let bcd: b8 = 0x42 as b8;    // Binary 42 -> BCD 42
 let bin: u8 = bcd as u8;     // BCD 42 -> Binary 0x42
 
@@ -1992,7 +2170,7 @@ let raw: u16 = score as u16;  // BCD 1234 -> 0x1234
 ```
 
 **Boolean Conversions:**
-```rust
+```rust,compile,fragment
 let flag: bool = true;
 let num: u8 = flag as u8;    // true -> 1, false -> 0
 
@@ -2004,7 +2182,7 @@ let is_set: bool = value as bool;  // 0 -> false, nonzero -> true
 
 When casting to a smaller type, high bytes are discarded:
 
-```rust
+```rust,compile,fragment
 let value: u16 = 0xABCD;
 let low: u8 = value as u8;    // 0xCD (low byte)
 let high: u8 = (value >> 8) as u8;  // 0xAB (high byte, shifted first)
@@ -2018,13 +2196,28 @@ let small: u8 = big as u8;    // 0x34
 
 Signed casts preserve the sign by extending the sign bit:
 
-```rust
+```rust,compile,fragment
 let small: i8 = -1;          // 0xFF in binary
 let large: i16 = small as i16;  // 0xFFFF (sign extended)
 
 let positive: i8 = 127;      // 0x7F
 let wide: i16 = positive as i16; // 0x007F (zero extended for positive)
 ```
+
+Which extension a widening cast performs is decided by the **source** type, not
+the destination. A signed source carries its sign into the new high byte; an
+unsigned one carries zero. The two mixed cases follow from that and are worth
+stating outright:
+
+```rust,compile,fragment
+let big: u8 = 200;
+let as_signed: i16 = big as i16;   // 200 — a u8 has no sign bit to extend
+
+let neg: i8 = -1;
+let as_unsigned: u16 = neg as u16; // 0xFFFF — the value, reinterpreted
+```
+
+Narrowing is unaffected: it keeps the low byte whichever way the signs go.
 
 **Manual Sign Extension (if needed):**
 ```rust,compile
@@ -2238,7 +2431,7 @@ import {symbol1, symbol2, symbol3} from "module.wr";
 A `*` imports every `pub` item of a module, so a library can be pulled in
 without listing its API:
 
-```rust
+```rust,compile
 import { * } from "math.wr";     // every pub item
 import * from "math.wr";         // braces optional around a bare *
 import { min, * } from "math.wr"; // legal; naming min is redundant
@@ -2460,7 +2653,7 @@ import {bar} from "../lib/helper.wr";
 
 **Non-relative imports**: Searched in standard library directory first, then current directory
 
-```rust
+```rust,compile
 import {memcpy} from "mem.wr";  // Searches stdlib first
 ```
 
@@ -2646,7 +2839,7 @@ Wraith includes a small standard library optimized for 6502 architecture.
 Low-level CPU control functions that map directly to 6502 instructions. All functions are inlined for zero overhead.
 
 **Import:**
-```rust
+```rust,compile
 import { enable_interrupts, disable_interrupts, nop } from "intrinsics.wr";
 ```
 
@@ -2853,7 +3046,7 @@ fn reset_handler() {
 Memory manipulation functions optimized for 6502.
 
 **Import:**
-```rust
+```rust,compile
 import { memcpy, memset, memcmp, mem_read, mem_write } from "mem.wr";
 ```
 
@@ -2998,7 +3191,7 @@ mem_jump(0x8000);
 Mathematical operations optimized for 6502/65C02. Focus on unsigned 8-bit values with efficient assembly implementations.
 
 **Import:**
-```rust
+```rust,compile
 import { min, max, clamp, set_bit, clear_bit, saturating_add, mul16, div16 } from "math.wr";
 ```
 
@@ -3349,7 +3542,7 @@ No additional keywords are currently planned for future versions.
 ### Keyword Usage Examples
 
 **Type Keywords:**
-```rust
+```rust,compile,fragment
 let count: u8 = 10;         // Unsigned 8-bit
 let delta: i16 = -500;      // Signed 16-bit
 let score: b16 = 1234 as b16;  // BCD 16-bit
@@ -3438,7 +3631,7 @@ Individual bits of an integer are read and written with built-in methods, where
 `n` is a compile-time constant in range for the value's width (0-7 for an 8-bit
 value, 0-15 for a 16-bit one):
 
-```rust
+```rust,compile,fragment
 let flags: u8 = 0;
 flags.set_bit(7);        // set bit 7  -> 0x80
 flags.clear_bit(3);      // clear bit 3
@@ -3495,7 +3688,7 @@ let w: u8 = a + b << 2;     // (a + b) << 2 (addition before shift)
 
 All arithmetic operators wrap on overflow with no error checking:
 
-```rust
+```rust,compile,fragment
 let x: u8 = 255 + 1;     // 0 (wraps)
 let y: u8 = 0 - 1;       // 255 (wraps)
 let z: u8 = 200 * 2;     // 144 (400 % 256)
@@ -3577,7 +3770,7 @@ fn complex_function() {
 
 Documentation comments use triple slashes (`///`) and are used to document functions, structs, and other items. These are commonly used in the standard library:
 
-```rust,compile
+```rust
 /// Enable interrupts by clearing the interrupt disable flag
 /// Maps to: CLI (Clear Interrupt Disable)
 /// Cycles: 2
@@ -3644,7 +3837,7 @@ fn with_assembler_comments() {
 - Explain "why" rather than "what" in regular comments
 - Use comments to mark TODO items or known limitations
 
-```rust,compile
+```rust
 /// Fast integer division by 10 using multiplication and shifts
 /// Cycles: ~45 (much faster than div16)
 fn div10_fast(value: u8) -> u8 {
@@ -3686,7 +3879,7 @@ fn test() {
 
 However, comments inside assembly string literals are **not** processed by Wraith:
 
-```rust
+```rust,compile,fragment
 asm {
     "LDA #$42  ; This semicolon comment goes to the assembler",
     // This slash comment is processed by Wraith
