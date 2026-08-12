@@ -488,3 +488,70 @@ fn indirect_call_in_body_disables_countdown() {
     );
     assert_eq!(e.mem(0x0401), 7, "indirect call result must be stored");
 }
+
+// ---------------------------------------------------------------------------
+// Unrolling has to be bounded by what it costs, not only by how often it runs
+// ---------------------------------------------------------------------------
+//
+// A `for` over constant bounds with eight or fewer iterations was unrolled
+// unconditionally. Eight copies of two instructions is a win; eight copies of a
+// 16-bit division is a kilobyte, and nested loops multiply — a 76-line
+// generated program overflowed the entire 16 KB CODE section that way, which is
+// a build failure with no obvious cause in the source. Found by
+// `tests/fuzz_exec.rs`.
+
+/// A body dense enough that copying it is the wrong trade must stay a loop.
+#[test]
+fn a_heavy_body_is_not_unrolled() {
+    let asm = crate::common::compile_success(
+        "const OUT: addr = 0x0900;\n#[reset]\nfn main() {\n\
+         \x20   let a: u16 = 30000;\n    let b: u16 = 0;\n\
+         \x20   for i in 0..4 {\n\
+         \x20       b = ((a / 7) + (a % 11)) * (a / 13);\n\
+         \x20   }\n\
+         \x20   OUT = b.low;\n    loop {}\n}\n",
+    );
+    assert!(
+        !asm.contains("Loop unrolled"),
+        "a body with three 16-bit divisions should stay a loop:\n{asm}"
+    );
+}
+
+/// ...and a light one must still be unrolled, or the guard has simply turned
+/// the optimization off.
+#[test]
+fn a_light_body_is_still_unrolled() {
+    let asm = crate::common::compile_success(
+        "const OUT: addr = 0x0900;\n#[reset]\nfn main() {\n\
+         \x20   let b: u8 = 0;\n\
+         \x20   for i in 0..4 { b = b + i; }\n\
+         \x20   OUT = b;\n    loop {}\n}\n",
+    );
+    assert!(
+        asm.contains("Loop unrolled"),
+        "a two-instruction body is exactly what unrolling is for:\n{asm}"
+    );
+}
+
+/// Nested loops multiply, so the inner body's cost has to be charged against
+/// the outer loop's count as well.
+#[test]
+fn nested_loops_do_not_multiply_a_moderate_body() {
+    let src = "const OUT: addr = 0x0900;\n#[reset]\nfn main() {\n\
+               \x20   let a: u16 = 30000;\n    let b: u16 = 0;\n\
+               \x20   for i in 0..8 {\n\
+               \x20       for j in 0..8 {\n\
+               \x20           b = b + (a / 7);\n\
+               \x20       }\n\
+               \x20   }\n\
+               \x20   OUT = b.low;\n    loop {}\n}\n";
+    let asm = crate::common::compile_success(src);
+    // 64 copies of a 16-bit division is several kilobytes; one loop is not.
+    assert!(
+        asm.matches("Loop unrolled").count() < 2,
+        "both levels unrolled, which emits the body 64 times:\n{asm}"
+    );
+    // And it must still compute the right answer.
+    let mut e = run(src);
+    assert_eq!(e.mem(0x0900), ((64u32 * (30000 / 7)) & 0xFF) as u8);
+}

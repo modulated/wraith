@@ -1009,6 +1009,17 @@ pub(super) fn generate_for(
     // Threshold for unrolling: 8 iterations or fewer
     const UNROLL_THRESHOLD: i64 = 8;
 
+    // ...and only when the body is small enough that copying it that many
+    // times is cheaper than a loop. The iteration count alone is not enough:
+    // eight copies of two instructions is a win, eight copies of a 16-bit
+    // division is a kilobyte, and nested loops multiply — `for i in 0..4 { for
+    // j in 0..3 { … } }` emits the inner body twelve times. A generated program
+    // of 76 lines overflowed the whole 16 KB CODE section that way.
+    //
+    // The budget is in estimated bytes of the *unrolled* body, so it bounds
+    // what unrolling can cost rather than how many times it happens.
+    const UNROLL_BYTE_BUDGET: u32 = 192;
+
     if let (
         Some(crate::sema::const_eval::ConstValue::Integer(start)),
         Some(crate::sema::const_eval::ConstValue::Integer(end)),
@@ -1021,7 +1032,8 @@ pub(super) fn generate_for(
             end - start
         };
 
-        if count > 0 && count <= UNROLL_THRESHOLD {
+        let unrolled_bytes = (count.max(0) as u32).saturating_mul(estimate_bytes(body, info));
+        if count > 0 && count <= UNROLL_THRESHOLD && unrolled_bytes <= UNROLL_BYTE_BUDGET {
             // LOOP UNROLLING: Generate inline code for small constant loops
             emitter.emit_comment(&format!(
                 "Loop unrolled: {} iteration{}",
@@ -1388,4 +1400,144 @@ pub(super) fn generate_foreach(
     emitter.emit_label(&end_label);
 
     Ok(())
+}
+
+/// A rough estimate of the bytes a statement emits, for the unrolling decision.
+///
+/// It only has to be monotone and to know that 16-bit multiply, divide and
+/// modulo dominate everything else — they are the difference between a body
+/// worth copying and one that is not. Measured against the emitted code: a
+/// 16-bit division costs about 105 bytes per site, a multiply about 70, an
+/// ordinary 16-bit operation about 20, and a load or store about 6.
+fn estimate_bytes(stmt: &Spanned<Stmt>, info: &ProgramInfo) -> u32 {
+    fn wide(expr: &Spanned<crate::ast::Expr>, info: &ProgramInfo) -> bool {
+        matches!(
+            info.resolved_types.get(&expr.span),
+            Some(
+                crate::sema::types::Type::Primitive(
+                    crate::ast::PrimitiveType::U16
+                        | crate::ast::PrimitiveType::I16
+                        | crate::ast::PrimitiveType::B16
+                ) | crate::sema::types::Type::Pointer(_)
+            )
+        )
+    }
+
+    fn expr_bytes(e: &Spanned<crate::ast::Expr>, info: &ProgramInfo) -> u32 {
+        use crate::ast::{BinaryOp, Expr};
+        let w = wide(e, info);
+        match &e.node {
+            Expr::Binary { left, op, right } => {
+                let own = match op {
+                    BinaryOp::Div | BinaryOp::Mod => {
+                        if w {
+                            105
+                        } else {
+                            40
+                        }
+                    }
+                    BinaryOp::Mul => {
+                        if w {
+                            70
+                        } else {
+                            30
+                        }
+                    }
+                    BinaryOp::Shl | BinaryOp::Shr => {
+                        if w {
+                            25
+                        } else {
+                            10
+                        }
+                    }
+                    _ => {
+                        if w {
+                            20
+                        } else {
+                            8
+                        }
+                    }
+                };
+                own + expr_bytes(left, info) + expr_bytes(right, info)
+            }
+            Expr::Unary { operand, .. } => 6 + expr_bytes(operand, info),
+            Expr::Cast { expr: inner, .. } => 10 + expr_bytes(inner, info),
+            Expr::Paren(inner)
+            | Expr::SliceLen(inner)
+            | Expr::U16Low(inner)
+            | Expr::U16High(inner) => expr_bytes(inner, info),
+            Expr::Field { object, .. } => 6 + expr_bytes(object, info),
+            Expr::Index { object, index } => {
+                12 + expr_bytes(object, info) + expr_bytes(index, info)
+            }
+            // A call is a JSR plus argument staging; the callee's own body is
+            // emitted once and does not scale with the unrolling — unless it is
+            // inlined, which the inliner bounds separately.
+            Expr::Call { args, .. } => 8 + args.iter().map(|a| expr_bytes(a, info)).sum::<u32>(),
+            Expr::CallIndirect { callee, args } => {
+                12 + expr_bytes(callee, info)
+                    + args.iter().map(|a| expr_bytes(a, info)).sum::<u32>()
+            }
+            Expr::Literal(_) | Expr::Variable(_) => {
+                if w {
+                    8
+                } else {
+                    5
+                }
+            }
+            _ => 12,
+        }
+    }
+
+    fn stmt_bytes(s: &Spanned<Stmt>, info: &ProgramInfo) -> u32 {
+        match &s.node {
+            Stmt::Block(body) => body.iter().map(|b| stmt_bytes(b, info)).sum(),
+            Stmt::VarDecl { init, .. } => 6 + expr_bytes(init, info),
+            Stmt::Assign { target, value } => {
+                6 + expr_bytes(target, info) + expr_bytes(value, info)
+            }
+            Stmt::Expr(e) => expr_bytes(e, info),
+            Stmt::Return(e) => 3 + e.as_ref().map_or(0, |e| expr_bytes(e, info)),
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                8 + expr_bytes(condition, info)
+                    + stmt_bytes(then_branch, info)
+                    + else_branch.as_ref().map_or(0, |e| stmt_bytes(e, info))
+            }
+            Stmt::While { condition, body } => {
+                8 + expr_bytes(condition, info) + stmt_bytes(body, info)
+            }
+            Stmt::Loop { body } => 3 + stmt_bytes(body, info),
+            // A nested `for` may itself unroll, so charge its whole span: this
+            // is exactly the case where the multiplication happens.
+            Stmt::For { range, body, .. } => {
+                let count = match (
+                    info.folded_constants.get(&range.start.span),
+                    info.folded_constants.get(&range.end.span),
+                ) {
+                    (
+                        Some(crate::sema::const_eval::ConstValue::Integer(a)),
+                        Some(crate::sema::const_eval::ConstValue::Integer(b)),
+                    ) => {
+                        let n = if range.inclusive { b - a + 1 } else { b - a };
+                        n.clamp(1, 8) as u32
+                    }
+                    _ => 1,
+                };
+                12 + count * stmt_bytes(body, info)
+            }
+            Stmt::ForEach { body, .. } => 16 + stmt_bytes(body, info),
+            Stmt::Match { expr, arms } => {
+                8 + expr_bytes(expr, info)
+                    + arms.iter().map(|a| stmt_bytes(&a.body, info)).sum::<u32>()
+            }
+            Stmt::Break | Stmt::Continue => 3,
+            Stmt::Asm { lines } => 3 * lines.len() as u32,
+        }
+    }
+
+    stmt_bytes(stmt, info)
 }

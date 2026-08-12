@@ -965,6 +965,31 @@ impl SemanticAnalyzer {
                 .entry(caller.clone())
                 .or_default()
                 .insert(function.node.clone());
+
+            // A call nested inside this call's *arguments* runs while this
+            // callee's parameter block is half-written, so the two are live at
+            // once and their frames must not share addresses. The call graph
+            // alone does not say so — they are siblings under a common caller,
+            // which colouring is otherwise free to overlay — so record the edge
+            // that makes it true.
+            //
+            // Without it `outer(v, inner(200, 201), v)` passed 200 as `outer`'s
+            // first argument: `inner`'s parameters had been coloured over
+            // `outer`'s. If the nested callee transitively calls this one, the
+            // edge closes a cycle, and the resulting save/restore is not
+            // over-caution — the parameters really are clobbered.
+            let mut nested = Vec::new();
+            for arg in args {
+                Self::collect_called_names(&arg.node, &mut nested);
+            }
+            for callee in nested {
+                if callee != function.node {
+                    self.call_edges
+                        .entry(function.node.clone())
+                        .or_default()
+                        .insert(callee);
+                }
+            }
         }
 
         // Verify function signature: check that it's a function and get param/return types
@@ -1626,6 +1651,90 @@ impl SemanticAnalyzer {
                 elems.iter().any(Self::expr_contains_call)
             }
             _ => false,
+        }
+    }
+
+    /// Every named function called anywhere inside `expr`, including through
+    /// nested argument lists. Used to record the extra frame-interference edges
+    /// a nested call creates; an indirect call has no name to record and takes
+    /// its arguments in the fixed staging block instead, so it is skipped.
+    fn collect_called_names(expr: &Expr, out: &mut Vec<String>) {
+        let walk =
+            |e: &Spanned<Expr>, out: &mut Vec<String>| Self::collect_called_names(&e.node, out);
+        match expr {
+            Expr::Call { function, args } => {
+                out.push(function.node.clone());
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            Expr::CallIndirect { callee, args } => {
+                walk(callee, out);
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+            Expr::Unary { operand, .. } => walk(operand, out),
+            Expr::Cast { expr: i, .. }
+            | Expr::Paren(i)
+            | Expr::SliceLen(i)
+            | Expr::U16Low(i)
+            | Expr::U16High(i) => walk(i, out),
+            Expr::Field { object, .. } => walk(object, out),
+            Expr::Index { object, index } => {
+                walk(object, out);
+                walk(index, out);
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                walk(object, out);
+                walk(start, out);
+                walk(end, out);
+            }
+            Expr::BitOp { object, bit, .. } => {
+                walk(object, out);
+                walk(bit, out);
+            }
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                for f in fields {
+                    walk(&f.value, out);
+                }
+            }
+            Expr::EnumVariant { data, .. } => match data {
+                crate::ast::VariantData::Unit => {}
+                crate::ast::VariantData::Tuple(elems) => {
+                    for e in elems {
+                        walk(e, out);
+                    }
+                }
+                crate::ast::VariantData::Struct(fields) => {
+                    for f in fields {
+                        walk(&f.value, out);
+                    }
+                }
+            },
+            Expr::Match { expr: i, arms } => {
+                walk(i, out);
+                for a in arms {
+                    walk(&a.body, out);
+                }
+            }
+            Expr::Literal(crate::ast::Literal::Array(elems)) => {
+                for e in elems {
+                    walk(e, out);
+                }
+            }
+            Expr::Literal(_)
+            | Expr::Variable(_)
+            | Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => {}
         }
     }
 

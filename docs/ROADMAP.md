@@ -121,8 +121,10 @@ compiler share, where one form still diverges.
 
 What it generates is a small imperative language: `u8`/`u16`/`i8`/`i16`, ten
 binary operators, casts, comparisons and boolean connectives, assignment,
-`if`/`else`, counted `for` and condition-driven `while`, nested. Every variable's
-final value is written out, so one program checks four results.
+`if`/`else`, counted `for` and condition-driven `while`, functions with one to
+three parameters and a return value, and self-recursion bounded by a decreasing
+budget — all nested. Every variable's final value is written out, so one program
+checks four results.
 
 **What it reaches is documented, not asserted**: [`fuzz-coverage.md`](fuzz-coverage.md)
 lists every construct in the language's AST with how many of a fixed sample of
@@ -139,7 +141,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Six real bugs so far, all silent:
+Ten real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -159,9 +161,24 @@ Six real bugs so far, all silent:
 6. A conditional branch spanning the right operand of `&&` overflowed its
    ±127-byte range once that operand was large enough — an assembly-time failure
    with no source-level fix.
+7. A call in another call's argument list clobbered the arguments already
+   staged, three separate ways: frame colouring overlaid two functions that are
+   siblings in the call graph but live at once during staging; the staging pool
+   sits at a fixed address whose allocator resets per function, so a callee
+   staged over its caller; and an inlined call stores straight into parameter
+   slots, which for a self-nested call are the same bytes by construction.
+   `f(0, v, f(12, v, v))` returned 12.
+8. Loop unrolling was decided by the iteration count alone, so eight copies of
+   a 16-bit division were emitted as readily as eight copies of two
+   instructions — and nested loops multiplied it. A 76-line generated program
+   overflowed the whole 16 KB CODE section, a build failure with no visible
+   cause in the source. Unrolling is now bounded by the estimated size of the
+   unrolled body; the example corpus is unchanged, so nothing that was worth
+   unrolling stopped being unrolled.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/int_conversions.rs`,
-`tests/e2e/short_circuit.rs`.
+`tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
+`tests/e2e/loop_sweep.rs`.
 
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
@@ -175,9 +192,9 @@ and an oracle that is merely *probably* right is worse than no oracle:
   metamorphically.
 - **Mixed widths.** One type per program today, because mixed-width arithmetic
   brings the implicit widening rules into the oracle.
-- **Calls with several arguments**, and recursion — the shapes where the spill
-  and frame machinery live. The four surface forms exercise one call each; none
-  passes an argument.
+- **Mutual recursion, and calls through a function pointer.** Self-recursion is
+  generated; a cycle of two functions is not, and neither is the indirect-call
+  trampoline.
 - **Aggregates.** Structs, arrays and slices, where several bugs have already
   been found by hand.
 - **Shift counts at or past the width**, and constant expressions standing alone
@@ -220,6 +237,20 @@ A differential battery (~150 programs with hand-computed results, run on the
 emulator) turned these up. The silent-miscompile findings from that run are
 fixed and regression-tested in `tests/e2e/match_ranges.rs`; what follows is what
 it found and left standing.
+
+### Argument staging is bounded by a fixed 11-byte pool
+
+Arguments are evaluated into a fixed zero-page pool (`$F4-$FE`) before being
+copied into the callee's frame, and a call nested in another call's argument
+list needs room for both lists at once. Four 16-bit arguments nested inside four
+more exceeds it. The failure is a compile error naming the workaround (bind the
+inner call to a `let`), not a miscompile — the miscompiles that used to hide
+here are fixed and regression-tested in `tests/e2e/nested_calls.rs`.
+
+Lifting it means staging arguments on the software stack rather than in a pool
+at a fixed address, which is the same mechanism the nested-call fix already uses
+to shelter what is staged so far. The pool would then hold one argument at a
+time and the depth would be bounded by the 256-byte stack instead.
 
 ### A mutable slice type
 

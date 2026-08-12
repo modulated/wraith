@@ -220,6 +220,13 @@ impl TempAllocator {
         result
     }
 
+    /// Bytes still unallocated in the arg pool, for diagnostics.
+    pub fn arg_bytes_free(&self) -> u8 {
+        (0..Self::ARG_SIZE)
+            .filter(|i| self.arg_pool & (1u16 << i) == 0)
+            .count() as u8
+    }
+
     /// Free previously allocated bytes in the arg pool
     pub fn free_arg(&mut self, addr: u8, size: u8) {
         let mut pool = self.arg_pool as u32;

@@ -28,9 +28,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `VarDecl` | 400 |  |
 | `Assign` | 400 |  |
 | `Expr` | 400 |  |
-| `Return` | — | not generated: the called form returns nothing; a value-returning call would need the oracle to model the return convention |
-| `If` | 280 |  |
-| `While` | 199 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
+| `Return` | 304 | every generated function returns a value of the program's type, so the `u8`/`i8` (A) and `u16`/`i16` (A:Y) return conventions are covered but the pointer one (A:X) is not — that needs aggregates |
+| `If` | 339 |  |
+| `While` | 211 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
 | `Loop` | 400 |  |
 | `For` | 400 | bounds are literals; a computed bound is not generated |
 | `ForEach` | — | not generated: iterating a slice or a string needs aggregates |
@@ -46,13 +46,13 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 |---|---:|---|
 | `Literal` | 400 |  |
 | `Variable` | 400 |  |
-| `Binary` | 397 |  |
-| `Unary` | 253 |  |
-| `Cast` | 363 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
+| `Binary` | 399 |  |
+| `Unary` | 270 |  |
+| `Cast` | 381 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
 | `Field` | — | not generated: aggregates are not generated |
 | `Index` | — | not generated: aggregates are not generated |
 | `Slice` | — | not generated: aggregates are not generated |
-| `Call` | 400 | one call, no arguments, no return value, no recursion |
+| `Call` | 400 | 1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing budget parameter. Mutual recursion and function pointers are not generated, and a callee reads only its own scope, so argument evaluation order cannot be observed |
 | `CallIndirect` | — | not generated: function pointers are not generated |
 | `StructInit` | — | not generated: aggregates are not generated |
 | `AnonStructInit` | — | not generated: aggregates are not generated |
@@ -83,32 +83,32 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Add` | 234 |  |
-| `Sub` | 315 |  |
-| `Mul` | 309 |  |
-| `Div` | 323 | divisor is always a nonzero positive literal — zero is an error-behaviour question, and positive keeps `i8::MIN / -1` out |
-| `Mod` | 274 | divisor as for `Div` |
-| `BitAnd` | 305 |  |
-| `BitOr` | 287 |  |
-| `BitXor` | 291 |  |
-| `Shl` | 308 | shift count is a literal below the type's width, where the result is the plain shift |
-| `Shr` | 295 | shift count as for `Shl` |
-| `Eq` | 96 |  |
-| `Ne` | 74 |  |
-| `Lt` | 115 |  |
-| `Gt` | 242 |  |
-| `Le` | 158 |  |
-| `Ge` | 89 |  |
-| `And` | 77 |  |
-| `Or` | 44 |  |
+| `Add` | 327 |  |
+| `Sub` | 359 |  |
+| `Mul` | 308 |  |
+| `Div` | 351 | divisor is always a nonzero positive literal — zero is an error-behaviour question, and positive keeps `i8::MIN / -1` out |
+| `Mod` | 317 | divisor as for `Div` |
+| `BitAnd` | 344 |  |
+| `BitOr` | 342 |  |
+| `BitXor` | 339 |  |
+| `Shl` | 343 | shift count is a literal below the type's width, where the result is the plain shift |
+| `Shr` | 342 | shift count as for `Shl` |
+| `Eq` | 204 |  |
+| `Ne` | 163 |  |
+| `Lt` | 106 |  |
+| `Gt` | 258 |  |
+| `Le` | 118 |  |
+| `Ge` | 136 |  |
+| `And` | 116 |  |
+| `Or` | 36 |  |
 
 ## Unary operators
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Neg` | 197 | only on a literal |
+| `Neg` | 200 | only on a literal |
 | `BitNot` | — | not generated: would widen the oracle for no new codegen path — `^ -1` covers the same lowering |
-| `Not` | 113 | only on a condition |
+| `Not` | 150 | only on a condition |
 | `AddrOf` | — | not generated: pointers are not generated |
 | `Deref` | — | not generated: pointers are not generated |
 
@@ -139,9 +139,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | Construct | Programs | Notes |
 |---|---:|---|
 | `U8` | 400 |  |
-| `I8` | 256 |  |
-| `U16` | 320 |  |
-| `I16` | 168 |  |
+| `I8` | 299 |  |
+| `U16` | 351 |  |
+| `I16` | 277 |  |
 | `Bool` | — | not generated: generated only as a condition, which is never spelled as a type |
 | `Char` | — | not generated: no character arithmetic is generated |
 | `B8` | — | not generated: BCD is covered by tests/e2e/bcd.rs |

@@ -34,6 +34,7 @@ mod match_ranges;
 mod math16;
 mod memory;
 mod multi_error;
+mod nested_calls;
 mod operators;
 mod org_conflicts;
 mod placement;

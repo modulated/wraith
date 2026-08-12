@@ -44,7 +44,7 @@ fn is_y_preserving(expr: &Expr) -> bool {
 /// Does evaluating this expression involve a function call (direct or nested)?
 /// A call clobbers Y and the $F0 scratch pool, so a live left operand held there
 /// must instead be spilled across the call.
-fn contains_call(expr: &Expr) -> bool {
+pub(super) fn contains_call(expr: &Expr) -> bool {
     match expr {
         // An indirect call is still a call: the trampoline JSRs to a function
         // that uses the same scratch pools this function does.
