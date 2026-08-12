@@ -1244,9 +1244,38 @@ impl SemanticAnalyzer {
                 Ok(())
             }
             Pattern::Literal(lit) => self.check_pattern_literal_fits(lit, match_ty),
-            Pattern::Range { start, end, .. } => {
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 self.check_pattern_literal_fits(start, match_ty)?;
-                self.check_pattern_literal_fits(end, match_ty)
+
+                // An exclusive range's `end` is one past its last value, so
+                // `0..256` covers a whole `u8` rather than naming a bound no
+                // `u8` can hold. What has to fit is the last value it matches.
+                let last = self
+                    .pattern_bound_value(end)
+                    .map(|v| if *inclusive { v } else { v - 1 });
+                if let Some(last) = last {
+                    self.check_pattern_value_fits(last, end.span, match_ty)?;
+                }
+
+                // A range whose end is below its start matches nothing, so the
+                // arm can never run. Easy to write by accident now that `..`
+                // is accepted: `5..5` looks like it covers 5.
+                if let (Some(lo), Some(hi)) = (self.pattern_bound_value(start), last)
+                    && lo > hi
+                {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "range pattern matches no value: it starts at {lo} and its last \
+                             value is {hi}"
+                        ),
+                        span: start.span.merge(end.span),
+                    });
+                }
+                Ok(())
             }
             Pattern::Wildcard | Pattern::Variable(_) => Ok(()),
         }
@@ -1260,12 +1289,25 @@ impl SemanticAnalyzer {
         lit: &Spanned<Expr>,
         match_ty: &Type,
     ) -> Result<(), SemaError> {
-        let Ok(val) = eval_const_expr_with_env(lit, &self.const_env) else {
+        let Some(int_val) = self.pattern_bound_value(lit) else {
             return Ok(()); // not constant: nothing to check
         };
-        let Some(int_val) = val.as_integer() else {
-            return Ok(());
-        };
+        self.check_pattern_value_fits(int_val, lit.span, match_ty)
+    }
+
+    /// The constant value of a pattern literal or range bound, if it has one.
+    fn pattern_bound_value(&self, lit: &Spanned<Expr>) -> Option<i64> {
+        eval_const_expr_with_env(lit, &self.const_env)
+            .ok()
+            .and_then(|v| v.as_integer())
+    }
+
+    fn check_pattern_value_fits(
+        &mut self,
+        int_val: i64,
+        span: crate::ast::Span,
+        match_ty: &Type,
+    ) -> Result<(), SemaError> {
         let fits = match match_ty {
             Type::Primitive(PrimitiveType::U8) => (0..=255).contains(&int_val),
             Type::Primitive(PrimitiveType::I8) => (-128..=127).contains(&int_val),
@@ -1282,7 +1324,7 @@ impl SemanticAnalyzer {
                     int_val,
                     match_ty.display_name()
                 ),
-                span: lit.span,
+                span,
             });
         }
         Ok(())

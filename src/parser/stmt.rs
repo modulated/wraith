@@ -330,8 +330,12 @@ impl Parser<'_> {
             Some(Token::Integer(_)) | Some(Token::Minus) => {
                 let expr = self.parse_pattern_bound()?;
 
-                // Check for range pattern
-                if self.check(&Token::DotDotEq) {
+                // Range pattern, in both forms. `..` and `..=` mean the same
+                // here as they do in a `for` range; accepting only one of them
+                // made the restriction look like a rule rather than an
+                // omission.
+                if self.check(&Token::DotDotEq) || self.check(&Token::DotDot) {
+                    let inclusive = self.check(&Token::DotDotEq);
                     self.advance();
                     let end = self.parse_pattern_bound()?;
                     let span = start.merge(end.span);
@@ -339,7 +343,7 @@ impl Parser<'_> {
                         Pattern::Range {
                             start: expr,
                             end,
-                            inclusive: true,
+                            inclusive,
                         },
                         span,
                     ))

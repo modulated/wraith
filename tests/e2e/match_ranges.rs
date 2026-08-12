@@ -240,3 +240,152 @@ fn u16_relational_operators_stay_width_correct() {
         1
     );
 }
+
+// ---------------------------------------------------------------------------
+// Exclusive ranges
+// ---------------------------------------------------------------------------
+//
+// `0..300` used to be a parse error ("expected FatArrow, found '..'"), so a
+// pattern accepted only `..=` while `for i in 0..n` accepted both. Codegen
+// already handled the exclusive form — it computes the same upper bound either
+// way — so what was missing was the parse and the bounds check.
+
+#[test]
+fn an_exclusive_range_excludes_its_end() {
+    assert_eq!(
+        arm_taken("let n: u8 = 99; match n { 0..100 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: u8 = 100; match n { 0..100 => { OUT=1; } _ => { OUT=2; } }"),
+        2,
+        "100 is one past the last value `0..100` covers"
+    );
+}
+
+#[test]
+fn an_exclusive_range_includes_its_start() {
+    assert_eq!(
+        arm_taken("let n: u8 = 10; match n { 10..20 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: u8 = 9; match n { 10..20 => { OUT=1; } _ => { OUT=2; } }"),
+        2
+    );
+}
+
+/// The two spellings of one range must select the same arm at every boundary.
+#[test]
+fn the_two_spellings_agree() {
+    for n in [0u8, 9, 10, 19, 20, 21, 255] {
+        let exclusive = arm_taken(&format!(
+            "let n: u8 = {n}; match n {{ 10..20 => {{ OUT=1; }} _ => {{ OUT=2; }} }}"
+        ));
+        let inclusive = arm_taken(&format!(
+            "let n: u8 = {n}; match n {{ 10..=19 => {{ OUT=1; }} _ => {{ OUT=2; }} }}"
+        ));
+        assert_eq!(exclusive, inclusive, "n = {n}");
+    }
+}
+
+/// The 16-bit case, where a low-byte-only comparison would give the opposite
+/// answer: 300 is `0x012C`, low byte 44.
+#[test]
+fn u16_exclusive_ranges_compare_both_bytes() {
+    assert_eq!(
+        arm_taken("let n: u16 = 299; match n { 0..300 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: u16 = 300; match n { 0..300 => { OUT=1; } _ => { OUT=2; } }"),
+        2
+    );
+    assert_eq!(
+        arm_taken("let n: u16 = 300; match n { 0..100 => { OUT=1; } _ => { OUT=2; } }"),
+        2,
+        "a low-byte comparison would see 44 and take the arm"
+    );
+}
+
+#[test]
+fn signed_exclusive_ranges() {
+    assert_eq!(
+        arm_taken("let n: i8 = -1; match n { -10..0 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: i8 = 0; match n { -10..0 => { OUT=1; } _ => { OUT=2; } }"),
+        2
+    );
+    assert_eq!(
+        arm_taken("let n: i16 = -300; match n { -1000..-299 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: i16 = -299; match n { -1000..-299 => { OUT=1; } _ => { OUT=2; } }"),
+        2
+    );
+}
+
+/// An exclusive end is one past the last value, so it may name the number just
+/// beyond the type. `0..256` covers a whole `u8` and must not be rejected as an
+/// out-of-range bound.
+#[test]
+fn an_exclusive_end_may_sit_one_past_the_type_maximum() {
+    assert_eq!(
+        arm_taken("let n: u8 = 255; match n { 0..256 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: i8 = 127; match n { 0..128 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: u16 = 65535; match n { 0..65536 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+}
+
+/// Two past the end is still out of range, so the check has not simply been
+/// relaxed.
+#[test]
+fn a_bound_beyond_that_is_still_rejected() {
+    for src in [
+        "let n: u8 = 0; match n { 0..257 => { OUT=1; } _ => { OUT=2; } }",
+        "let n: u8 = 0; match n { 0..=256 => { OUT=1; } _ => { OUT=2; } }",
+        "let n: i8 = 0; match n { 0..129 => { OUT=1; } _ => { OUT=2; } }",
+    ] {
+        let full =
+            format!("const OUT: addr = 0x0900;\n#[reset]\nfn main() {{ {src} loop {{}} }}\n");
+        crate::common::assert_error_contains(&full, "cannot match a value of type");
+    }
+}
+
+/// A range that covers nothing is an arm that can never run — easy to write by
+/// accident now that `..` is accepted, since `5..5` looks like it covers 5.
+#[test]
+fn an_empty_range_is_rejected() {
+    for src in [
+        "let n: u8 = 0; match n { 5..5 => { OUT=1; } _ => { OUT=2; } }",
+        "let n: u8 = 0; match n { 9..3 => { OUT=1; } _ => { OUT=2; } }",
+        "let n: u8 = 0; match n { 9..=3 => { OUT=1; } _ => { OUT=2; } }",
+    ] {
+        let full =
+            format!("const OUT: addr = 0x0900;\n#[reset]\nfn main() {{ {src} loop {{}} }}\n");
+        crate::common::assert_error_contains(&full, "matches no value");
+    }
+}
+
+/// A single-value inclusive range is not empty and must keep working.
+#[test]
+fn a_single_value_range_is_not_empty() {
+    assert_eq!(
+        arm_taken("let n: u8 = 5; match n { 5..=5 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+    assert_eq!(
+        arm_taken("let n: u8 = 5; match n { 5..6 => { OUT=1; } _ => { OUT=2; } }"),
+        1
+    );
+}

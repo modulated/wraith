@@ -1952,7 +1952,8 @@ fn process(data: &[u8]) {
 // Match on values
 match value {
     0 => { },
-    1..=10 => { },    // Range
+    1..=10 => { },    // Range, inclusive of 10
+    11..20 => { },    // Range, exclusive of 20
     _ => { },         // Default
 }
 
@@ -1975,6 +1976,12 @@ match msg {
     },
 }
 ```
+
+Both range spellings mean here what they mean in a `for` range: `a..=b` covers
+`b`, `a..b` stops one short of it. An exclusive end may therefore name the value
+just past the type — `0..256` covers a whole `u8` — but a range that covers
+nothing (`5..5`, or a reversed `9..=3`) is rejected, since the arm could never
+run.
 
 ### Continue Statement
 

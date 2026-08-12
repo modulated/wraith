@@ -238,12 +238,6 @@ no-op on real hardware and nothing at run time will catch it.
 Until then, code that needs to write a sub-range passes the array itself plus
 explicit bounds.
 
-### Exclusive ranges in match patterns
-
-`match n { 0..300 => … }` is a parse error ("expected FatArrow, found '..'");
-only `..=` is accepted in a pattern. Ranges elsewhere (`for i in 0..n`) take
-both forms, so the restriction is surprising.
-
 ---
 
 ## Correctness & diagnostics
