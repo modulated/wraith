@@ -124,6 +124,14 @@ binary operators, casts, comparisons and boolean connectives, assignment,
 `if`/`else`, counted `for` and condition-driven `while`, nested. Every variable's
 final value is written out, so one program checks four results.
 
+**What it reaches is documented, not asserted**: [`fuzz-coverage.md`](fuzz-coverage.md)
+lists every construct in the language's AST with how many of a fixed sample of
+programs contain it, the limits that apply where it is generated, and the reason
+where it is not. That document is generated from the fuzzer and checked on every
+run — and the variant lists are read from `src/ast/*.rs`, so a construct added to
+the language appears there as uncovered and has to be given a reason before the
+suite passes again. Read it before trusting any claim below about coverage.
+
 It is deterministic and seeded per iteration, so a failure reports a seed that
 reproduces it and CI sees the same programs every run. `WRAITH_FUZZ_ITERS` and
 `WRAITH_FUZZ_SEED` widen the search locally. A failing program is **shrunk**
