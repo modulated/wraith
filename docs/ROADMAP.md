@@ -252,6 +252,13 @@ at a fixed address, which is the same mechanism the nested-call fix already uses
 to shelter what is staged so far. The pool would then hold one argument at a
 time and the depth would be bounded by the 256-byte stack instead.
 
+The fuzzer budgets the pool so it rarely generates a program that exhausts it,
+and skips (and counts) the ones that slip through — the budget cannot be exact,
+because the pool has other consumers a program's source does not reveal, and
+modelling the compiler's allocator inside the generator would put that knowledge
+in the wrong place. The skip count is printed and capped, so if lifting this
+limit ever stops mattering the test will say so rather than drift.
+
 ### A mutable slice type
 
 Slices are read-only views and now borrow from any storage — a local, a

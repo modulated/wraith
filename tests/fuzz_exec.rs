@@ -1420,12 +1420,32 @@ fn shrink(p: &Prog, form: Form, kind: Kind) -> Prog {
     }
 }
 
+/// A compile error that is a known, documented limit rather than a defect.
+///
+/// Argument staging uses a fixed 11-byte zero-page pool, so a call nested in
+/// another call's argument list can exhaust it. The generator budgets the pool
+/// to keep this rare, but it cannot be exact — the pool has other consumers
+/// that a program's source does not reveal — and encoding the compiler's
+/// allocator into the generator would be the wrong place for that knowledge.
+///
+/// The limit fails loudly, names its workaround, has a regression test
+/// (`tests/e2e/nested_calls.rs`) and a roadmap entry saying what lifting it
+/// takes. Skipping it here keeps the run spent on wrong answers; the count is
+/// reported so it cannot quietly become the common case.
+fn is_known_limit(why: &str) -> bool {
+    why.contains("argument-evaluation pool exhausted")
+}
+
 /// One generated case, checked against the oracle in every surface form.
-fn check_seed(seed: u64) -> Result<(), String> {
+/// `Ok(true)` means the case was skipped as a known limit.
+fn check_seed(seed: u64) -> Result<bool, String> {
     let p = gen_program(seed);
-    let Some((form, kind, _)) = disagrees(&p) else {
-        return Ok(());
+    let Some((form, kind, why)) = disagrees(&p) else {
+        return Ok(false);
     };
+    if is_known_limit(&why) {
+        return Ok(true);
+    }
 
     let small = shrink(&p, form, kind);
     let why = disagrees_as(&small, form)
@@ -1452,12 +1472,18 @@ fn generated_programs_compute_what_they_should() {
         .unwrap_or(0);
 
     let mut failures = Vec::new();
+    let mut skipped = 0u64;
     for i in 0..iters {
-        if let Err(e) = check_seed(base.wrapping_add(i)) {
-            failures.push(e);
-            // A handful of examples is enough to debug; do not print hundreds.
-            if failures.len() >= 3 {
-                break;
+        match check_seed(base.wrapping_add(i)) {
+            Ok(true) => skipped += 1,
+            Ok(false) => {}
+            Err(e) => {
+                failures.push(e);
+                // A handful of examples is enough to debug; do not print
+                // hundreds.
+                if failures.len() >= 3 {
+                    break;
+                }
             }
         }
     }
@@ -1468,6 +1494,19 @@ fn generated_programs_compute_what_they_should() {
         "{} of {iters} generated programs were miscompiled:\n\n{}",
         failures.len(),
         failures.join("\n\n========================\n\n")
+    );
+    // Loud enough to notice, and a hard cap so the search cannot quietly
+    // degrade into one that mostly tests the pool limit.
+    if skipped > 0 {
+        eprintln!(
+            "{skipped} of {iters} seeds skipped: argument-staging pool exhausted \
+             (a documented limit — see docs/ROADMAP.md)"
+        );
+    }
+    assert!(
+        skipped * 20 <= iters.max(20),
+        "{skipped} of {iters} seeds hit the argument-staging pool limit; the generator's \
+         budget for it has stopped working"
     );
 }
 
@@ -1863,7 +1902,9 @@ mod coverage {
             "1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing \
              budget parameter. Mutual recursion and function pointers are not generated, and \
              a callee reads only its own scope, so argument evaluation order cannot be \
-             observed",
+             observed. Nesting depth is limited by the compiler's 11-byte argument-staging \
+             pool: the generator budgets it, and a program that exhausts it anyway is \
+             skipped and counted rather than reported",
         ),
         (
             "Expr::Cast",

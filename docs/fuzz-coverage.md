@@ -52,7 +52,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Field` | — | not generated: aggregates are not generated |
 | `Index` | — | not generated: aggregates are not generated |
 | `Slice` | — | not generated: aggregates are not generated |
-| `Call` | 400 | 1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing budget parameter. Mutual recursion and function pointers are not generated, and a callee reads only its own scope, so argument evaluation order cannot be observed |
+| `Call` | 400 | 1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing budget parameter. Mutual recursion and function pointers are not generated, and a callee reads only its own scope, so argument evaluation order cannot be observed. Nesting depth is limited by the compiler's 11-byte argument-staging pool: the generator budgets it, and a program that exhausts it anyway is skipped and counted rather than reported |
 | `CallIndirect` | — | not generated: function pointers are not generated |
 | `StructInit` | — | not generated: aggregates are not generated |
 | `AnonStructInit` | — | not generated: aggregates are not generated |
