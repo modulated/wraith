@@ -42,8 +42,14 @@ fn is_y_preserving(expr: &Expr) -> bool {
 }
 
 /// Does evaluating this expression involve a function call (direct or nested)?
-/// A call clobbers Y and the $F0 scratch pool, so a live left operand held there
-/// must instead be spilled across the call.
+///
+/// Three mechanisms depend on the answer: a live left operand is spilled across
+/// the call, and an argument list shelters what it has already staged (both the
+/// pool and, for an inlined call, the parameter slots). A *false* answer
+/// silently disables all three, and the result is a wrong value rather than a
+/// diagnostic — so this match is exhaustive on purpose. A new `Expr` variant
+/// must be classified here before it compiles, not discovered later by the
+/// fuzzer.
 pub(super) fn contains_call(expr: &Expr) -> bool {
     match expr {
         // An indirect call is still a call: the trampoline JSRs to a function
@@ -74,7 +80,20 @@ pub(super) fn contains_call(expr: &Expr) -> bool {
         Expr::Slice {
             object, start, end, ..
         } => contains_call(&object.node) || contains_call(&start.node) || contains_call(&end.node),
-        _ => false,
+        // An array literal's elements are ordinary expressions: `[f(), 1]`
+        // reaches a call, and the catch-all this replaces said it did not.
+        Expr::Literal(crate::ast::Literal::Array(elems)) => {
+            elems.iter().any(|e| contains_call(&e.node))
+        }
+        Expr::Literal(crate::ast::Literal::ArrayFill { value, .. }) => contains_call(&value.node),
+        Expr::BitOp { object, bit, .. } => contains_call(&object.node) || contains_call(&bit.node),
+        // Genuinely call-free.
+        Expr::Literal(_)
+        | Expr::Variable(_)
+        | Expr::CpuFlagCarry
+        | Expr::CpuFlagZero
+        | Expr::CpuFlagOverflow
+        | Expr::CpuFlagNegative => false,
     }
 }
 

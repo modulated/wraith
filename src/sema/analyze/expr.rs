@@ -1614,6 +1614,12 @@ impl SemanticAnalyzer {
     }
 
     /// Whether evaluating `expr` can run a `JSR`.
+    ///
+    /// Feeds the recursion-depth cost model: an operand live across a call is
+    /// spilled to the same 256-byte software stack the frame saves use, so
+    /// missing one under-counts what a recursion level costs and the warning
+    /// fires too late. Exhaustive for that reason — a new `Expr` variant has to
+    /// be classified rather than defaulting to "no call".
     fn expr_contains_call(expr: &Spanned<Expr>) -> bool {
         match &expr.node {
             Expr::Call { .. } | Expr::CallIndirect { .. } => true,
@@ -1650,7 +1656,23 @@ impl SemanticAnalyzer {
             Expr::Literal(crate::ast::Literal::Array(elems)) => {
                 elems.iter().any(Self::expr_contains_call)
             }
-            _ => false,
+            Expr::Literal(crate::ast::Literal::ArrayFill { value, .. }) => {
+                Self::expr_contains_call(value)
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                Self::expr_contains_call(object)
+                    || Self::expr_contains_call(start)
+                    || Self::expr_contains_call(end)
+            }
+            // Genuinely call-free.
+            Expr::Literal(_)
+            | Expr::Variable(_)
+            | Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => false,
         }
     }
 

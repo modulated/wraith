@@ -178,3 +178,23 @@ fn exhausting_the_staging_pool_is_a_compile_error() {
     crate::common::assert_error_contains(src, "argument-evaluation pool exhausted");
     crate::common::assert_error_contains(src, "Bind the inner call to a `let` first");
 }
+
+/// A bit test whose object is a call, sitting in a later argument. `contains_call`
+/// decides whether the earlier arguments get sheltered, and its `BitOp` arm used
+/// to be covered by a catch-all that answered "no call". This shape already
+/// worked — the answer was right before the arm was written — so it is pinned
+/// rather than fixed: the arm now says so explicitly instead of by omission.
+#[test]
+fn a_bit_test_on_a_call_result_in_a_later_argument() {
+    let got = outs(
+        &format!(
+            "{PICKERS}fn eight() -> u8 {{ return 8; }}\n\
+             #[reset]\nfn main() {{\n\
+             \x20   OUT0 = pick2a(200, eight().bit(3) as u8);\n\
+             \x20   OUT1 = pick2b(200, eight().bit(3) as u8);\n\
+             \x20   loop {{}}\n}}\n"
+        ),
+        2,
+    );
+    assert_eq!(got, vec![200, 1], "bit 3 of 8 is set, and 200 survives");
+}
