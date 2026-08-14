@@ -233,7 +233,10 @@ enum E {
     /// parameter or a local) inside a generated function.
     Var(usize),
     /// The induction variable of an enclosing `for`, by loop id. It is always
-    /// `u8`; at any other program type it appears through a cast.
+    /// `u8`; at any other program type it appears through a cast. Rendered
+    /// `lv{id}` rather than `i{id}` because loop 8 would otherwise be named
+    /// `i8`, which is a type name and not an identifier — a parse error the
+    /// fuzzer duly reported against itself.
     Loop(usize),
     Bin(Box<E>, Op, Box<E>),
     /// Out to another type and straight back: truncation and sign-extension,
@@ -938,10 +941,20 @@ fn expected(p: &Prog) -> Vec<u32> {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// The name of a `for` induction variable.
+///
+/// `lv` rather than `i`, because `i8` and `i16` are type names and not
+/// identifiers: a program with nine loops declared `for i8 in …`, which the
+/// parser rejected. Every site that names a loop variable goes through here so
+/// the rule has one place to hold.
+fn loop_var(id: usize) -> String {
+    format!("lv{id}")
+}
+
 fn render_index(ix: &Ix) -> String {
     match ix {
         Ix::Lit(k) => format!("{k}"),
-        Ix::Loop(id) => format!("i{id}"),
+        Ix::Loop(id) => loop_var(*id),
         Ix::Wrapped(i) => format!("((v{i} as u8) % {ALEN})"),
     }
 }
@@ -959,8 +972,8 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Lit(v) if *v < 0 => format!("({v})"),
         E::Lit(v) => format!("{v}"),
         E::Var(i) => sc.var(*i),
-        E::Loop(id) if ty == Ty::U8 => format!("i{id}"),
-        E::Loop(id) => format!("(i{id} as {})", ty.name()),
+        E::Loop(id) if ty == Ty::U8 => loop_var(*id),
+        E::Loop(id) => format!("({} as {})", loop_var(*id), ty.name()),
         E::Bin(l, op, r) => format!("({} {} {})", render(l, ty, sc), op.sym(), render(r, ty, sc)),
         E::Cast(to, inner) => format!(
             "(({} as {}) as {})",
@@ -1020,7 +1033,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 }
             }
             S::For(id, count, body) => {
-                out.push_str(&format!("{pad}for i{id} in 0..{count} {{\n"));
+                out.push_str(&format!("{pad}for {} in 0..{count} {{\n", loop_var(*id)));
                 out.push_str(&render_stmts(body, ty, indent + 4, sc));
                 out.push_str(&format!("{pad}}}\n"));
             }
@@ -1941,6 +1954,76 @@ fn the_generator_covers_what_it_claims() {
          argument staging goes wrong"
     );
     assert!(seen.self_calls > 0, "never emitted a recursive call");
+}
+
+/// No name the generator invents may be a reserved word.
+///
+/// The parse check below would find this only if a random program happened to
+/// need nine loops, which took 3046 seeds and two minutes; the rule is about
+/// the naming scheme, so it is checked directly and over the whole range of ids
+/// any program could reach.
+#[test]
+fn generated_names_are_never_reserved() {
+    // Type names first — the ones a numeric suffix can collide with — then the
+    // keywords, so a future prefix cannot land on one of those either.
+    const RESERVED: &[&str] = &[
+        "u8", "i8", "u16", "i16", "b8", "b16", "bool", "char", "addr", "str", "void", "let", "if",
+        "else", "while", "for", "loop", "match", "fn", "struct", "enum", "const", "static",
+        "import", "return", "break", "continue", "asm", "pub", "as", "in", "true", "false",
+    ];
+
+    let mut names: Vec<String> = vec![
+        "arr".into(),
+        "s".into(),
+        "d".into(),
+        "sel".into(),
+        "w0".into(),
+        "body".into(),
+        "main".into(),
+        "TBL".into(),
+        "S".into(),
+    ];
+    for id in 0..64usize {
+        names.push(loop_var(id));
+        names.push(format!("c{id}"));
+        names.push(format!("f{id}"));
+        names.push(format!("o{id}"));
+        names.push(format!("OUT{id}"));
+        names.push(Scope::Main.var(id));
+        names.push(Scope::Func { id: 0, params: 2 }.var(id));
+    }
+
+    for name in &names {
+        assert!(
+            !RESERVED.contains(&name.as_str()),
+            "the generator can produce the name `{name}`, which is reserved"
+        );
+    }
+}
+
+/// Every generated program must at least *parse*, in every surface form.
+///
+/// Cheap enough to run over far more seeds than the execution check, and it
+/// catches the mistakes that are the generator's rather than the compiler's —
+/// a name that collides with a keyword, a malformed construct — in
+/// milliseconds instead of after a hundred seconds of compiling and emulating.
+/// Loop variables were named `i{id}`, so a program with nine loops declared
+/// `i8`, and that is what found it.
+#[test]
+fn every_generated_program_parses() {
+    for seed in 0..2000u64 {
+        let p = gen_program(seed);
+        for form in FORMS {
+            let src = render_program(&p, form);
+            let tokens = match wraith::lex(&src) {
+                Ok(t) => t,
+                Err(e) => panic!("seed {seed} {form:?} does not lex: {e:?}\n{src}"),
+            };
+            if let Err(e) = wraith::parser::Parser::parse(&tokens) {
+                panic!("seed {seed} {form:?} does not parse: {e:?}\n{src}");
+            }
+        }
+    }
 }
 
 /// The oracle's own arithmetic, pinned against hand-checked values. If this
