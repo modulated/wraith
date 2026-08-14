@@ -1181,6 +1181,11 @@ pub struct ProgramInfo {
     pub function_metadata: HashMap<String, FunctionMetadata>,
     /// Map of expression spans to their constant-folded values
     pub folded_constants: HashMap<Span, const_eval::ConstValue>,
+    /// Named compile-time constants, by name. Codegen flattens `const` array
+    /// initializers itself, and those element expressions were never
+    /// type-checked, so there is no `folded_constants` entry to look up — this
+    /// is what lets `const A: [i8; 2] = [N - 1, 0]` resolve `N`.
+    pub const_env: const_eval::ConstEnv,
     /// Hidden per-loop frame slots holding non-constant for-loop range ends,
     /// keyed by the range end expression's span. Frame-allocated (and colored
     /// with the call graph) so nested loops, scratch-using expressions, and

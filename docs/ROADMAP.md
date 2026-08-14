@@ -122,9 +122,10 @@ compiler share, where one form still diverges.
 What it generates is a small imperative language: `u8`/`u16`/`i8`/`i16`, ten
 binary operators, casts, comparisons and boolean connectives, assignment,
 `if`/`else`, counted `for` and condition-driven `while`, functions with one to
-three parameters and a return value, and self-recursion bounded by a decreasing
-budget — all nested. Every variable's final value is written out, so one program
-checks four results.
+three parameters and a return value, self-recursion bounded by a decreasing
+budget, and a local array, a `const` table and a two-field struct — all nested.
+Every cell's final value is written out, so one program checks up to ten
+results.
 
 **What it reaches is documented, not asserted**: [`fuzz-coverage.md`](fuzz-coverage.md)
 lists every construct in the language's AST with how many of a fixed sample of
@@ -141,7 +142,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Ten real bugs so far, most of them silent:
+Eleven real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -176,7 +177,15 @@ Ten real bugs so far, most of them silent:
    unrolled body; the example corpus is unchanged, so nothing that was worth
    unrolling stopped being unrolled.
 
-Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/int_conversions.rs`,
+9. A `const` array with a negative element was rejected as "not a compile-time
+   constant" — but only once something read it, since an unused `const` is
+   dropped before flattening. The identical `static` worked. Two
+   `InitContext::integer` implementations had drifted: sema's evaluates the
+   expression, codegen's pattern-matched a bare literal, and `-5` parses as
+   `Unary(Neg, 5)`. Codegen now evaluates too, with the constant environment, so
+   `[N - 1, 0]` resolves as well.
+
+Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
 `tests/e2e/loop_sweep.rs`.
 
@@ -195,8 +204,12 @@ and an oracle that is merely *probably* right is worse than no oracle:
 - **Mutual recursion, and calls through a function pointer.** Self-recursion is
   generated; a cycle of two functions is not, and neither is the indirect-call
   trampoline.
-- **Aggregates.** Structs, arrays and slices, where several bugs have already
-  been found by hand.
+- **Slices, pointers and enums.** Arrays and structs of scalars are generated;
+  a slice or a `&T` gives two names for one piece of storage, which the oracle
+  would have to alias-model, and enums are a separate lowering again.
+- **Aggregates across a call.** A struct is a local today — never passed,
+  returned, or pointed at — and an array field inside a struct is not
+  generated. Both are shapes where a miscompile has already been found by hand.
 - **Shift counts at or past the width**, and constant expressions standing alone
   (typed by their own literals, not by the program around them — see the
   specification). Both are defined; neither is in the oracle.

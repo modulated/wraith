@@ -142,3 +142,59 @@ fn an_addr_read_under_a_cast_is_not_folded_to_its_address() {
     "#);
     assert_eq!(e.mem(0x0900), 6);
 }
+
+// ---------------------------------------------------------------------------
+// Negative elements in a `const` array
+// ---------------------------------------------------------------------------
+//
+// `const A: [i8; 2] = [-5, 1];` was rejected as "this initializer is not a
+// compile-time constant" — but only once something read it, since an unused
+// const is dropped before the flattening runs. The identical `static` worked.
+//
+// Two `InitContext::integer` implementations had drifted: sema's evaluates the
+// expression, codegen's pattern-matched a bare `Expr::Literal`. `-5` parses as
+// `Unary(Neg, 5)`, so codegen saw no literal, and a const array's elements are
+// flattened rather than type-checked, so nothing had folded them either.
+//
+// Found by `tests/fuzz_exec.rs` once it started generating `const` tables.
+
+#[test]
+fn a_const_array_may_hold_negative_elements() {
+    let mut e = run("const OUT0: addr = 0x0900;\nconst OUT1: addr = 0x0901;\n\
+         const OUT2: addr = 0x0902;\nconst OUT3: addr = 0x0903;\n\
+         const A: [i8; 3] = [-5, 1, -128];\n\
+         const C: [i16; 2] = [-300, 1];\n\
+         #[reset]\nfn main() {\n\
+         \x20   let i: u8 = 0;\n\
+         \x20   OUT0 = A[i] as u8;\n\
+         \x20   OUT1 = A[2] as u8;\n\
+         \x20   let c: u16 = C[i] as u16;\n\
+         \x20   OUT2 = c.low;\n    OUT3 = c.high;\n    loop {}\n}\n");
+    assert_eq!(e.mem(0x0900), 251, "-5 is 0xFB");
+    assert_eq!(e.mem(0x0901), 128, "-128 is 0x80");
+    assert_eq!(e.mem16(0x0902), 65236, "-300 is 0xFED4");
+}
+
+/// The value need not be a literal — any constant expression should flatten.
+#[test]
+fn a_const_array_element_may_be_a_constant_expression() {
+    let mut e = run("const OUT0: addr = 0x0900;\nconst OUT1: addr = 0x0901;\n\
+         const N: i8 = 7;\n\
+         const A: [i8; 2] = [0 - 5, N - 10];\n\
+         #[reset]\nfn main() {\n\
+         \x20   let i: u8 = 0;\n\
+         \x20   OUT0 = A[i] as u8;\n    OUT1 = A[1] as u8;\n    loop {}\n}\n");
+    assert_eq!(e.mem(0x0900), 251, "0 - 5 is -5");
+    assert_eq!(e.mem(0x0901), 253, "7 - 10 is -3");
+}
+
+/// The `static` form always worked, and has to keep working: the fix brought
+/// codegen's flattening into line with sema's, not the other way round.
+#[test]
+fn a_static_array_still_holds_negative_elements() {
+    let mut e = run("const OUT0: addr = 0x0900;\n\
+         static B: [i8; 2] = [-5, 1];\n\
+         #[reset]\nfn main() {\n\
+         \x20   let i: u8 = 0;\n    OUT0 = B[i] as u8;\n    loop {}\n}\n");
+    assert_eq!(e.mem(0x0900), 251);
+}

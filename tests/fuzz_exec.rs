@@ -22,9 +22,10 @@
 //! What is generated is a small imperative language: four integer types, ten
 //! binary operators, casts, comparisons and boolean connectives, assignment,
 //! `if`/`else`, counted `for` and condition-driven `while`, functions with one
-//! to three parameters and a return value, and self-recursion bounded by a
-//! decreasing budget — all nested. Every variable's final value is written out,
-//! so one program checks four results rather than one.
+//! to three parameters and a return value, self-recursion bounded by a
+//! decreasing budget, and a local array, a `const` table and a two-field struct
+//! — all nested. Every cell's final value is written out, so one program checks
+//! up to ten results rather than one.
 //!
 //! Runs are deterministic. Each iteration is seeded from its index, so a
 //! failure reports a seed that reproduces it, and CI sees the same programs
@@ -251,7 +252,48 @@ enum E {
     /// `Call` so termination is a property of the *shape*: there is no way to
     /// write a self-call that does not decrease the budget.
     SelfCall(Box<E>),
+    /// `arr[<index>]`, in `main` only.
+    Elem(Ix),
+    /// `TBL[<index>]` — a `const` array, which lives in ROM and is reached
+    /// through an assembler label rather than a zero-page base. A different
+    /// lowering from the local array, and the one with the bug history.
+    Konst(Ix),
+    /// `s.f{i}`, in `main` only.
+    Field(usize),
 }
+
+/// An array index. Every form is in range by construction: the language does no
+/// bounds checking (this is a 6502), so an out-of-range index would read or
+/// write storage the oracle does not model, and the disagreement would be the
+/// generator's fault rather than the compiler's.
+#[derive(Clone)]
+enum Ix {
+    /// A constant, below the length.
+    Lit(usize),
+    /// The induction variable of an enclosing `for`. Loop counts never exceed
+    /// the array length, so this is always in range — and it is already `u8`,
+    /// which is the only type indexing accepts.
+    Loop(usize),
+    /// `(v{i} as u8) % LEN`: a genuinely computed index. The cast pins it to
+    /// `u8` (indexing rejects a 16-bit index) and the modulus pins the range,
+    /// whatever the variable holds.
+    Wrapped(usize),
+}
+
+/// Somewhere a value can be stored.
+#[derive(Clone)]
+enum Place {
+    Var(usize),
+    Elem(Ix),
+    Field(usize),
+}
+
+/// Elements in the generated array, and the largest `for` count, so a loop
+/// variable is always a valid index.
+const ALEN: usize = 4;
+
+/// Fields in the generated struct.
+const SFIELDS: usize = 2;
 
 /// A condition. Only ever a condition — `bool` as a *value* has its own
 /// widening rule, which is a separate question from control flow.
@@ -265,7 +307,7 @@ enum B {
 
 #[derive(Clone)]
 enum S {
-    Assign(usize, E),
+    Assign(Place, E),
     If(B, Vec<S>, Option<Vec<S>>),
     /// `for i{id} in 0..{count}`.
     For(usize, u32, Vec<S>),
@@ -348,6 +390,10 @@ struct Gen<'a> {
     /// would need its counter re-initialised per invocation, which is a
     /// separate question from the call machinery this reaches.
     allow_loops: bool,
+    /// The array and the struct are `main`'s locals, so only `main`'s scope can
+    /// name them. False inside a generated function, and false in a program
+    /// that declares neither.
+    allow_aggregates: bool,
     /// Bytes still available in the compiler's fixed argument-staging pool.
     /// Arguments are staged there before being copied into the callee's frame,
     /// and a call nested in another call's argument list needs room for both at
@@ -382,6 +428,15 @@ impl Gen<'_> {
 /// adopts the sibling's type.
 fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
     if depth == 0 || g.rng.below(100) < 30 {
+        // An element or a field is storage of the program's type, so it anchors
+        // an expression exactly as a variable does.
+        if g.allow_aggregates && g.rng.below(100) < 35 {
+            return match g.rng.below(3) {
+                0 => E::Elem(gen_index(g)),
+                1 => E::Konst(gen_index(g)),
+                _ => E::Field(g.rng.below(SFIELDS as u64) as usize),
+            };
+        }
         let choices = if g.scope.is_empty() { 2 } else { 3 };
         let pick = if anchored {
             1 + g.rng.below(choices - 1)
@@ -438,6 +493,33 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
     E::Bin(Box::new(lhs), op, Box::new(rhs))
 }
 
+/// An index that is in range whatever the program computes.
+fn gen_index(g: &mut Gen) -> Ix {
+    let choices = if g.scope.is_empty() { 2 } else { 3 };
+    match g.rng.below(choices) {
+        0 => Ix::Lit(g.rng.below(ALEN as u64) as usize),
+        1 => Ix::Wrapped(g.rng.below(VARS as u64) as usize),
+        _ => {
+            let k = g.rng.below(g.scope.len() as u64) as usize;
+            Ix::Loop(g.scope[k])
+        }
+    }
+}
+
+/// Where an assignment stores. Restricted to the locals a function may write:
+/// a parameter is immutable, and the aggregates belong to `main`.
+fn gen_place(g: &mut Gen) -> Place {
+    if g.allow_aggregates && g.rng.below(100) < 40 {
+        return if g.rng.below(2) == 0 {
+            Place::Elem(gen_index(g))
+        } else {
+            Place::Field(g.rng.below(SFIELDS as u64) as usize)
+        };
+    }
+    let span = g.assignable.end - g.assignable.start;
+    Place::Var(g.assignable.start + g.rng.below(span as u64) as usize)
+}
+
 fn gen_bool(g: &mut Gen, depth: u32) -> B {
     if depth > 0 && g.rng.below(100) < 45 {
         return match g.rng.below(3) {
@@ -466,11 +548,10 @@ fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
 fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
-        let v = g.assignable.start
-            + g.rng.below((g.assignable.end - g.assignable.start) as u64) as usize;
+        let place = gen_place(g);
         // The assignment target supplies the type, so the right-hand side does
         // not need its own anchor.
-        return S::Assign(v, gen_expr(g, 3, false));
+        return S::Assign(place, gen_expr(g, 3, false));
     }
     match pick {
         50..=71 => {
@@ -486,7 +567,9 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
         72..=87 => {
             let id = g.loops;
             g.loops += 1;
-            let count = 1 + g.rng.below(4) as u32;
+            // Capped at the array length so a loop variable is always a valid
+            // index (see `Ix::Loop`).
+            let count = 1 + g.rng.below(ALEN as u64) as u32;
             g.scope.push(id);
             let body = gen_block(g, depth - 1);
             g.scope.pop();
@@ -510,6 +593,14 @@ struct Prog {
     stmts: Vec<S>,
     loops: usize,
     funcs: Vec<Func>,
+    /// Whether this program declares the array and the struct. Not every
+    /// program does, so the scalar shapes keep being generated too.
+    aggregates: bool,
+    arr_init: [i64; ALEN],
+    field_init: [i64; SFIELDS],
+    /// The `const` table's contents. Declared whenever `aggregates` is set, and
+    /// never written, so it needs no cell in the state.
+    konst: [i64; ALEN],
 }
 
 /// The largest recursion budget a call site may pass. Well under the depth the
@@ -543,6 +634,8 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         let saved_assignable = g.assignable.clone();
         let saved_callable = g.callable.clone();
         let saved_loops = g.allow_loops;
+        let saved_aggregates = g.allow_aggregates;
+        g.allow_aggregates = false;
         g.vars = params + locals.len();
         g.assignable = params..params + locals.len();
         g.callable = i + 1..count;
@@ -588,6 +681,7 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         g.assignable = saved_assignable;
         g.callable = saved_callable;
         g.allow_loops = saved_loops;
+        g.allow_aggregates = saved_aggregates;
 
         funcs.push(Func {
             params,
@@ -618,15 +712,33 @@ fn gen_program(seed: u64) -> Prog {
         callable: 0..0,
         self_call: false,
         allow_loops: true,
+        allow_aggregates: false,
         pool_left: ARG_POOL_BYTES,
     };
     for v in init.iter_mut() {
+        *v = g.lit();
+    }
+    let mut arr_init = [0i64; ALEN];
+    for v in arr_init.iter_mut() {
+        *v = g.lit();
+    }
+    let mut field_init = [0i64; SFIELDS];
+    for v in field_init.iter_mut() {
+        *v = g.lit();
+    }
+    let mut konst = [0i64; ALEN];
+    for v in konst.iter_mut() {
         *v = g.lit();
     }
 
     let count = g.rng.below(4) as usize;
     let funcs = gen_funcs(&mut g, count);
     g.callable = 0..count;
+
+    // Aggregates are `main`'s locals, so they are decided after the functions
+    // are generated and only affect `main`'s body.
+    let aggregates = g.rng.below(100) < 60;
+    g.allow_aggregates = aggregates;
 
     let n = 2 + g.rng.below(3) as usize;
     let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
@@ -638,6 +750,10 @@ fn gen_program(seed: u64) -> Prog {
         stmts,
         loops,
         funcs,
+        aggregates,
+        arr_init,
+        field_init,
+        konst,
     }
 }
 
@@ -648,6 +764,10 @@ fn gen_program(seed: u64) -> Prog {
 struct St<'a> {
     prog: &'a Prog,
     vars: Vec<i64>,
+    /// `main`'s array and struct. Empty inside a function, which cannot name
+    /// them, and in a program that declares neither.
+    arr: Vec<i64>,
+    fields: Vec<i64>,
     counters: Vec<i64>,
     loops: Vec<i64>,
     /// The function being executed and its remaining budget, for a self-call.
@@ -665,6 +785,9 @@ fn call_fn(p: &Prog, id: usize, budget: i64, args: &[i64], ty: Ty) -> i64 {
     let mut st = St {
         prog: p,
         vars,
+        // A function names no aggregate, so there is nothing to carry in.
+        arr: Vec::new(),
+        fields: Vec::new(),
         // Function bodies contain no loops, so these are never indexed; sized
         // rather than empty so a generator change cannot panic here.
         counters: p.counters.iter().map(|c| *c as i64).collect(),
@@ -696,6 +819,9 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let v = eval(arg, st, ty);
             narrow(call_fn(st.prog, id, budget - 1, &[v], ty), ty)
         }
+        E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
+        E::Konst(ix) => narrow(st.prog.konst[eval_index(ix, st, ty)], ty),
+        E::Field(i) => st.fields[*i],
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
@@ -722,6 +848,17 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
     }
 }
 
+/// Where an index lands. Mirrors the three forms the generator emits, each of
+/// which is in range by construction.
+fn eval_index(ix: &Ix, st: &St, ty: Ty) -> usize {
+    match ix {
+        Ix::Lit(k) => *k,
+        Ix::Loop(id) => st.loops[*id] as usize,
+        // `(v as u8) % LEN`: the cast keeps the low byte, whatever the type.
+        Ix::Wrapped(i) => (raw(st.vars[*i], ty) as usize & 0xFF) % ALEN,
+    }
+}
+
 fn eval_bool(b: &B, st: &St, ty: Ty) -> bool {
     match b {
         B::Rel(l, c, r) => c.apply(eval(l, st, ty), eval(r, st, ty)),
@@ -734,7 +871,17 @@ fn eval_bool(b: &B, st: &St, ty: Ty) -> bool {
 fn exec(stmts: &[S], st: &mut St, ty: Ty) {
     for s in stmts {
         match s {
-            S::Assign(v, e) => st.vars[*v] = eval(e, st, ty),
+            S::Assign(place, e) => {
+                let value = eval(e, st, ty);
+                match place {
+                    Place::Var(v) => st.vars[*v] = value,
+                    Place::Elem(ix) => {
+                        let k = eval_index(ix, st, ty);
+                        st.arr[k] = value;
+                    }
+                    Place::Field(f) => st.fields[*f] = value,
+                }
+            }
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st, ty) {
                     exec(then, st, ty);
@@ -760,20 +907,52 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
 
 /// The final bit pattern of every program variable.
 fn expected(p: &Prog) -> Vec<u32> {
+    let narrowed = |xs: &[i64]| -> Vec<i64> { xs.iter().map(|v| narrow(*v, p.ty)).collect() };
     let mut st = St {
         prog: p,
-        vars: p.init.to_vec(),
+        vars: narrowed(&p.init),
+        arr: if p.aggregates {
+            narrowed(&p.arr_init)
+        } else {
+            Vec::new()
+        },
+        fields: if p.aggregates {
+            narrowed(&p.field_init)
+        } else {
+            Vec::new()
+        },
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
         current: None,
     };
     exec(&p.stmts, &mut st, p.ty);
-    st.vars.iter().map(|v| raw(*v, p.ty)).collect()
+    st.vars
+        .iter()
+        .chain(st.arr.iter())
+        .chain(st.fields.iter())
+        .map(|v| raw(*v, p.ty))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+fn render_index(ix: &Ix) -> String {
+    match ix {
+        Ix::Lit(k) => format!("{k}"),
+        Ix::Loop(id) => format!("i{id}"),
+        Ix::Wrapped(i) => format!("((v{i} as u8) % {ALEN})"),
+    }
+}
+
+fn render_place(p: &Place, sc: Scope) -> String {
+    match p {
+        Place::Var(v) => sc.var(*v),
+        Place::Elem(ix) => format!("arr[{}]", render_index(ix)),
+        Place::Field(f) => format!("s.f{f}"),
+    }
+}
 
 fn render(e: &E, ty: Ty, sc: Scope) -> String {
     match e {
@@ -803,6 +982,9 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             };
             format!("f{id}(d - 1, {})", render(arg, ty, sc))
         }
+        E::Elem(ix) => format!("arr[{}]", render_index(ix)),
+        E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
+        E::Field(f) => format!("s.f{f}"),
     }
 }
 
@@ -820,9 +1002,11 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
     let mut out = String::new();
     for s in stmts {
         match s {
-            S::Assign(v, e) => {
-                out.push_str(&format!("{pad}{} = {};\n", sc.var(*v), render(e, ty, sc)))
-            }
+            S::Assign(place, e) => out.push_str(&format!(
+                "{pad}{} = {};\n",
+                render_place(place, sc),
+                render(e, ty, sc)
+            )),
             S::If(c, then, otherwise) => {
                 out.push_str(&format!("{pad}if {} {{\n", render_bool(c, ty, sc)));
                 out.push_str(&render_stmts(then, ty, indent + 4, sc));
@@ -910,18 +1094,45 @@ const FORMS: [Form; 4] = [
     Form::ViaLoop,
 ];
 
-/// One output byte per 8-bit variable, two per 16-bit one.
-fn out_bytes(ty: Ty) -> usize {
-    VARS * if ty.wide() { 2 } else { 1 }
+/// The cells a program reports: its variables, then the array elements, then
+/// the struct fields when it has them.
+fn out_cells(p: &Prog) -> usize {
+    VARS + if p.aggregates { ALEN + SFIELDS } else { 0 }
+}
+
+/// One output byte per 8-bit cell, two per 16-bit one.
+fn out_bytes(p: &Prog) -> usize {
+    out_cells(p) * if p.ty.wide() { 2 } else { 1 }
 }
 
 fn render_program(p: &Prog, form: Form) -> String {
     let ty = p.ty;
     let tn = ty.name();
 
-    let head: String = (0..out_bytes(ty))
+    let head: String = (0..out_bytes(p))
         .map(|i| format!("const OUT{i}: addr = 0x{:04X};\n", 0x0900 + i))
         .collect();
+
+    // The struct type is declared at the top level, so it exists whether or not
+    // this program's `main` uses one.
+    let lit = |v: &i64| -> String {
+        if *v < 0 {
+            format!("({v})")
+        } else {
+            format!("{v}")
+        }
+    };
+    let struct_decl = if p.aggregates {
+        let fields: Vec<String> = (0..SFIELDS).map(|i| format!("f{i}: {tn}")).collect();
+        let table: Vec<String> = p.konst.iter().map(lit).collect();
+        format!(
+            "struct S {{ {} }}\nconst TBL: [{tn}; {ALEN}] = [{}];\n",
+            fields.join(", "),
+            table.join(", ")
+        )
+    } else {
+        String::new()
+    };
 
     // Generated functions come before `main` in every surface form: they are
     // what the body calls, and their frames are what the call-graph colouring
@@ -940,23 +1151,44 @@ fn render_program(p: &Prog, form: Form) -> String {
     for (i, c) in p.counters.iter().enumerate() {
         decls.push_str(&format!("    let c{i}: u8 = {c};\n"));
     }
+    if p.aggregates {
+        let elems: Vec<String> = p.arr_init.iter().map(lit).collect();
+        decls.push_str(&format!(
+            "    let arr: [{tn}; {ALEN}] = [{}];\n",
+            elems.join(", ")
+        ));
+        let fields: Vec<String> = p
+            .field_init
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("f{i}: {}", lit(v)))
+            .collect();
+        decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", ")));
+    }
+
+    // Every cell is written out, in the order `expected` reports them.
+    let mut cells: Vec<String> = (0..VARS).map(|i| format!("v{i}")).collect();
+    if p.aggregates {
+        cells.extend((0..ALEN).map(|i| format!("arr[{i}]")));
+        cells.extend((0..SFIELDS).map(|i| format!("s.f{i}")));
+    }
 
     let mut stores = String::new();
-    for i in 0..VARS {
+    for (i, cell) in cells.iter().enumerate() {
         if ty.wide() {
             let src = if ty.signed() {
-                format!("v{i} as u16")
+                format!("{cell} as u16")
             } else {
-                format!("v{i}")
+                cell.clone()
             };
             stores.push_str(&format!("    let o{i}: u16 = {src};\n"));
             stores.push_str(&format!("    OUT{} = o{i}.low;\n", i * 2));
             stores.push_str(&format!("    OUT{} = o{i}.high;\n", i * 2 + 1));
         } else {
             let src = if ty.signed() {
-                format!("v{i} as u8")
+                format!("{cell} as u8")
             } else {
-                format!("v{i}")
+                cell.clone()
             };
             stores.push_str(&format!("    OUT{i} = {src};\n"));
         }
@@ -969,21 +1201,23 @@ fn render_program(p: &Prog, form: Form) -> String {
 
     match form {
         Form::Inline => {
-            format!("{head}{funcs}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n")
+            format!(
+                "{head}{struct_decl}{funcs}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
+            )
         }
         Form::ViaFunction => format!(
-            "{head}{funcs}fn body() {{\n{decls}{body}{stores}}}\n\
+            "{head}{struct_decl}{funcs}fn body() {{\n{decls}{body}{stores}}}\n\
              #[reset]\nfn main() {{\n    body();\n    loop {{}}\n}}\n"
         ),
         Form::ViaMatch => format!(
-            "{head}{funcs}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
+            "{head}{struct_decl}{funcs}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
                  match sel {{\n        0 => {{\n{}{}        }}\n        _ => {{}}\n    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&bump(&body)),
             bump(&bump(&stores)),
         ),
         Form::ViaLoop => format!(
-            "{head}{funcs}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
+            "{head}{struct_decl}{funcs}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&body),
             bump(&stores),
@@ -997,10 +1231,11 @@ fn render_program(p: &Prog, form: Form) -> String {
 
 /// Compile and run one program, reading back every variable, or reporting the
 /// reason it did not get there.
-fn observe(src: &str, ty: Ty) -> Result<Vec<u32>, String> {
+fn observe(src: &str, p: &Prog) -> Result<Vec<u32>, String> {
+    let (ty, cells) = (p.ty, out_cells(p));
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut e = run(src);
-        (0..VARS)
+        (0..cells)
             .map(|i| {
                 if ty.wide() {
                     e.mem16(0x0900 + (i * 2) as u16) as u32
@@ -1043,7 +1278,7 @@ enum Kind {
 /// How this program disagrees with the oracle in one surface form, if it does.
 fn disagrees_as(p: &Prog, form: Form) -> Option<(Kind, String)> {
     let want = expected(p);
-    match observe(&render_program(p, form), p.ty) {
+    match observe(&render_program(p, form), p) {
         Ok(got) if got == want => None,
         Ok(got) => Some((
             Kind::WrongAnswer,
@@ -1234,9 +1469,42 @@ fn mutate_block(block: &mut Vec<S>, target: usize, seen: &mut usize) -> bool {
     false
 }
 
+/// Reduce an index to a constant 0 — the simplest in-range form.
+fn mutate_index(ix: &mut Ix, target: usize, seen: &mut usize) -> bool {
+    if matches!(ix, Ix::Lit(0)) {
+        return false;
+    }
+    if *seen == target {
+        *ix = Ix::Lit(0);
+        return true;
+    }
+    *seen += 1;
+    false
+}
+
 fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
     match s {
-        S::Assign(_, e) => mutate_expr(e, target, seen),
+        S::Assign(place, e) => {
+            // Storing to `v0` instead of an element or a field takes the index
+            // and the aggregate out of the picture when neither is the cause.
+            // Only for an element or a field: those occur in `main` alone,
+            // where `v0` is assignable. Retargeting a `Var` is not safe — the
+            // same index inside a function names a *parameter*, which is
+            // immutable, and the reduced program stops compiling.
+            if matches!(place, Place::Elem(_) | Place::Field(_)) {
+                if *seen == target {
+                    *place = Place::Var(0);
+                    return true;
+                }
+                *seen += 1;
+            }
+            if let Place::Elem(ix) = place
+                && mutate_index(ix, target, seen)
+            {
+                return true;
+            }
+            mutate_expr(e, target, seen)
+        }
         S::If(cond, then, otherwise) => {
             if mutate_bool(cond, target, seen) {
                 return true;
@@ -1299,6 +1567,22 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             }
             *seen += 1;
             mutate_expr(arg, target, seen)
+        }
+        E::Elem(ix) | E::Konst(ix) => {
+            if *seen == target {
+                *e = E::Var(0);
+                return true;
+            }
+            *seen += 1;
+            mutate_index(ix, target, seen)
+        }
+        E::Field(_) => {
+            if *seen == target {
+                *e = E::Var(0);
+                return true;
+            }
+            *seen += 1;
+            false
         }
         E::Call { budget, args, .. } => {
             if let Some(b) = budget
@@ -1688,10 +1972,16 @@ fn the_oracle_matches_the_documented_semantics() {
         stmts: Vec::new(),
         loops: 0,
         funcs: Vec::new(),
+        aggregates: false,
+        arr_init: [0; ALEN],
+        field_init: [0; SFIELDS],
+        konst: [0; ALEN],
     };
     let st = St {
         prog: &empty,
         vars: vec![0; VARS],
+        arr: Vec::new(),
+        fields: Vec::new(),
         counters: Vec::new(),
         loops: Vec::new(),
         current: None,
@@ -1754,18 +2044,7 @@ mod coverage {
     /// nothing the count has not already told them.
     const REASONS: &[(&str, &str)] = &[
         // --- Items -----------------------------------------------------------
-        (
-            "Item::Struct",
-            "aggregates are not generated; see the roadmap",
-        ),
-        (
-            "Item::Enum",
-            "aggregates are not generated; see the roadmap",
-        ),
-        (
-            "Item::Static",
-            "every generated variable is a local, so what gets exercised is frame colouring",
-        ),
+        ("Item::Enum", "enums are not generated; see the roadmap"),
         (
             "Item::Import",
             "programs are single-file; the import graph is covered by tests/e2e/imports.rs",
@@ -1773,7 +2052,7 @@ mod coverage {
         // --- Statements ------------------------------------------------------
         (
             "Stmt::ForEach",
-            "iterating a slice or a string needs aggregates",
+            "iterating needs a slice or a string, neither of which is generated",
         ),
         (
             "Stmt::Break",
@@ -1786,14 +2065,17 @@ mod coverage {
             "inline assembly has no meaning the oracle could mirror",
         ),
         // --- Expressions -----------------------------------------------------
-        ("Expr::Field", "aggregates are not generated"),
-        ("Expr::Index", "aggregates are not generated"),
-        ("Expr::Slice", "aggregates are not generated"),
+        (
+            "Expr::Slice",
+            "a slice is a descriptor over storage the oracle would have to alias-model",
+        ),
         ("Expr::CallIndirect", "function pointers are not generated"),
-        ("Expr::StructInit", "aggregates are not generated"),
-        ("Expr::AnonStructInit", "aggregates are not generated"),
-        ("Expr::EnumVariant", "aggregates are not generated"),
-        ("Expr::SliceLen", "aggregates are not generated"),
+        (
+            "Expr::AnonStructInit",
+            "the named form is generated; this one adds inference, not a codegen path",
+        ),
+        ("Expr::EnumVariant", "enums are not generated"),
+        ("Expr::SliceLen", "slices are not generated"),
         (
             "Expr::CpuFlagCarry",
             "a status flag depends on the instruction that last set it — a property of the \
@@ -1818,8 +2100,10 @@ mod coverage {
         ),
         ("Literal::Char", "no character arithmetic is generated"),
         ("Literal::String", "strings are aggregates"),
-        ("Literal::Array", "aggregates are not generated"),
-        ("Literal::ArrayFill", "aggregates are not generated"),
+        (
+            "Literal::ArrayFill",
+            "the element-list form is generated, and lowers the same way",
+        ),
         // --- Operators -------------------------------------------------------
         (
             "UnaryOp::BitNot",
@@ -1832,16 +2116,14 @@ mod coverage {
             "Pattern::Range",
             "range patterns are covered exhaustively by tests/e2e/match_ranges.rs",
         ),
-        ("Pattern::EnumVariant", "aggregates are not generated"),
+        ("Pattern::EnumVariant", "enums are not generated"),
         (
             "Pattern::Variable",
             "a binding pattern would put a value in scope that the oracle does not track",
         ),
         // --- Types -----------------------------------------------------------
-        ("TypeExpr::Named", "aggregates are not generated"),
         ("TypeExpr::StringBuf", "strings are aggregates"),
-        ("TypeExpr::Array", "aggregates are not generated"),
-        ("TypeExpr::Slice", "aggregates are not generated"),
+        ("TypeExpr::Slice", "slices are not generated"),
         ("TypeExpr::Pointer", "pointers are not generated"),
         ("TypeExpr::Function", "function pointers are not generated"),
         (
@@ -1926,6 +2208,42 @@ mod coverage {
             "Literal::Integer",
             "always inside the program's type; every operator has an operand mentioning a \
              variable, so no subexpression is typed by its own literals",
+        ),
+        (
+            "Expr::Index",
+            "the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, \
+             because the language does no bounds checking and an out-of-range access would \
+             be the generator's bug rather than the compiler's",
+        ),
+        (
+            "Expr::Field",
+            "two fields of the program's type; no nested struct and no array field",
+        ),
+        (
+            "Item::Static",
+            "only the `const` table, which is read-only and lives in ROM; a mutable `static` \
+             in RAM is not generated, so what gets exercised is frame colouring rather than \
+             BSS",
+        ),
+        (
+            "Item::Struct",
+            "one struct per program, two scalar fields, used as a local — never passed, \
+             returned, or pointed at",
+        ),
+        (
+            "Literal::Array",
+            "two arrays per program — a local in zero page and a `const` in ROM, which reach \
+             their elements through different bases — four elements each, initialised from \
+             literals",
+        ),
+        (
+            "TypeExpr::Array",
+            "a fixed length of 4, which is also the largest `for` count, so a loop variable \
+             indexes it safely",
+        ),
+        (
+            "TypeExpr::Named",
+            "only the generated struct; no enum, and no named type across a call boundary",
         ),
         (
             "TypeExpr::Primitive",

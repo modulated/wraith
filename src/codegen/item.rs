@@ -661,10 +661,21 @@ impl crate::sema::init::InitContext for ProgramInfo {
         if let crate::ast::Expr::Literal(crate::ast::Literal::Integer(n)) = &expr.node {
             return Some(*n);
         }
-        match self.folded_constants.get(&expr.span) {
-            Some(crate::sema::const_eval::ConstValue::Integer(n)) => Some(*n),
-            _ => None,
+        if let Some(crate::sema::const_eval::ConstValue::Integer(n)) =
+            self.folded_constants.get(&expr.span)
+        {
+            return Some(*n);
         }
+        // Fall back to evaluating it. A `const` array's element expressions are
+        // flattened here, not type-checked as ordinary expressions, so nothing
+        // has folded them and there is no entry to look up: `-5` is
+        // `Unary(Neg, 5)`, not a bare literal, and `const A: [i8; 2] = [-5, 1]`
+        // was rejected as "not a compile-time constant" the moment it was used.
+        // The `static` path works because sema's own `InitContext` evaluates
+        // rather than pattern-matching; this brings codegen's into line.
+        crate::sema::const_eval::eval_const_expr_with_env(expr, &self.const_env)
+            .ok()
+            .and_then(|v| v.as_integer())
     }
 
     fn function_name(&self, expr: &Spanned<crate::ast::Expr>) -> Option<String> {

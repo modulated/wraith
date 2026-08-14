@@ -449,6 +449,7 @@ impl SemanticAnalyzer {
 
         Ok(ProgramInfo {
             table: self.table.clone(),
+            const_env: self.const_env.clone(),
             resolved_symbols: self.resolved_symbols.clone(),
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
