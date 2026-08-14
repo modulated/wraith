@@ -1,0 +1,246 @@
+// A device-driver system, the way an operating system has one.
+//
+// A driver is a struct of function pointers - a vtable. The kernel keeps one
+// per open device and calls through it without knowing, or caring, what
+// hardware is on the other end. Registering a device is nothing more than
+// installing a different set of pointers; no kernel code changes.
+//
+// Two real drivers are here, over hardware the test harness models: a
+// TL16C550 UART at $7F00 and a 6522 VIA parallel port at $7F10. A third, the
+// null driver, is what an unregistered slot holds so that calling into a
+// device nobody claimed is harmless rather than a jump to $0000.
+//
+// Two dispatch shapes appear, and an OS wants both:
+//
+//   * the vtable  - CONSOLE.write(c), "how does this device work"
+//   * the table   - WRITE_TABLE[id](c), "which device", indexed by a number
+//                   that only exists at runtime
+//
+// tests/e2e/example_drivers.rs runs this program against the emulated UART
+// and VIA, so what it does is checked and not just claimed.
+
+// ===========================================================================
+// Hardware
+// ===========================================================================
+
+// TL16C550 UART. The first two registers change meaning when the divisor
+// latch bit is set in the line-control register, which is why $7F00 is named
+// three times.
+const UART_RBR: read  addr = 0x7F00;   // receive buffer   (read)
+const UART_THR: write addr = 0x7F00;   // transmit holding (write)
+const UART_DLL: write addr = 0x7F00;   // divisor low,  while DLAB is set
+const UART_DLM: write addr = 0x7F01;   // divisor high, while DLAB is set
+const UART_LCR: write addr = 0x7F03;   // line control
+const UART_LSR: read  addr = 0x7F05;   // line status
+
+const LSR_DATA_READY: u8 = 0x01;
+const LSR_THR_EMPTY:  u8 = 0x20;
+const LCR_DLAB:       u8 = 0x80;
+const LCR_8N1:        u8 = 0x03;
+const BAUD_9600:      u8 = 12;         // 1.8432 MHz / (16 * 9600)
+
+// 6522 VIA. Port B drives eight output pins, port A reads eight input pins,
+// and the data-direction registers decide which way each pin faces.
+const VIA_PORTB: addr = 0x7F10;
+const VIA_PORTA: addr = 0x7F11;
+const VIA_DDRB:  addr = 0x7F12;
+const VIA_DDRA:  addr = 0x7F13;
+
+// ===========================================================================
+// The driver interface
+// ===========================================================================
+//
+// Every driver answers the same four calls. `init` brings the hardware up,
+// `ready` reports whether a byte can be taken without blocking, `read` takes
+// one, `write` sends one. That is the whole contract - a driver is written by
+// filling in these four and nothing else.
+
+struct Driver {
+    init:  fn(),
+    ready: fn() -> u8,
+    read:  fn() -> u8,
+    write: fn(u8),
+}
+
+// --- The null driver: what an unclaimed slot holds. ------------------------
+
+static SINK: u8 = 0;
+
+fn null_init() {}
+fn null_ready() -> u8 { return 0; }
+fn null_read() -> u8 { return 0; }
+fn null_write(c: u8) { SINK = c; }
+
+// --- UART driver -----------------------------------------------------------
+
+fn uart_init() {
+    UART_LCR = LCR_DLAB;       // divisor latch visible
+    UART_DLL = BAUD_9600;
+    UART_DLM = 0;
+    UART_LCR = LCR_8N1;        // back to the data registers, 8N1
+}
+
+fn uart_ready() -> u8 { return UART_LSR & LSR_DATA_READY; }
+
+fn uart_read() -> u8 { return UART_RBR; }
+
+fn uart_write(c: u8) {
+    while (UART_LSR & LSR_THR_EMPTY) == 0 {}
+    UART_THR = c;
+}
+
+// --- VIA driver ------------------------------------------------------------
+
+fn via_init() {
+    VIA_DDRB = 0xFF;           // port B: all outputs
+    VIA_DDRA = 0x00;           // port A: all inputs
+}
+
+fn via_ready() -> u8 { return 1; }          // input pins are always readable
+fn via_read() -> u8 { return VIA_PORTA; }
+fn via_write(c: u8) { VIA_PORTB = c; }
+
+// ===========================================================================
+// Registration
+// ===========================================================================
+
+const DEV_NONE: u8 = 0;
+const DEV_UART: u8 = 1;
+const DEV_VIA:  u8 = 2;
+
+// The console starts out pointing at nothing. Booting a machine with no
+// serial port attached should print into the void, not crash.
+static CONSOLE: Driver = Driver {
+    init:  null_init,
+    ready: null_ready,
+    read:  null_read,
+    write: null_write,
+};
+
+/// Which driver the console currently holds, so the kernel can report it.
+static CONSOLE_ID: u8 = DEV_NONE;
+
+/// Bind a driver to the console and bring its hardware up. This is the only
+/// function in the program that names both a device number and a driver.
+fn register_console(id: u8) {
+    if id == DEV_UART {
+        CONSOLE.init  = uart_init;
+        CONSOLE.ready = uart_ready;
+        CONSOLE.read  = uart_read;
+        CONSOLE.write = uart_write;
+    }
+    if id == DEV_VIA {
+        CONSOLE.init  = via_init;
+        CONSOLE.ready = via_ready;
+        CONSOLE.read  = via_read;
+        CONSOLE.write = via_write;
+    }
+    CONSOLE_ID = id;
+    CONSOLE.init();
+}
+
+// ===========================================================================
+// Kernel services
+// ===========================================================================
+//
+// Nothing below this line names a driver or touches a hardware register. It
+// only goes through CONSOLE, so it serves whichever device was registered -
+// which is the entire point of the arrangement.
+
+fn put(c: u8) {
+    CONSOLE.write(c);
+}
+
+fn print(s: str) {
+    for c in s {
+        CONSOLE.write(c as u8);
+    }
+}
+
+fn hex_digit(n: u8) -> u8 {
+    if n < 10 {
+        return n + 0x30;       // '0'
+    }
+    return n + 0x37;           // 'A' - 10
+}
+
+fn put_hex(v: u8) {
+    put(hex_digit(v >> 4));
+    put(hex_digit(v & 0x0F));
+}
+
+/// Take one byte, spinning until the device has one to give.
+fn get() -> u8 {
+    while CONSOLE.ready() == 0 {}
+    return CONSOLE.read();
+}
+
+/// Echo back whatever is already waiting, and report how many bytes moved.
+/// A terminal driver's read path is this loop with a line buffer attached.
+fn echo_pending() -> u8 {
+    let n: u8 = 0;
+    while CONSOLE.ready() != 0 {
+        let c: u8 = CONSOLE.read();
+        CONSOLE.write(c);
+        n = n + 1;
+    }
+    return n;
+}
+
+// ===========================================================================
+// Dispatch by device number
+// ===========================================================================
+//
+// The other half of the pattern. Where the vtable answers "how does this
+// device work", a table indexed by device number answers "which device". The
+// index arrives at runtime - from a syscall argument, a command byte, an
+// interrupt vector - and the table turns it into a call with no chain of
+// comparisons in between.
+
+static WRITE_TABLE: [fn(u8); 2] = [uart_write, via_write];
+
+fn dev_write(id: u8, c: u8) {
+    WRITE_TABLE[id](c);
+}
+
+// ===========================================================================
+// Boot
+// ===========================================================================
+
+const BANNER:  str = "wraith> ";
+const SENSOR:  str = "\nport a = ";
+const TABLE_W: u8  = 0;        // WRITE_TABLE slot holding the UART
+
+const OUT_ECHOED:  addr = 0x0900;   // bytes the console echoed
+const OUT_SENSOR:  addr = 0x0901;   // what the VIA's input port read
+const OUT_CONSOLE: addr = 0x0902;   // which driver the console ended on
+
+#[reset]
+fn main() {
+    // Boot: bring the console up on the serial port and greet whoever is
+    // listening. `print` has no idea a UART exists.
+    register_console(DEV_UART);
+    print(BANNER);
+
+    // Anything already typed comes back echoed - still through the vtable.
+    OUT_ECHOED = echo_pending();
+
+    // Now read a sensor wired to the VIA's input port. The kernel code above
+    // does not change; the driver underneath it does.
+    register_console(DEV_VIA);
+    let sample: u8 = get();
+    OUT_SENSOR = sample;
+
+    // Hand the console back to the serial port and report the reading. The
+    // same `print` and `put_hex` now reach different hardware.
+    register_console(DEV_UART);
+    print(SENSOR);
+    put_hex(sample);
+
+    // The same byte again, this time by device number rather than through
+    // the console vtable.
+    dev_write(TABLE_W, 0x0A);   // newline
+
+    OUT_CONSOLE = CONSOLE_ID;
+    loop {}
+}

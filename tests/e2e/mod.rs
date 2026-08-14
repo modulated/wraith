@@ -18,6 +18,7 @@ mod devices;
 mod enum_values;
 mod enums;
 mod error_diagnostics;
+mod example_drivers;
 mod execution;
 mod frames;
 mod functions;

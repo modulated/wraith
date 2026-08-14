@@ -84,6 +84,7 @@ impl SemanticAnalyzer {
             Expr::CallIndirect { callee, args } => {
                 // The callee must evaluate to a function pointer; check the
                 // arguments against its signature and yield its return type.
+                self.note_indirect_call();
                 let callee_ty = self.check_expr(callee)?;
                 let Type::Function(param_types, ret_ty) = callee_ty else {
                     return Err(SemaError::TypeMismatch {
@@ -958,6 +959,7 @@ impl SemanticAnalyzer {
             if let Some(s) = self.table.lookup(&function.node) {
                 self.resolved_symbols.insert(function.span, s.clone());
             }
+            self.note_indirect_call();
         } else if let Some(caller) = &self.current_function {
             // Record a call-graph edge (caller -> callee) for frame coloring and
             // recursion detection. Only for real named functions.
@@ -1676,10 +1678,19 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// Note that the function being analysed dispatches through a function
+    /// pointer, so its frame has to stay clear of every possible target.
+    fn note_indirect_call(&mut self) {
+        if let Some(caller) = &self.current_function {
+            self.indirect_callers.insert(caller.clone());
+        }
+    }
+
     /// Every named function called anywhere inside `expr`, including through
     /// nested argument lists. Used to record the extra frame-interference edges
-    /// a nested call creates; an indirect call has no name to record and takes
-    /// its arguments in the fixed staging block instead, so it is skipped.
+    /// a nested call creates; an indirect call has no name to record and its
+    /// arguments are sheltered across the nested call instead, so it
+    /// contributes nothing here.
     fn collect_called_names(expr: &Expr, out: &mut Vec<String>) {
         let walk =
             |e: &Spanned<Expr>, out: &mut Vec<String>| Self::collect_called_names(&e.node, out);

@@ -57,6 +57,20 @@ impl SemanticAnalyzer {
                         .collect()
                 })
                 .unwrap_or_default();
+            // An indirect call has no callee name, so `call_edges` records
+            // nothing and colouring reads the silence as "these frames can
+            // share" — which is how a driver's parameters came to be laid over
+            // its caller's locals. The target is unknown but the candidates
+            // are not: only a function whose address was taken can be reached
+            // through a pointer. Edge to all of them.
+            if self.indirect_callers.contains(n) {
+                succ.extend(
+                    self.address_taken_functions
+                        .iter()
+                        .filter(|c| self.frame_sizes.contains_key(*c))
+                        .cloned(),
+                );
+            }
             succ.sort();
             succ.dedup();
             adj.insert(n.clone(), succ);

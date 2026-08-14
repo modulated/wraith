@@ -1069,6 +1069,8 @@ impl SemanticAnalyzer {
         }
         self.address_taken_functions
             .extend(imported_analyzer.address_taken_functions.iter().cloned());
+        self.indirect_callers
+            .extend(imported_analyzer.indirect_callers.iter().cloned());
 
         // Merge the imported module's reference graph. Liveness is computed over
         // the whole program at the root, so an imported function that calls a

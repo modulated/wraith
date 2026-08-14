@@ -6,6 +6,7 @@ bcd_score 626 0
 const_array_demo 37 24
 countdown_tail 103 0
 dead_code_demo 20 0
+device_drivers 1000 20
 factorial_tail 334 0
 fib_recurse 243 0
 fibonacci 212 0

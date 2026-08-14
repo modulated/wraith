@@ -241,3 +241,68 @@ fn local_function_pointer_table_dispatches_by_index() {
     };
     assert_eq!((pick(0), pick(1), pick(2)), (11, 12, 13));
 }
+
+// ---------------------------------------------------------------------------
+// Frame colouring across an indirect call.
+//
+// Frames are coloured from the call graph, and an indirect call contributes no
+// edge to it — there is no callee name to record. Colouring read that silence
+// as permission to overlay the caller's frame with the driver's, so a local
+// held across `dev.write(c)` came back as the driver's parameter. Found by
+// `examples/device_drivers.wr`, which prints a byte it sampled earlier and
+// printed the last character of the preceding string instead.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_local_survives_an_indirect_call() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        const S: str = "abc";
+        static SINK: u8 = 0;
+        struct D { write: fn(u8) }
+        fn emit(c: u8) { SINK = c; }
+        static DEV: D = D { write: emit };
+        fn print(s: str) { for c in s { DEV.write(c as u8); } }
+        #[reset]
+        fn main() {
+            let sample: u8 = 0x5A;
+            print(S);
+            OUT = sample;
+            loop {}
+        }
+    "#);
+    // Before the fix this was 0x63 — 'c', the last byte `emit` was handed.
+    assert_eq!(
+        e.mem(0x0900),
+        0x5A,
+        "the driver must not land on main's frame"
+    );
+}
+
+#[test]
+fn an_indirect_call_in_an_argument_list_leaves_the_other_arguments_alone() {
+    // The staging hazard of `tests/e2e/nested_calls.rs`, with the nested callee
+    // reached through a pointer: `keep`'s parameters are half written when the
+    // driver runs, and which driver it is is unknown at compile time. This one
+    // already worked — the inline shelter parks the written parameters on the
+    // software stack across any nested call, indirect included — so it is a pin
+    // on a shape the colouring fix above deliberately does *not* cover.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        static SINK: u8 = 0;
+        struct D { read: fn() -> u8 }
+        fn sample() -> u8 { let t: u8 = SINK; let u: u8 = t + 1; return u + t; }
+        static DEV: D = D { read: sample };
+        fn keep(a: u8, b: u8) -> u8 { return a + b - b; }
+        #[reset]
+        fn main() {
+            OUT = keep(200, DEV.read());
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem(0x0900),
+        200,
+        "the first argument must survive the driver"
+    );
+}

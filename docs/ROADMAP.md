@@ -203,7 +203,12 @@ and an oracle that is merely *probably* right is worse than no oracle:
   brings the implicit widening rules into the oracle.
 - **Mutual recursion, and calls through a function pointer.** Self-recursion is
   generated; a cycle of two functions is not, and neither is the indirect-call
-  trampoline.
+  trampoline. The gap has already cost something: an indirect call contributes
+  no call-graph edge, so frame colouring laid a driver's frame over its
+  caller's locals, and `examples/device_drivers.wr` found it by hand. A
+  generator that installs one of several same-signature functions in a vtable
+  and dispatches through it would have found it first — the oracle only needs
+  to know which function it installed.
 - **Slices, pointers and enums.** Arrays and structs of scalars are generated;
   a slice or a `&T` gives two names for one piece of storage, which the oracle
   would have to alias-model, and enums are a separate lowering again.
