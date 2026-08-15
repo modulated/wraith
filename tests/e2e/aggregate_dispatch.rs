@@ -205,6 +205,57 @@ fn a_struct_assigned_from_a_function_pointer_call_copies() {
 }
 
 // ---------------------------------------------------------------------------
+// Arguments: the same question, at the staging site.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_slice_from_a_call_stages_as_a_descriptor() {
+    // `g(mk())`. A returning function leaves a *pointer* to its descriptor in
+    // A:X, so the four bytes have to be copied through it. This staged A
+    // alone, handing `g` one byte of that pointer as though it were the base
+    // of the slice — `s[1]` then read from wherever the low byte pointed.
+    let mut e = run(&format!(
+        "{PRE}fn mk() -> &[u8] {{ return T[1..4]; }}\n\
+         fn second(s: &[u8]) -> u8 {{ return s[1]; }}\n\
+         fn length(s: &[u8]) -> u8 {{ return s.len as u8; }}\n\
+         #[reset]\nfn main() {{\n\
+         \x20   OUT0 = second(mk());\n\
+         \x20   OUT1 = length(mk());\n    loop {{}}\n}}\n"
+    ));
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (30, 3));
+}
+
+#[test]
+fn a_slice_from_a_function_pointer_call_stages_as_a_descriptor() {
+    let mut e = run(&format!(
+        "{PRE}struct D {{ get: fn() -> &[u8] }}\n\
+         fn mk() -> &[u8] {{ return T[2..5]; }}\n\
+         fn second(s: &[u8]) -> u8 {{ return s[1]; }}\n\
+         static DEV: D = D {{ get: mk }};\n\
+         #[reset]\nfn main() {{ OUT0 = second(DEV.get()); loop {{}} }}\n"
+    ));
+    assert_eq!(e.mem(0x0900), 40);
+}
+
+#[test]
+fn an_argument_no_staging_path_claims_is_an_error_not_a_byte() {
+    // The argument site's version of the guard. A struct is staged as an
+    // address and a slice as four bytes; neither is what the register staging
+    // below them writes, so an argument that reached it had been declined by
+    // every path that knows those conventions.
+    crate::common::assert_error_contains(
+        &format!(
+            "{PRE}fn second(s: &[u8]) -> u8 {{ return s[1]; }}\n\
+             #[reset]\nfn main() {{\n\
+             \x20   let a: &[u8] = T[0..4];\n\
+             \x20   let k: u8 = 1;\n\
+             \x20   OUT0 = second(match k {{ 1 => a, _ => a }});\n    loop {{}}\n}}\n"
+        ),
+        "passed by address or by descriptor",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The guard itself.
 // ---------------------------------------------------------------------------
 

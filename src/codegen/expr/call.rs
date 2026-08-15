@@ -453,6 +453,20 @@ pub(super) fn generate_call(
                 arg_info.push((temp_addr, 4));
                 continue;
             }
+
+            // A slice from a call — `total(mk())`, direct or through a
+            // function pointer. The callee left a *pointer* to its descriptor
+            // in A:X, so the four bytes have to be copied through it. Staging
+            // A alone handed the callee one byte of that pointer as though it
+            // were the base of the slice.
+            if crate::codegen::expr::is_call(arg) {
+                generate_expr(arg, emitter, info, string_collector)?;
+                crate::codegen::stmt::emit_return_by_value_copy(emitter, temp_addr as u16, 4);
+                emitter.invalidate_registers();
+                temp_offset += 4;
+                arg_info.push((temp_addr, 4));
+                continue;
+            }
         }
 
         // Check if this PARAMETER (not argument) is a 16-bit type
@@ -543,6 +557,31 @@ pub(super) fn generate_call(
                 temp_offset += 2;
                 arg_info.push((temp_addr, 2)); // 2-byte pointer
                 continue;
+            }
+        }
+
+        // A struct or slice parameter is staged by one of the paths above — a
+        // two-byte pointer for the first, four descriptor bytes for the second
+        // — and never by the register staging below, which writes A and at
+        // most one more byte. Reaching here means every one of those paths
+        // declined this argument, so say so rather than hand the callee a
+        // fraction of what it will read. (An enum is also `Named`, and does
+        // stage as a two-byte pointer through the register path.)
+        if let Some(param_ty) = param_types.get(i) {
+            let staged_by_copy = match param_ty {
+                Type::Slice(_) => true,
+                Type::Named(n) => info.type_registry.get_struct(n).is_some(),
+                _ => false,
+            };
+            if staged_by_copy {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "cannot pass this expression as argument {} of '{}': a `{}` is passed by \
+                     address or by descriptor, and this expression provides neither. Bind it \
+                     to a `let` first and pass that",
+                    i + 1,
+                    function.node,
+                    param_ty.display_name()
+                )));
             }
         }
 
