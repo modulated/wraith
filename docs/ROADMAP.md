@@ -55,18 +55,40 @@ Two instructions in the WDC set have no codegen site yet:
 
 ### Branch optimization intelligence
 
-Status flags are discarded after every comparison, so a repeated test re-emits the
-`CMP`:
+*Partly done, and the entry as originally written pointed at the wrong
+redundancy.* It proposed tracking status flags across statements so a repeated
+`if x > 5` would not re-emit the `CMP`. That case barely occurs: an `if` ends
+in a label and usually contains a call, and both invalidate flags, so a tracker
+would find almost nothing to elide.
 
-```rust
-if x > 5 { foo(); }
-if x > 5 { bar(); }   // the second CMP is redundant if x is unchanged
-```
+The waste was elsewhere and larger. A comparison feeding an `if` or `while`
+built a 0/1 in `A` and then compared *that* against zero to branch — eleven
+instructions to decide one branch. `collapse_boolean_compares` in the peephole
+already fused the common case, but it matched a *one-branch* comparison tail,
+and only four of the six comparisons end in one. Unsigned `<=` and `>` have no
+single 6502 branch (`A > m` is `!Z && C`), so they ended in two, missed the
+window, and materialised the boolean. Both shapes are now matched — they differ
+from each other as well: `>` sends its branches to different labels, `<=` sends
+both to the same one. A comparison-heavy program drops from 89 instructions to
+74.
 
-High complexity, with a demonstrated correctness risk: the register-state tracker
-that would underpin this has already produced several silent miscompiles by
-outliving a label. Any flag tracking must invalidate at labels and calls from the
-outset (`Emitter::emit_label` already does this for registers).
+**What is still open, and it is the interesting part.** The example corpus does
+not shrink by a byte. Its `<=`/`>` uses sit inside `&&` chains and other
+contexts where the shapes still do not match or a guard still refuses, and the
+guards are refusing for reasons neither of the two obvious hypotheses explained
+— it is not `RTS` being treated as reading every flag (relaxing that changes
+nothing), and it is not overflow liveness (a `CMP` never writes `V`, and
+excluding it from the guard changes nothing either). Both were tried and
+reverted; a relaxation that buys nothing is only surface area on a pass with a
+miscompile history. Finding what actually blocks those sites wants an
+instrumented run reporting the failing guard per site, not another guess.
+
+**Where the ceiling is.** Fusing in the peephole means recognising a shape
+codegen just finished emitting. Emitting the branch directly — a
+`generate_condition_branch` path threaded through comparisons, `&&`, `||` and
+`!` — would need no pattern matching, would cover the compound conditions the
+peephole cannot see through, and is the version worth building if this area is
+returned to.
 
 ### Smaller code
 
