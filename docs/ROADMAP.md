@@ -25,6 +25,7 @@ read against a current picture:
 | Two-branch comparisons (`>`, `<=`) fused into their branch; the V guard dropped | `tests/e2e/branch_fusion.rs` |
 | The fuzzer dispatches through function pointers, two ways | `docs/fuzz-coverage.md` |
 | The fuzzer binds, copies, passes and returns slices | `docs/fuzz-coverage.md` |
+| The fuzzer builds a two-function call cycle, reaching the SCC path | `docs/fuzz-coverage.md` |
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
@@ -279,8 +280,26 @@ and an oracle that is merely *probably* right is worse than no oracle:
   metamorphically.
 - **Mixed widths.** One type per program today, because mixed-width arithmetic
   brings the implicit widening rules into the oracle.
-- **Mutual recursion.** Self-recursion is generated; a cycle of two functions is
-  not, so the SCC half of frame colouring is reached only by hand-written tests.
+- **Cycles of three or more.** *Done for two.* Self-recursion only ever reaches
+  the trivial strongly-connected component; a pair that call each other is the
+  case frame colouring solves with Tarjan, and the generator now builds one —
+  each member calling the other at `d - 1`, with a base case at `d == 0`, so
+  the cycle terminates by the same construction a self-call does.
+
+  Two constraints are what make that safe to generate, and both are worth
+  keeping in mind for a longer cycle. A pair member may not reach its partner
+  by an *ordinary* call: that passes a fresh literal budget, which resets the
+  cycle's own depth every second edge and never terminates. And a pair member
+  takes no slice, since its partner would have to pass one on every mutual
+  edge, and the two are shaped alike so the cycle can close.
+
+  **The disjoint frame layout inside an SCC is not what carries this.**
+  Deliberately overlapping two members' frames survives 600 seeds: the per-edge
+  save and restore covers the case already, because it saves the *callee's*
+  frame, which under a shared base is the caller's. What does carry it is the
+  recursive-edge set — counting only self-edges as recursive fails at seed 38,
+  reduced to two six-line functions with a local surviving into the outer
+  frame.
 
   *The indirect-call half of this item is done.* The generator installs one of
   several same-signature functions in a table and dispatches through it two
