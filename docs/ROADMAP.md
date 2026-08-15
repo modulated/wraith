@@ -8,6 +8,29 @@ This is the language and compiler roadmap; it stays agnostic of any particular
 program written in Wraith. Application work (device drivers, an OS, monitors)
 lives in its own repository.
 
+## Where this stands
+
+Recently closed, each with its regression tests, so the open items below are
+read against a current picture:
+
+| Landed | Where it is pinned |
+|---|---|
+| Whole-struct copy from any place with an address — binding, assignment, and as an argument | `tests/e2e/struct_copy.rs` |
+| An assignment evaluates its value once (`arr[i] = f()` called `f` twice) | `tests/e2e/assign_side_effects.rs` |
+| `.low`/`.high` assignable, with a sema check behind them | `tests/e2e/word_halves.rs` |
+| Pointers, strings, enums and structs across an indirect call; the escape rule re-derived | `tests/e2e/indirect_args.rs` |
+| Frame colouring given an edge for indirect calls | `tests/e2e/vtable.rs` |
+| Arguments spill to the software stack when the pool will not hold them | `tests/e2e/nested_calls.rs` |
+| BSS repacked so a dropped `static` gives its bytes back | `tests/e2e/bss_reclaim.rs` |
+| Two-branch comparisons (`>`, `<=`) fused into their branch; the V guard dropped | `tests/e2e/branch_fusion.rs` |
+| The fuzzer dispatches through function pointers, two ways | `docs/fuzz-coverage.md` |
+| Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
+
+The recurring defect behind most of that list is written up under
+[Structure & maintainability](#structure--maintainability): a dispatch match
+whose fallback is *another strategy* rather than a failure. It is the highest-
+value structural item open.
+
 ---
 
 ## Language features
@@ -245,18 +268,20 @@ and an oracle that is merely *probably* right is worse than no oracle:
   metamorphically.
 - **Mixed widths.** One type per program today, because mixed-width arithmetic
   brings the implicit widening rules into the oracle.
-- **Mutual recursion, and calls through a function pointer.** Self-recursion is
-  generated; a cycle of two functions is not, and neither is the indirect-call
-  trampoline. The gap has already cost something: an indirect call contributes
-  no call-graph edge, so frame colouring laid a driver's frame over its
-  caller's locals, and `examples/device_drivers.wr` found it by hand. A
-  generator that installs one of several same-signature functions in a vtable
-  and dispatches through it would have found it first — the oracle only needs
-  to know which function it installed. The area has since grown: an indirect
-  call now stages pointer, string, enum and struct arguments as well as
-  scalars, and the escape rule that guarded it was re-derived rather than
-  merely relaxed. All of it is covered by hand-written tests and none of it by
-  the generator.
+- **Mutual recursion.** Self-recursion is generated; a cycle of two functions is
+  not, so the SCC half of frame colouring is reached only by hand-written tests.
+
+  *The indirect-call half of this item is done.* The generator installs one of
+  several same-signature functions in a table and dispatches through it two
+  ways: `VTBL[sel](x)` indexed by a constant or by a runtime value, and
+  `DEV.call(x)` through a struct field that an `Install` statement rebinds —
+  the shape where *which* function runs is program state rather than a
+  syntactic fact, which is all the oracle has to track. That gap had already
+  cost something: an indirect call contributes no call-graph edge, so frame
+  colouring laid a driver's frame over its caller's locals and
+  `examples/device_drivers.wr` found it by hand. What is still uncovered
+  inside it is pointer and aggregate *arguments* to an indirect call; those
+  staging paths are pinned by `tests/e2e/indirect_args.rs` alone.
 - **Slices, pointers and enums.** Arrays and structs of scalars are generated;
   a slice or a `&T` gives two names for one piece of storage, which the oracle
   would have to alias-model, and enums are a separate lowering again.
@@ -294,10 +319,14 @@ These items are not independent, and the natural order is not one-per-category:
 3. **Then the usability gaps** (array fields in structs is the largest).
 4. ~~Then the size benchmark~~ — done; extend it with cycle counts when the
    timing table exists.
-5. **Branch/flag tracking last.** It is the biggest single efficiency prize and
-   the one whose predecessor already produced several silent miscompiles.
-   Attempting it before differential testing exists is how the next silent
-   miscompile gets written.
+5. **Branch/flag tracking last** — *partly done, and it went the way this
+   entry predicted.* It is the biggest single efficiency prize and the one
+   whose predecessor already produced several silent miscompiles, so it waited
+   for the fuzzer. What has landed is peephole work: the two remaining
+   comparison shapes fused, and a guard relaxed over a flag the rewrite cannot
+   touch. What is left is the version that does not pattern-match at all —
+   `generate_condition_branch`, described under
+   [Branch optimization intelligence](#branch-optimization-intelligence).
 
 ---
 
