@@ -11,6 +11,7 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 - **Modern Syntax** - Rust-inspired syntax with explicit types, AST and pattern matching
 - **Tail Call Optimization** - Recursive functions optimized to loops when possible
 - **Module System** - No more header files, no more macros
+- **No Assumed Machine** - The compiler knows the 6502 and nothing else: no built-in peripherals, no fixed I/O range, no presumed memory size. Devices are `addr` declarations you write, memory is sections you configure, and only the addresses the processor itself mandates are reserved
 - **Configurable Memory Sections** - Control code, data and RAM placement for different memory layouts in your bespoke 6502 computer
 - **Mutable Globals** - `static` state in RAM, shareable between interrupt handlers and main code
 - **Function Pointers & Vtables** - Call through struct fields (`device.read(reg)`), tables of drivers indexed at runtime (`DRIVERS[id].write(c)`), and per-instance state (`&State` in the vtable row) — see [`examples/device_drivers.wr`](examples/device_drivers.wr)
@@ -166,14 +167,17 @@ If no `wraith.toml` is present, the compiler uses these defaults:
 - **STACK**: `0x0200-0x02FF` (256B) — **RAM** for the compiler's software stack
 - **BSS**: `0x0400-0x07FF` (1KB) — **RAM** for mutable globals (`static`)
 
-`0xE000-0xEFFF` is left unmanaged as the memory-mapped I/O window: device
-registers are declared with `const NAME: addr = 0xE0xx`, and `DATA` stops below
-it so constant data is never laid over a device.
+These are defaults, not a description of any particular machine. Every one is a
+`wraith.toml` section, so the whole map is yours to define. The only addresses
+the compiler fixes are those the 6502 itself mandates — the zero page (scratch
+and function frames), the hardware stack at `$0100-$01FF`, and the vectors at
+`$FFFA-$FFFF`.
 
-Every one of these is a `wraith.toml` section, so the whole map is yours to
-define. The only addresses the compiler fixes are those the 6502 itself
-mandates — the zero page (scratch and function frames), the hardware stack at
-`$0100-$01FF`, and the vectors at `$FFFA-$FFFF`.
+Anything outside the sections you declare is left alone: the compiler places
+nothing there and assumes nothing about it. Device registers live wherever your
+hardware decodes them and are named with `const NAME: addr = ...`; leaving room
+for them is a matter of how you size your sections, not something the compiler
+has an opinion about.
 
 Functions without an explicit `#[org]` or `#[section]` attribute are placed in the default section.
 
@@ -236,10 +240,12 @@ Check the `examples/` directory for sample programs demonstrating:
 [`device_drivers.wr`](examples/device_drivers.wr) is the longest of them and
 the one closest to a real system: a driver is a struct of function pointers, a
 table of those is the device list, and the kernel half of the program names no
-driver and touches no register. Its serial driver is interrupt-driven with a
-ring buffer at each end, so writing to the console queues a byte and returns.
-It runs against emulated hardware in `tests/e2e/example_drivers.rs` rather than
-only compiling, so what it claims is checked.
+driver and touches no register. One of its drivers is interrupt-driven with a
+ring buffer at each end, so writing to the console queues a byte and returns;
+the other is unbuffered, and nothing above the interface can tell. The devices
+it drives are the ones its own test harness models — pick whatever your board
+actually has. It runs against them in `tests/e2e/example_drivers.rs` rather
+than only compiling, so what it claims is checked.
 
 ## Contributing
 

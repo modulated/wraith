@@ -180,10 +180,12 @@ impl Config {
         Self {
             sections: vec![
                 Section::new("CODE", 0x8000, 0xBFFF), // 16KB for user code
-                // 4KB for constants/data, ending below $E000 so it never
-                // collides with the memory-mapped I/O window ($E000-$EFFF, where
-                // device `addr` registers live). That window is intentionally
-                // left unmanaged — nothing but device registers may sit there.
+                // 4KB for constants/data. It stops at $DFFF rather than running
+                // up to the vectors so that a default build leaves the top of
+                // memory free; where a given machine decodes its devices is not
+                // something the compiler knows, and any address outside a
+                // declared section is left untouched. Move it in `wraith.toml`
+                // to suit the board.
                 Section::new("DATA", 0xD000, 0xDFFF),
                 // Compiler's software stack: one page of RAM used to save a
                 // callee's frame across a recursive call and to spill operands.
