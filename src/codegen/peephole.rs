@@ -712,6 +712,16 @@ fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
 /// the only thing that put the boolean in A, so a reader downstream would get
 /// the comparison's intermediate instead. `(v < -102) && …` read `0 - 0x9A`
 /// as a truthy "false" that way.
+/// The flags the collapsed region writes, and so the only ones whose liveness
+/// can make the rewrite unsafe.
+///
+/// Everything deleted here is a `CMP #$00`, two `LDA`s and a `JMP`. `CMP` and
+/// `LDA` write N and Z, `CMP` also writes C, and none of them touches V — so V
+/// holds whatever the original comparison left it at, before the rewrite and
+/// after. Requiring it dead anyway refused 48 of the 225 sites this pass finds
+/// in the example corpus, for a property the rewrite cannot affect.
+const CMP_FLAGS: u8 = FLAG_N | FLAG_Z | FLAG_C;
+
 /// Whether a mnemonic is one of the 6502's conditional branches.
 fn is_cond_branch(m: &str) -> bool {
     matches!(
@@ -822,8 +832,8 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, false_label) == 2
             && uses(lines, true_label) == 2
             && uses(lines, end_label) == 2
-            && live_out[w[9]] == 0
-            && a_live_out[w[9]] == 0
+            && live_out[w[9]] & CMP_FLAGS == 0
+            && a_live_out[w[9]] & CMP_FLAGS == 0
         {
             // `B1` taken means false, and falling past `B2` means false too, so
             // both land on the label the `JMP` used to target — which is where
@@ -917,8 +927,8 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             // Definition plus the two branches that reach it.
             && uses(lines, true_label) == 3
             && uses(lines, end_label) == 2
-            && live_out[w[8]] == 0
-            && a_live_out[w[8]] == 0
+            && live_out[w[8]] & CMP_FLAGS == 0
+            && a_live_out[w[8]] & CMP_FLAGS == 0
         {
             for b in [b1, b2] {
                 result.push(Line::Instruction {
@@ -994,8 +1004,8 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && m7 == "BNE"
             && uses(lines, true_label) == 2
             && uses(lines, end_label) == 2
-            && live_out[w[7]] == 0
-            && a_live_out[w[7]] == 0
+            && live_out[w[7]] & CMP_FLAGS == 0
+            && a_live_out[w[7]] & CMP_FLAGS == 0
         {
             result.push(Line::Instruction {
                 mnemonic: br.clone(),

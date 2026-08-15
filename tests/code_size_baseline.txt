@@ -1,31 +1,33 @@
-# Bytes emitted per example, by section. Regenerate with:
+# What each example emits. Regenerate with:
 #   WRAITH_BLESS_SIZES=1 cargo test --test code_size
-# name code data
-adt_demo 1166 14
-bcd_score 626 0
-const_array_demo 37 24
-countdown_tail 103 0
-dead_code_demo 20 0
-device_drivers 2099 20
-factorial_tail 334 0
-fib_recurse 243 0
-fibonacci 212 0
-fsm 484 4
-interrupt_counter 824 0
-interrupts 575 0
-intrinsics_demo 529 0
-loop_unroll_demo 0 0
-monitor_standalone 2711 153
-pointers 597 0
-slice_assign 99 0
-slice_test 2145 0
-stack_overflow_demo 165 0
-string_concat 102 22
-string_features_demo 1052 55
-string_iteration 484 6
-string_slicing 117 12
-strings 318 21
-struct 205 0
-struct_nested 78 0
-syntax_demo 70 0
-tuple 900 21
+# `code`/`data` are section bytes reserved at placement; `instrs` is
+# instructions in the final assembly, which is what a peephole moves.
+# name code data instrs
+adt_demo 1166 14 504
+bcd_score 626 0 284
+const_array_demo 37 24 14
+countdown_tail 103 0 30
+dead_code_demo 20 0 6
+device_drivers 2099 20 887
+factorial_tail 334 0 142
+fib_recurse 243 0 105
+fibonacci 212 0 87
+fsm 484 4 222
+interrupt_counter 824 0 526
+interrupts 575 0 314
+intrinsics_demo 529 0 317
+loop_unroll_demo 0 0 38
+monitor_standalone 2711 153 1047
+pointers 597 0 242
+slice_assign 99 0 32
+slice_test 2145 0 933
+stack_overflow_demo 165 0 70
+string_concat 102 22 44
+string_features_demo 1052 55 458
+string_iteration 484 6 201
+string_slicing 117 12 49
+strings 318 21 139
+struct 205 0 84
+struct_nested 78 0 26
+syntax_demo 70 0 26
+tuple 900 21 397

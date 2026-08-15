@@ -139,3 +139,36 @@ fn both_operands_of_a_conjunction_are_two_branch_comparisons() {
         assert_eq!(got, want, "x = {x}");
     }
 }
+
+/// The overflow flag is what let the guard relax, so it needs pinning.
+///
+/// Everything the collapse deletes — a `CMP #$00`, two `LDA`s and a `JMP` —
+/// writes N, Z and C and never V. Requiring V dead as well refused 48 of the
+/// 225 candidate sites in the example corpus for a property the rewrite cannot
+/// affect. It is excluded from the guard now, so a program that reads `V`
+/// across a fused comparison has to still see the right bit.
+#[test]
+fn overflow_survives_a_fused_comparison() {
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        static A: u8 = 0;
+        static B: u8 = 0;
+        #[reset]
+        fn main() {
+            // 100 + 100 overflows a signed byte, so V comes out set.
+            let x: i8 = 100;
+            let y: i8 = x + 100;
+            let v: bool = overflow;
+            // A comparison the collapse rewrites, between setting V and
+            // reading it. It writes N/Z/C and must leave V alone.
+            let n: u8 = 7;
+            if n > 5 { A = 1; }
+            OUT0 = A;
+            OUT1 = v as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 1, "the comparison still decided correctly");
+    assert_eq!(e.mem(0x0901), 1, "and the overflow flag survived it");
+}

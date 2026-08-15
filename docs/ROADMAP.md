@@ -72,16 +72,28 @@ from each other as well: `>` sends its branches to different labels, `<=` sends
 both to the same one. A comparison-heavy program drops from 89 instructions to
 74.
 
-**What is still open, and it is the interesting part.** The example corpus does
-not shrink by a byte. Its `<=`/`>` uses sit inside `&&` chains and other
-contexts where the shapes still do not match or a guard still refuses, and the
-guards are refusing for reasons neither of the two obvious hypotheses explained
-— it is not `RTS` being treated as reading every flag (relaxing that changes
-nothing), and it is not overflow liveness (a `CMP` never writes `V`, and
-excluding it from the guard changes nothing either). Both were tried and
-reverted; a relaxation that buys nothing is only surface area on a pass with a
-miscompile history. Finding what actually blocks those sites wants an
-instrumented run reporting the failing guard per site, not another guess.
+**The guard was refusing for a property the rewrite cannot affect.** Everything
+the collapse deletes — a `CMP #$00`, two `LDA`s and a `JMP` — writes N, Z and C
+and never V, so V holds the same bit before and after. Requiring it dead anyway
+refused 48 of the 225 candidate sites in the example corpus. Excluding V from
+the guard removes **115 instructions** across the corpus, 60 of them from
+`monitor_standalone`.
+
+Finding that took an instrumented run reporting every guard's value per site,
+which is what should have been done first: two earlier guesses (that `RTS` was
+being treated as reading every flag; that the shapes simply did not match) were
+both measured, both wrong, and one of those measurements was itself wrong —
+see the benchmark note below. The remaining refusals are now known rather than
+guessed at: 30 sites with A genuinely live, and 44 whose labels have other
+entrants.
+
+**The benchmark could not see any of this.** `tests/code_size.rs` measured the
+section allocator's reservations, which are made at *placement* — before the
+peephole runs. Every "code size unchanged" it reported for a peephole change
+was measuring something that could not move, including the ones in this
+branch's earlier commits. It now records the emitted instruction count
+alongside the section bytes; the sections still matter, since they are what has
+to fit the memory map, but they are not the whole picture.
 
 **Where the ceiling is.** Fusing in the peephole means recognising a shape
 codegen just finished emitting. Emitting the branch directly — a
@@ -257,9 +269,13 @@ and an oracle that is merely *probably* right is worse than no oracle:
 
 ### Code-size benchmark
 
-`tests/code_size.rs` compiles every `examples/*.wr` and checks the bytes emitted
-per section against `tests/code_size_baseline.txt`. A change either way fails,
-with a per-program and overall delta; `WRAITH_BLESS_SIZES=1 cargo test --test
+`tests/code_size.rs` compiles every `examples/*.wr` and checks two numbers per
+program against `tests/code_size_baseline.txt`: bytes reserved per section, and
+instructions in the emitted assembly. The second was added after the first
+turned out to be blind to the peephole — section space is reserved at
+placement, before those passes run, so a change that deletes instructions moved
+nothing there. A change in either direction fails, with a per-program and
+overall delta; `WRAITH_BLESS_SIZES=1 cargo test --test
 code_size` re-blesses, so an optimization's win shows up in the diff rather than
 in a claim. It runs under plain `cargo test`, so CI already guards it.
 
