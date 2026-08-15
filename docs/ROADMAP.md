@@ -24,6 +24,7 @@ read against a current picture:
 | BSS repacked so a dropped `static` gives its bytes back | `tests/e2e/bss_reclaim.rs` |
 | Two-branch comparisons (`>`, `<=`) fused into their branch; the V guard dropped | `tests/e2e/branch_fusion.rs` |
 | The fuzzer dispatches through function pointers, two ways | `docs/fuzz-coverage.md` |
+| The fuzzer binds, copies, passes and returns slices | `docs/fuzz-coverage.md` |
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
@@ -206,7 +207,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Twelve real bugs so far, most of them silent:
+Thirteen real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -255,10 +256,16 @@ Twelve real bugs so far, most of them silent:
     function pointer read out of the hole the dropped static left, on the very
     first run after the change. Caught before the change was ever committed,
     which is the case for having the fuzzer at all.
+11. `s = mk();` had no codegen path where `let s: &[u8] = mk();` did — the
+    binding and assignment forms of a slice-returning call had drifted apart.
+    Found while teaching the generator to pass slices around, by the guard
+    under the store rather than by a wrong answer, since that guard had landed
+    the day before.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
-`tests/e2e/loop_sweep.rs`, `tests/e2e/bss_reclaim.rs`.
+`tests/e2e/loop_sweep.rs`, `tests/e2e/bss_reclaim.rs`,
+`tests/e2e/aggregate_dispatch.rs`.
 
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
@@ -286,18 +293,25 @@ and an oracle that is merely *probably* right is worse than no oracle:
   `examples/device_drivers.wr` found it by hand. What is still uncovered
   inside it is pointer and aggregate *arguments* to an indirect call; those
   staging paths are pinned by `tests/e2e/indirect_args.rs` alone.
-- **Slices, pointers and enums.** Arrays and structs of scalars are generated;
-  a slice or a `&T` gives two names for one piece of storage, which the oracle
-  would have to alias-model, and enums are a separate lowering again.
+- **Pointers and enums.** A `&T` gives two names for one piece of storage,
+  which the oracle would have to alias-model; enums are a separate lowering
+  again.
 
-  This one has now cost what the function-pointer gap cost. Three slice bugs
-  were found by hand — a binding that copied one of four descriptor bytes, an
-  assignment that did the same, and an argument that staged one byte of a
-  pointer to a descriptor — and each would have shown up as a wrong answer in a
-  generator that binds a slice, passes it, and reads an element and `.len`.
-  None of that needs alias modelling: a slice of a `const` table is read-only,
-  so an oracle that tracks base and length against the same table it generated
-  is exact. That much is worth doing before the aliasing question.
+  *The slice half of this item is done*, and needed no alias modelling: a slice
+  of the `const` table views ROM, nothing writes it, and the table is the
+  generator's own, so the oracle carries `(start, len)` and reads the element
+  out of the table it already knows. Programs that declare the table declare
+  two slices over it, and a descriptor reaches one four ways — a range
+  expression, a copy from another slice, `f0`'s parameter, and a call to `mk` —
+  which are four codegen paths rather than one. Each slice reports its first
+  element *and* its length as output cells, so a copy that moves one half and
+  not the other is visible even when no expression read it.
+
+  The generator was checked against the bugs rather than assumed to cover them:
+  truncating the descriptor copy fails seed 0, staging a slice argument as two
+  bytes fails seed 119, and copying two bytes of a returned descriptor fails
+  three of the first hundred and twenty. It also found a fourth on its way in:
+  `s = mk();` had no codegen path where `let s: &[u8] = mk();` did.
 - **Aggregates across a call.** A struct is a local today — never passed,
   returned, or pointed at — and an array field inside a struct is not
   generated. Both are shapes where a miscompile has already been found by hand.
