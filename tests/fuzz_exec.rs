@@ -260,6 +260,12 @@ enum E {
     /// `Call` so termination is a property of the *shape*: there is no way to
     /// write a self-call that does not decrease the budget.
     SelfCall(Box<E>),
+    /// A call to the other half of a mutually recursive pair, at `d - 1` and
+    /// carrying the partner's id. Its own node for the same reason as
+    /// `SelfCall`, and the reason the pair matters: two functions in one
+    /// call-graph cycle are one SCC, which is the case frame colouring solves
+    /// with Tarjan and which a self-call — a cycle of one — never reaches.
+    MutualCall(usize, Box<E>),
     /// `arr[<index>]`, in `main` only.
     Elem(Ix),
     /// `TBL[<index>]` — a `const` array, which lives in ROM and is reached
@@ -397,6 +403,11 @@ struct Func {
     /// to high — so the only caller is `main`, and `main` is the only scope
     /// that has a slice to hand over.
     slice_param: bool,
+    /// The other half of the mutually recursive pair, when this function is
+    /// one of them. Both members are `recursive`, and the shrinker needs the
+    /// link: dissolving one without the other leaves a call to a function that
+    /// no longer takes a budget.
+    partner: Option<usize>,
     /// Initial values of the locals declared at the top of the body.
     local_init: Vec<i64>,
     recursive: bool,
@@ -462,6 +473,10 @@ struct Gen<'a> {
     /// one has been placed — one self-call per function keeps the recursion
     /// linear rather than exponential in the depth budget.
     self_call: bool,
+    /// The partner a mutual call may name here, on the same one-per-function
+    /// terms as `self_call`. `None` outside the pair, in a base case, and once
+    /// the call has been placed.
+    mutual_call: Option<usize>,
     /// `for`/`while` are generated in `main` only; a loop inside a function
     /// would need its counter re-initialised per invocation, which is a
     /// separate question from the call machinery this reaches.
@@ -571,6 +586,12 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
     if g.self_call && g.rng.below(100) < 25 {
         g.self_call = false;
         return E::SelfCall(Box::new(gen_expr(g, depth - 1, false)));
+    }
+    if let Some(partner) = g.mutual_call
+        && g.rng.below(100) < 25
+    {
+        g.mutual_call = None;
+        return E::MutualCall(partner, Box::new(gen_expr(g, depth - 1, false)));
     }
     // An indirect call. Same cost to the staging pool as a direct one-argument
     // call — the argument is evaluated into the pool before being copied to
@@ -809,6 +830,10 @@ struct Prog {
     /// The two ranges `mk` chooses between. Present exactly when `slices` is
     /// non-empty; `mk` is what makes a slice arrive from a call.
     mk_ranges: Vec<(usize, usize)>,
+    /// The mutually recursive pair, low id first, or `None`. Both members carry
+    /// a budget and call each other at `d - 1`, so the cycle terminates by the
+    /// same construction a self-call does.
+    mutual: Option<(usize, usize)>,
 }
 
 impl Prog {
@@ -827,25 +852,42 @@ const RECURSION_BUDGET: u32 = 5;
 /// Build the functions first, back to front: `f0` may call `f1`, `f1` may call
 /// `f2`, and none may call a lower-numbered one, so the call graph is acyclic
 /// and the only cycle in the program is the explicit self-call.
-fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
+fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<Func> {
     let mut funcs: Vec<Func> = Vec::new();
     // Indexed by function id, so a caller can look up a callee generated
     // earlier in this back-to-front walk.
     g.sigs = vec![(0, false); count];
+    // The pair's signatures have to be known before either body is generated:
+    // the higher-numbered member is generated first and calls the lower one,
+    // which the back-to-front walk has not reached yet. Both are shaped like
+    // the self-recursive function — a budget and one value parameter — so the
+    // mutual call has an argument to vary.
+    if let Some((a, b)) = mutual {
+        g.sigs[a] = (1, true);
+        g.sigs[b] = (1, true);
+    }
     for i in (0..count).rev() {
         // The highest-numbered functions are the table's candidates. They must
         // share one signature to sit in the same array, so they take a single
         // parameter and do not recurse — a recursive one carries a depth
         // budget, which changes the type.
         let is_candidate = i >= count - g.vtable;
-        // `f0` alone may take a slice: every other function is reachable from
-        // one that has no slice to pass, and a candidate has to match the
-        // table's signature.
-        let slice_param = i == 0 && !is_candidate && g.allow_slices;
+        // A member of the mutual pair, and if so, which function it calls back.
+        let partner = mutual.and_then(|(a, b)| match i {
+            _ if i == a => Some(b),
+            _ if i == b => Some(a),
+            _ => None,
+        });
+        // `f0` alone may take a slice — but not while it is half of the pair.
+        // Its partner would have to pass one on every mutual call, and a pair
+        // member has none: they are shaped alike so the cycle closes.
+        let slice_param = i == 0 && !is_candidate && g.allow_slices && partner.is_none();
         // Otherwise the last function is the one allowed to recurse, and a
         // recursive one takes exactly one value parameter besides its budget,
-        // so the self-call has one argument to vary.
-        let recursive = !is_candidate && i + 1 == count - g.vtable && g.rng.below(2) == 0;
+        // so the self-call has one argument to vary. A pair member is recursive
+        // through its partner instead — one cycle per function either way.
+        let recursive = partner.is_some()
+            || (!is_candidate && i + 1 == count - g.vtable && g.rng.below(2) == 0);
         let params = if recursive || is_candidate {
             1
         } else {
@@ -868,12 +910,22 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         g.main_slices = 0;
         g.vars = params + locals.len();
         g.assignable = params..params + locals.len();
-        g.callable = i + 1..count;
+        // The lower member of the pair may not call the higher one *except*
+        // through its `MutualCall`, which decrements the budget. An ordinary
+        // call passes a fresh literal one, so the cycle would reset its own
+        // depth every second edge and never terminate. The two are adjacent by
+        // construction, so skipping one id is enough to say that.
+        g.callable = if partner == Some(i + 1) {
+            i + 2..count
+        } else {
+            i + 1..count
+        };
         g.allow_loops = false;
 
-        // The base case first, with self-calls unavailable: recursing at
-        // `d == 0` would pass `d - 1` on a `u8` and wrap to 255.
+        // The base case first, with both kinds of recursive call unavailable:
+        // recursing at `d == 0` would pass `d - 1` on a `u8` and wrap to 255.
         g.self_call = false;
+        g.mutual_call = None;
         let base = gen_expr(g, 2, false);
 
         // Statements need somewhere to assign, and a parameter is not it, so a
@@ -885,13 +937,19 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         };
         let body: Vec<S> = (0..n).map(|_| gen_stmt(g, 1)).collect();
 
-        // Exactly one self-call, in the returned expression, so it is always
-        // reached when `d > 0` and the recursion is linear in the budget.
-        g.self_call = recursive;
+        // Exactly one recursive call, in the returned expression, so it is
+        // always reached when `d > 0` and the recursion is linear in the
+        // budget. A pair member recurses through its partner; every other
+        // recursive function calls itself.
+        g.self_call = recursive && partner.is_none();
+        g.mutual_call = partner;
         let ret = if recursive {
             let arg = gen_expr(g, 2, false);
             let other = gen_expr(g, 2, false);
-            let call = E::SelfCall(Box::new(arg));
+            let call = match partner {
+                Some(p) => E::MutualCall(p, Box::new(arg)),
+                None => E::SelfCall(Box::new(arg)),
+            };
             let op = OPS[g.rng.below(OPS.len() as u64) as usize];
             // Both operand orders: with the call on the right, the left operand
             // has to survive the JSR, which is the software-stack spill path.
@@ -906,6 +964,7 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
             gen_expr(g, 3, false)
         };
         g.self_call = false;
+        g.mutual_call = None;
 
         g.vars = saved_vars;
         g.assignable = saved_assignable;
@@ -917,6 +976,7 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
 
         funcs.push(Func {
             slice_param,
+            partner,
             params,
             local_init: locals,
             recursive,
@@ -944,6 +1004,7 @@ fn gen_program(seed: u64) -> Prog {
         sigs: Vec::new(),
         callable: 0..0,
         self_call: false,
+        mutual_call: None,
         allow_loops: true,
         allow_aggregates: false,
         vtable: 0,
@@ -1003,7 +1064,13 @@ fn gen_program(seed: u64) -> Prog {
     };
     g.allow_slices = !slices.is_empty();
 
-    let funcs = gen_funcs(&mut g, count);
+    // A cycle of two, when there are two non-candidate functions to make one
+    // from. It is the two highest-numbered of them, which is also where the
+    // self-recursive function would have gone — a function gets one cycle or
+    // the other, never both.
+    let plain = count - vtable;
+    let mutual = (plain >= 2 && g.rng.below(100) < 40).then(|| (plain - 2, plain - 1));
+    let funcs = gen_funcs(&mut g, count, mutual);
     g.callable = 0..count;
     g.allow_indirect = vtable > 0;
     g.allow_aggregates = aggregates;
@@ -1029,6 +1096,7 @@ fn gen_program(seed: u64) -> Prog {
         vtable,
         slices,
         mk_ranges,
+        mutual,
     }
 }
 
@@ -1122,6 +1190,13 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             // passes `sp` along, so the callee sees what this frame sees.
             let sl = st.slices.first().copied();
             narrow(call_fn(st.prog, id, budget - 1, &[v], sl, ty), ty)
+        }
+        E::MutualCall(partner, arg) => {
+            let (_, budget) = st.current.expect("a mutual call outside a function");
+            let v = eval(arg, st, ty);
+            // The partner takes no slice — a pair member never carries one, so
+            // there is nothing to pass along.
+            narrow(call_fn(st.prog, *partner, budget - 1, &[v], None, ty), ty)
         }
         E::Dispatch { sel, arg } => {
             let k = match sel {
@@ -1352,6 +1427,9 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             let sl = if slice { "sp, " } else { "" };
             format!("f{id}(d - 1, {sl}{})", render(arg, ty, sc))
         }
+        // The partner's budget is this frame's, one lower. A pair member takes
+        // no slice, so there is none to pass.
+        E::MutualCall(partner, arg) => format!("f{partner}(d - 1, {})", render(arg, ty, sc)),
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::Field(f) => format!("s.f{f}"),
@@ -1799,9 +1877,29 @@ fn mutate(p: &mut Prog, target: usize, seen: &mut usize) -> bool {
     for i in 0..p.funcs.len() {
         if p.funcs[i].recursive {
             if *seen == target {
-                p.funcs[i].recursive = false;
-                strip_self_calls(&mut p.funcs[i].ret);
-                drop_budgets(p, i);
+                // A mutual pair dissolves together. Dropping the budget from
+                // one member alone leaves the other calling it with `d - 1`,
+                // and the reduced program stops compiling for a reason that
+                // has nothing to do with the failure being shrunk.
+                let ids: Vec<usize> = match p.funcs[i].partner {
+                    Some(other) => vec![i, other],
+                    None => vec![i],
+                };
+                for &k in &ids {
+                    p.funcs[k].recursive = false;
+                    p.funcs[k].partner = None;
+                    strip_self_calls(&mut p.funcs[k].ret);
+                    strip_self_calls(&mut p.funcs[k].base);
+                    for st in p.funcs[k].body.iter_mut() {
+                        strip_stmt_self_calls(st);
+                    }
+                }
+                if ids.len() > 1 {
+                    p.mutual = None;
+                }
+                for &k in &ids {
+                    drop_budgets(p, k);
+                }
                 return true;
             }
             *seen += 1;
@@ -1849,13 +1947,27 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                     in_expr(a, id);
                 }
             }
-            E::SelfCall(arg) => in_expr(arg, id),
+            E::SelfCall(arg)
+            | E::MutualCall(_, arg)
+            | E::Dispatch { arg, .. }
+            | E::DevCall(arg)
+            | E::Cast(_, arg) => in_expr(arg, id),
             E::Bin(l, _, r) => {
                 in_expr(l, id);
                 in_expr(r, id);
             }
-            E::Cast(_, inner) => in_expr(inner, id),
-            _ => {}
+            // Leaves. Enumerated rather than left to a catch-all: a new form
+            // carrying an expression would otherwise keep a budget the
+            // reduction has just taken away, and the reduced program would
+            // stop compiling for a reason nothing points at.
+            E::Lit(_)
+            | E::Var(_)
+            | E::Loop(_)
+            | E::Elem(_)
+            | E::Konst(_)
+            | E::Field(_)
+            | E::SliceElem(..)
+            | E::SliceLen(_) => {}
         }
     }
     fn in_bool(b: &mut B, id: usize) {
@@ -1896,11 +2008,12 @@ fn drop_budgets(p: &mut Prog, id: usize) {
     in_block(&mut p.stmts, id);
 }
 
-/// Replace every self-call with its argument. Used when a function stops being
-/// recursive: a `SelfCall` in a non-recursive function has no `d` to decrement.
+/// Replace every recursive call with its argument. Used when a function stops
+/// being recursive: a `SelfCall` or a `MutualCall` in a non-recursive function
+/// has no `d` to decrement.
 fn strip_self_calls(e: &mut E) {
     match e {
-        E::SelfCall(arg) => {
+        E::SelfCall(arg) | E::MutualCall(_, arg) => {
             let lifted = (**arg).clone();
             *e = lifted;
             strip_self_calls(e);
@@ -1909,13 +2022,53 @@ fn strip_self_calls(e: &mut E) {
             strip_self_calls(l);
             strip_self_calls(r);
         }
-        E::Cast(_, inner) => strip_self_calls(inner),
+        E::Cast(_, inner) | E::Dispatch { arg: inner, .. } | E::DevCall(inner) => {
+            strip_self_calls(inner)
+        }
         E::Call { args, .. } => {
             for a in args {
                 strip_self_calls(a);
             }
         }
-        _ => {}
+        E::Lit(_)
+        | E::Var(_)
+        | E::Loop(_)
+        | E::Elem(_)
+        | E::Konst(_)
+        | E::Field(_)
+        | E::SliceElem(..)
+        | E::SliceLen(_) => {}
+    }
+}
+
+/// Strip recursive calls out of a statement, for the whole-function reductions
+/// above. A function's body can hold one as readily as its `return` can.
+fn strip_stmt_self_calls(s: &mut S) {
+    match s {
+        S::Assign(_, e) => strip_self_calls(e),
+        S::If(c, t, e) => {
+            strip_bool_self_calls(c);
+            t.iter_mut().for_each(strip_stmt_self_calls);
+            if let Some(e) = e {
+                e.iter_mut().for_each(strip_stmt_self_calls);
+            }
+        }
+        S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
+        S::Install(_) | S::CopySlice(..) | S::Reslice(..) | S::SliceFromCall(..) => {}
+    }
+}
+
+fn strip_bool_self_calls(b: &mut B) {
+    match b {
+        B::Rel(l, _, r) => {
+            strip_self_calls(l);
+            strip_self_calls(r);
+        }
+        B::And(l, r) | B::Or(l, r) => {
+            strip_bool_self_calls(l);
+            strip_bool_self_calls(r);
+        }
+        B::Not(inner) => strip_bool_self_calls(inner),
     }
 }
 
@@ -2044,7 +2197,10 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_expr(inner, target, seen)
         }
-        E::SelfCall(arg) => {
+        // Either recursive call reduces to its argument: what is left still
+        // compiles and still terminates, because the partner's own call is
+        // what bounds the depth.
+        E::SelfCall(arg) | E::MutualCall(_, arg) => {
             if *seen == target {
                 let lifted = (**arg).clone();
                 *e = lifted;
@@ -2349,6 +2505,7 @@ fn the_generator_covers_what_it_claims() {
         loop_vars: usize,
         calls: usize,
         self_calls: usize,
+        mutual_calls: usize,
         multi_arg_calls: usize,
         table_dispatches: usize,
         installed_dispatches: usize,
@@ -2379,6 +2536,10 @@ fn the_generator_covers_what_it_claims() {
             }
             E::SelfCall(arg) => {
                 s.self_calls += 1;
+                walk_e(arg, s);
+            }
+            E::MutualCall(_, arg) => {
+                s.mutual_calls += 1;
                 walk_e(arg, s);
             }
             E::Dispatch { arg, .. } => {
@@ -2617,6 +2778,7 @@ fn the_oracle_matches_the_documented_semantics() {
         vtable: 0,
         slices: Vec::new(),
         mk_ranges: Vec::new(),
+        mutual: None,
     };
     let st = St {
         prog: &empty,
@@ -2838,9 +3000,16 @@ mod coverage {
         ),
         (
             "Expr::Call",
-            "1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing \
-             budget parameter. Mutual recursion is not generated, and a callee reads only \
-             its own scope, so argument evaluation order cannot be observed. Nesting depth is limited by the compiler's 11-byte argument-staging \
+            "1-3 arguments, and a callee that reads only its own scope, so argument \
+             evaluation order cannot be observed. The call graph is acyclic apart from \
+             recursion, which comes two ways: a function that calls itself, and a pair that \
+             call each other. Both are bounded by a budget parameter that every recursive \
+             edge decrements, so termination is a property of the shape — a pair member \
+             cannot reach its partner by an ordinary call, which would pass a fresh literal \
+             budget and reset the cycle's own depth. The pair is what puts two functions in \
+             one call-graph SCC, which is the case frame colouring solves with Tarjan and \
+             which a self-call never reaches. Cycles of three or more are not generated. \
+             Nesting depth is limited by the compiler's 11-byte argument-staging \
              pool, which a call whose list does not fit spills to the software stack one \
              argument at a time: the generator budgets a level's worth, and a program that \
              exhausts it anyway is skipped and counted rather than reported",
