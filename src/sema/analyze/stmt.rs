@@ -653,6 +653,17 @@ impl SemanticAnalyzer {
                     }
                     cur = inner;
                 }
+                // A genuine `.low`/`.high` writes one byte of the 16-bit value
+                // it is rooted at, so that root is what has to be mutable —
+                // `SOME_CONST.low = 1` is a store into ROM just as much as
+                // `LUT[i] = v` is. (`.len` is not peeled: a slice's length is
+                // not an assignable place at all.)
+                Expr::U16Low(inner) | Expr::U16High(inner) => {
+                    if self.denotes_a_reference(inner) {
+                        return None;
+                    }
+                    cur = inner;
+                }
                 Expr::Paren(inner) => cur = inner,
                 _ => return None,
             }
@@ -660,12 +671,20 @@ impl SemanticAnalyzer {
     }
 
     /// Whether this expression holds an address rather than the bytes themselves.
+    ///
+    /// Aggregates are passed by reference, so writing through such a parameter
+    /// reaches the caller's storage and the parameter's own mutability is
+    /// beside the point. A *scalar* parameter is a by-value copy in the frame,
+    /// though — there is no address in it — so it is the thing being assigned,
+    /// and `w.high = 1` on one is as immutable as `w = 1` is.
     fn denotes_a_reference(&self, expr: &Spanned<Expr>) -> bool {
         if matches!(self.resolved_types.get(&expr.span), Some(Type::Pointer(_))) {
             return true;
         }
         matches!(&expr.node, Expr::Variable(n)
-            if self.table.lookup(n).is_some_and(|s| s.is_param))
+        if self.table.lookup(n).is_some_and(|s| {
+            s.is_param && !matches!(s.ty, Type::Primitive(_))
+        }))
     }
 
     fn analyze_for_loop(

@@ -4,9 +4,11 @@
 
 mod addr_of_rom;
 mod aggregate_init;
+mod assign_side_effects;
 mod bcd;
 mod bcd_validation;
 mod bitfields;
+mod bss_reclaim;
 mod cmos;
 mod complex_features;
 mod const_folding;
@@ -24,6 +26,7 @@ mod frames;
 mod functions;
 mod import_diagnostics;
 mod imports;
+mod indirect_args;
 mod inline;
 mod int_conversions;
 mod interrupts;
@@ -56,3 +59,4 @@ mod temp_pools;
 mod types;
 mod variables;
 mod vtable;
+mod word_halves;

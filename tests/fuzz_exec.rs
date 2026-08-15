@@ -263,6 +263,32 @@ enum E {
     Konst(Ix),
     /// `s.f{i}`, in `main` only.
     Field(usize),
+    /// `VTBL[<sel>](<arg>)` — a call through a table of function pointers,
+    /// indexed at run time. The callee is not known until then, so this is the
+    /// path where the compiler stages arguments at a fixed address and where
+    /// frame colouring has to keep the caller clear of every candidate rather
+    /// than of a named callee. `main` only.
+    Dispatch {
+        sel: Sel,
+        arg: Box<E>,
+    },
+    /// `DEV.call(<arg>)` — a call through a function pointer held in a struct
+    /// field, which is the shape a driver's vtable takes. Which candidate runs
+    /// depends on the `Install` statements executed so far, so unlike
+    /// `Dispatch` the answer is program state rather than an index. `main`
+    /// only.
+    DevCall(Box<E>),
+}
+
+/// Which entry of the function-pointer table a `Dispatch` selects. In range by
+/// construction, like [`Ix`], and for the same reason.
+#[derive(Clone)]
+enum Sel {
+    /// A constant, so the callee is knowable at compile time even though the
+    /// call is indirect.
+    Lit(usize),
+    /// `(v{i} as u8) % <candidates>`: genuinely not known until run time.
+    Wrapped(usize),
 }
 
 /// An array index. Every form is in range by construction: the language does no
@@ -318,6 +344,11 @@ enum S {
     /// the top with a positive start value and is written by nothing else, so
     /// the loop terminates by construction.
     While(usize, Vec<S>),
+    /// `DEV.call = f{id};` — install a different driver. The point of the
+    /// whole arrangement: what `DevCall` reaches is decided at run time by a
+    /// store, not by anything a call graph can see. Carries the function's id
+    /// rather than its table index, so rendering needs no lookup.
+    Install(usize),
 }
 
 /// Variables in `main`.
@@ -397,11 +428,23 @@ struct Gen<'a> {
     /// name them. False inside a generated function, and false in a program
     /// that declares neither.
     allow_aggregates: bool,
+    /// How many same-signature functions the table holds, or 0 when this
+    /// program has no table. They are the highest-numbered functions, so the
+    /// candidates are `funcs.len() - vtable ..`.
+    vtable: usize,
+    /// May an indirect call be generated here? `main` only, for the same
+    /// reason as the aggregates: `DEV` is program state, and letting a callee
+    /// read it would make a call something other than a function of its
+    /// arguments. Also false while generating the candidates themselves, which
+    /// keeps them out of their own dispatch and the call graph acyclic.
+    allow_indirect: bool,
     /// Bytes still available in the compiler's fixed argument-staging pool.
-    /// Arguments are staged there before being copied into the callee's frame,
-    /// and a call nested in another call's argument list needs room for both at
-    /// once — so the generator budgets it rather than spending its run
-    /// re-reporting one limit that already fails loudly and says what to do.
+    /// A call whose whole argument list fits stages there; one that does not
+    /// moves each argument to the software stack as it is evaluated, holding
+    /// only its widest argument in the pool. So a nesting level costs one
+    /// argument, not the list — which is what this charges. The budget cannot
+    /// be exact (the pool has consumers a program's source does not reveal),
+    /// so a seed that overruns anyway is skipped and counted.
     pool_left: u8,
 }
 
@@ -463,11 +506,35 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
         g.self_call = false;
         return E::SelfCall(Box::new(gen_expr(g, depth - 1, false)));
     }
+    // An indirect call. Same cost to the staging pool as a direct one-argument
+    // call — the argument is evaluated into the pool before being copied to
+    // the fixed indirect block — so it is budgeted the same way.
+    if g.allow_indirect && g.vtable > 0 && g.rng.below(100) < 16 {
+        let cost = if g.ty.wide() { 2 } else { 1 };
+        if cost <= g.pool_left {
+            let saved = g.pool_left;
+            g.pool_left -= cost;
+            let arg = Box::new(gen_expr(g, depth - 1, false));
+            g.pool_left = saved;
+            return if g.rng.below(2) == 0 {
+                E::DevCall(arg)
+            } else {
+                let sel = if g.rng.below(2) == 0 {
+                    Sel::Lit(g.rng.below(g.vtable as u64) as usize)
+                } else {
+                    Sel::Wrapped(g.rng.below(VARS as u64) as usize)
+                };
+                E::Dispatch { sel, arg }
+            };
+        }
+    }
+
     if !g.callable.is_empty() && g.rng.below(100) < 14 {
         let id =
             g.callable.start + g.rng.below((g.callable.end - g.callable.start) as u64) as usize;
         let (arity, recursive) = g.sigs[id];
-        let cost = arity as u8 * if g.ty.wide() { 2 } else { 1 };
+        // One argument's worth: the widest a nesting level holds.
+        let cost = if g.ty.wide() { 2 } else { 1 };
         if cost <= g.pool_left {
             let saved = g.pool_left;
             g.pool_left -= cost;
@@ -549,6 +616,12 @@ fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
 }
 
 fn gen_stmt(g: &mut Gen, depth: u32) -> S {
+    // Rebinding the installed driver. Rare, and before the type check below,
+    // because it is the one statement that carries no expression.
+    if g.allow_indirect && g.vtable > 1 && g.rng.below(100) < 8 {
+        let k = g.rng.below(g.vtable as u64) as usize;
+        return S::Install(g.sigs.len() - g.vtable + k);
+    }
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
         let place = gen_place(g);
@@ -604,6 +677,16 @@ struct Prog {
     /// The `const` table's contents. Declared whenever `aggregates` is set, and
     /// never written, so it needs no cell in the state.
     konst: [i64; ALEN],
+    /// How many of the highest-numbered functions sit in the function-pointer
+    /// table, or 0 for a program without one.
+    vtable: usize,
+}
+
+impl Prog {
+    /// The function id of table entry `k`.
+    fn candidate(&self, k: usize) -> usize {
+        self.funcs.len() - self.vtable + k
+    }
 }
 
 /// The largest recursion budget a call site may pass. Well under the depth the
@@ -621,11 +704,16 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
     // earlier in this back-to-front walk.
     g.sigs = vec![(0, false); count];
     for i in (0..count).rev() {
-        // The last function is the one allowed to recurse, and a recursive one
-        // takes exactly one value parameter besides its budget, so the
-        // self-call has one argument to vary.
-        let recursive = i + 1 == count && g.rng.below(2) == 0;
-        let params = if recursive {
+        // The highest-numbered functions are the table's candidates. They must
+        // share one signature to sit in the same array, so they take a single
+        // parameter and do not recurse — a recursive one carries a depth
+        // budget, which changes the type.
+        let is_candidate = i >= count - g.vtable;
+        // Otherwise the last function is the one allowed to recurse, and a
+        // recursive one takes exactly one value parameter besides its budget,
+        // so the self-call has one argument to vary.
+        let recursive = !is_candidate && i + 1 == count - g.vtable && g.rng.below(2) == 0;
+        let params = if recursive || is_candidate {
             1
         } else {
             1 + g.rng.below(3) as usize
@@ -716,6 +804,8 @@ fn gen_program(seed: u64) -> Prog {
         self_call: false,
         allow_loops: true,
         allow_aggregates: false,
+        vtable: 0,
+        allow_indirect: false,
         pool_left: ARG_POOL_BYTES,
     };
     for v in init.iter_mut() {
@@ -734,9 +824,20 @@ fn gen_program(seed: u64) -> Prog {
         *v = g.lit();
     }
 
-    let count = g.rng.below(4) as usize;
+    // Decide the table before the functions, since it constrains the shape of
+    // the highest-numbered ones. Two entries is the smallest table where which
+    // one runs is a real question; three occasionally, to keep a wrong index
+    // from landing on the right answer by having nowhere else to land.
+    let vtable = match g.rng.below(100) {
+        0..=54 => 0,
+        55..=84 => 2,
+        _ => 3,
+    };
+    let count = vtable + g.rng.below(3) as usize;
+    g.vtable = vtable;
     let funcs = gen_funcs(&mut g, count);
     g.callable = 0..count;
+    g.allow_indirect = vtable > 0;
 
     // Aggregates are `main`'s locals, so they are decided after the functions
     // are generated and only affect `main`'s body.
@@ -757,6 +858,7 @@ fn gen_program(seed: u64) -> Prog {
         arr_init,
         field_init,
         konst,
+        vtable,
     }
 }
 
@@ -776,6 +878,10 @@ struct St<'a> {
     /// The function being executed and its remaining budget, for a self-call.
     /// `None` in `main`, where no self-call can appear.
     current: Option<(usize, i64)>,
+    /// Which function `DEV.call` currently holds, by id. Program state,
+    /// written by `S::Install` — the whole point of dispatching through a
+    /// pointer is that this is not a property of the source.
+    dev: usize,
 }
 
 /// Call a generated function. Its locals are fresh per invocation — which is
@@ -796,6 +902,8 @@ fn call_fn(p: &Prog, id: usize, budget: i64, args: &[i64], ty: Ty) -> i64 {
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
         current: Some((id, budget)),
+        // A function body contains no indirect call, so this is never read.
+        dev: 0,
     };
     if f.recursive && budget == 0 {
         return eval(&f.base, &st, ty);
@@ -821,6 +929,18 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let (id, budget) = st.current.expect("a self-call outside a function");
             let v = eval(arg, st, ty);
             narrow(call_fn(st.prog, id, budget - 1, &[v], ty), ty)
+        }
+        E::Dispatch { sel, arg } => {
+            let k = match sel {
+                Sel::Lit(k) => *k,
+                Sel::Wrapped(i) => (raw(st.vars[*i], ty) as u8 as usize) % st.prog.vtable,
+            };
+            let v = eval(arg, st, ty);
+            narrow(call_fn(st.prog, st.prog.candidate(k), 0, &[v], ty), ty)
+        }
+        E::DevCall(arg) => {
+            let v = eval(arg, st, ty);
+            narrow(call_fn(st.prog, st.dev, 0, &[v], ty), ty)
         }
         E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
         E::Konst(ix) => narrow(st.prog.konst[eval_index(ix, st, ty)], ty),
@@ -885,6 +1005,7 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                     Place::Field(f) => st.fields[*f] = value,
                 }
             }
+            S::Install(id) => st.dev = *id,
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st, ty) {
                     exec(then, st, ty);
@@ -927,6 +1048,8 @@ fn expected(p: &Prog) -> Vec<u32> {
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
         current: None,
+        // The declaration installs the table's first entry.
+        dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
     };
     exec(&p.stmts, &mut st, p.ty);
     st.vars
@@ -998,6 +1121,19 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::Field(f) => format!("s.f{f}"),
+        E::Dispatch { sel, arg } => {
+            format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
+        }
+        E::DevCall(arg) => format!("DEV.call({})", render(arg, ty, sc)),
+    }
+}
+
+/// The table index of a `Dispatch`. `vt` is the number of entries, which the
+/// modulus needs and the tree does not carry.
+fn render_sel(sel: &Sel) -> String {
+    match sel {
+        Sel::Lit(k) => format!("{k}"),
+        Sel::Wrapped(i) => format!("((v{i} as u8) % VT_LEN)"),
     }
 }
 
@@ -1043,6 +1179,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 out.push_str(&format!("{pad}    c{id} = c{id} - 1;\n"));
                 out.push_str(&format!("{pad}}}\n"));
             }
+            S::Install(id) => out.push_str(&format!("{pad}DEV.call = f{id};\n")),
         }
     }
     out
@@ -1152,6 +1289,30 @@ fn render_program(p: &Prog, form: Form) -> String {
     // has to keep apart from it.
     let funcs: String = (0..p.funcs.len()).map(|i| render_func(p, i)).collect();
 
+    // The function-pointer table, and the struct field a driver is installed
+    // in. Both name the same candidates, and both have to come after the
+    // functions they name. Taking their addresses is what makes those
+    // functions address-taken, which changes how the whole program is
+    // compiled: their arguments arrive through the fixed staging block, and
+    // every function that dispatches must be coloured clear of all of them.
+    let vtable_decl = if p.vtable > 0 {
+        let entries: Vec<String> = (0..p.vtable)
+            .map(|k| format!("f{}", p.candidate(k)))
+            .collect();
+        format!(
+            "const VT_LEN: u8 = {};\n\
+struct VT {{ call: fn({tn}) -> {tn} }}\n\
+static VTBL: [fn({tn}) -> {tn}; {}] = [{}];\n\
+static DEV: VT = VT {{ call: {} }};\n",
+            p.vtable,
+            p.vtable,
+            entries.join(", "),
+            entries[0],
+        )
+    } else {
+        String::new()
+    };
+
     let mut decls = String::new();
     for (i, v) in p.init.iter().enumerate() {
         let lit = if *v < 0 {
@@ -1215,22 +1376,22 @@ fn render_program(p: &Prog, form: Form) -> String {
     match form {
         Form::Inline => {
             format!(
-                "{head}{struct_decl}{funcs}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
+                "{head}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
             )
         }
         Form::ViaFunction => format!(
-            "{head}{struct_decl}{funcs}fn body() {{\n{decls}{body}{stores}}}\n\
+            "{head}{struct_decl}{funcs}{vtable_decl}fn body() {{\n{decls}{body}{stores}}}\n\
              #[reset]\nfn main() {{\n    body();\n    loop {{}}\n}}\n"
         ),
         Form::ViaMatch => format!(
-            "{head}{struct_decl}{funcs}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
+            "{head}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
                  match sel {{\n        0 => {{\n{}{}        }}\n        _ => {{}}\n    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&bump(&body)),
             bump(&bump(&stores)),
         ),
         Form::ViaLoop => format!(
-            "{head}{struct_decl}{funcs}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
+            "{head}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&body),
             bump(&stores),
@@ -1429,6 +1590,8 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                     }
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
+                // Carries no expression, and no budget to drop.
+                S::Install(_) => {}
             }
         }
     }
@@ -1548,6 +1711,9 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
             mutate_block(body, target, seen)
         }
         S::While(_, body) => mutate_block(body, target, seen),
+        // Dropping the statement entirely is `mutate_block`'s job; there is
+        // nothing smaller to make it.
+        S::Install(_) => false,
     }
 }
 
@@ -1649,7 +1815,23 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             }
             mutate_expr(r, target, seen)
         }
-        _ => false,
+        // An indirect call shrinks to its argument, which is what tells a
+        // failing case apart: the dispatch was the cause, or it was carrying
+        // one.
+        E::Dispatch { arg, .. } | E::DevCall(arg) => {
+            if *seen == target {
+                let lifted = (**arg).clone();
+                *e = lifted;
+                return true;
+            }
+            *seen += 1;
+            let (E::Dispatch { arg, .. } | E::DevCall(arg)) = e else {
+                unreachable!()
+            };
+            mutate_expr(arg, target, seen)
+        }
+        // Leaves: nothing smaller to try.
+        E::Var(_) | E::Loop(_) => false,
     }
 }
 
@@ -1719,16 +1901,21 @@ fn shrink(p: &Prog, form: Form, kind: Kind) -> Prog {
 
 /// A compile error that is a known, documented limit rather than a defect.
 ///
-/// Argument staging uses a fixed 11-byte zero-page pool, so a call nested in
-/// another call's argument list can exhaust it. The generator budgets the pool
-/// to keep this rare, but it cannot be exact — the pool has other consumers
-/// that a program's source does not reveal — and encoding the compiler's
-/// allocator into the generator would be the wrong place for that knowledge.
+/// A call whose whole argument list fits stages it in the fixed 11-byte
+/// zero-page pool; one that does not moves each argument to the software stack
+/// as it is evaluated, holding only its widest argument there. So a nesting
+/// level costs one argument rather than the list — but it still costs one, and
+/// deep enough nesting exhausts the pool anyway.
 ///
-/// The limit fails loudly, names its workaround, has a regression test
-/// (`tests/e2e/nested_calls.rs`) and a roadmap entry saying what lifting it
-/// takes. Skipping it here keeps the run spent on wrong answers; the count is
-/// reported so it cannot quietly become the common case.
+/// The generator budgets a level's worth to keep that rare, but it cannot be
+/// exact: the pool has other consumers a program's source does not reveal, and
+/// encoding the compiler's allocator into the generator would put that
+/// knowledge in the wrong place.
+///
+/// The limit fails loudly, has regression tests (`tests/e2e/nested_calls.rs`)
+/// and a roadmap entry saying what removing the rest of it takes. Skipping it
+/// here keeps the run spent on wrong answers; the count is reported so it
+/// cannot quietly become the common case.
 fn is_known_limit(why: &str) -> bool {
     why.contains("argument-evaluation pool exhausted")
 }
@@ -1838,6 +2025,8 @@ fn the_generator_covers_what_it_claims() {
         calls: usize,
         self_calls: usize,
         multi_arg_calls: usize,
+        table_dispatches: usize,
+        installed_dispatches: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen) {
@@ -1865,7 +2054,15 @@ fn the_generator_covers_what_it_claims() {
                 s.self_calls += 1;
                 walk_e(arg, s);
             }
-            _ => {}
+            E::Dispatch { arg, .. } => {
+                s.table_dispatches += 1;
+                walk_e(arg, s);
+            }
+            E::DevCall(arg) => {
+                s.installed_dispatches += 1;
+                walk_e(arg, s);
+            }
+            E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) | E::Field(_) => {}
         }
     }
     fn walk_b(b: &B, s: &mut Seen) {
@@ -1914,6 +2111,9 @@ fn the_generator_covers_what_it_claims() {
                     s.stmts.insert("while");
                     walk_s(b, s);
                 }
+                S::Install(_) => {
+                    s.stmts.insert("install");
+                }
             }
         }
     }
@@ -1936,7 +2136,7 @@ fn the_generator_covers_what_it_claims() {
     for c in CMPS {
         assert!(seen.cmps.contains(c.sym()), "never emitted `{}`", c.sym());
     }
-    for k in ["assign", "if", "if-else", "for", "while"] {
+    for k in ["assign", "if", "if-else", "for", "while", "install"] {
         assert!(seen.stmts.contains(k), "never emitted a `{k}` statement");
     }
     for k in ["&&", "||", "!"] {
@@ -1954,6 +2154,16 @@ fn the_generator_covers_what_it_claims() {
          argument staging goes wrong"
     );
     assert!(seen.self_calls > 0, "never emitted a recursive call");
+    assert!(
+        seen.table_dispatches > 0,
+        "never dispatched through the function-pointer table — the lowering where the \
+         callee is an indexed load rather than a name"
+    );
+    assert!(
+        seen.installed_dispatches > 0,
+        "never called through an installed vtable — the shape where which function runs \
+         is program state rather than anything the call graph records"
+    );
 }
 
 /// No name the generator invents may be a reserved word.
@@ -2059,6 +2269,7 @@ fn the_oracle_matches_the_documented_semantics() {
         arr_init: [0; ALEN],
         field_init: [0; SFIELDS],
         konst: [0; ALEN],
+        vtable: 0,
     };
     let st = St {
         prog: &empty,
@@ -2068,6 +2279,7 @@ fn the_oracle_matches_the_documented_semantics() {
         counters: Vec::new(),
         loops: Vec::new(),
         current: None,
+        dev: 0,
     };
     for (ty, a, op, b, want) in cases {
         let e = E::Bin(Box::new(E::Lit(*a)), *op, Box::new(E::Lit(*b)));
@@ -2152,7 +2364,6 @@ mod coverage {
             "Expr::Slice",
             "a slice is a descriptor over storage the oracle would have to alias-model",
         ),
-        ("Expr::CallIndirect", "function pointers are not generated"),
         (
             "Expr::AnonStructInit",
             "the named form is generated; this one adds inference, not a codegen path",
@@ -2208,7 +2419,6 @@ mod coverage {
         ("TypeExpr::StringBuf", "strings are aggregates"),
         ("TypeExpr::Slice", "slices are not generated"),
         ("TypeExpr::Pointer", "pointers are not generated"),
-        ("TypeExpr::Function", "function pointers are not generated"),
         (
             "PrimitiveType::Bool",
             "generated only as a condition, which is never spelled as a type",
@@ -2265,11 +2475,27 @@ mod coverage {
         (
             "Expr::Call",
             "1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing \
-             budget parameter. Mutual recursion and function pointers are not generated, and \
-             a callee reads only its own scope, so argument evaluation order cannot be \
-             observed. Nesting depth is limited by the compiler's 11-byte argument-staging \
-             pool: the generator budgets it, and a program that exhausts it anyway is \
-             skipped and counted rather than reported",
+             budget parameter. Mutual recursion is not generated, and a callee reads only \
+             its own scope, so argument evaluation order cannot be observed. Nesting depth is limited by the compiler's 11-byte argument-staging \
+             pool, which a call whose list does not fit spills to the software stack one \
+             argument at a time: the generator budgets a level's worth, and a program that \
+             exhausts it anyway is skipped and counted rather than reported",
+        ),
+        (
+            "TypeExpr::Function",
+            "always `fn(T) -> T` at the program's own type: the table's entries must share a \
+             signature, and a one-argument one is what an indirect call can stage",
+        ),
+        (
+            "Expr::CallIndirect",
+            "two shapes, both with one argument: `VTBL[sel](x)` through a table of \
+             same-signature functions indexed by a constant or a runtime value, and \
+             `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` \
+             rebinds. The candidates take one parameter and do not recurse, so they share a \
+             signature; they are never called from inside one another, so the call graph \
+             stays acyclic; and the dispatch appears in `main` only, so a callee is still a \
+             function of its arguments alone. Pointer and aggregate arguments to an indirect \
+             call are not generated",
         ),
         (
             "Expr::Cast",

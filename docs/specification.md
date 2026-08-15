@@ -59,7 +59,7 @@ Wraith is a systems programming language designed specifically for the 6502 proc
 1. **Explicitness over Convenience** - Every variable's type is declared, and narrowing or signedness changes must be written out with `as`. The only quiet conversions are the lossless ones: `u8` → `u16`, `i8` → `i16`, `bool` → `u8`, and integer literals adopting the type the context expects.
 2. **Trust the Programmer** - Variables are mutable by default, no borrow checker, direct memory access.
 3. **Zero Overhead** - Direct compilation to hand-optimized assembly with no runtime or hidden allocations.
-4. **Hardware-Aware** - Language features map directly to 6502 capabilities (BCD types, interrupt handlers, zero page).
+4. **Hardware-Aware** - Language features map directly to 6502 capabilities (BCD types, interrupt handlers, zero page). The *processor* is what the language knows. It assumes nothing about the machine built around it: what peripherals exist, where they are decoded, how much memory there is, and what is ROM are all things you state — peripherals as `addr` declarations, memory as `wraith.toml` sections. No address is special to the compiler except the ones the 6502 itself fixes.
 5. **Modern Syntax** - Rust-inspired syntax while remaining simple and explicit.
 
 ### Compilation Process
@@ -212,6 +212,17 @@ let value: u16 = 0x1234;
 let low: u8 = value.low;    // 0x34
 let high: u8 = value.high;  // 0x12
 ```
+
+Both halves are assignable, and write one byte of the value in place:
+
+```rust,compile,fragment
+let value: u16 = 0x1234;
+value.high = 0x56;          // value is now 0x5634
+```
+
+The target has to name storage — a `let` local or a `static`. A `const` is
+ROM, a parameter is an immutable copy, and a call's result is not a place;
+all three are rejected.
 
 ### Completion Status
 
@@ -782,8 +793,13 @@ indirect trampoline rather than a direct `JSR`, so they cost a few extra cycles.
 
 **Indirect arguments.** A function whose address is taken receives its arguments
 through a fixed staging block and copies them into its frame in a prologue, so
-direct and indirect callers agree on where arguments live. Only scalar
-(1- and 2-byte) parameters may be passed to an indirect call.
+direct and indirect callers agree on where arguments live.
+
+The staging block is a fixed size at a fixed address, so a parameter has to be
+one or two bytes with a settled register convention. That admits the scalars,
+a pointer, a `str`, an enum, and a struct — which goes by reference, indirectly
+just as it does directly. An array or a slice may not be passed to an indirect
+call; pass a `&T` instead.
 
 ### Vtables and Dynamic Dispatch
 
@@ -792,24 +808,25 @@ is how a driver or device interface is expressed: the calling code names only th
 struct, not the implementation.
 
 ```rust,compile
-const UART_BASE: read addr  = 0xE000;
-const UART_TX:   write addr = 0xE001;
-const VIA_PORTA: read addr  = 0x6001;
+// Two devices at whatever addresses the machine puts them.
+const PORT_A_IN:  read  addr = 0x6000;
+const PORT_A_OUT: write addr = 0x6001;
+const PORT_B_IN:  read  addr = 0x6010;
 
 struct Device {
     read:  fn(u8) -> u8,
     write: fn(u8),
 }
 
-fn uart_read(reg: u8) -> u8  { return UART_BASE; }
-fn uart_write(v: u8)         { UART_TX = v; }
-fn via_read(reg: u8) -> u8   { return VIA_PORTA; }
+fn a_read(reg: u8) -> u8  { return PORT_A_IN; }
+fn a_write(v: u8)         { PORT_A_OUT = v; }
+fn b_read(reg: u8) -> u8  { return PORT_B_IN; }
 
-static DEV: Device = Device { read: uart_read, write: uart_write };
+static DEV: Device = Device { read: a_read, write: a_write };
 
 fn main() {
     // Bind a different driver at runtime; callers are unaffected.
-    DEV.read = via_read;
+    DEV.read = b_read;
 
     let status: u8 = DEV.read(5);   // dispatched through the vtable
     DEV.write(0x41);
@@ -823,6 +840,80 @@ direct `JSR`; only computed callees pay the indirect cost.
 `read` and `write` are *contextual* keywords: they act as access modifiers only
 in `const NAME: read addr = ...`, and are ordinary identifiers everywhere else,
 so `struct Device { read, write }` and `dev.write(v)` are legal.
+
+#### Device tables
+
+An array of those structs is a device list, indexed by device number. Both
+halves of dispatch come out of one table: through a bound vtable for "how does
+this device work", and by index for "which device".
+
+```rust,compile
+struct Driver {
+    init:  fn(),
+    write: fn(u8),
+}
+
+fn a_init() { }
+fn a_write(v: u8) { }
+fn b_init() { }
+fn b_write(v: u8) { }
+
+static DRIVERS: [Driver; 2] = [
+    Driver { init: a_init, write: a_write },
+    Driver { init: b_init, write: b_write },
+];
+static CONSOLE: Driver = Driver { init: a_init, write: a_write };
+
+fn register(id: u8) {
+    CONSOLE = DRIVERS[id];   // the whole vtable, copied
+    CONSOLE.init();
+}
+
+fn main() {
+    register(1);
+    CONSOLE.write(0x41);     // through the bound vtable
+    DRIVERS[0].write(0x42);  // by device number
+}
+```
+
+Registration is a whole-struct assignment (see [Copying Structs](#copying-structs)),
+so `CONSOLE` ends up with its own copy of the pointers rather than an alias into
+the table.
+
+#### Per-instance state
+
+A vtable row may carry data as well as pointers, which is what lets one driver
+serve several devices of the same kind — peripherals on a shared bus, say. A
+`&T` is passed like any other pointer:
+
+```rust,compile
+struct State { count: u8 }
+static S0: State = State { count: 0 };
+static S1: State = State { count: 0 };
+
+fn poll(s: &State) -> u8 {
+    s.count = s.count + 1;
+    return s.count;
+}
+
+struct Peripheral {
+    state: &State,
+    poll:  fn(&State) -> u8,
+}
+
+static PERIPHS: [Peripheral; 2] = [
+    Peripheral { state: &S0, poll: poll },
+    Peripheral { state: &S1, poll: poll },
+];
+
+fn main() {
+    let i: u8 = 1;
+    let n: u8 = PERIPHS[i].poll(PERIPHS[i].state);
+}
+```
+
+A driver reached only through a table is not reported as dead code, so device
+entry points do not need to be called directly to avoid a warning.
 
 ### Completion Status
 
@@ -1081,15 +1172,15 @@ number written in the declaration. This is how an enum naming hardware states is
 written to a register:
 
 ```rust,compile
-const DDRA: addr = 0x6003;       // VIA port A data-direction register
+const PORT_DIR: addr = 0x6003;   // a port's data-direction register
 
 pub enum Direction {
     OUTPUT = 0xFF,
     INPUT  = 0x00,
 }
 
-pub fn set_port_a_direction(direction: Direction) {
-    DDRA = direction as u8;      // stores $FF or $00
+pub fn set_port_direction(direction: Direction) {
+    PORT_DIR = direction as u8;  // stores $FF or $00
 }
 ```
 
@@ -1574,10 +1665,10 @@ struct. Without them a driver has to own its buffer as a `static`, or take a
 bare `u16` the compiler cannot check.
 
 ```rust
-fn uart_getline(buf: &u8, max: u8) -> u8 { ... }
+fn read_line(buf: &u8, max: u8) -> u8 { ... }
 
 let line: [u8; 64] = [0; 64];
-let n: u8 = uart_getline(&line, 64);
+let n: u8 = read_line(&line, 64);
 ```
 
 ### Representation
@@ -1689,9 +1780,15 @@ The analysis is flow-insensitive: a variable's provenance is the meet of every
 value assigned to it anywhere in the function. `let p = &GLOBAL; p = &x;`
 makes `p` local throughout.
 
-A pointer passed to an **indirect** call must point at a global. A call through
-a function pointer records no call edge, so the callee's frame is uncoloured
-with respect to the caller's and the usual guarantee does not hold.
+An **indirect** call gets the same rule, asked of every function it could
+reach. Which one runs is unknown, but the candidates are not — only a function
+whose address was taken is reachable through a pointer — so a pointer to a
+local is rejected if *any* of them stores that parameter beyond the call.
+
+Frame colouring holds across an indirect call as it does across a direct one:
+a function that dispatches through a pointer is given a colouring edge to every
+address-taken function, so the callee's frame cannot overlap the caller's and a
+pointer into that frame stays valid.
 
 ### Pointers in statics
 
@@ -1701,7 +1798,7 @@ from another static's address:
 ```rust,compile
 static COUNT: u8 = 0;
 static P: &u8 = &COUNT;
-static UART: &u8 = 0xD012 as &u8;
+static DEVICE: &u8 = 0x6000 as &u8;
 ```
 
 Statics are laid out in declaration order, so a static's initializer can only
@@ -2328,7 +2425,7 @@ fn custom_operation() -> u8 {
 fn read_timer() -> u8 {
     let value: u8 = 0;
     asm {
-        "LDA $D012",  // Read VIC-II raster register (C64 example)
+        "LDA $6004",  // read a device status register
         "STA {value}",
     }
     return value;
@@ -2340,7 +2437,7 @@ fn read_timer() -> u8 {
 fn set_interrupt_mask(mask: u8) {
     asm {
         "LDA {mask}",
-        "STA $D01A",   // VIA interrupt enable register
+        "STA $6005",   // a device's interrupt-enable register
     }
 }
 ```
@@ -4010,8 +4107,17 @@ Applied roughly in this order during compilation:
 | $0400-$07FF | Default `BSS` section (1KB) — **RAM** for mutable globals (`static`) |
 | $8000-$BFFF | Default `CODE` section (16KB) |
 | $D000-$DFFF | Default `DATA` section (4KB) |
-| $E000-$EFFF | Memory-mapped I/O window (device `addr` registers); unmanaged |
 | $FFFA-$FFFF | 6502 hardware vectors (NMI, RESET, IRQ) |
+
+The four sections are *defaults*, not a machine description. Only the zero page,
+the hardware stack and the vectors are fixed — the 6502 mandates those. Every
+other range above comes from `wraith.toml` and is yours to move.
+
+Addresses outside every declared section are left untouched: the compiler places
+nothing there and assumes nothing about them. That is where device registers go,
+declared with `addr` (see [Memory-Mapped Addresses](#memory-mapped-addresses)),
+wherever the machine happens to decode them. Sizing a section so it stops clear
+of your hardware is a configuration decision, not something the compiler knows.
 
 Only `BSS` is written at runtime; `CODE` and `DATA` are read-only on a ROM-based
 machine. See [Mutable Globals](#mutable-globals-static) for how `static` storage

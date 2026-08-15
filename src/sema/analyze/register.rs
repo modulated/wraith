@@ -3,7 +3,7 @@
 //! First pass of semantic analysis that registers all global items
 //! (functions, statics, structs, enums, imports) before analyzing bodies.
 
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -550,6 +550,154 @@ impl SemanticAnalyzer {
         }
         ctx.bss_cursor = Some(base + size);
         Ok(base)
+    }
+
+    /// Repack BSS so a static the output drops costs nothing.
+    ///
+    /// Addresses are handed out during registration, in declaration order,
+    /// long before liveness is known — an initializer's `&OTHER` has to
+    /// resolve to a number as it is flattened, and that number has to exist.
+    /// So a dropped static still reserved its bytes: codegen stopped emitting
+    /// its initializer, but everything after it stayed where it was.
+    ///
+    /// Rather than defer allocation, repack once liveness *is* known. Sizes
+    /// come from the gaps between consecutive addresses — BSS is handed out
+    /// contiguously and statics are its only consumer until `finalize_frames`
+    /// lays local-array blocks above the cursor — so nothing needs to re-derive
+    /// a type's width here. Every live static's symbol is moved first, and only
+    /// then are the initializers re-flattened, so an `&OTHER` picks up the
+    /// address its target *ends up at* rather than the one it started with.
+    ///
+    /// A program that drops nothing keeps every address it had.
+    pub(super) fn compact_bss(
+        &mut self,
+        source: &crate::ast::SourceFile,
+        reachable: &HashSet<String>,
+    ) -> Result<(), SemaError> {
+        use crate::ast::Item;
+
+        if self.static_inits.is_empty() {
+            return Ok(());
+        }
+        let dropped = self
+            .static_inits
+            .iter()
+            .any(|i| !reachable.contains(&i.name));
+        if !dropped {
+            return Ok(());
+        }
+
+        let (start, cursor_end) = {
+            let ctx = self.import_context.borrow();
+            let start = self
+                .memory_config
+                .get_section("BSS")
+                .map(|s| s.start)
+                .unwrap_or(0x0400);
+            (start, ctx.bss_cursor.unwrap_or(start))
+        };
+
+        // Each static's allocated width, from where the next one begins.
+        let sizes: Vec<u16> = self
+            .static_inits
+            .iter()
+            .enumerate()
+            .map(|(i, init)| {
+                let next = self
+                    .static_inits
+                    .get(i + 1)
+                    .map(|n| n.addr)
+                    .unwrap_or(cursor_end);
+                next.saturating_sub(init.addr)
+            })
+            .collect();
+
+        // Pass 1: new addresses, in the order they were originally given out.
+        let mut cursor = start;
+        let mut kept: Vec<(String, u16)> = Vec::new();
+        for (init, size) in self.static_inits.iter().zip(sizes.iter()) {
+            if !reachable.contains(&init.name) {
+                continue;
+            }
+            kept.push((init.name.clone(), cursor));
+            cursor += size;
+        }
+
+        // Pass 2: move the symbols, so the re-flattening below sees the final
+        // layout no matter which order the initializers reference each other in.
+        //
+        // The symbol table is not the only place an address lives. Body
+        // analysis snapshots the whole `SymbolInfo` under each use's span, and
+        // codegen reads *those* — so a static moved here but not there keeps
+        // being loaded from where it used to be. (The fuzzer caught exactly
+        // that: a program whose only surviving static had shifted down read a
+        // function pointer out of the hole the dropped one left.) Both are
+        // rewritten, and a snapshot is only touched when its name *and* its
+        // current address match, so a local shadowing a static's name is left
+        // alone.
+        let mut moves: HashMap<String, (u16, u16)> = HashMap::default();
+        for (name, addr) in &kept {
+            if let Some(sym) = self.table.lookup(name) {
+                if let SymbolLocation::Absolute(old) = sym.location {
+                    moves.insert(name.clone(), (old, *addr));
+                }
+                let mut moved = sym.clone();
+                moved.location = SymbolLocation::Absolute(*addr);
+                self.table.insert(name.clone(), moved);
+            }
+        }
+        let relocate = |sym: &mut SymbolInfo| {
+            if let Some((old, new)) = moves.get(&sym.name)
+                && sym.location == SymbolLocation::Absolute(*old)
+            {
+                sym.location = SymbolLocation::Absolute(*new);
+            }
+        };
+        self.resolved_symbols.values_mut().for_each(relocate);
+        // `inline_param_symbols` is a third copy, and its name undersells it:
+        // it holds every symbol a function's body analysis resolved, not just
+        // its parameters. An inline expansion merges those over
+        // `resolved_symbols` at the call site, so a static corrected in the
+        // other two stores is put back to its old address here.
+        // `rewrite_frame_offsets` keeps the same three in step for the same
+        // reason.
+        for meta in self.function_metadata.values_mut() {
+            if let Some(syms) = meta.inline_param_symbols.as_mut() {
+                syms.values_mut().for_each(relocate);
+            }
+        }
+
+        // Pass 3: re-flatten. An initializer that embeds `&OTHER` resolved it
+        // to a number at registration time, and that number may have moved.
+        let mut asts: HashMap<String, Spanned<crate::ast::Expr>> = HashMap::default();
+        for item in self.imported_items.iter().chain(source.items.iter()) {
+            if let Item::Static(st) = &item.node
+                && st.mutable
+            {
+                asts.insert(st.name.node.clone(), st.init.clone());
+            }
+        }
+
+        let mut repacked = Vec::with_capacity(kept.len());
+        for (name, addr) in kept {
+            let ty = match self.table.lookup(&name) {
+                Some(sym) => sym.ty.clone(),
+                None => continue,
+            };
+            let bytes = match asts.get(&name) {
+                Some(init) => self.static_init_bytes(init, &ty)?,
+                // No declaration to re-read: keep what registration produced.
+                None => match self.static_inits.iter().find(|i| i.name == name) {
+                    Some(old) => old.bytes.clone(),
+                    None => continue,
+                },
+            };
+            repacked.push(crate::sema::StaticInit { name, addr, bytes });
+        }
+
+        self.static_inits = repacked;
+        self.import_context.borrow_mut().bss_cursor = Some(cursor);
+        Ok(())
     }
 
     fn register_address(&mut self, addr: &crate::ast::AddressDecl) -> Result<(), SemaError> {

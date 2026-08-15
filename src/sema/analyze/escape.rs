@@ -384,16 +384,35 @@ impl SemanticAnalyzer {
                     let prov = self.provenance_of(arg, facts);
                     let is_known_fn = functions.iter().any(|(n, _)| n == callee);
                     if !is_known_fn {
-                        // An indirect call: no call edge was recorded for it, so
-                        // frame colouring never saw it and cannot protect the
-                        // callee's frame from overlapping this one.
-                        if prov < Provenance::Global {
+                        // An indirect call. Which function runs is unknown, but
+                        // the candidates are not — only a function whose address
+                        // was taken can be reached through a pointer — so this
+                        // is the rule below, asked of all of them at once.
+                        //
+                        // It used to be "globals only", on the grounds that
+                        // frame colouring could not see an indirect call and so
+                        // could not keep the callee's frame off this one. That
+                        // is no longer true: an indirect caller now gets a
+                        // colouring edge to every address-taken function, so a
+                        // pointer into this frame stays valid across the call.
+                        // What remains is the same hazard a direct call has —
+                        // the callee might *store* the pointer somewhere that
+                        // outlives the call.
+                        if prov == Provenance::Local
+                            && let Some(bad) = self
+                                .address_taken_functions
+                                .iter()
+                                .find(|f| escapes.get(*f).is_some_and(|s| s.contains(&i)))
+                        {
                             fail(
                                 SemaError::EscapingPointer {
-                                    reason: "only a pointer to global storage may cross an \
-                                             indirect call; frame colouring does not see calls \
-                                             made through a function pointer"
-                                        .to_string(),
+                                    reason: format!(
+                                        "this indirect call could reach '{}', which stores that \
+                                         parameter somewhere that outlives the call, so it must \
+                                         not be given a pointer to a local. Point it at a \
+                                         `static` instead",
+                                        bad
+                                    ),
                                     span: arg.span,
                                 },
                                 &mut error,

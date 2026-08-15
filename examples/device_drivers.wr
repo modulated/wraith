@@ -23,6 +23,8 @@
 // tests/e2e/example_drivers.rs runs this program against the emulated UART
 // and VIA, so what it does is checked and not just claimed.
 
+import {enable_interrupts} from "intrinsics.wr";
+
 // ===========================================================================
 // Hardware
 // ===========================================================================
@@ -34,6 +36,7 @@ const UART_RBR: read  addr = 0x7F00;   // receive buffer   (read)
 const UART_THR: write addr = 0x7F00;   // transmit holding (write)
 const UART_DLL: write addr = 0x7F00;   // divisor low,  while DLAB is set
 const UART_DLM: write addr = 0x7F01;   // divisor high, while DLAB is set
+const UART_IER: write addr = 0x7F01;   // interrupt enable, while DLAB is clear
 const UART_LCR: write addr = 0x7F03;   // line control
 const UART_LSR: read  addr = 0x7F05;   // line status
 
@@ -42,6 +45,8 @@ const LSR_THR_EMPTY:  u8 = 0x20;
 const LCR_DLAB:       u8 = 0x80;
 const LCR_8N1:        u8 = 0x03;
 const BAUD_9600:      u8 = 12;         // 1.8432 MHz / (16 * 9600)
+const IER_RX:         u8 = 0x01;       // interrupt when a byte arrives
+const IER_THRE:       u8 = 0x02;       // interrupt when the transmitter is free
 
 // 6522 VIA. Port B drives eight output pins, port A reads eight input pins,
 // and the data-direction registers decide which way each pin faces.
@@ -54,16 +59,27 @@ const VIA_DDRA:  addr = 0x7F13;
 // The driver interface
 // ===========================================================================
 //
-// Every driver answers the same four calls. `init` brings the hardware up,
-// `ready` reports whether a byte can be taken without blocking, `read` takes
-// one, `write` sends one. That is the whole contract - a driver is written by
-// filling in these four and nothing else.
+// Every driver answers the same six calls:
+//
+//   init     bring the hardware up
+//   service  called from the interrupt handler, never by the kernel
+//   ready    can a byte be taken right now, without waiting
+//   read     take one
+//   write    queue one; it goes out when the device is ready for it
+//   pending  how many bytes are still queued to send
+//
+// That is the whole contract - a driver is written by filling in these six.
+// `write` and `pending` are what make the console asynchronous: `write` hands
+// a byte to the driver and returns, and `pending` is how a caller that really
+// does need the line drained finds out when.
 
 struct Driver {
-    init:  fn(),
-    ready: fn() -> u8,
-    read:  fn() -> u8,
-    write: fn(u8),
+    init:    fn(),
+    service: fn(),
+    ready:   fn() -> u8,
+    read:    fn() -> u8,
+    write:   fn(u8),
+    pending: fn() -> u8,
 }
 
 // --- The null driver: what an unclaimed slot holds. ------------------------
@@ -71,38 +87,114 @@ struct Driver {
 static SINK: u8 = 0;
 
 fn null_init() {}
+fn null_service() {}
 fn null_ready() -> u8 { return 0; }
 fn null_read() -> u8 { return 0; }
 fn null_write(c: u8) { SINK = c; }
+fn null_pending() -> u8 { return 0; }
 
-// --- UART driver -----------------------------------------------------------
+// --- UART driver: interrupt-driven, with a ring buffer at each end ---------
+//
+// Neither `read` nor `write` touches the device. The handler moves bytes
+// between the hardware and these rings, and the kernel only ever sees the
+// rings, so a slow line costs the foreground nothing.
+//
+// Each ring has one writer per index, which is what makes them safe without
+// disabling interrupts: the handler advances RX_HEAD and TX_TAIL, the
+// foreground advances RX_TAIL and TX_HEAD, and a byte-sized store on this CPU
+// cannot be seen half-done. The indices free-run and wrap at 256; only the
+// subscript is masked, so `head - tail` is the count and `head == tail` means
+// empty. (Masking the indices themselves would make a full ring look empty.)
+
+const RING:      u8 = 16;      // must be a power of two, for the mask below
+const RING_MASK: u8 = 15;
+
+static RX_BUF:  [u8; 16] = [0; 16];
+static RX_HEAD: u8 = 0;        // advanced by the handler
+static RX_TAIL: u8 = 0;        // advanced by the foreground
+
+static TX_BUF:  [u8; 16] = [0; 16];
+static TX_HEAD: u8 = 0;        // advanced by the foreground
+static TX_TAIL: u8 = 0;        // advanced by the handler
 
 fn uart_init() {
     UART_LCR = LCR_DLAB;       // divisor latch visible
     UART_DLL = BAUD_9600;
     UART_DLM = 0;
     UART_LCR = LCR_8N1;        // back to the data registers, 8N1
+    RX_HEAD = 0;
+    RX_TAIL = 0;
+    TX_HEAD = 0;
+    TX_TAIL = 0;
+    UART_IER = IER_RX;         // receive interrupts on; transmit turns itself
+                               // on when there is something to send
 }
 
-fn uart_ready() -> u8 { return UART_LSR & LSR_DATA_READY; }
+/// Called from the interrupt handler. Moves bytes in both directions and,
+/// crucially, stops asking about the transmitter once the queue is empty: a
+/// 16550 asserts THR-empty continuously, so leaving that interrupt enabled
+/// with nothing to send is an interrupt storm rather than an idle machine.
+fn uart_service() {
+    while (UART_LSR & LSR_DATA_READY) != 0 {
+        RX_BUF[RX_HEAD & RING_MASK] = UART_RBR;
+        RX_HEAD = RX_HEAD + 1;
+    }
+    if TX_HEAD != TX_TAIL && (UART_LSR & LSR_THR_EMPTY) != 0 {
+        UART_THR = TX_BUF[TX_TAIL & RING_MASK];
+        TX_TAIL = TX_TAIL + 1;
+    }
+    if TX_HEAD == TX_TAIL {
+        UART_IER = IER_RX;     // transmitter idle: stop asking
+    }
+}
 
-fn uart_read() -> u8 { return UART_RBR; }
+fn uart_ready() -> u8 {
+    if RX_HEAD == RX_TAIL {
+        return 0;
+    }
+    return 1;
+}
+
+fn uart_read() -> u8 {
+    let c: u8 = RX_BUF[RX_TAIL & RING_MASK];
+    RX_TAIL = RX_TAIL + 1;
+    return c;
+}
 
 fn uart_write(c: u8) {
-    while (UART_LSR & LSR_THR_EMPTY) == 0 {}
-    UART_THR = c;
+    // The one place a caller can still wait, and only when it is producing
+    // faster than the line can carry it away. Note the handler is what makes
+    // this loop terminate, so a caller that queues a full ring with interrupts
+    // disabled hangs here - which is a bug in the caller, not the driver.
+    while (TX_HEAD - TX_TAIL) == RING {}
+    TX_BUF[TX_HEAD & RING_MASK] = c;
+    TX_HEAD = TX_HEAD + 1;
+    // Queue first, then enable: the other order lets the handler run between
+    // the two and transmit from a slot not yet written. Enabling an interrupt
+    // for a byte already sent costs one spurious call to `service`; enabling
+    // it for a byte not yet stored sends a stale one.
+    UART_IER = IER_RX | IER_THRE;
 }
 
-// --- VIA driver ------------------------------------------------------------
+fn uart_pending() -> u8 { return TX_HEAD - TX_TAIL; }
+
+// --- VIA driver: no buffering, and none needed ----------------------------
+//
+// A parallel port writes a pin state and is done, so this driver is
+// synchronous. Nothing above it can tell: `write` returns having finished,
+// and `pending` truthfully answers zero. That the same interface covers a
+// buffered device and an unbuffered one is the point of having one.
 
 fn via_init() {
     VIA_DDRB = 0xFF;           // port B: all outputs
     VIA_DDRA = 0x00;           // port A: all inputs
 }
 
+fn via_service() {}                         // nothing to do between calls
 fn via_ready() -> u8 { return 1; }          // input pins are always readable
 fn via_read() -> u8 { return VIA_PORTA; }
 fn via_write(c: u8) { VIA_PORTB = c; }
+fn via_pending() -> u8 { return 0; }        // the write already happened
 
 // ===========================================================================
 // The device table
@@ -117,27 +209,33 @@ fn via_write(c: u8) { VIA_PORTB = c; }
 // no bounds check on an index in this language; the table pays for that with
 // one wasted row.
 //
-// To add a device: write its four entry points, add a row here, and give it a
+// To add a device: write its six entry points, add a row here, and give it a
 // number. That is the whole procedure - nothing below this section changes,
 // and a driver reached only through the table is not reported as dead code.
 
-const DEV_NONE: u8 = 0;
-const DEV_UART: u8 = 1;
-const DEV_VIA:  u8 = 2;
+const DEV_NONE:  u8 = 0;
+const DEV_UART:  u8 = 1;
+const DEV_VIA:   u8 = 2;
+const DEV_COUNT: u8 = 3;
 
 static DRIVERS: [Driver; 3] = [
-    Driver { init: null_init, ready: null_ready, read: null_read, write: null_write },
-    Driver { init: uart_init, ready: uart_ready, read: uart_read, write: uart_write },
-    Driver { init: via_init,  ready: via_ready,  read: via_read,  write: via_write  },
+    Driver { init: null_init, service: null_service, ready: null_ready,
+             read: null_read, write: null_write, pending: null_pending },
+    Driver { init: uart_init, service: uart_service, ready: uart_ready,
+             read: uart_read, write: uart_write, pending: uart_pending },
+    Driver { init: via_init,  service: via_service,  ready: via_ready,
+             read: via_read,  write: via_write,  pending: via_pending  },
 ];
 
 // The console starts out pointing at nothing. Booting a machine with no
 // serial port attached should print into the void, not crash.
 static CONSOLE: Driver = Driver {
-    init:  null_init,
-    ready: null_ready,
-    read:  null_read,
-    write: null_write,
+    init:    null_init,
+    service: null_service,
+    ready:   null_ready,
+    read:    null_read,
+    write:   null_write,
+    pending: null_pending,
 };
 
 /// Which driver the console currently holds, so the kernel can report it.
@@ -146,12 +244,40 @@ static CONSOLE_ID: u8 = DEV_NONE;
 /// Bind a driver to the console and bring its hardware up.
 ///
 /// The whole vtable moves in one assignment: binding and assignment copy a
-/// struct, so CONSOLE ends up with its own four pointers rather than an alias
+/// struct, so CONSOLE ends up with its own six pointers rather than an alias
 /// into the table. Registering a device is one row's worth of work.
 fn register_console(id: u8) {
     CONSOLE = DRIVERS[id];
     CONSOLE_ID = id;
     CONSOLE.init();
+}
+
+// ===========================================================================
+// The interrupt handler
+// ===========================================================================
+//
+// One handler for the whole machine, because the 6502 has one IRQ line: every
+// device pulls it low and none of them says so. The handler asks each driver
+// in turn - "anything for you?" - which is why `service` is in the interface
+// and why the table is worth having. Adding a device does not touch this.
+//
+// A driver that is not the console is still serviced. The UART keeps filling
+// its receive ring while the console is pointed at the VIA, which is what you
+// want: bytes arriving during that window are waiting when it comes back.
+//
+// Note the cost the compiler pays here. `DRIVERS[i].service()` is an indirect
+// call, so it must assume any driver can run, and an interrupt handler has to
+// preserve every zero-page frame its callees might use - the whole span, on
+// every interrupt. A handler that called one known function directly would
+// save less.
+
+#[irq]
+fn on_irq() {
+    let i: u8 = 0;
+    while i < DEV_COUNT {
+        DRIVERS[i].service();
+        i = i + 1;
+    }
 }
 
 // ===========================================================================
@@ -184,10 +310,27 @@ fn put_hex(v: u8) {
     put(hex_digit(v & 0x0F));
 }
 
-/// Take one byte, spinning until the device has one to give.
+/// Take one byte, waiting until the device has one to give. On a buffered
+/// device the byte usually arrived some time ago and this returns at once;
+/// what this waits for is a byte that has not been sent yet, which no amount
+/// of buffering can hurry.
 fn get() -> u8 {
     while CONSOLE.ready() == 0 {}
     return CONSOLE.read();
+}
+
+/// Wait until everything queued has actually left the device.
+///
+/// The counterpart to `write` returning early: the kernel needs a point where
+/// it can insist the line is clear - before powering down, before handing the
+/// port to something else, before a message that must not be lost. It is the
+/// only place the foreground waits on the transmitter, and on an unbuffered
+/// device it returns immediately because `pending` is always zero.
+///
+/// This is one of the loops that depends on the handler running. With
+/// interrupts disabled and bytes queued it never returns.
+fn console_flush() {
+    while CONSOLE.pending() != 0 {}
 }
 
 /// Echo back whatever is already waiting, and report how many bytes moved.
@@ -230,28 +373,42 @@ fn dev_write(id: u8, c: u8) {
 const BANNER: str = "wraith> ";
 const SENSOR: str = "\nport a = ";
 
-const OUT_ECHOED:  addr = 0x0900;   // bytes the console echoed
-const OUT_SENSOR:  addr = 0x0901;   // what the VIA's input port read
-const OUT_CONSOLE: addr = 0x0902;   // which driver the console ended on
+const OUT_QUEUED:  addr = 0x0900;   // bytes queued before interrupts were on
+const OUT_ECHOED:  addr = 0x0901;   // bytes the console echoed
+const OUT_SENSOR:  addr = 0x0902;   // what the VIA's input port read
+const OUT_CONSOLE: addr = 0x0903;   // which driver the console ended on
 
 #[reset]
 fn main() {
-    // Boot: bring the console up on the serial port and greet whoever is
-    // listening. `print` has no idea a UART exists.
+    // Boot with interrupts still masked. The console comes up and the banner
+    // is written - and goes nowhere, because nothing is running that could
+    // send it. That is the whole claim about `write` being asynchronous, made
+    // checkable: eight bytes are queued and the device has seen none of them.
     register_console(DEV_UART);
     print(BANNER);
+    OUT_QUEUED = CONSOLE.pending();
 
-    // Anything already typed comes back echoed - still through the vtable.
+    // Let the handler run. From here the banner goes out a byte per interrupt
+    // while the foreground gets on with something else, and anything arriving
+    // on the line lands in the receive ring without being asked for.
+    enable_interrupts();
+    console_flush();
+
+    // Whatever was typed while the banner was going out is already waiting -
+    // no one polled for it. Echo it back; `write` returns before any of it
+    // reaches the wire.
     OUT_ECHOED = echo_pending();
+    console_flush();
 
     // Now read a sensor wired to the VIA's input port. The kernel code above
-    // does not change; the driver underneath it does.
+    // does not change; the driver underneath it does - and this one has no
+    // buffering at all, which nothing above the interface can tell.
     register_console(DEV_VIA);
     let sample: u8 = get();
     OUT_SENSOR = sample;
 
     // Hand the console back to the serial port and report the reading. The
-    // same `print` and `put_hex` now reach different hardware.
+    // UART kept servicing itself throughout, console or not.
     register_console(DEV_UART);
     print(SENSOR);
     put_hex(sample);
@@ -260,6 +417,11 @@ fn main() {
     // console - the same call a kernel makes on behalf of a process that
     // named a device it does not own.
     dev_write(DEV_UART, 0x0A);   // newline
+
+    // Insist the line is clear before stopping. Without this the program
+    // would halt with bytes still sitting in the ring, which on real hardware
+    // is a truncated last line.
+    console_flush();
 
     OUT_CONSOLE = CONSOLE_ID;
     loop {}

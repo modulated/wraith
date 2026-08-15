@@ -48,6 +48,8 @@ pub const LSR_THR_EMPTY: u8 = 0x20;
 pub const LSR_TX_EMPTY: u8 = 0x40;
 /// Interrupt-enable bit: received-data-available.
 pub const IER_RX_AVAIL: u8 = 0x01;
+/// Interrupt-enable bit: transmitter-holding-register empty.
+pub const IER_THR_EMPTY: u8 = 0x02;
 /// Line-control bit: divisor latch access.
 pub const LCR_DLAB: u8 = 0x80;
 
@@ -90,9 +92,24 @@ impl Uart {
         self.rx.extend(bytes.iter().copied());
     }
 
-    /// True when the device is asserting its interrupt line: receive data is
-    /// available and the corresponding interrupt is enabled.
+    /// True when the device is asserting its interrupt line.
+    ///
+    /// Two causes, as on the real part. Receive data available is the
+    /// straightforward one. Transmitter-holding-register empty is asserted
+    /// *continuously* while enabled, because transmission is instantaneous
+    /// here and the holding register is therefore always empty — which is the
+    /// real behaviour too, and the reason a driver has to disable this
+    /// interrupt once it has nothing left to send. A driver that forgets gets
+    /// an interrupt storm, and gets it here rather than on hardware.
     pub fn irq_asserted(&self) -> bool {
+        let rx = !self.rx.is_empty() && (self.ier & IER_RX_AVAIL) != 0;
+        let tx = (self.ier & IER_THR_EMPTY) != 0;
+        rx || tx
+    }
+
+    /// Whether receive data is what is currently asserting the line. Receive
+    /// outranks transmit on the real part's interrupt-identification register.
+    fn rx_pending(&self) -> bool {
         !self.rx.is_empty() && (self.ier & IER_RX_AVAIL) != 0
     }
 
@@ -117,10 +134,13 @@ impl Uart {
                     self.ier
                 }
             }
-            // Interrupt identification: bit 0 clear means "interrupt pending".
+            // Interrupt identification: bit 0 clear means "interrupt pending",
+            // and the cause is in the bits above it, highest priority first.
             uart_reg::IIR_FCR => {
-                if self.irq_asserted() {
+                if self.rx_pending() {
                     0x04 // received data available
+                } else if (self.ier & IER_THR_EMPTY) != 0 {
+                    0x02 // transmitter holding register empty
                 } else {
                     0x01 // no interrupt pending
                 }

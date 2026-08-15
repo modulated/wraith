@@ -37,22 +37,59 @@ fn run_example(typed: &[u8]) -> crate::common::exec::Exec {
 fn the_driver_example_talks_to_both_devices() {
     let mut e = run_example(b"hi");
 
-    // Everything the kernel printed went out through the vtable: the banner
-    // before anything was read, the two echoed bytes, then the sensor report
-    // and a newline sent by device number instead of through the console.
+    // Everything the kernel printed went out through the vtable: the banner,
+    // the two echoed bytes, the sensor report, and a newline sent by device
+    // number instead of through the console. The final flush is what makes
+    // the last line whole.
     assert_eq!(
         e.uart_output(),
         "wraith> hi\nport a = 5A\n",
         "the console vtable reached the UART for every write"
     );
 
-    assert_eq!(e.mem(0x0900), 2, "echo_pending drained both queued bytes");
+    assert_eq!(e.mem(0x0901), 2, "echo_pending drained both queued bytes");
     assert_eq!(
-        e.mem(0x0901),
+        e.mem(0x0902),
         PORT_A,
         "get() read the VIA's input port, not the UART, once the driver was swapped"
     );
-    assert_eq!(e.mem(0x0902), 1, "the console ended on the UART driver");
+    assert_eq!(e.mem(0x0903), 1, "the console ended on the UART driver");
+}
+
+#[test]
+fn writing_to_the_console_does_not_wait_for_the_line() {
+    // The asynchrony itself, and the reason it is checkable rather than
+    // asserted: the banner is written with interrupts still masked, so
+    // nothing exists that could transmit it. If `write` sent the bytes
+    // itself, the queue would be empty here and the UART would already have
+    // them.
+    let mut e = run_example(b"");
+    assert_eq!(
+        e.mem(0x0900),
+        8,
+        "all eight banner bytes were queued, none sent"
+    );
+}
+
+#[test]
+fn the_handler_drains_the_queue_once_interrupts_are_on() {
+    // The other half: those queued bytes do come out, and in order, without
+    // the foreground touching the device again.
+    let mut e = run_example(b"");
+    assert!(
+        e.uart_output().starts_with("wraith> "),
+        "the handler transmitted the queued banner, got {:?}",
+        e.uart_output()
+    );
+}
+
+#[test]
+fn the_receive_ring_fills_without_being_polled() {
+    // Nothing in `main` reads the device before `echo_pending`, and
+    // `echo_pending` reads the ring rather than the UART. The bytes got there
+    // because the handler put them there while the banner was going out.
+    let mut e = run_example(b"hi");
+    assert_eq!(e.mem(0x0901), 2, "the handler received both bytes unasked");
 }
 
 #[test]
@@ -80,6 +117,6 @@ fn nothing_is_echoed_when_nothing_was_typed() {
     // without blocking, and the banner is still the only thing transmitted
     // before the sensor report.
     let mut e = run_example(b"");
-    assert_eq!(e.mem(0x0900), 0, "no bytes waiting, none echoed");
+    assert_eq!(e.mem(0x0901), 0, "no bytes waiting, none echoed");
     assert_eq!(e.uart_output(), "wraith> \nport a = 5A\n");
 }

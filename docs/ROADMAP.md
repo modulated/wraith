@@ -70,18 +70,21 @@ outset (`Emitter::emit_label` already does this for registers).
 
 ### Smaller code
 
-- **Reclaim BSS from dropped statics.** Dead statics are no longer emitted, but
-  the registration pass (`register.rs` `bss_alloc`) assigns every mutable
-  static a RAM address before liveness (`reachable_symbols`) is known, so a
-  dropped static still reserves its bytes. A naive "allocate after the liveness
-  walk" reorder does not work directly: initializer `&OTHER_STATIC` references
-  and the flattened init bytes are resolved at registration time, in
-  declaration order, from the already-assigned addresses. Recovering the space
-  means splitting static registration into phases — declare symbols and collect
-  refs, run liveness, then assign BSS addresses to the live statics (still in
-  declaration order) and flatten their init bytes — and keeping the shared
-  `bss_cursor` consistent before `finalize_frames` lays local-array blocks
-  above it.
+- **Reclaim BSS from dropped statics.** *Done.* Registration hands out BSS
+  addresses in declaration order, long before liveness is known — an
+  initializer's `&OTHER` has to resolve to a number as it is flattened — so a
+  dropped static used to keep its bytes. Rather than defer allocation, the
+  layout is repacked between `reachable_symbols` and `finalize_frames`: live
+  statics keep their relative order and the gaps close. Sizes come from the
+  gaps between consecutive addresses, so nothing re-derives a type's width.
+
+  The lesson worth keeping is where an address lives by that point. There are
+  *three* copies — the symbol table, the per-use snapshots in
+  `resolved_symbols`, and `inline_param_symbols`, which despite its name holds
+  every symbol a function's body resolved and is merged back over
+  `resolved_symbols` at each inline call site. Moving a static in fewer than
+  all three silently puts it back. `rewrite_frame_offsets` already had to keep
+  the same three in step; the fuzzer caught both halves of getting it wrong.
 
 ---
 
@@ -142,7 +145,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Eleven real bugs so far, most of them silent:
+Twelve real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -184,10 +187,17 @@ Eleven real bugs so far, most of them silent:
    expression, codegen's pattern-matched a bare literal, and `-5` parses as
    `Unary(Neg, 5)`. Codegen now evaluates too, with the constant environment, so
    `[N - 1, 0]` resolves as well.
+10. Repacking BSS to reclaim a dropped static's bytes moved a live one, and
+    two of the three places an address lives were left behind — the per-use
+    snapshots in `resolved_symbols`, and then `inline_param_symbols`, which is
+    re-merged over those at every inline call site. Both showed up as a
+    function pointer read out of the hole the dropped static left, on the very
+    first run after the change. Caught before the change was ever committed,
+    which is the case for having the fuzzer at all.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
-`tests/e2e/loop_sweep.rs`.
+`tests/e2e/loop_sweep.rs`, `tests/e2e/bss_reclaim.rs`.
 
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
@@ -208,7 +218,11 @@ and an oracle that is merely *probably* right is worse than no oracle:
   caller's locals, and `examples/device_drivers.wr` found it by hand. A
   generator that installs one of several same-signature functions in a vtable
   and dispatches through it would have found it first — the oracle only needs
-  to know which function it installed.
+  to know which function it installed. The area has since grown: an indirect
+  call now stages pointer, string, enum and struct arguments as well as
+  scalars, and the escape rule that guarded it was re-derived rather than
+  merely relaxed. All of it is covered by hand-written tests and none of it by
+  the generator.
 - **Slices, pointers and enums.** Arrays and structs of scalars are generated;
   a slice or a `&T` gives two names for one piece of storage, which the oracle
   would have to alias-model, and enums are a separate lowering again.
@@ -256,26 +270,31 @@ emulator) turned these up. The silent-miscompile findings from that run are
 fixed and regression-tested in `tests/e2e/match_ranges.rs`; what follows is what
 it found and left standing.
 
-### Argument staging is bounded by a fixed 11-byte pool
+### Argument staging holds one argument per nesting level
 
-Arguments are evaluated into a fixed zero-page pool (`$F4-$FE`) before being
-copied into the callee's frame, and a call nested in another call's argument
-list needs room for both lists at once. Four 16-bit arguments nested inside four
-more exceeds it. The failure is a compile error naming the workaround (bind the
-inner call to a `let`), not a miscompile — the miscompiles that used to hide
-here are fixed and regression-tested in `tests/e2e/nested_calls.rs`.
+*Mostly lifted.* Arguments used to be evaluated into a fixed 11-byte zero-page
+pool (`$F4-$FE`) as one contiguous block, so a call nested in another call's
+argument list needed room for both lists at once and four 16-bit arguments
+inside four more was a compile error.
 
-Lifting it means staging arguments on the software stack rather than in a pool
-at a fixed address, which is the same mechanism the nested-call fix already uses
-to shelter what is staged so far. The pool would then hold one argument at a
-time and the depth would be bounded by the 256-byte stack instead.
+A call whose whole list fits still stages there — it is the cheaper path, `LDA
+temp; STA param` per byte, and nothing that used to fit changed by a byte. When
+the block does not fit, each argument now moves to the software stack as soon
+as it is evaluated, so the pool holds only that call's *widest single
+argument* and the depth is bounded by the stack's 256 bytes. Because the frame
+save shares that stack, a recursive callee's save happens before the arguments
+go on rather than after, or it would bury them.
 
-The fuzzer budgets the pool so it rarely generates a program that exhausts it,
-and skips (and counts) the ones that slip through — the budget cannot be exact,
-because the pool has other consumers a program's source does not reveal, and
-modelling the compiler's allocator inside the generator would put that knowledge
-in the wrong place. The skip count is printed and capped, so if lifting this
-limit ever stops mattering the test will say so rather than drift.
+What is left is that a nesting level still costs its widest argument, so around
+five levels of 16-bit nesting exhausts the pool. Removing even that means
+pushing each argument straight from the registers it is produced in, without a
+zero-page slot in between — which needs the per-argument staging in
+`generate_call` restructured so the push has one place to happen, rather than
+being reached through a dozen `continue`s.
+
+The failure is still a compile error rather than a miscompile, and the fuzzer
+budgets one argument per level to match, skipping and counting anything that
+overruns anyway.
 
 ### A mutable slice type
 
@@ -333,10 +352,33 @@ Also open:
 
 ## Structure & maintainability
 
-- **Shared exhaustive Stmt/Expr walker.** The dominant historical defect was
-  hand-enumerated per-form walkers and merge lists that missed new variants. A
-  single recursion helper shared by all analysis walkers would close it; the
-  import-merge half is already done.
+- **Shared exhaustive Stmt/Expr walker.** Hand-enumerated per-form walkers and
+  merge lists that missed new variants were the dominant defect for a long
+  time. A single recursion helper shared by all analysis walkers would close
+  it; the import-merge half is already done, and `contains_call` /
+  `expr_contains_call` are exhaustive.
+- **Make codegen's per-form dispatch exhaustive, or make its fallback loud.**
+  The same defect, one layer down, and now the more common one. Where a walker
+  asks "is there a call in here", these matches ask "which strategy does this
+  form need" — and their fallback is not `false`, it is *another strategy*,
+  usually the scalar one. A form nobody enumerated does not fail; it gets
+  loaded as though it were a `u8`.
+
+  Six bugs in a row had this shape. Struct copy handled a literal and a call
+  and fell through to the scalar path for every *place*, so `let q: P = PS[1]`
+  bound one byte. Struct arguments matched a zero-page local and nothing else.
+  `.low`/`.high` had no assignment arm. Indirect calls took scalars only.
+  Frame colouring had no edge for an indirect call. Assignment evaluated its
+  value generically *and* again per target, so `arr[i] = f()` called `f` twice.
+  Each compiled silently and produced a wrong answer.
+
+  Two shapes to attack. Resolvers returning `Option`/`bool` (
+  `resolve_static_addr`, `yields_struct_pointer`, `emit_struct_place_address`)
+  whose `None` a caller reads as "not applicable, use the ordinary path" —
+  those want callers that distinguish "not this shape" from "unhandled", and
+  error on the second. And genuine `_ =>` arms in strategy matches, which want
+  the treatment `contains_call` got: enumerate every variant so a new one is a
+  compile error. `aggregate.rs` alone has 24 catch-alls, 9 of which error.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
   `types.rs` and `control_flow.rs` were already behavioral or are asserting
