@@ -277,3 +277,41 @@ fn an_aggregate_no_copy_path_claims_is_an_error_not_a_byte() {
         "it is 4 bytes",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Returns: the third site with the same conventions.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_aggregate_relayed_through_a_return_survives() {
+    // A return leaves a pointer to the aggregate in A:X, so relaying one — the
+    // value arriving as a parameter or from another call, and going straight
+    // back out — puts the binding, the argument and the return conventions in
+    // a line. Each of the four has a different source shape.
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        const OUT2: addr = 0x0902;
+        const T: [u8; 4] = [11, 22, 33, 44];
+        struct P { x: u8, y: u8 }
+        struct D { get: fn() -> &[u8] }
+        fn mk() -> &[u8] { return T[1..4]; }
+        static DEV: D = D { get: mk };
+        fn relay_indirect() -> &[u8] { return DEV.get(); }
+        fn relay_param(s: &[u8]) -> &[u8] { return s; }
+        fn relay_struct(p: P) -> P { return p; }
+        #[reset]
+        fn main() {
+            let a: &[u8] = relay_indirect();
+            let b: &[u8] = relay_param(T[0..2]);
+            let q: P = relay_struct(P { x: 6, y: 7 });
+            OUT0 = a[0]; OUT1 = b.len as u8; OUT2 = q.y;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (22, 2, 7),
+        "a slice from an indirect call, a slice from a parameter, a struct from a parameter"
+    );
+}
