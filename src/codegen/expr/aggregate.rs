@@ -866,6 +866,99 @@ pub(crate) fn resolve_static_struct_lvalue(
     }
 }
 
+/// Emit the *address* of a struct-valued place into A:X — the pointer
+/// convention — and return the struct's name. `None` when `expr` is not a
+/// place: a literal or a call chooses its own storage and leaves a pointer to
+/// it already, which the return-by-value path handles.
+///
+/// Three shapes, because a struct's bytes are reachable three ways: inline
+/// storage whose address the assembler knows, a by-reference parameter whose
+/// slot holds a pointer to the caller's storage, and an array element whose
+/// offset exists only at run time.
+pub(crate) fn emit_struct_place_address(
+    expr: &Spanned<Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<Option<String>, CodegenError> {
+    use crate::sema::table::SymbolLocation;
+    use crate::sema::types::Type;
+
+    // Inline storage: a local, a static, a nested field, or a constant index.
+    if let Some((base, struct_name)) = resolve_static_struct_lvalue(expr, info) {
+        base.emit_as_pointer(emitter);
+        emitter.invalidate_registers();
+        return Ok(Some(struct_name));
+    }
+
+    // A by-reference struct parameter, or a `&Struct`: the slot holds a
+    // pointer to storage that belongs to someone else, so the address is a
+    // load rather than a constant.
+    if let Expr::Variable(name) = &expr.node
+        && let Some(sym) = info
+            .resolved_symbols
+            .get(&expr.span)
+            .or_else(|| info.table.lookup(name))
+        && let SymbolLocation::ZeroPage(slot) = sym.location
+    {
+        let pointee = match &sym.ty {
+            Type::Named(n) => Some(n.clone()),
+            Type::Pointer(inner) => match &**inner {
+                Type::Named(n) => Some(n.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(struct_name) = pointee
+            && info.type_registry.get_struct(&struct_name).is_some()
+        {
+            emitter.emit_inst("LDA", &format!("${:02X}", slot));
+            emitter.emit_inst("LDX", &format!("${:02X}", slot + 1));
+            emitter.invalidate_registers();
+            return Ok(Some(struct_name));
+        }
+    }
+
+    // An array element at a runtime index: base + index * element size. The
+    // scaled index is one byte — element offsets are addressed as `abs,Y`
+    // everywhere else, so the array is within 256 bytes either way — which
+    // leaves the carry into the high byte as the only 16-bit part.
+    if let Expr::Index { object, index } = &expr.node
+        && let Some((base, elem_struct)) = array_of_struct_base(object, info)
+    {
+        let elem_size = info
+            .type_registry
+            .get_struct(&elem_struct)
+            .ok_or_else(|| {
+                CodegenError::UnsupportedOperation(format!("struct '{elem_struct}' not found"))
+            })?
+            .total_size;
+        generate_expr(index, emitter, info, string_collector)?;
+        emit_scale_index(emitter, elem_size);
+        emitter.emit_inst("CLC", "");
+        match &base {
+            StaticBase::Addr(a) => {
+                emitter.emit_inst("ADC", &format!("#${:02X}", a & 0xFF));
+                emitter.emit_inst("PHA", "");
+                emitter.emit_inst("LDA", &format!("#${:02X}", a >> 8));
+            }
+            StaticBase::Label(..) => {
+                let label = base.operand(0);
+                emitter.emit_inst("ADC", &format!("#<{}", label));
+                emitter.emit_inst("PHA", "");
+                emitter.emit_inst("LDA", &format!("#>{}", label));
+            }
+        }
+        emitter.emit_inst("ADC", "#$00");
+        emitter.emit_inst("TAX", "");
+        emitter.emit_inst("PLA", "");
+        emitter.invalidate_registers();
+        return Ok(Some(elem_struct));
+    }
+
+    Ok(None)
+}
+
 /// Scale A (a runtime array index) by a constant element size, leaving the byte
 /// offset in A. Uses shifts for power-of-two sizes and unrolled adds otherwise.
 fn emit_scale_index(emitter: &mut Emitter, size: usize) {

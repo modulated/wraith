@@ -448,22 +448,24 @@ pub(super) fn generate_call(
         }
 
         if is_struct && param_is_struct {
-            // Struct pass-by-reference: pass the 2-byte ZP address
-            // The argument must be a variable (for now)
-            if let crate::ast::Expr::Variable(var_name) = &arg.node
-                && let Some(sym) = info
-                    .resolved_symbols
-                    .get(&arg.span)
-                    .or_else(|| info.table.lookup(var_name))
-                && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
-            {
-                // Load the ADDRESS of the struct (not its value)
-                emitter.emit_inst("LDA", &format!("#${:02X}", addr)); // Low byte of address
-                emitter.emit_inst("LDY", "#$00"); // High byte (ZP, so always 0)
-
-                // Store 2-byte pointer to temp
+            // Struct pass-by-reference: pass the 2-byte address of the
+            // argument's storage, so the callee's field writes land on the
+            // caller's struct.
+            //
+            // Every place has such an address, not just a zero-page local:
+            // this used to match a `Variable` in the frame and nothing else,
+            // so a `static`, a nested field and an array element all fell
+            // through to the scalar path below and staged one byte of the
+            // struct's *contents* as though it were a pointer. `sum(PS[i])`
+            // read whatever that byte happened to address.
+            if let Some(_struct_name) = crate::codegen::expr::emit_struct_place_address(
+                arg,
+                emitter,
+                info,
+                string_collector,
+            )? {
                 emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-                emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+                emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
                 temp_offset += 2;
                 arg_info.push((temp_addr, 2)); // 2-byte pointer
                 continue;

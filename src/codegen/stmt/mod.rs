@@ -567,9 +567,9 @@ fn emit_enum_copy_to_block(
     Ok(())
 }
 
-/// Copy a return-by-value aggregate out of the callee's storage into the
-/// caller's slot. On entry `A:X` holds a pointer to `size` source bytes; they
-/// are copied into `dest..dest+size` (zero page).
+/// Copy an aggregate into a variable's storage. On entry `A:X` holds a pointer
+/// to `size` source bytes; they are copied into `dest..dest+size`. `dest` is a
+/// zero-page frame slot for a local and an absolute address for a `static`.
 ///
 /// Below the threshold the copy is unrolled (`LDY #i; LDA ($20),Y; STA dest+i`,
 /// ~6 bytes/byte — smallest for a handful of bytes). At or above it, an
@@ -577,7 +577,7 @@ fn emit_enum_copy_to_block(
 /// so it wins once the aggregate exceeds ~3 bytes (a `DEX/BNE`-class trade of a
 /// little speed for much smaller code). `A:X` are dead afterwards; callers
 /// invalidate register state.
-fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u8, size: u8) {
+fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u16, size: u8) {
     /// Aggregate size at/above which the loop is smaller than unrolling.
     const COPY_LOOP_THRESHOLD: u8 = 4;
 
@@ -587,18 +587,24 @@ fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u8, size: u8) {
 
     if size < COPY_LOOP_THRESHOLD {
         for i in 0..size {
+            let byte = dest + i as u16;
+            let operand = if byte < 0x100 {
+                format!("${:02X}", byte)
+            } else {
+                format!("${:04X}", byte)
+            };
             emitter.emit_inst("LDY", &format!("#${:02X}", i));
             emitter.emit_inst("LDA", "($20),Y");
-            emitter.emit_inst("STA", &format!("${:02X}", dest + i));
+            emitter.emit_inst("STA", &operand);
         }
     } else {
         let loop_label = emitter.next_label("rbvcp");
         emitter.emit_inst("LDY", "#$00");
         emitter.emit_label(&loop_label);
         emitter.emit_inst("LDA", "($20),Y");
-        // Absolute,Y: `STA zp,Y` has no encoding, so the zero-page dest is
+        // Absolute,Y: `STA zp,Y` has no encoding, so a zero-page dest is
         // addressed as a 16-bit base ($00dd) with the Y index.
-        emitter.emit_inst("STA", &format!("${:04X},Y", dest as u16));
+        emitter.emit_inst("STA", &format!("${:04X},Y", dest));
         emitter.emit_inst("INY", "");
         emitter.emit_inst("CPY", &format!("#${:02X}", size));
         emitter.emit_inst("BNE", &loop_label);

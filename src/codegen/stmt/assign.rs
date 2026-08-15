@@ -984,6 +984,125 @@ pub(crate) fn generate_local_array_init(
     Ok(())
 }
 
+/// `q = p;` — assign a whole struct from a *place* (a variable, a static, a
+/// field, or an array element). Returns whether it handled the statement; a
+/// value that is not a struct place is left to the paths below, which cover a
+/// call and a struct literal.
+///
+/// Destinations come in two kinds. One with an address the assembler knows —
+/// a local, a static, a constant index — copies straight into it. An array
+/// element at a runtime index has no such address, so both ends are staged as
+/// pointers and the copy runs indirect on each.
+fn try_struct_place_assignment(
+    target: &Spanned<crate::ast::Expr>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<bool, CodegenError> {
+    use crate::ast::Expr;
+    use crate::sema::types::Type;
+
+    // Only a place can be copied from; a call or a literal already leaves a
+    // pointer to its own bytes and is handled further down.
+    if !matches!(
+        &value.node,
+        Expr::Variable(_) | Expr::Field { .. } | Expr::Index { .. }
+    ) {
+        return Ok(false);
+    }
+    let Some(Type::Named(struct_name)) = info.resolved_types.get(&value.span) else {
+        return Ok(false);
+    };
+    let Some(sdef) = info.type_registry.get_struct(struct_name) else {
+        return Ok(false); // an enum: two bytes, and the scalar path handles it
+    };
+    let total = sdef.total_size as u8;
+
+    // A destination with a fixed address.
+    if let Some((base, _)) = crate::codegen::expr::resolve_static_struct_lvalue(target, info) {
+        if base.is_read_only() {
+            return Err(CodegenError::UnsupportedOperation(
+                "cannot write to constant data".to_string(),
+            ));
+        }
+        let crate::codegen::expr::StaticBase::Addr(dest) = base else {
+            unreachable!("a non-label base is an address");
+        };
+        let Some(src) = crate::codegen::expr::emit_struct_place_address(
+            value,
+            emitter,
+            info,
+            string_collector,
+        )?
+        else {
+            return Err(struct_source_error(struct_name));
+        };
+        emitter.emit_comment(&format!(
+            "Struct copy: {} bytes of {} into ${:04X}",
+            total, src, dest
+        ));
+        emit_return_by_value_copy(emitter, dest, total);
+        emitter.invalidate_registers();
+        return Ok(true);
+    }
+
+    // A destination whose address is only known at run time.
+    if !matches!(&target.node, Expr::Index { .. }) {
+        return Ok(false); // not a struct place we recognize; leave it below
+    }
+    let dest_vec = emitter.temp_alloc.alloc_primary(2).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in struct copy".to_string())
+    })?;
+    let Some(_) =
+        crate::codegen::expr::emit_struct_place_address(target, emitter, info, string_collector)?
+    else {
+        emitter.temp_alloc.free_primary(dest_vec, 2);
+        return Err(CodegenError::UnsupportedOperation(format!(
+            "cannot assign to this struct '{struct_name}' location: it has no address"
+        )));
+    };
+    emitter.emit_inst("STA", &format!("${:02X}", dest_vec));
+    emitter.emit_inst("STX", &format!("${:02X}", dest_vec + 1));
+
+    let src_vec = emitter.temp_alloc.alloc_primary(2).ok_or_else(|| {
+        CodegenError::Internal("temporary storage exhausted in struct copy".to_string())
+    })?;
+    let Some(src) =
+        crate::codegen::expr::emit_struct_place_address(value, emitter, info, string_collector)?
+    else {
+        return Err(struct_source_error(struct_name));
+    };
+    emitter.emit_inst("STA", &format!("${:02X}", src_vec));
+    emitter.emit_inst("STX", &format!("${:02X}", src_vec + 1));
+
+    emitter.emit_comment(&format!(
+        "Struct copy: {} bytes of {}, both ends indirect",
+        total, src
+    ));
+    let loop_label = emitter.next_label("stcp");
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_label(&loop_label);
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", src_vec));
+    emitter.emit_inst("STA", &format!("(${:02X}),Y", dest_vec));
+    emitter.emit_inst("INY", "");
+    emitter.emit_inst("CPY", &format!("#${:02X}", total));
+    emitter.emit_inst("BNE", &loop_label);
+    emitter.temp_alloc.free_primary(src_vec, 2);
+    emitter.temp_alloc.free_primary(dest_vec, 2);
+    emitter.invalidate_registers();
+    Ok(true)
+}
+
+/// The struct value has no address to copy from — it is neither a place, nor a
+/// call, nor a literal.
+fn struct_source_error(struct_name: &str) -> CodegenError {
+    CodegenError::UnsupportedOperation(format!(
+        "cannot copy struct '{struct_name}' from this expression: it has no address to copy \
+         from. Bind it to a local first, or build a struct literal"
+    ))
+}
+
 pub(super) fn generate_var_decl(
     name: &Spanned<String>,
     init: &Spanned<crate::ast::Expr>,
@@ -1086,9 +1205,46 @@ pub(super) fn generate_var_decl(
                     total, dest
                 ));
                 generate_expr(init, emitter, info, string_collector)?;
-                emit_return_by_value_copy(emitter, dest, total);
+                emit_return_by_value_copy(emitter, dest as u16, total);
                 emitter.invalidate_registers();
                 return Ok(());
+            }
+
+            // Struct-by-value initialization from a *place*, e.g.
+            // `let d: Driver = DRIVERS[id];`. Binding copies: the source keeps
+            // its own bytes, unlike a struct *argument*, which is passed by
+            // reference so the callee writes through to the caller's storage.
+            //
+            // This used to fall through to the scalar path below, which loads
+            // one byte and scales an array index by 1 instead of the element
+            // size — `let p: P = PS[1]` bound `PS[0].y` and left every later
+            // field zero, with no diagnostic.
+            if is_struct_type
+                && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+                && let Some(sdef) = info.type_registry.get_struct(struct_name)
+            {
+                let total = sdef.total_size as u8;
+                if let Some(src) = crate::codegen::expr::emit_struct_place_address(
+                    init,
+                    emitter,
+                    info,
+                    string_collector,
+                )? {
+                    emitter.emit_comment(&format!(
+                        "Struct copy: {} bytes of {} into ${:02X}",
+                        total, src, dest
+                    ));
+                    emit_return_by_value_copy(emitter, dest as u16, total);
+                    emitter.invalidate_registers();
+                    return Ok(());
+                }
+                // Neither a literal, a call, nor an addressable place. Falling
+                // through would silently copy one byte, so say so instead.
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "cannot initialize struct '{}' from this expression: it has no address to \
+                     copy from. Bind it to a local first, or build a struct literal",
+                    struct_name
+                )));
             }
         }
 
@@ -1154,7 +1310,7 @@ pub(super) fn generate_var_decl(
         {
             emitter.emit_comment("Slice return-by-value: copy 4-byte descriptor");
             generate_expr(init, emitter, info, string_collector)?;
-            emit_return_by_value_copy(emitter, dest, 4);
+            emit_return_by_value_copy(emitter, dest as u16, 4);
             emitter.invalidate_registers();
             return Ok(());
         }
@@ -1453,6 +1609,13 @@ pub(super) fn generate_assign(
         }
     }
 
+    // `q = p` — whole-struct copy from a place. Handled before the value is
+    // evaluated below, for the same reason as the deref case: the generic path
+    // evaluates a struct place as a scalar and stores one byte of it.
+    if try_struct_place_assignment(target, value, emitter, info, string_collector)? {
+        return Ok(());
+    }
+
     // `*p = v` — write through a pointer. Handled before the value is
     // evaluated below, because the pointer has to be staged first and
     // the generic path assumes the target is a name.
@@ -1497,7 +1660,7 @@ pub(super) fn generate_assign(
                         "Struct return-by-value assign: copy {} bytes into ${:02X}",
                         total, dest
                     ));
-                    emit_return_by_value_copy(emitter, dest, total);
+                    emit_return_by_value_copy(emitter, dest as u16, total);
                     emitter.invalidate_registers();
                     return Ok(());
                 }
