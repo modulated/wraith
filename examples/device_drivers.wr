@@ -10,11 +10,15 @@
 // null driver, is what an unregistered slot holds so that calling into a
 // device nobody claimed is harmless rather than a jump to $0000.
 //
-// Two dispatch shapes appear, and an OS wants both:
+// One table, DRIVERS, read two ways - and an OS wants both:
 //
-//   * the vtable  - CONSOLE.write(c), "how does this device work"
-//   * the table   - WRITE_TABLE[id](c), "which device", indexed by a number
-//                   that only exists at runtime
+//   * through the console vtable - CONSOLE.write(c), "how does this device
+//     work", with the caller not knowing which device it holds
+//   * by device number - DRIVERS[id].write(c), "which device", indexed by a
+//     number that only exists at runtime
+//
+// Adding a device is a row in DRIVERS and a number for it. Nothing in the
+// kernel section changes, and there is no second table to keep in step.
 //
 // tests/e2e/example_drivers.rs runs this program against the emulated UART
 // and VIA, so what it does is checked and not just claimed.
@@ -101,12 +105,31 @@ fn via_read() -> u8 { return VIA_PORTA; }
 fn via_write(c: u8) { VIA_PORTB = c; }
 
 // ===========================================================================
-// Registration
+// The device table
 // ===========================================================================
+//
+// One row per device, indexed by device number. Adding a device is a row and
+// a number - no branch to extend, and nothing to keep in step with a parallel
+// table somewhere else.
+//
+// Slot 0 holds the null driver so that a number nobody registered lands on
+// something harmless rather than on whatever bytes follow the table. There is
+// no bounds check on an index in this language; the table pays for that with
+// one wasted row.
+//
+// To add a device: write its four entry points, add a row here, and give it a
+// number. That is the whole procedure - nothing below this section changes,
+// and a driver reached only through the table is not reported as dead code.
 
 const DEV_NONE: u8 = 0;
 const DEV_UART: u8 = 1;
 const DEV_VIA:  u8 = 2;
+
+static DRIVERS: [Driver; 3] = [
+    Driver { init: null_init, ready: null_ready, read: null_read, write: null_write },
+    Driver { init: uart_init, ready: uart_ready, read: uart_read, write: uart_write },
+    Driver { init: via_init,  ready: via_ready,  read: via_read,  write: via_write  },
+];
 
 // The console starts out pointing at nothing. Booting a machine with no
 // serial port attached should print into the void, not crash.
@@ -120,21 +143,13 @@ static CONSOLE: Driver = Driver {
 /// Which driver the console currently holds, so the kernel can report it.
 static CONSOLE_ID: u8 = DEV_NONE;
 
-/// Bind a driver to the console and bring its hardware up. This is the only
-/// function in the program that names both a device number and a driver.
+/// Bind a driver to the console and bring its hardware up.
+///
+/// The whole vtable moves in one assignment: binding and assignment copy a
+/// struct, so CONSOLE ends up with its own four pointers rather than an alias
+/// into the table. Registering a device is one row's worth of work.
 fn register_console(id: u8) {
-    if id == DEV_UART {
-        CONSOLE.init  = uart_init;
-        CONSOLE.ready = uart_ready;
-        CONSOLE.read  = uart_read;
-        CONSOLE.write = uart_write;
-    }
-    if id == DEV_VIA {
-        CONSOLE.init  = via_init;
-        CONSOLE.ready = via_ready;
-        CONSOLE.read  = via_read;
-        CONSOLE.write = via_write;
-    }
+    CONSOLE = DRIVERS[id];
     CONSOLE_ID = id;
     CONSOLE.init();
 }
@@ -192,24 +207,28 @@ fn echo_pending() -> u8 {
 // ===========================================================================
 //
 // The other half of the pattern. Where the vtable answers "how does this
-// device work", a table indexed by device number answers "which device". The
-// index arrives at runtime - from a syscall argument, a command byte, an
-// interrupt vector - and the table turns it into a call with no chain of
-// comparisons in between.
-
-static WRITE_TABLE: [fn(u8); 2] = [uart_write, via_write];
+// device work", the index into DRIVERS answers "which device". The number
+// arrives at runtime - a syscall argument, a command byte, an interrupt
+// vector - and becomes a call with no chain of comparisons in between.
+//
+// This reaches a device without disturbing the console, so it is what a
+// kernel call like `write(fd, c)` is made of. Note there is no second table:
+// dispatching by number and dispatching through a vtable are the same table
+// read two ways, and a parallel `[fn(u8); N]` of just the write entry points
+// would be one more thing to keep in step. (That flatter form - a bare array
+// of function pointers, no struct - is worth knowing; it is exercised in
+// tests/e2e/vtable.rs.)
 
 fn dev_write(id: u8, c: u8) {
-    WRITE_TABLE[id](c);
+    DRIVERS[id].write(c);
 }
 
 // ===========================================================================
 // Boot
 // ===========================================================================
 
-const BANNER:  str = "wraith> ";
-const SENSOR:  str = "\nport a = ";
-const TABLE_W: u8  = 0;        // WRITE_TABLE slot holding the UART
+const BANNER: str = "wraith> ";
+const SENSOR: str = "\nport a = ";
 
 const OUT_ECHOED:  addr = 0x0900;   // bytes the console echoed
 const OUT_SENSOR:  addr = 0x0901;   // what the VIA's input port read
@@ -237,9 +256,10 @@ fn main() {
     print(SENSOR);
     put_hex(sample);
 
-    // The same byte again, this time by device number rather than through
-    // the console vtable.
-    dev_write(TABLE_W, 0x0A);   // newline
+    // One more byte, addressed by device number rather than through the
+    // console - the same call a kernel makes on behalf of a process that
+    // named a device it does not own.
+    dev_write(DEV_UART, 0x0A);   // newline
 
     OUT_CONSOLE = CONSOLE_ID;
     loop {}
