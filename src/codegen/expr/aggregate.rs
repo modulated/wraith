@@ -688,12 +688,28 @@ pub fn generate_struct_init_runtime(
 /// reach them.
 pub(crate) fn yields_struct_pointer(expr: &Spanned<Expr>, info: &ProgramInfo) -> bool {
     match &expr.node {
-        Expr::Call { .. } => true,
+        _ if is_call(expr) => true,
         Expr::StructInit { .. } | Expr::AnonStructInit { .. } => {
             info.struct_temps.contains_key(&expr.span)
         }
         _ => false,
     }
+}
+
+/// Whether `expr` is a call — direct, or through a function pointer.
+///
+/// The two return identically: an aggregate comes back as a pointer in A:X. But
+/// only `Call` was enumerated at the four sites that ask this question, so a
+/// struct or a slice from `DEV.get()` matched none of them and fell through to
+/// the scalar store, which writes one byte. Where the question is "does
+/// evaluating this leave a returned value in the register convention", it is
+/// this and not `Call` alone.
+pub(crate) fn is_call(expr: &Spanned<Expr>) -> bool {
+    let mut cur = expr;
+    while let Expr::Paren(inner) = &cur.node {
+        cur = inner;
+    }
+    matches!(cur.node, Expr::Call { .. } | Expr::CallIndirect { .. })
 }
 
 /// Format a store/load operand, picking zero-page or absolute form by address.

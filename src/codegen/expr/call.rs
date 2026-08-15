@@ -531,12 +531,12 @@ pub(super) fn generate_call(
             // (`sum(P { x: 6, y: 7 })`) points into ROM and so has a non-zero
             // high byte, which is why dropping it was a silent miscompile
             // rather than merely a zero-page assumption.
-            if matches!(
-                &arg.node,
-                crate::ast::Expr::StructInit { .. }
-                    | crate::ast::Expr::AnonStructInit { .. }
-                    | crate::ast::Expr::Call { .. }
-            ) {
+            if crate::codegen::expr::is_call(arg)
+                || matches!(
+                    &arg.node,
+                    crate::ast::Expr::StructInit { .. } | crate::ast::Expr::AnonStructInit { .. }
+                )
+            {
                 generate_expr(arg, emitter, info, string_collector)?;
                 emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
                 emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
