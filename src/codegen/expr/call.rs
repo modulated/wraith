@@ -215,9 +215,14 @@ pub(super) fn generate_call(
             Some(addr) => addr,
             None => {
                 return Err(CodegenError::Internal(format!(
-                    "argument-evaluation pool exhausted calling '{}' ({} bytes of args); \
-                     expression nesting is too deep",
-                    function.node, total_bytes
+                    "argument-evaluation pool exhausted calling '{}' ({} bytes of arguments, \
+                     {} free of {}). Arguments are staged in a fixed zero-page pool, and a \
+                     call nested in another call's argument list needs room for both at \
+                     once. Bind the inner call to a `let` first.",
+                    function.node,
+                    total_bytes,
+                    emitter.temp_alloc.arg_bytes_free(),
+                    crate::codegen::memory_layout::TempAllocator::ARG_SIZE,
                 )));
             }
         }
@@ -233,8 +238,36 @@ pub(super) fn generate_call(
     // Evaluating arguments clobbers the registers anyway, so drop all beliefs.
     emitter.invalidate_registers();
 
+    // Bytes of the argument pool currently parked on the software stack. See
+    // the shelter comment in the loop; the pop is deferred to the next
+    // iteration (and to after the loop) because the body below leaves through
+    // a dozen different `continue`s.
+    let mut sheltered = 0u8;
+
     for (i, arg) in args.iter().enumerate() {
+        if sheltered > 0 {
+            emitter.pop_frame(temp_base, sheltered);
+            sheltered = 0;
+        }
         let temp_addr = temp_base + temp_offset;
+
+        // The argument pool is a *fixed* zero-page region ($F4-$FE) and the
+        // allocator is reset at every function boundary, so a callee stages its
+        // own arguments over the same bytes. An argument containing a call
+        // therefore destroys the arguments already staged beside it:
+        // `f(62, g(0, v), v)` passed g's first argument as f's, because g wrote
+        // $F4 on its way in.
+        //
+        // Park what is staged so far on the software stack across the
+        // evaluation. That stack is indexed through $FF, so it nests correctly
+        // with the callee's own use of it — which the pool, being at a fixed
+        // address, cannot. Only the bytes already written need saving, and only
+        // when this argument can reach a call at all, so a call whose arguments
+        // are plain values pays nothing.
+        if temp_offset > 0 && super::binary::contains_call(&arg.node) {
+            emitter.push_frame(temp_base, temp_offset);
+            sheltered = temp_offset;
+        }
 
         // Check argument type
         let arg_type = info.resolved_types.get(&arg.span);
@@ -415,22 +448,24 @@ pub(super) fn generate_call(
         }
 
         if is_struct && param_is_struct {
-            // Struct pass-by-reference: pass the 2-byte ZP address
-            // The argument must be a variable (for now)
-            if let crate::ast::Expr::Variable(var_name) = &arg.node
-                && let Some(sym) = info
-                    .resolved_symbols
-                    .get(&arg.span)
-                    .or_else(|| info.table.lookup(var_name))
-                && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
-            {
-                // Load the ADDRESS of the struct (not its value)
-                emitter.emit_inst("LDA", &format!("#${:02X}", addr)); // Low byte of address
-                emitter.emit_inst("LDY", "#$00"); // High byte (ZP, so always 0)
-
-                // Store 2-byte pointer to temp
+            // Struct pass-by-reference: pass the 2-byte address of the
+            // argument's storage, so the callee's field writes land on the
+            // caller's struct.
+            //
+            // Every place has such an address, not just a zero-page local:
+            // this used to match a `Variable` in the frame and nothing else,
+            // so a `static`, a nested field and an array element all fell
+            // through to the scalar path below and staged one byte of the
+            // struct's *contents* as though it were a pointer. `sum(PS[i])`
+            // read whatever that byte happened to address.
+            if let Some(_struct_name) = crate::codegen::expr::emit_struct_place_address(
+                arg,
+                emitter,
+                info,
+                string_collector,
+            )? {
                 emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-                emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+                emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
                 temp_offset += 2;
                 arg_info.push((temp_addr, 2)); // 2-byte pointer
                 continue;
@@ -489,6 +524,10 @@ pub(super) fn generate_call(
         }
 
         arg_info.push((temp_addr, if is_16bit { 2 } else { 1 }));
+    }
+
+    if sheltered > 0 {
+        emitter.pop_frame(temp_base, sheltered);
     }
 
     // RECURSION SAVE: for a call inside a cycle, preserve the callee's frame
@@ -812,9 +851,29 @@ fn generate_inline_call(
     // Store arguments to the parameter locations that were allocated during semantic analysis
     // Each parameter has a specific zero-page address that was assigned when the function was defined
     // We need to store the argument values at those exact addresses
+    // Parameter bytes already written, for the shelter below.
+    let mut written: Vec<(u8, u8)> = Vec::new();
+
     for (i, arg) in args.iter().enumerate() {
         // Get the parameter info for this position
         let param = &params[i];
+
+        // An inlined call stores each argument straight into the callee's
+        // parameter slots, so a call inside a *later* argument overwrites the
+        // ones already there. When the nested callee is this same function the
+        // slots are literally the same bytes and no amount of frame colouring
+        // can separate them: `f(0, v, f(12, i, i))` returned 12, the inner
+        // call's first argument, as the outer call's.
+        //
+        // Park the written slots on the software stack across the evaluation.
+        // It nests LIFO with everything else that uses it, and costs nothing
+        // for the ordinary case where no argument contains a call.
+        let shelter = !written.is_empty() && super::binary::contains_call(&arg.node);
+        if shelter {
+            for (addr, size) in &written {
+                emitter.push_frame(*addr, *size);
+            }
+        }
 
         // Look up the parameter's allocated location from inline_param_symbols
         if let Some(ref param_symbols) = metadata.inline_param_symbols {
@@ -829,6 +888,15 @@ fn generate_inline_call(
                             info,
                             string_collector,
                         )?;
+                        // Restore the earlier arguments now that this one is in
+                        // its slot. `pop_frame` clobbers A, which is dead here.
+                        if shelter {
+                            for (a, sz) in written.iter().rev() {
+                                emitter.pop_frame(*a, *sz);
+                            }
+                        }
+                        let size = param_info.ty.size().max(1) as u8;
+                        written.push((addr, size));
                     }
                     _ => {
                         return Err(CodegenError::UnsupportedOperation(format!(
@@ -909,6 +977,7 @@ fn generate_inline_call(
             resolved_symbols: merged_resolved,
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
+            const_env: info.const_env.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
             slice_return_temps: info.slice_return_temps.clone(),
             local_arrays: info.local_arrays.clone(),

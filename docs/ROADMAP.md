@@ -121,8 +121,11 @@ compiler share, where one form still diverges.
 
 What it generates is a small imperative language: `u8`/`u16`/`i8`/`i16`, ten
 binary operators, casts, comparisons and boolean connectives, assignment,
-`if`/`else`, counted `for` and condition-driven `while`, nested. Every variable's
-final value is written out, so one program checks four results.
+`if`/`else`, counted `for` and condition-driven `while`, functions with one to
+three parameters and a return value, self-recursion bounded by a decreasing
+budget, and a local array, a `const` table and a two-field struct — all nested.
+Every cell's final value is written out, so one program checks up to ten
+results.
 
 **What it reaches is documented, not asserted**: [`fuzz-coverage.md`](fuzz-coverage.md)
 lists every construct in the language's AST with how many of a fixed sample of
@@ -139,7 +142,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Six real bugs so far, all silent:
+Eleven real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -159,9 +162,32 @@ Six real bugs so far, all silent:
 6. A conditional branch spanning the right operand of `&&` overflowed its
    ±127-byte range once that operand was large enough — an assembly-time failure
    with no source-level fix.
+7. A call in another call's argument list clobbered the arguments already
+   staged, three separate ways: frame colouring overlaid two functions that are
+   siblings in the call graph but live at once during staging; the staging pool
+   sits at a fixed address whose allocator resets per function, so a callee
+   staged over its caller; and an inlined call stores straight into parameter
+   slots, which for a self-nested call are the same bytes by construction.
+   `f(0, v, f(12, v, v))` returned 12.
+8. Loop unrolling was decided by the iteration count alone, so eight copies of
+   a 16-bit division were emitted as readily as eight copies of two
+   instructions — and nested loops multiplied it. A 76-line generated program
+   overflowed the whole 16 KB CODE section, a build failure with no visible
+   cause in the source. Unrolling is now bounded by the estimated size of the
+   unrolled body; the example corpus is unchanged, so nothing that was worth
+   unrolling stopped being unrolled.
 
-Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/int_conversions.rs`,
-`tests/e2e/short_circuit.rs`.
+9. A `const` array with a negative element was rejected as "not a compile-time
+   constant" — but only once something read it, since an unused `const` is
+   dropped before flattening. The identical `static` worked. Two
+   `InitContext::integer` implementations had drifted: sema's evaluates the
+   expression, codegen's pattern-matched a bare literal, and `-5` parses as
+   `Unary(Neg, 5)`. Codegen now evaluates too, with the constant environment, so
+   `[N - 1, 0]` resolves as well.
+
+Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
+`tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
+`tests/e2e/loop_sweep.rs`.
 
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
@@ -175,11 +201,20 @@ and an oracle that is merely *probably* right is worse than no oracle:
   metamorphically.
 - **Mixed widths.** One type per program today, because mixed-width arithmetic
   brings the implicit widening rules into the oracle.
-- **Calls with several arguments**, and recursion — the shapes where the spill
-  and frame machinery live. The four surface forms exercise one call each; none
-  passes an argument.
-- **Aggregates.** Structs, arrays and slices, where several bugs have already
-  been found by hand.
+- **Mutual recursion, and calls through a function pointer.** Self-recursion is
+  generated; a cycle of two functions is not, and neither is the indirect-call
+  trampoline. The gap has already cost something: an indirect call contributes
+  no call-graph edge, so frame colouring laid a driver's frame over its
+  caller's locals, and `examples/device_drivers.wr` found it by hand. A
+  generator that installs one of several same-signature functions in a vtable
+  and dispatches through it would have found it first — the oracle only needs
+  to know which function it installed.
+- **Slices, pointers and enums.** Arrays and structs of scalars are generated;
+  a slice or a `&T` gives two names for one piece of storage, which the oracle
+  would have to alias-model, and enums are a separate lowering again.
+- **Aggregates across a call.** A struct is a local today — never passed,
+  returned, or pointed at — and an array field inside a struct is not
+  generated. Both are shapes where a miscompile has already been found by hand.
 - **Shift counts at or past the width**, and constant expressions standing alone
   (typed by their own literals, not by the program around them — see the
   specification). Both are defined; neither is in the oracle.
@@ -221,6 +256,27 @@ emulator) turned these up. The silent-miscompile findings from that run are
 fixed and regression-tested in `tests/e2e/match_ranges.rs`; what follows is what
 it found and left standing.
 
+### Argument staging is bounded by a fixed 11-byte pool
+
+Arguments are evaluated into a fixed zero-page pool (`$F4-$FE`) before being
+copied into the callee's frame, and a call nested in another call's argument
+list needs room for both lists at once. Four 16-bit arguments nested inside four
+more exceeds it. The failure is a compile error naming the workaround (bind the
+inner call to a `let`), not a miscompile — the miscompiles that used to hide
+here are fixed and regression-tested in `tests/e2e/nested_calls.rs`.
+
+Lifting it means staging arguments on the software stack rather than in a pool
+at a fixed address, which is the same mechanism the nested-call fix already uses
+to shelter what is staged so far. The pool would then hold one argument at a
+time and the depth would be bounded by the 256-byte stack instead.
+
+The fuzzer budgets the pool so it rarely generates a program that exhausts it,
+and skips (and counts) the ones that slip through — the budget cannot be exact,
+because the pool has other consumers a program's source does not reveal, and
+modelling the compiler's allocator inside the generator would put that knowledge
+in the wrong place. The skip count is printed and capped, so if lifting this
+limit ever stops mattering the test will say so rather than drift.
+
 ### A mutable slice type
 
 Slices are read-only views and now borrow from any storage — a local, a
@@ -237,12 +293,6 @@ no-op on real hardware and nothing at run time will catch it.
 
 Until then, code that needs to write a sub-range passes the array itself plus
 explicit bounds.
-
-### Exclusive ranges in match patterns
-
-`match n { 0..300 => … }` is a parse error ("expected FatArrow, found '..'");
-only `..=` is accepted in a pattern. Ranges elsewhere (`for i in 0..n`) take
-both forms, so the restriction is surprising.
 
 ---
 

@@ -84,6 +84,7 @@ impl SemanticAnalyzer {
             Expr::CallIndirect { callee, args } => {
                 // The callee must evaluate to a function pointer; check the
                 // arguments against its signature and yield its return type.
+                self.note_indirect_call();
                 let callee_ty = self.check_expr(callee)?;
                 let Type::Function(param_types, ret_ty) = callee_ty else {
                     return Err(SemaError::TypeMismatch {
@@ -958,6 +959,7 @@ impl SemanticAnalyzer {
             if let Some(s) = self.table.lookup(&function.node) {
                 self.resolved_symbols.insert(function.span, s.clone());
             }
+            self.note_indirect_call();
         } else if let Some(caller) = &self.current_function {
             // Record a call-graph edge (caller -> callee) for frame coloring and
             // recursion detection. Only for real named functions.
@@ -965,6 +967,31 @@ impl SemanticAnalyzer {
                 .entry(caller.clone())
                 .or_default()
                 .insert(function.node.clone());
+
+            // A call nested inside this call's *arguments* runs while this
+            // callee's parameter block is half-written, so the two are live at
+            // once and their frames must not share addresses. The call graph
+            // alone does not say so — they are siblings under a common caller,
+            // which colouring is otherwise free to overlay — so record the edge
+            // that makes it true.
+            //
+            // Without it `outer(v, inner(200, 201), v)` passed 200 as `outer`'s
+            // first argument: `inner`'s parameters had been coloured over
+            // `outer`'s. If the nested callee transitively calls this one, the
+            // edge closes a cycle, and the resulting save/restore is not
+            // over-caution — the parameters really are clobbered.
+            let mut nested = Vec::new();
+            for arg in args {
+                Self::collect_called_names(&arg.node, &mut nested);
+            }
+            for callee in nested {
+                if callee != function.node {
+                    self.call_edges
+                        .entry(function.node.clone())
+                        .or_default()
+                        .insert(callee);
+                }
+            }
         }
 
         // Verify function signature: check that it's a function and get param/return types
@@ -1589,6 +1616,12 @@ impl SemanticAnalyzer {
     }
 
     /// Whether evaluating `expr` can run a `JSR`.
+    ///
+    /// Feeds the recursion-depth cost model: an operand live across a call is
+    /// spilled to the same 256-byte software stack the frame saves use, so
+    /// missing one under-counts what a recursion level costs and the warning
+    /// fires too late. Exhaustive for that reason — a new `Expr` variant has to
+    /// be classified rather than defaulting to "no call".
     fn expr_contains_call(expr: &Spanned<Expr>) -> bool {
         match &expr.node {
             Expr::Call { .. } | Expr::CallIndirect { .. } => true,
@@ -1625,7 +1658,116 @@ impl SemanticAnalyzer {
             Expr::Literal(crate::ast::Literal::Array(elems)) => {
                 elems.iter().any(Self::expr_contains_call)
             }
-            _ => false,
+            Expr::Literal(crate::ast::Literal::ArrayFill { value, .. }) => {
+                Self::expr_contains_call(value)
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                Self::expr_contains_call(object)
+                    || Self::expr_contains_call(start)
+                    || Self::expr_contains_call(end)
+            }
+            // Genuinely call-free.
+            Expr::Literal(_)
+            | Expr::Variable(_)
+            | Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => false,
+        }
+    }
+
+    /// Note that the function being analysed dispatches through a function
+    /// pointer, so its frame has to stay clear of every possible target.
+    fn note_indirect_call(&mut self) {
+        if let Some(caller) = &self.current_function {
+            self.indirect_callers.insert(caller.clone());
+        }
+    }
+
+    /// Every named function called anywhere inside `expr`, including through
+    /// nested argument lists. Used to record the extra frame-interference edges
+    /// a nested call creates; an indirect call has no name to record and its
+    /// arguments are sheltered across the nested call instead, so it
+    /// contributes nothing here.
+    fn collect_called_names(expr: &Expr, out: &mut Vec<String>) {
+        let walk =
+            |e: &Spanned<Expr>, out: &mut Vec<String>| Self::collect_called_names(&e.node, out);
+        match expr {
+            Expr::Call { function, args } => {
+                out.push(function.node.clone());
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            Expr::CallIndirect { callee, args } => {
+                walk(callee, out);
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+            Expr::Unary { operand, .. } => walk(operand, out),
+            Expr::Cast { expr: i, .. }
+            | Expr::Paren(i)
+            | Expr::SliceLen(i)
+            | Expr::U16Low(i)
+            | Expr::U16High(i) => walk(i, out),
+            Expr::Field { object, .. } => walk(object, out),
+            Expr::Index { object, index } => {
+                walk(object, out);
+                walk(index, out);
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                walk(object, out);
+                walk(start, out);
+                walk(end, out);
+            }
+            Expr::BitOp { object, bit, .. } => {
+                walk(object, out);
+                walk(bit, out);
+            }
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                for f in fields {
+                    walk(&f.value, out);
+                }
+            }
+            Expr::EnumVariant { data, .. } => match data {
+                crate::ast::VariantData::Unit => {}
+                crate::ast::VariantData::Tuple(elems) => {
+                    for e in elems {
+                        walk(e, out);
+                    }
+                }
+                crate::ast::VariantData::Struct(fields) => {
+                    for f in fields {
+                        walk(&f.value, out);
+                    }
+                }
+            },
+            Expr::Match { expr: i, arms } => {
+                walk(i, out);
+                for a in arms {
+                    walk(&a.body, out);
+                }
+            }
+            Expr::Literal(crate::ast::Literal::Array(elems)) => {
+                for e in elems {
+                    walk(e, out);
+                }
+            }
+            Expr::Literal(_)
+            | Expr::Variable(_)
+            | Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => {}
         }
     }
 

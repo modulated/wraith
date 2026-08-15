@@ -219,8 +219,10 @@ pub struct Via {
     /// Last value the program drove onto port A / port B.
     pub port_a_out: u8,
     pub port_b_out: u8,
-    ddra: u8,
-    ddrb: u8,
+    /// Which way each pin faces: a set bit is an output. A driver's `init`
+    /// writes these, so a test can check the port was configured at all.
+    pub ddra: u8,
+    pub ddrb: u8,
     t1_counter: u16,
     t1_latch: u16,
     acr: u8,

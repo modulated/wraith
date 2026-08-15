@@ -175,6 +175,13 @@ pub struct SemanticAnalyzer {
     /// an indirect caller (which cannot know the callee's colored frame) can
     /// still pass args; their prologue copies staging -> frame params.
     pub(super) address_taken_functions: HashSet<String>,
+    /// Functions that dispatch through a function pointer, so their frame is
+    /// live while an *unknown* function runs. `call_edges` records no edge for
+    /// an indirect call — there is no name to record — so frame colouring
+    /// would otherwise overlay them with the driver they dispatch to.
+    /// `finalize_frames` gives each an edge to every address-taken function
+    /// instead.
+    pub(super) indirect_callers: HashSet<String>,
     /// Every symbol each function references: calls, constants, statics,
     /// addresses and inline-asm operands. A superset of `call_edges`, used to
     /// decide which imported items are live (see `reachable_symbols`).
@@ -237,6 +244,7 @@ impl SemanticAnalyzer {
             function_signatures: HashMap::default(),
             call_edges: HashMap::default(),
             address_taken_functions: HashSet::default(),
+            indirect_callers: HashSet::default(),
             symbol_refs: HashMap::default(),
         }
     }
@@ -449,6 +457,7 @@ impl SemanticAnalyzer {
 
         Ok(ProgramInfo {
             table: self.table.clone(),
+            const_env: self.const_env.clone(),
             resolved_symbols: self.resolved_symbols.clone(),
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
@@ -763,10 +772,7 @@ impl SemanticAnalyzer {
                 }
                 Ok(ty)
             }
-            TypeExpr::Slice {
-                element,
-                mutable: _,
-            } => {
+            TypeExpr::Slice { element } => {
                 // Slice is a fat pointer with base address and length
                 let element_type = self.resolve_type(&element.node)?;
                 Ok(Type::Slice(Box::new(element_type)))

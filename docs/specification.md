@@ -955,8 +955,8 @@ fn update_entity(e: Entity) {
 }
 ```
 
-To work on a copy, bind a local and copy field by field (or return a fresh
-struct):
+To work on a copy, bind the parameter to a local — binding copies (see
+[Copying Structs](#copying-structs)) — or return a fresh struct:
 
 ```rust,compile
 struct Point { x: u8, y: u8 }
@@ -965,6 +965,32 @@ fn move_point(p: Point, dx: u8, dy: u8) -> Point {
     return Point { x: p.x + dx, y: p.y + dy };
 }
 ```
+
+### Copying Structs
+
+Binding and assignment **copy**; arguments are passed **by reference**. The two
+conventions are deliberate: `let q: Point = p` gives `q` storage of its own, so
+writing `q` leaves `p` alone, while `f(p)` hands over an address so the callee
+can write through to the caller's struct.
+
+Any struct-valued *place* can be copied — a local, a `static`, a nested field,
+an array element (at a constant or a runtime index), or a by-reference
+parameter:
+
+```rust
+struct Driver { init: fn(), read: fn() -> u8 }
+static DRIVERS: [Driver; 2] = [ /* … */ ];
+static CONSOLE: Driver = /* … */;
+
+let d: Driver = DRIVERS[id];   // copies the whole struct
+CONSOLE = DRIVERS[id];         // so does assignment
+DRIVERS[i] = DRIVERS[j];       // including element to element
+```
+
+A struct value that is *not* a place — an expression with no address of its own
+— has to be a struct literal or a call returning a struct, both of which are
+copied the same way. Anything else is a compile error rather than a partial
+copy.
 
 ### Returning Structs by Value
 
@@ -1952,7 +1978,8 @@ fn process(data: &[u8]) {
 // Match on values
 match value {
     0 => { },
-    1..=10 => { },    // Range
+    1..=10 => { },    // Range, inclusive of 10
+    11..20 => { },    // Range, exclusive of 20
     _ => { },         // Default
 }
 
@@ -1975,6 +2002,12 @@ match msg {
     },
 }
 ```
+
+Both range spellings mean here what they mean in a `for` range: `a..=b` covers
+`b`, `a..b` stops one short of it. An exclusive end may therefore name the value
+just past the type — `0..256` covers a whole `u8` — but a range that covers
+nothing (`5..5`, or a reversed `9..=3`) is rejected, since the arm could never
+run.
 
 ### Continue Statement
 
