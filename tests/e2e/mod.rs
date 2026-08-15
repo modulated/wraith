@@ -4,6 +4,7 @@
 
 mod addr_of_rom;
 mod aggregate_init;
+mod assign_side_effects;
 mod bcd;
 mod bcd_validation;
 mod bitfields;

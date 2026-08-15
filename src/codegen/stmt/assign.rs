@@ -1627,6 +1627,89 @@ pub(super) fn generate_assign(
         return generate_deref_assignment(operand, value, emitter, info, string_collector);
     }
 
+    // Targets whose handler evaluates the value itself, for the same reason:
+    // they need the destination address staged around the evaluation. They
+    // have to be dispatched *before* the generic evaluation below, or the
+    // value expression is generated twice — which is invisible for
+    // arithmetic, and two calls for `arr[i] = f()`. Where the value is a
+    // memory-mapped register whose read consumes a byte, the first read threw
+    // that byte away: `RX_BUF[head] = UART_RBR` dropped every other character.
+    match &target.node {
+        crate::ast::Expr::Index { object, index } => {
+            return generate_index_assignment(
+                object,
+                index,
+                value,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        crate::ast::Expr::Field { object, field } => {
+            return generate_field_assignment(
+                object,
+                field,
+                value,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        // A `.len`/`.low`/`.high` target that sema re-resolved as a
+        // struct field access stores like a plain field.
+        crate::ast::Expr::SliceLen(object) if info.accessor_fields.contains(&target.span) => {
+            let field = crate::ast::Spanned::new("len".to_string(), target.span);
+            return generate_field_assignment(
+                object,
+                &field,
+                value,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        crate::ast::Expr::U16Low(object) if info.accessor_fields.contains(&target.span) => {
+            let field = crate::ast::Spanned::new("low".to_string(), target.span);
+            return generate_field_assignment(
+                object,
+                &field,
+                value,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        crate::ast::Expr::U16High(object) if info.accessor_fields.contains(&target.span) => {
+            let field = crate::ast::Spanned::new("high".to_string(), target.span);
+            return generate_field_assignment(
+                object,
+                &field,
+                value,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        crate::ast::Expr::Slice {
+            object,
+            start,
+            end,
+            inclusive,
+        } => {
+            return generate_slice_assignment(
+                object,
+                start,
+                end,
+                *inclusive,
+                value,
+                emitter,
+                info,
+                string_collector,
+            );
+        }
+        _ => {}
+    }
+
     // 1. Generate code for value (result in A)
     generate_expr(value, emitter, info, string_collector)?;
 
@@ -1749,43 +1832,6 @@ pub(super) fn generate_assign(
             } else {
                 return Err(CodegenError::SymbolNotFound(name.clone()));
             }
-        }
-        crate::ast::Expr::Index { object, index } => {
-            generate_index_assignment(object, index, value, emitter, info, string_collector)?;
-        }
-        crate::ast::Expr::Field { object, field } => {
-            generate_field_assignment(object, field, value, emitter, info, string_collector)?;
-        }
-        // A `.len`/`.low`/`.high` target that sema re-resolved as a
-        // struct field access stores like a plain field.
-        crate::ast::Expr::SliceLen(object) if info.accessor_fields.contains(&target.span) => {
-            let field = crate::ast::Spanned::new("len".to_string(), target.span);
-            generate_field_assignment(object, &field, value, emitter, info, string_collector)?;
-        }
-        crate::ast::Expr::U16Low(object) if info.accessor_fields.contains(&target.span) => {
-            let field = crate::ast::Spanned::new("low".to_string(), target.span);
-            generate_field_assignment(object, &field, value, emitter, info, string_collector)?;
-        }
-        crate::ast::Expr::U16High(object) if info.accessor_fields.contains(&target.span) => {
-            let field = crate::ast::Spanned::new("high".to_string(), target.span);
-            generate_field_assignment(object, &field, value, emitter, info, string_collector)?;
-        }
-        crate::ast::Expr::Slice {
-            object,
-            start,
-            end,
-            inclusive,
-        } => {
-            generate_slice_assignment(
-                object,
-                start,
-                end,
-                *inclusive,
-                value,
-                emitter,
-                info,
-                string_collector,
-            )?;
         }
         _ => {
             return Err(CodegenError::UnsupportedOperation(
