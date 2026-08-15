@@ -213,6 +213,17 @@ let low: u8 = value.low;    // 0x34
 let high: u8 = value.high;  // 0x12
 ```
 
+Both halves are assignable, and write one byte of the value in place:
+
+```rust,compile,fragment
+let value: u16 = 0x1234;
+value.high = 0x56;          // value is now 0x5634
+```
+
+The target has to name storage — a `let` local or a `static`. A `const` is
+ROM, a parameter is an immutable copy, and a call's result is not a place;
+all three are rejected.
+
 ### Completion Status
 
 All items completed.

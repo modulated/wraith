@@ -57,3 +57,4 @@ mod temp_pools;
 mod types;
 mod variables;
 mod vtable;
+mod word_halves;

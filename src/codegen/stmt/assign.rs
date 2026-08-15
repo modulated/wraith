@@ -1833,6 +1833,38 @@ pub(super) fn generate_assign(
                 return Err(CodegenError::SymbolNotFound(name.clone()));
             }
         }
+        // `w.low = v` / `w.high = v` on a genuine 16-bit value. (A `.low` that
+        // sema resolved to a struct field named `low` was dispatched earlier,
+        // with the other field-like targets.)
+        //
+        // No staging: a 16-bit value is two adjacent bytes at one address, so
+        // the destination is known before the value is evaluated and the store
+        // is a single `STA`. Sema has already checked the operand is `u16` or
+        // `i16` and that its root is mutable.
+        crate::ast::Expr::U16Low(object) | crate::ast::Expr::U16High(object) => {
+            let high = matches!(&target.node, crate::ast::Expr::U16High(_));
+            let part = if high { "high" } else { "low" };
+            let Some((base, _)) = crate::codegen::expr::resolve_static_addr(object, info) else {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "cannot assign to `.{part}`: this value has no fixed address to write \
+                     into. Bind it to a `let` first, then assign to that"
+                )));
+            };
+            let crate::codegen::expr::StaticBase::Addr(word) = base else {
+                return Err(CodegenError::UnsupportedOperation(
+                    "cannot write to constant data".to_string(),
+                ));
+            };
+            let addr = word + if high { 1 } else { 0 };
+            emitter.emit_comment(&format!("u16/i16 .{part} assignment"));
+            if addr < 0x100 {
+                emitter.emit_inst("STA", &format!("${:02X}", addr));
+                emitter.reg_state.invalidate_zero_page(addr as u8);
+            } else {
+                emitter.emit_inst("STA", &format!("${:04X}", addr));
+                emitter.reg_state.invalidate_memory(addr);
+            }
+        }
         _ => {
             return Err(CodegenError::UnsupportedOperation(
                 "Only variable, index, field, and slice assignment supported".to_string(),
