@@ -315,3 +315,22 @@ fn an_aggregate_relayed_through_a_return_survives() {
         "a slice from an indirect call, a slice from a parameter, a struct from a parameter"
     );
 }
+
+#[test]
+fn a_slice_assigned_from_a_call_copies_the_descriptor() {
+    // The assignment counterpart of the binding above, and the one the two
+    // forms had drifted apart on: `let s: &[u8] = mk();` handled a call and
+    // `s = mk();` did not. The guard reported it rather than storing one byte
+    // of the returned pointer.
+    let mut e = run(&format!(
+        "{PRE}fn mk(k: u8) -> &[{}] {{\n\
+         \x20   if k == 0 {{ return T[0..2]; }}\n\
+         \x20   return T[2..5];\n}}\n\
+         #[reset]\nfn main() {{\n\
+         \x20   let s: &[u8] = T[0..5];\n\
+         \x20   s = mk(1);\n\
+         \x20   OUT0 = s[0]; OUT1 = s[2]; OUT2 = s.len as u8;\n    loop {{}}\n}}\n",
+        "u8"
+    ));
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (30, 50, 3));
+}

@@ -1753,6 +1753,11 @@ pub(super) fn generate_assign(
 
     // `b = a` between slices — a copy of the four-byte descriptor, for the same
     // reason. (`b = arr[0..n]`, which builds a new one, was handled above.)
+    //
+    // `b = mk()` lands here too: a slice-returning call leaves a pointer to its
+    // descriptor in A:X, exactly as it does for the `let` form. The two forms
+    // had drifted apart — binding handled a call and assignment did not — which
+    // the aggregate guard reported rather than storing one byte of the pointer.
     if let crate::ast::Expr::Variable(target_name) = &target.node
         && let Some(sym) = info
             .resolved_symbols
@@ -1760,9 +1765,17 @@ pub(super) fn generate_assign(
             .or_else(|| info.table.lookup(target_name))
         && matches!(sym.ty, crate::sema::types::Type::Slice(_))
         && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
-        && try_slice_place_copy(dest, value, emitter, info)
     {
-        return Ok(());
+        if try_slice_place_copy(dest, value, emitter, info) {
+            return Ok(());
+        }
+        if crate::codegen::expr::is_call(value) {
+            emitter.emit_comment("Slice return-by-value assign: copy 4-byte descriptor");
+            generate_expr(value, emitter, info, string_collector)?;
+            emit_return_by_value_copy(emitter, dest as u16, 4);
+            emitter.invalidate_registers();
+            return Ok(());
+        }
     }
 
     // `*p = v` — write through a pointer. Handled before the value is

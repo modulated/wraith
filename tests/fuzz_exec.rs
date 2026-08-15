@@ -249,6 +249,11 @@ enum E {
         id: usize,
         budget: Option<u32>,
         args: Vec<E>,
+        /// Which of `main`'s slices is handed to a slice-taking callee, or
+        /// `None` when the callee takes none. A four-byte descriptor staged
+        /// alongside the scalar arguments, which is the widest thing the
+        /// argument pool ever holds.
+        slice_arg: Option<usize>,
     },
     /// A recursive call from inside the function itself, always at `d - 1` and
     /// never reachable at `d == 0`. Kept as its own node rather than an ordinary
@@ -363,6 +368,10 @@ enum S {
     /// different range, so a slice's base and length are program state rather
     /// than a property of its declaration.
     Reslice(usize, usize, usize),
+    /// `sl{i} = mk({k});` — a descriptor that arrives from a *call*, which
+    /// returns a pointer to it in A:X rather than the four bytes themselves.
+    /// A different path again from either of the two above.
+    SliceFromCall(usize, usize),
 }
 
 /// Variables in `main`.
@@ -383,6 +392,11 @@ const SLICES: usize = 2;
 struct Func {
     /// Parameters, not counting a recursive function's depth budget.
     params: usize,
+    /// Whether a leading `sp: &[T]` parameter carries a slice in. Only ever set
+    /// on `f0`, which no other function can call — the call graph runs from low
+    /// to high — so the only caller is `main`, and `main` is the only scope
+    /// that has a slice to hand over.
+    slice_param: bool,
     /// Initial values of the locals declared at the top of the body.
     local_init: Vec<i64>,
     recursive: bool,
@@ -401,7 +415,13 @@ struct Func {
 #[derive(Clone, Copy)]
 enum Scope {
     Main,
-    Func { id: usize, params: usize },
+    Func {
+        id: usize,
+        params: usize,
+        /// Whether this function carries a slice, which a self-call has to
+        /// pass along and which `sp` names.
+        slice: bool,
+    },
 }
 
 impl Scope {
@@ -409,7 +429,7 @@ impl Scope {
         match self {
             Scope::Main => format!("v{i}"),
             Scope::Func { params, .. } if i < params => format!("p{i}"),
-            Scope::Func { params, .. } => format!("q{}", i - params),
+            Scope::Func { params, .. } => format!("q{}", i - params), // local
         }
     }
 }
@@ -460,10 +480,18 @@ struct Gen<'a> {
     /// arguments. Also false while generating the candidates themselves, which
     /// keeps them out of their own dispatch and the call graph acyclic.
     allow_indirect: bool,
-    /// May a slice be named here? `main` only, and only in a program that
-    /// declares the `const` table to view — the same restriction as the other
-    /// aggregates, for the same reason.
+    /// The function that takes a slice parameter, when the program has one.
+    /// Always `f0`, and unreachable from any function body, so a call site that
+    /// names it is in `main` and has a slice to pass.
+    slice_taker: Option<usize>,
+    /// May a slice expression be generated here? True in `main` when the
+    /// program declares slices, and inside `f0` when it takes one — the same
+    /// restriction as the other aggregates, for the same reason.
     allow_slices: bool,
+    /// How many `sl{i}` are in scope: `SLICES` in `main`, and 0 inside a
+    /// function, where the only slice is the parameter. What separates the two
+    /// is that a statement can *move* a named slice, and `sp` is not one.
+    main_slices: usize,
     /// Bytes still available in the compiler's fixed argument-staging pool.
     /// A call whose whole argument list fits stages there; one that does not
     /// moves each argument to the software stack as it is evaluated, holding
@@ -512,7 +540,9 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
         // A slice element and a slice length are both storage of the program's
         // type once cast, so either anchors an expression as a variable does.
         if g.allow_slices && g.rng.below(100) < 20 {
-            let i = g.rng.below(SLICES as u64) as usize;
+            // Inside a function the only slice is `sp`, which every slice
+            // expression there names; rendering keys off the scope.
+            let i = g.rng.below(g.main_slices.max(1) as u64) as usize;
             return if g.rng.below(100) < 30 {
                 E::SliceLen(i)
             } else {
@@ -569,15 +599,31 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
         let id =
             g.callable.start + g.rng.below((g.callable.end - g.callable.start) as u64) as usize;
         let (arity, recursive) = g.sigs[id];
-        // One argument's worth: the widest a nesting level holds.
-        let cost = if g.ty.wide() { 2 } else { 1 };
+        // One argument's worth: the widest a nesting level holds. A slice
+        // descriptor is four bytes and so is the widest of all, which is why
+        // it is charged rather than assumed to fit.
+        let takes_slice = g.slice_taker == Some(id);
+        let cost = if takes_slice {
+            4
+        } else if g.ty.wide() {
+            2
+        } else {
+            1
+        };
         if cost <= g.pool_left {
             let saved = g.pool_left;
             g.pool_left -= cost;
             let args = (0..arity).map(|_| gen_expr(g, depth - 1, false)).collect();
             g.pool_left = saved;
             let budget = recursive.then(|| g.rng.below(RECURSION_BUDGET as u64 + 1) as u32);
-            return E::Call { id, budget, args };
+            let slice_arg = (takes_slice && g.main_slices > 0)
+                .then(|| g.rng.below(g.main_slices as u64) as usize);
+            return E::Call {
+                id,
+                budget,
+                args,
+                slice_arg,
+            };
         }
     }
 
@@ -624,7 +670,9 @@ fn gen_slice_index(g: &mut Gen) -> Ix {
     if g.rng.below(2) == 0 {
         Ix::Lit(0)
     } else {
-        Ix::Wrapped(g.rng.below(VARS as u64) as usize)
+        // The *enclosing* scope's variables, not `main`'s: this is the one
+        // index form generated inside a function, where there may be fewer.
+        Ix::Wrapped(g.rng.below(g.vars as u64) as usize)
     }
 }
 
@@ -684,14 +732,15 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     // Moving a descriptor, the same way and for the same reason: neither
     // statement carries an expression, and both change what a later read
     // reaches without any arithmetic being involved.
-    if g.allow_slices && g.rng.below(100) < 10 {
-        let i = g.rng.below(SLICES as u64) as usize;
-        return if g.rng.below(2) == 0 {
-            let j = (i + 1) % SLICES;
-            S::CopySlice(i, j)
-        } else {
-            let (start, len) = gen_range(g);
-            S::Reslice(i, start, len)
+    if g.main_slices > 0 && g.rng.below(100) < 12 {
+        let i = g.rng.below(g.main_slices as u64) as usize;
+        return match g.rng.below(3) {
+            0 => S::CopySlice(i, (i + 1) % g.main_slices),
+            1 => {
+                let (start, len) = gen_range(g);
+                S::Reslice(i, start, len)
+            }
+            _ => S::SliceFromCall(i, g.rng.below(2) as usize),
         };
     }
     let pick = g.rng.below(100);
@@ -757,6 +806,9 @@ struct Prog {
     /// `S::Reslice` and `S::CopySlice` move them, which is why the state
     /// carries its own copy.
     slices: Vec<(usize, usize)>,
+    /// The two ranges `mk` chooses between. Present exactly when `slices` is
+    /// non-empty; `mk` is what makes a slice arrive from a call.
+    mk_ranges: Vec<(usize, usize)>,
 }
 
 impl Prog {
@@ -786,6 +838,10 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         // parameter and do not recurse — a recursive one carries a depth
         // budget, which changes the type.
         let is_candidate = i >= count - g.vtable;
+        // `f0` alone may take a slice: every other function is reachable from
+        // one that has no slice to pass, and a candidate has to match the
+        // table's signature.
+        let slice_param = i == 0 && !is_candidate && g.allow_slices;
         // Otherwise the last function is the one allowed to recurse, and a
         // recursive one takes exactly one value parameter besides its budget,
         // so the self-call has one argument to vary.
@@ -803,7 +859,13 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         let saved_callable = g.callable.clone();
         let saved_loops = g.allow_loops;
         let saved_aggregates = g.allow_aggregates;
+        let saved_slices = g.allow_slices;
+        let saved_main_slices = g.main_slices;
         g.allow_aggregates = false;
+        // Inside the function the only slice in scope is its own parameter,
+        // which every slice expression there names and no statement can move.
+        g.allow_slices = slice_param;
+        g.main_slices = 0;
         g.vars = params + locals.len();
         g.assignable = params..params + locals.len();
         g.callable = i + 1..count;
@@ -850,8 +912,11 @@ fn gen_funcs(g: &mut Gen, count: usize) -> Vec<Func> {
         g.callable = saved_callable;
         g.allow_loops = saved_loops;
         g.allow_aggregates = saved_aggregates;
+        g.allow_slices = saved_slices;
+        g.main_slices = saved_main_slices;
 
         funcs.push(Func {
+            slice_param,
             params,
             local_init: locals,
             recursive,
@@ -884,6 +949,8 @@ fn gen_program(seed: u64) -> Prog {
         vtable: 0,
         allow_indirect: false,
         allow_slices: false,
+        main_slices: 0,
+        slice_taker: None,
         pool_left: ARG_POOL_BYTES,
     };
     for v in init.iter_mut() {
@@ -913,14 +980,11 @@ fn gen_program(seed: u64) -> Prog {
     };
     let count = vtable + g.rng.below(3) as usize;
     g.vtable = vtable;
-    let funcs = gen_funcs(&mut g, count);
-    g.callable = 0..count;
-    g.allow_indirect = vtable > 0;
 
-    // Aggregates are `main`'s locals, so they are decided after the functions
-    // are generated and only affect `main`'s body.
+    // The aggregates are `main`'s locals and affect only `main`'s body, but a
+    // slice can also arrive as `f0`'s parameter — so both are decided before
+    // the functions are generated, and only the slice decision reaches them.
     let aggregates = g.rng.below(100) < 60;
-    g.allow_aggregates = aggregates;
 
     // Slices view the `const` table, so they exist only where it does. Not in
     // every such program: a slice changes how `main`'s frame is laid out, and
@@ -930,7 +994,23 @@ fn gen_program(seed: u64) -> Prog {
     } else {
         Vec::new()
     };
+    // The two ranges `mk` chooses between, so a slice can arrive from a call
+    // as well as from a range expression or another slice.
+    let mk_ranges: Vec<(usize, usize)> = if slices.is_empty() {
+        Vec::new()
+    } else {
+        (0..2).map(|_| gen_range(&mut g)).collect()
+    };
     g.allow_slices = !slices.is_empty();
+
+    let funcs = gen_funcs(&mut g, count);
+    g.callable = 0..count;
+    g.allow_indirect = vtable > 0;
+    g.allow_aggregates = aggregates;
+    g.main_slices = slices.len();
+    // `f0` is the only function that can take a slice, and only when it exists
+    // and is not one of the table's candidates.
+    g.slice_taker = (count > vtable && funcs[0].slice_param).then_some(0);
 
     let n = 2 + g.rng.below(3) as usize;
     let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
@@ -948,6 +1028,7 @@ fn gen_program(seed: u64) -> Prog {
         konst,
         vtable,
         slices,
+        mk_ranges,
     }
 }
 
@@ -980,7 +1061,14 @@ struct St<'a> {
 /// Call a generated function. Its locals are fresh per invocation — which is
 /// what the compiler's frame save/restore has to reproduce across a recursive
 /// call — and it reads nothing but its own scope, so no caller state is passed.
-fn call_fn(p: &Prog, id: usize, budget: i64, args: &[i64], ty: Ty) -> i64 {
+fn call_fn(
+    p: &Prog,
+    id: usize,
+    budget: i64,
+    args: &[i64],
+    slice: Option<(usize, usize)>,
+    ty: Ty,
+) -> i64 {
     let f = &p.funcs[id];
     let mut vars: Vec<i64> = args.to_vec();
     vars.extend(f.local_init.iter().map(|v| narrow(*v, ty)));
@@ -997,8 +1085,9 @@ fn call_fn(p: &Prog, id: usize, budget: i64, args: &[i64], ty: Ty) -> i64 {
         current: Some((id, budget)),
         // A function body contains no indirect call, so this is never read.
         dev: 0,
-        // Nor does it name a slice.
-        slices: Vec::new(),
+        // The parameter, when this function takes one — the only slice its
+        // body can name, and the one `sp` resolves to.
+        slices: slice.into_iter().collect(),
     };
     if f.recursive && budget == 0 {
         return eval(&f.base, &st, ty);
@@ -1013,17 +1102,26 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         E::Var(i) => st.vars[*i],
         E::Loop(id) => narrow(st.loops[*id], ty),
         E::Cast(to, inner) => narrow(narrow(eval(inner, st, ty), *to), ty),
-        E::Call { id, budget, args } => {
+        E::Call {
+            id,
+            budget,
+            args,
+            slice_arg,
+        } => {
             let vals: Vec<i64> = args.iter().map(|a| eval(a, st, ty)).collect();
+            let sl = slice_arg.map(|k| st.slices[k]);
             narrow(
-                call_fn(st.prog, *id, budget.unwrap_or(0) as i64, &vals, ty),
+                call_fn(st.prog, *id, budget.unwrap_or(0) as i64, &vals, sl, ty),
                 ty,
             )
         }
         E::SelfCall(arg) => {
             let (id, budget) = st.current.expect("a self-call outside a function");
             let v = eval(arg, st, ty);
-            narrow(call_fn(st.prog, id, budget - 1, &[v], ty), ty)
+            // The slice travels down the recursion unchanged: the self-call
+            // passes `sp` along, so the callee sees what this frame sees.
+            let sl = st.slices.first().copied();
+            narrow(call_fn(st.prog, id, budget - 1, &[v], sl, ty), ty)
         }
         E::Dispatch { sel, arg } => {
             let k = match sel {
@@ -1031,11 +1129,14 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                 Sel::Wrapped(i) => (raw(st.vars[*i], ty) as u8 as usize) % st.prog.vtable,
             };
             let v = eval(arg, st, ty);
-            narrow(call_fn(st.prog, st.prog.candidate(k), 0, &[v], ty), ty)
+            narrow(
+                call_fn(st.prog, st.prog.candidate(k), 0, &[v], None, ty),
+                ty,
+            )
         }
         E::DevCall(arg) => {
             let v = eval(arg, st, ty);
-            narrow(call_fn(st.prog, st.dev, 0, &[v], ty), ty)
+            narrow(call_fn(st.prog, st.dev, 0, &[v], None, ty), ty)
         }
         E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
         E::Konst(ix) => narrow(st.prog.konst[eval_index(ix, st, ty)], ty),
@@ -1115,6 +1216,7 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             S::Install(id) => st.dev = *id,
             S::CopySlice(d, src) => st.slices[*d] = st.slices[*src],
             S::Reslice(i, start, len) => st.slices[*i] = (*start, *len),
+            S::SliceFromCall(i, k) => st.slices[*i] = st.prog.mk_ranges[*k],
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st, ty) {
                     exec(then, st, ty);
@@ -1223,19 +1325,32 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             to.name(),
             ty.name()
         ),
-        E::Call { id, budget, args } => {
+        E::Call {
+            id,
+            budget,
+            args,
+            slice_arg,
+        } => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(b) = budget {
                 parts.push(b.to_string());
+            }
+            // The descriptor goes after the budget and before the values, in
+            // the order `render_func` declares the parameters.
+            if let Some(k) = slice_arg {
+                parts.push(format!("sl{k}"));
             }
             parts.extend(args.iter().map(|a| render(a, ty, sc)));
             format!("f{id}({})", parts.join(", "))
         }
         E::SelfCall(arg) => {
-            let Scope::Func { id, .. } = sc else {
+            let Scope::Func { id, slice, .. } = sc else {
                 unreachable!("a self-call outside a function")
             };
-            format!("f{id}(d - 1, {})", render(arg, ty, sc))
+            // A recursive function that took a slice hands the same one down;
+            // there is nothing else in scope it could pass.
+            let sl = if slice { "sp, " } else { "" };
+            format!("f{id}(d - 1, {sl}{})", render(arg, ty, sc))
         }
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
@@ -1244,18 +1359,32 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
         }
         E::DevCall(arg) => format!("DEV.call({})", render(arg, ty, sc)),
-        E::SliceElem(i, ix) => format!("sl{i}[{}]", render_slice_index(*i, ix)),
-        E::SliceLen(i) => format!("(sl{i}.len as {})", ty.name()),
+        E::SliceElem(i, ix) => {
+            let n = slice_name(*i, sc);
+            format!("{n}[{}]", render_slice_index(&n, ix, sc))
+        }
+        E::SliceLen(i) => format!("({}.len as {})", slice_name(*i, sc), ty.name()),
     }
 }
 
-/// An index into `sl{i}`. The modulus is the slice's *run-time* length, so the
+/// Which slice a slice expression names. `main` has `SLICES` of them; a
+/// function has exactly one, its parameter, so the index is not consulted.
+fn slice_name(i: usize, sc: Scope) -> String {
+    match sc {
+        Scope::Main => format!("sl{i}"),
+        Scope::Func { .. } => "sp".to_string(),
+    }
+}
+
+/// An index into a slice. The modulus is the slice's *run-time* length, so the
 /// source reads it out of the descriptor rather than naming a constant.
-fn render_slice_index(i: usize, ix: &Ix) -> String {
+fn render_slice_index(name: &str, ix: &Ix, sc: Scope) -> String {
     match ix {
         Ix::Lit(k) => format!("{k}"),
         Ix::Loop(id) => loop_var(*id),
-        Ix::Wrapped(v) => format!("((v{v} as u8) % (sl{i}.len as u8))"),
+        // Named through the scope: inside a function this is a parameter or a
+        // local, not one of `main`'s variables.
+        Ix::Wrapped(v) => format!("(({} as u8) % ({name}.len as u8))", sc.var(*v)),
     }
 }
 
@@ -1315,6 +1444,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
             S::Reslice(i, start, len) => {
                 out.push_str(&format!("{pad}sl{i} = TBL[{start}..{}];\n", start + len))
             }
+            S::SliceFromCall(i, k) => out.push_str(&format!("{pad}sl{i} = mk({k});\n")),
         }
     }
     out
@@ -1328,11 +1458,17 @@ fn render_func(p: &Prog, id: usize) -> String {
     let sc = Scope::Func {
         id,
         params: f.params,
+        slice: f.slice_param,
     };
 
     let mut params: Vec<String> = Vec::new();
     if f.recursive {
         params.push("d: u8".to_string());
+    }
+    // The descriptor comes before the values, so a recursive slice-taking
+    // function reads `f0(d - 1, sp, …)` at its self-call.
+    if f.slice_param {
+        params.push(format!("sp: &[{tn}]"));
     }
     for i in 0..f.params {
         params.push(format!("p{i}: {tn}"));
@@ -1422,7 +1558,18 @@ fn render_program(p: &Prog, form: Form) -> String {
     // Generated functions come before `main` in every surface form: they are
     // what the body calls, and their frames are what the call-graph colouring
     // has to keep apart from it.
-    let funcs: String = (0..p.funcs.len()).map(|i| render_func(p, i)).collect();
+    let mut funcs: String = (0..p.funcs.len()).map(|i| render_func(p, i)).collect();
+
+    // `mk` is where a slice arrives from a *call* — a pointer to a descriptor
+    // in A:X rather than four bytes in a slot, and a third path again from a
+    // range expression or another slice.
+    if let [(s0, l0), (s1, l1)] = p.mk_ranges[..] {
+        funcs.push_str(&format!(
+            "fn mk(k: u8) -> &[{tn}] {{\n             \x20   if k == 0 {{ return TBL[{s0}..{}]; }}\n             \x20   return TBL[{s1}..{}];\n}}\n",
+            s0 + l0,
+            s1 + l1
+        ));
+    }
 
     // The function-pointer table, and the struct field a driver is installed
     // in. Both name the same candidates, and both have to come after the
@@ -1693,6 +1840,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 id: callee,
                 budget,
                 args,
+                ..
             } => {
                 if *callee == id {
                     *budget = None;
@@ -1736,7 +1884,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
                 // Carry no expression, and no budget to drop.
-                S::Install(_) | S::CopySlice(..) | S::Reslice(..) => {}
+                S::Install(_) | S::CopySlice(..) | S::Reslice(..) | S::SliceFromCall(..) => {}
             }
         }
     }
@@ -1871,7 +2019,7 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::Install(_) | S::CopySlice(..) => false,
+        S::Install(_) | S::CopySlice(..) | S::SliceFromCall(..) => false,
     }
 }
 
@@ -2301,6 +2449,9 @@ fn the_generator_covers_what_it_claims() {
                 S::Reslice(..) => {
                     s.stmts.insert("reslice");
                 }
+                S::SliceFromCall(..) => {
+                    s.stmts.insert("slice-from-call");
+                }
             }
         }
     }
@@ -2387,7 +2538,14 @@ fn generated_names_are_never_reserved() {
         names.push(format!("o{id}"));
         names.push(format!("OUT{id}"));
         names.push(Scope::Main.var(id));
-        names.push(Scope::Func { id: 0, params: 2 }.var(id));
+        names.push(
+            Scope::Func {
+                id: 0,
+                params: 2,
+                slice: false,
+            }
+            .var(id),
+        );
     }
 
     for name in &names {
@@ -2458,6 +2616,7 @@ fn the_oracle_matches_the_documented_semantics() {
         konst: [0; ALEN],
         vtable: 0,
         slices: Vec::new(),
+        mk_ranges: Vec::new(),
     };
     let st = St {
         prog: &empty,
@@ -2650,7 +2809,9 @@ mod coverage {
             "Expr::Slice",
             "always a sub-range of the `const` table, with literal bounds. That table lives in \
              ROM and nothing writes it, so a slice is a read-only view and the oracle needs its \
-             two numbers rather than an alias model. Slices of a local array, of another slice, \
+             two numbers rather than an alias model. A descriptor reaches a slice four ways — a \
+             range expression, a copy from another slice, a call to `mk`, and a parameter — \
+             which are four different codegen paths. Slices of a local array, of another slice, \
              and with computed bounds are not generated",
         ),
         (
@@ -2660,9 +2821,9 @@ mod coverage {
         ),
         (
             "TypeExpr::Slice",
-            "declared in `main` only, at the program's own type. A slice is not passed to a \
-             function, returned from one, or held in a struct — those staging and return paths \
-             are covered by tests/e2e/aggregate_dispatch.rs and not by the generator",
+            "declared in `main` at the program's own type, and taken as a parameter by `f0` \
+             — the one function no other can call, so the only caller is `main` and the only \
+             caller with a slice to pass. Never held in a struct or iterated",
         ),
         (
             "Stmt::Match",
