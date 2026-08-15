@@ -13,7 +13,7 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 - **Module System** - No more header files, no more macros
 - **Configurable Memory Sections** - Control code, data and RAM placement for different memory layouts in your bespoke 6502 computer
 - **Mutable Globals** - `static` state in RAM, shareable between interrupt handlers and main code
-- **Function Pointers & Vtables** - Call through struct fields (`device.read(reg)`) for driver-style dispatch
+- **Function Pointers & Vtables** - Call through struct fields (`device.read(reg)`), tables of drivers indexed at runtime (`DRIVERS[id].write(c)`), and per-instance state (`&State` in the vtable row) — see [`examples/device_drivers.wr`](examples/device_drivers.wr)
 - **Slices** - `&[T]` views over arrays with runtime length, passable to and returnable from functions
 - **Pointers** - `&x`, `*p`, `p[i]`, `p.field`, with an escape analysis that rejects a pointer outliving what it names
 - **Bitfield Access** - `flags.set_bit(7)` / `clear_bit` / `toggle_bit` / `.bit(n)` on any integer, constant-folded to a mask
@@ -232,6 +232,14 @@ Check the `examples/` directory for sample programs demonstrating:
 - Nested structs
 - Mathematical operations
 - Memory manipulation
+
+[`device_drivers.wr`](examples/device_drivers.wr) is the longest of them and
+the one closest to a real system: a driver is a struct of function pointers, a
+table of those is the device list, and the kernel half of the program names no
+driver and touches no register. Its serial driver is interrupt-driven with a
+ring buffer at each end, so writing to the console queues a byte and returns.
+It runs against emulated hardware in `tests/e2e/example_drivers.rs` rather than
+only compiling, so what it claims is checked.
 
 ## Contributing
 

@@ -233,6 +233,42 @@ fn a_pointer_to_a_global_is_always_fine() {
 }
 
 #[test]
+fn an_enum_argument_through_an_indirect_call() {
+    // Enums are already a two-byte value in the pointer registers, so they
+    // ride the same path. Pinned because the specification says so.
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        enum Colour { Red, Green, Blue }
+        fn rank(c: Colour) -> u8 { return c as u8 + 1; }
+        struct Dev { go: fn(Colour) -> u8 }
+        static D: Dev = Dev { go: rank };
+        #[reset]
+        fn main() { OUT = D.go(Colour::Blue); loop {} }
+    "#);
+    assert_eq!(e.mem(0x0900), 3);
+}
+
+#[test]
+fn a_slice_argument_is_still_rejected() {
+    // A slice is a four-byte descriptor, so it does not fit the convention.
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        fn first(s: &[u8]) -> u8 { return s[0]; }
+        struct Dev { go: fn(&[u8]) -> u8 }
+        static D: Dev = Dev { go: first };
+        #[reset]
+        fn main() {
+            let a: [u8; 3] = [7, 8, 9];
+            OUT = D.go(a[0..2]);
+            loop {}
+        }
+    "#,
+        "indirect call cannot take",
+    );
+}
+
+#[test]
 fn an_array_argument_is_still_rejected_with_a_reason() {
     // Not every type is two bytes with a settled convention. The message says
     // what to do instead rather than naming a category.

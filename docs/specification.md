@@ -840,6 +840,80 @@ direct `JSR`; only computed callees pay the indirect cost.
 in `const NAME: read addr = ...`, and are ordinary identifiers everywhere else,
 so `struct Device { read, write }` and `dev.write(v)` are legal.
 
+#### Device tables
+
+An array of those structs is a device list, indexed by device number. Both
+halves of dispatch come out of one table: through a bound vtable for "how does
+this device work", and by index for "which device".
+
+```rust,compile
+struct Driver {
+    init:  fn(),
+    write: fn(u8),
+}
+
+fn uart_init() { }
+fn uart_write(v: u8) { }
+fn via_init() { }
+fn via_write(v: u8) { }
+
+static DRIVERS: [Driver; 2] = [
+    Driver { init: uart_init, write: uart_write },
+    Driver { init: via_init,  write: via_write  },
+];
+static CONSOLE: Driver = Driver { init: uart_init, write: uart_write };
+
+fn register(id: u8) {
+    CONSOLE = DRIVERS[id];   // the whole vtable, copied
+    CONSOLE.init();
+}
+
+fn main() {
+    register(1);
+    CONSOLE.write(0x41);     // through the bound vtable
+    DRIVERS[0].write(0x42);  // by device number
+}
+```
+
+Registration is a whole-struct assignment (see [Copying Structs](#copying-structs)),
+so `CONSOLE` ends up with its own copy of the pointers rather than an alias into
+the table.
+
+#### Per-instance state
+
+A vtable row may carry data as well as pointers, which is what lets one driver
+serve several devices of the same kind — peripherals on a shared bus, say. A
+`&T` is passed like any other pointer:
+
+```rust,compile
+struct State { count: u8 }
+static S0: State = State { count: 0 };
+static S1: State = State { count: 0 };
+
+fn poll(s: &State) -> u8 {
+    s.count = s.count + 1;
+    return s.count;
+}
+
+struct Peripheral {
+    state: &State,
+    poll:  fn(&State) -> u8,
+}
+
+static PERIPHS: [Peripheral; 2] = [
+    Peripheral { state: &S0, poll: poll },
+    Peripheral { state: &S1, poll: poll },
+];
+
+fn main() {
+    let i: u8 = 1;
+    let n: u8 = PERIPHS[i].poll(PERIPHS[i].state);
+}
+```
+
+A driver reached only through a table is not reported as dead code, so device
+entry points do not need to be called directly to avoid a warning.
+
 ### Completion Status
 
 All items completed.
