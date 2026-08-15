@@ -278,6 +278,12 @@ enum E {
     /// `Dispatch` the answer is program state rather than an index. `main`
     /// only.
     DevCall(Box<E>),
+    /// `sl{i}[<index>]` — an element read through a slice descriptor, which is
+    /// a base pointer and a length rather than storage of its own. `main` only.
+    SliceElem(usize, Ix),
+    /// `(sl{i}.len as {ty})` — the other half of the descriptor, and the half a
+    /// partial copy loses without disturbing any element. `main` only.
+    SliceLen(usize),
 }
 
 /// Which entry of the function-pointer table a `Dispatch` selects. In range by
@@ -349,10 +355,26 @@ enum S {
     /// store, not by anything a call graph can see. Carries the function's id
     /// rather than its table index, so rendering needs no lookup.
     Install(usize),
+    /// `sl{d} = sl{s};` — a descriptor copy between two slices. Four bytes with
+    /// no expression anywhere in the source to say so, which is how a version
+    /// that copied one of them went unnoticed.
+    CopySlice(usize, usize),
+    /// `sl{i} = TBL[{start}..{end}];` — build a fresh descriptor over a
+    /// different range, so a slice's base and length are program state rather
+    /// than a property of its declaration.
+    Reslice(usize, usize, usize),
 }
 
 /// Variables in `main`.
 const VARS: usize = 4;
+
+/// Slices of the `const` table a program declares when it declares any.
+///
+/// Two, because one slice cannot be copied into another and copying is the
+/// operation with the history. They view a *`const`* table: it lives in ROM and
+/// nothing writes it, so the oracle needs the descriptor's two numbers and
+/// nothing about aliasing.
+const SLICES: usize = 2;
 
 /// A generated function. Its body reads only its own parameters and locals, so
 /// a call is a pure function of its arguments and the oracle can evaluate it
@@ -438,6 +460,10 @@ struct Gen<'a> {
     /// arguments. Also false while generating the candidates themselves, which
     /// keeps them out of their own dispatch and the call graph acyclic.
     allow_indirect: bool,
+    /// May a slice be named here? `main` only, and only in a program that
+    /// declares the `const` table to view — the same restriction as the other
+    /// aggregates, for the same reason.
+    allow_slices: bool,
     /// Bytes still available in the compiler's fixed argument-staging pool.
     /// A call whose whole argument list fits stages there; one that does not
     /// moves each argument to the software stack as it is evaluated, holding
@@ -481,6 +507,16 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
                 0 => E::Elem(gen_index(g)),
                 1 => E::Konst(gen_index(g)),
                 _ => E::Field(g.rng.below(SFIELDS as u64) as usize),
+            };
+        }
+        // A slice element and a slice length are both storage of the program's
+        // type once cast, so either anchors an expression as a variable does.
+        if g.allow_slices && g.rng.below(100) < 20 {
+            let i = g.rng.below(SLICES as u64) as usize;
+            return if g.rng.below(100) < 30 {
+                E::SliceLen(i)
+            } else {
+                E::SliceElem(i, gen_slice_index(g))
             };
         }
         let choices = if g.scope.is_empty() { 2 } else { 3 };
@@ -576,6 +612,29 @@ fn gen_index(g: &mut Gen) -> Ix {
     }
 }
 
+/// An index into a slice, which is in range whatever the slice currently
+/// views.
+///
+/// Only the two forms whose range does not depend on the descriptor: a literal
+/// `0`, and a variable reduced modulo the *run-time* length. A loop variable is
+/// deliberately absent — its bound is fixed when the loop is generated, while a
+/// `Reslice` can shorten the slice underneath it, and an out-of-range read
+/// would be the generator's fault rather than the compiler's.
+fn gen_slice_index(g: &mut Gen) -> Ix {
+    if g.rng.below(2) == 0 {
+        Ix::Lit(0)
+    } else {
+        Ix::Wrapped(g.rng.below(VARS as u64) as usize)
+    }
+}
+
+/// A non-empty sub-range of `TBL`, as `(start, len)`.
+fn gen_range(g: &mut Gen) -> (usize, usize) {
+    let start = g.rng.below(ALEN as u64) as usize;
+    let len = 1 + g.rng.below((ALEN - start) as u64) as usize;
+    (start, len)
+}
+
 /// Where an assignment stores. Restricted to the locals a function may write:
 /// a parameter is immutable, and the aggregates belong to `main`.
 fn gen_place(g: &mut Gen) -> Place {
@@ -621,6 +680,19 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     if g.allow_indirect && g.vtable > 1 && g.rng.below(100) < 8 {
         let k = g.rng.below(g.vtable as u64) as usize;
         return S::Install(g.sigs.len() - g.vtable + k);
+    }
+    // Moving a descriptor, the same way and for the same reason: neither
+    // statement carries an expression, and both change what a later read
+    // reaches without any arithmetic being involved.
+    if g.allow_slices && g.rng.below(100) < 10 {
+        let i = g.rng.below(SLICES as u64) as usize;
+        return if g.rng.below(2) == 0 {
+            let j = (i + 1) % SLICES;
+            S::CopySlice(i, j)
+        } else {
+            let (start, len) = gen_range(g);
+            S::Reslice(i, start, len)
+        };
     }
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
@@ -680,6 +752,11 @@ struct Prog {
     /// How many of the highest-numbered functions sit in the function-pointer
     /// table, or 0 for a program without one.
     vtable: usize,
+    /// The declared range of each slice over `TBL`, as `(start, len)`. Empty
+    /// in a program without the table. These are the *initial* descriptors —
+    /// `S::Reslice` and `S::CopySlice` move them, which is why the state
+    /// carries its own copy.
+    slices: Vec<(usize, usize)>,
 }
 
 impl Prog {
@@ -806,6 +883,7 @@ fn gen_program(seed: u64) -> Prog {
         allow_aggregates: false,
         vtable: 0,
         allow_indirect: false,
+        allow_slices: false,
         pool_left: ARG_POOL_BYTES,
     };
     for v in init.iter_mut() {
@@ -844,6 +922,16 @@ fn gen_program(seed: u64) -> Prog {
     let aggregates = g.rng.below(100) < 60;
     g.allow_aggregates = aggregates;
 
+    // Slices view the `const` table, so they exist only where it does. Not in
+    // every such program: a slice changes how `main`'s frame is laid out, and
+    // the shapes without one have to keep being generated.
+    let slices: Vec<(usize, usize)> = if aggregates && g.rng.below(100) < 55 {
+        (0..SLICES).map(|_| gen_range(&mut g)).collect()
+    } else {
+        Vec::new()
+    };
+    g.allow_slices = !slices.is_empty();
+
     let n = 2 + g.rng.below(3) as usize;
     let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
     let (counters, loops) = (g.counters, g.loops);
@@ -859,6 +947,7 @@ fn gen_program(seed: u64) -> Prog {
         field_init,
         konst,
         vtable,
+        slices,
     }
 }
 
@@ -882,6 +971,10 @@ struct St<'a> {
     /// written by `S::Install` — the whole point of dispatching through a
     /// pointer is that this is not a property of the source.
     dev: usize,
+    /// Each slice's current `(start, len)` into `TBL`. Program state too:
+    /// `Reslice` and `CopySlice` move it. Empty inside a function, which names
+    /// no slice.
+    slices: Vec<(usize, usize)>,
 }
 
 /// Call a generated function. Its locals are fresh per invocation — which is
@@ -904,6 +997,8 @@ fn call_fn(p: &Prog, id: usize, budget: i64, args: &[i64], ty: Ty) -> i64 {
         current: Some((id, budget)),
         // A function body contains no indirect call, so this is never read.
         dev: 0,
+        // Nor does it name a slice.
+        slices: Vec::new(),
     };
     if f.recursive && budget == 0 {
         return eval(&f.base, &st, ty);
@@ -944,6 +1039,11 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         }
         E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
         E::Konst(ix) => narrow(st.prog.konst[eval_index(ix, st, ty)], ty),
+        E::SliceElem(i, ix) => {
+            let (start, len) = st.slices[*i];
+            narrow(st.prog.konst[start + eval_index_mod(ix, st, ty, len)], ty)
+        }
+        E::SliceLen(i) => narrow(st.slices[*i].1 as i64, ty),
         E::Field(i) => st.fields[*i],
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
@@ -974,11 +1074,18 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
 /// Where an index lands. Mirrors the three forms the generator emits, each of
 /// which is in range by construction.
 fn eval_index(ix: &Ix, st: &St, ty: Ty) -> usize {
+    eval_index_mod(ix, st, ty, ALEN)
+}
+
+/// As [`eval_index`], against a length known only at run time. A slice's is
+/// whatever the last `Reslice` or `CopySlice` left, so the modulus the source
+/// spells is `sl{i}.len` rather than a constant.
+fn eval_index_mod(ix: &Ix, st: &St, ty: Ty, len: usize) -> usize {
     match ix {
         Ix::Lit(k) => *k,
         Ix::Loop(id) => st.loops[*id] as usize,
         // `(v as u8) % LEN`: the cast keeps the low byte, whatever the type.
-        Ix::Wrapped(i) => (raw(st.vars[*i], ty) as usize & 0xFF) % ALEN,
+        Ix::Wrapped(i) => (raw(st.vars[*i], ty) as usize & 0xFF) % len,
     }
 }
 
@@ -1006,6 +1113,8 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                 }
             }
             S::Install(id) => st.dev = *id,
+            S::CopySlice(d, src) => st.slices[*d] = st.slices[*src],
+            S::Reslice(i, start, len) => st.slices[*i] = (*start, *len),
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st, ty) {
                     exec(then, st, ty);
@@ -1050,12 +1159,22 @@ fn expected(p: &Prog) -> Vec<u32> {
         current: None,
         // The declaration installs the table's first entry.
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
+        slices: p.slices.clone(),
     };
     exec(&p.stmts, &mut st, p.ty);
+    // Each slice reports its first element and its length — the two halves of
+    // the descriptor, so a copy that moves one and not the other shows up here
+    // even in a program whose expressions never happened to read it.
+    let descriptors: Vec<i64> = st
+        .slices
+        .iter()
+        .flat_map(|(start, len)| [narrow(p.konst[*start], p.ty), narrow(*len as i64, p.ty)])
+        .collect();
     st.vars
         .iter()
         .chain(st.arr.iter())
         .chain(st.fields.iter())
+        .chain(descriptors.iter())
         .map(|v| raw(*v, p.ty))
         .collect()
 }
@@ -1125,6 +1244,18 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
         }
         E::DevCall(arg) => format!("DEV.call({})", render(arg, ty, sc)),
+        E::SliceElem(i, ix) => format!("sl{i}[{}]", render_slice_index(*i, ix)),
+        E::SliceLen(i) => format!("(sl{i}.len as {})", ty.name()),
+    }
+}
+
+/// An index into `sl{i}`. The modulus is the slice's *run-time* length, so the
+/// source reads it out of the descriptor rather than naming a constant.
+fn render_slice_index(i: usize, ix: &Ix) -> String {
+    match ix {
+        Ix::Lit(k) => format!("{k}"),
+        Ix::Loop(id) => loop_var(*id),
+        Ix::Wrapped(v) => format!("((v{v} as u8) % (sl{i}.len as u8))"),
     }
 }
 
@@ -1180,6 +1311,10 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 out.push_str(&format!("{pad}}}\n"));
             }
             S::Install(id) => out.push_str(&format!("{pad}DEV.call = f{id};\n")),
+            S::CopySlice(d, src) => out.push_str(&format!("{pad}sl{d} = sl{src};\n")),
+            S::Reslice(i, start, len) => {
+                out.push_str(&format!("{pad}sl{i} = TBL[{start}..{}];\n", start + len))
+            }
         }
     }
     out
@@ -1244,10 +1379,10 @@ const FORMS: [Form; 4] = [
     Form::ViaLoop,
 ];
 
-/// The cells a program reports: its variables, then the array elements, then
-/// the struct fields when it has them.
+/// The cells a program reports: its variables, then the array elements, the
+/// struct fields, and two per slice — its first element and its length.
 fn out_cells(p: &Prog) -> usize {
-    VARS + if p.aggregates { ALEN + SFIELDS } else { 0 }
+    VARS + if p.aggregates { ALEN + SFIELDS } else { 0 } + 2 * p.slices.len()
 }
 
 /// One output byte per 8-bit cell, two per 16-bit one.
@@ -1339,12 +1474,22 @@ static DEV: VT = VT {{ call: {} }};\n",
             .collect();
         decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", ")));
     }
+    for (i, (start, len)) in p.slices.iter().enumerate() {
+        decls.push_str(&format!(
+            "    let sl{i}: &[{tn}] = TBL[{start}..{}];\n",
+            start + len
+        ));
+    }
 
     // Every cell is written out, in the order `expected` reports them.
     let mut cells: Vec<String> = (0..VARS).map(|i| format!("v{i}")).collect();
     if p.aggregates {
         cells.extend((0..ALEN).map(|i| format!("arr[{i}]")));
         cells.extend((0..SFIELDS).map(|i| format!("s.f{i}")));
+    }
+    for i in 0..p.slices.len() {
+        cells.push(format!("sl{i}[0]"));
+        cells.push(format!("(sl{i}.len as {tn})"));
     }
 
     let mut stores = String::new();
@@ -1590,8 +1735,8 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                     }
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
-                // Carries no expression, and no budget to drop.
-                S::Install(_) => {}
+                // Carry no expression, and no budget to drop.
+                S::Install(_) | S::CopySlice(..) | S::Reslice(..) => {}
             }
         }
     }
@@ -1711,9 +1856,22 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
             mutate_block(body, target, seen)
         }
         S::While(_, body) => mutate_block(body, target, seen),
+        // A reslice reduces to the whole table: the range stops being a
+        // variable in the failure while the descriptor move stays.
+        S::Reslice(_, start, len) => {
+            if (*start, *len) != (0, ALEN) {
+                if *seen == target {
+                    *start = 0;
+                    *len = ALEN;
+                    return true;
+                }
+                *seen += 1;
+            }
+            false
+        }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::Install(_) => false,
+        S::Install(_) | S::CopySlice(..) => false,
     }
 }
 
@@ -1829,6 +1987,25 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
                 unreachable!()
             };
             mutate_expr(arg, target, seen)
+        }
+        // A slice read reduces to a variable, which takes the descriptor out
+        // of the picture when it was only carrying the failure; the index
+        // reduces on its own first.
+        E::SliceElem(_, ix) => {
+            if *seen == target {
+                *e = E::Var(0);
+                return true;
+            }
+            *seen += 1;
+            mutate_index(ix, target, seen)
+        }
+        E::SliceLen(_) => {
+            if *seen == target {
+                *e = E::Var(0);
+                return true;
+            }
+            *seen += 1;
+            false
         }
         // Leaves: nothing smaller to try.
         E::Var(_) | E::Loop(_) => false,
@@ -2027,6 +2204,8 @@ fn the_generator_covers_what_it_claims() {
         multi_arg_calls: usize,
         table_dispatches: usize,
         installed_dispatches: usize,
+        slice_reads: usize,
+        slice_lens: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen) {
@@ -2062,6 +2241,8 @@ fn the_generator_covers_what_it_claims() {
                 s.installed_dispatches += 1;
                 walk_e(arg, s);
             }
+            E::SliceElem(_, _) => s.slice_reads += 1,
+            E::SliceLen(_) => s.slice_lens += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) | E::Field(_) => {}
         }
     }
@@ -2113,6 +2294,12 @@ fn the_generator_covers_what_it_claims() {
                 }
                 S::Install(_) => {
                     s.stmts.insert("install");
+                }
+                S::CopySlice(..) => {
+                    s.stmts.insert("slice-copy");
+                }
+                S::Reslice(..) => {
+                    s.stmts.insert("reslice");
                 }
             }
         }
@@ -2270,6 +2457,7 @@ fn the_oracle_matches_the_documented_semantics() {
         field_init: [0; SFIELDS],
         konst: [0; ALEN],
         vtable: 0,
+        slices: Vec::new(),
     };
     let st = St {
         prog: &empty,
@@ -2280,6 +2468,7 @@ fn the_oracle_matches_the_documented_semantics() {
         loops: Vec::new(),
         current: None,
         dev: 0,
+        slices: Vec::new(),
     };
     for (ty, a, op, b, want) in cases {
         let e = E::Bin(Box::new(E::Lit(*a)), *op, Box::new(E::Lit(*b)));
@@ -2347,7 +2536,9 @@ mod coverage {
         // --- Statements ------------------------------------------------------
         (
             "Stmt::ForEach",
-            "iterating needs a slice or a string, neither of which is generated",
+            "a slice is generated but never iterated: `for x in sl` binds a value the oracle \
+             would have to track alongside the loop counter, which is a separate question from \
+             the descriptor this generates slices to exercise",
         ),
         (
             "Stmt::Break",
@@ -2361,15 +2552,10 @@ mod coverage {
         ),
         // --- Expressions -----------------------------------------------------
         (
-            "Expr::Slice",
-            "a slice is a descriptor over storage the oracle would have to alias-model",
-        ),
-        (
             "Expr::AnonStructInit",
             "the named form is generated; this one adds inference, not a codegen path",
         ),
         ("Expr::EnumVariant", "enums are not generated"),
-        ("Expr::SliceLen", "slices are not generated"),
         (
             "Expr::CpuFlagCarry",
             "a status flag depends on the instruction that last set it — a property of the \
@@ -2417,7 +2603,6 @@ mod coverage {
         ),
         // --- Types -----------------------------------------------------------
         ("TypeExpr::StringBuf", "strings are aggregates"),
-        ("TypeExpr::Slice", "slices are not generated"),
         ("TypeExpr::Pointer", "pointers are not generated"),
         (
             "PrimitiveType::Bool",
@@ -2460,6 +2645,24 @@ mod coverage {
         (
             "Stmt::For",
             "bounds are literals; a computed bound is not generated",
+        ),
+        (
+            "Expr::Slice",
+            "always a sub-range of the `const` table, with literal bounds. That table lives in \
+             ROM and nothing writes it, so a slice is a read-only view and the oracle needs its \
+             two numbers rather than an alias model. Slices of a local array, of another slice, \
+             and with computed bounds are not generated",
+        ),
+        (
+            "Expr::SliceLen",
+            "read as a value and as the modulus of an index, so a descriptor whose length half \
+             is wrong shows up either way. Never assigned to",
+        ),
+        (
+            "TypeExpr::Slice",
+            "declared in `main` only, at the program's own type. A slice is not passed to a \
+             function, returned from one, or held in a struct — those staging and return paths \
+             are covered by tests/e2e/aggregate_dispatch.rs and not by the generator",
         ),
         (
             "Stmt::Match",
