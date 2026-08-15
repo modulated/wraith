@@ -337,10 +337,33 @@ Also open:
 
 ## Structure & maintainability
 
-- **Shared exhaustive Stmt/Expr walker.** The dominant historical defect was
-  hand-enumerated per-form walkers and merge lists that missed new variants. A
-  single recursion helper shared by all analysis walkers would close it; the
-  import-merge half is already done.
+- **Shared exhaustive Stmt/Expr walker.** Hand-enumerated per-form walkers and
+  merge lists that missed new variants were the dominant defect for a long
+  time. A single recursion helper shared by all analysis walkers would close
+  it; the import-merge half is already done, and `contains_call` /
+  `expr_contains_call` are exhaustive.
+- **Make codegen's per-form dispatch exhaustive, or make its fallback loud.**
+  The same defect, one layer down, and now the more common one. Where a walker
+  asks "is there a call in here", these matches ask "which strategy does this
+  form need" — and their fallback is not `false`, it is *another strategy*,
+  usually the scalar one. A form nobody enumerated does not fail; it gets
+  loaded as though it were a `u8`.
+
+  Six bugs in a row had this shape. Struct copy handled a literal and a call
+  and fell through to the scalar path for every *place*, so `let q: P = PS[1]`
+  bound one byte. Struct arguments matched a zero-page local and nothing else.
+  `.low`/`.high` had no assignment arm. Indirect calls took scalars only.
+  Frame colouring had no edge for an indirect call. Assignment evaluated its
+  value generically *and* again per target, so `arr[i] = f()` called `f` twice.
+  Each compiled silently and produced a wrong answer.
+
+  Two shapes to attack. Resolvers returning `Option`/`bool` (
+  `resolve_static_addr`, `yields_struct_pointer`, `emit_struct_place_address`)
+  whose `None` a caller reads as "not applicable, use the ordinary path" —
+  those want callers that distinguish "not this shape" from "unhandled", and
+  error on the second. And genuine `_ =>` arms in strategy matches, which want
+  the treatment `contains_call` got: enumerate every variant so a new one is a
+  compile error. `aggregate.rs` alone has 24 catch-alls, 9 of which error.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
   `types.rs` and `control_flow.rs` were already behavioral or are asserting
