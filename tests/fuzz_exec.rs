@@ -439,10 +439,12 @@ struct Gen<'a> {
     /// keeps them out of their own dispatch and the call graph acyclic.
     allow_indirect: bool,
     /// Bytes still available in the compiler's fixed argument-staging pool.
-    /// Arguments are staged there before being copied into the callee's frame,
-    /// and a call nested in another call's argument list needs room for both at
-    /// once — so the generator budgets it rather than spending its run
-    /// re-reporting one limit that already fails loudly and says what to do.
+    /// A call whose whole argument list fits stages there; one that does not
+    /// moves each argument to the software stack as it is evaluated, holding
+    /// only its widest argument in the pool. So a nesting level costs one
+    /// argument, not the list — which is what this charges. The budget cannot
+    /// be exact (the pool has consumers a program's source does not reveal),
+    /// so a seed that overruns anyway is skipped and counted.
     pool_left: u8,
 }
 
@@ -531,7 +533,8 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
         let id =
             g.callable.start + g.rng.below((g.callable.end - g.callable.start) as u64) as usize;
         let (arity, recursive) = g.sigs[id];
-        let cost = arity as u8 * if g.ty.wide() { 2 } else { 1 };
+        // One argument's worth: the widest a nesting level holds.
+        let cost = if g.ty.wide() { 2 } else { 1 };
         if cost <= g.pool_left {
             let saved = g.pool_left;
             g.pool_left -= cost;
@@ -1895,16 +1898,21 @@ fn shrink(p: &Prog, form: Form, kind: Kind) -> Prog {
 
 /// A compile error that is a known, documented limit rather than a defect.
 ///
-/// Argument staging uses a fixed 11-byte zero-page pool, so a call nested in
-/// another call's argument list can exhaust it. The generator budgets the pool
-/// to keep this rare, but it cannot be exact — the pool has other consumers
-/// that a program's source does not reveal — and encoding the compiler's
-/// allocator into the generator would be the wrong place for that knowledge.
+/// A call whose whole argument list fits stages it in the fixed 11-byte
+/// zero-page pool; one that does not moves each argument to the software stack
+/// as it is evaluated, holding only its widest argument there. So a nesting
+/// level costs one argument rather than the list — but it still costs one, and
+/// deep enough nesting exhausts the pool anyway.
 ///
-/// The limit fails loudly, names its workaround, has a regression test
-/// (`tests/e2e/nested_calls.rs`) and a roadmap entry saying what lifting it
-/// takes. Skipping it here keeps the run spent on wrong answers; the count is
-/// reported so it cannot quietly become the common case.
+/// The generator budgets a level's worth to keep that rare, but it cannot be
+/// exact: the pool has other consumers a program's source does not reveal, and
+/// encoding the compiler's allocator into the generator would put that
+/// knowledge in the wrong place.
+///
+/// The limit fails loudly, has regression tests (`tests/e2e/nested_calls.rs`)
+/// and a roadmap entry saying what removing the rest of it takes. Skipping it
+/// here keeps the run spent on wrong answers; the count is reported so it
+/// cannot quietly become the common case.
 fn is_known_limit(why: &str) -> bool {
     why.contains("argument-evaluation pool exhausted")
 }
@@ -2466,8 +2474,9 @@ mod coverage {
             "1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing \
              budget parameter. Mutual recursion is not generated, and a callee reads only \
              its own scope, so argument evaluation order cannot be observed. Nesting depth is limited by the compiler's 11-byte argument-staging \
-             pool: the generator budgets it, and a program that exhausts it anyway is \
-             skipped and counted rather than reported",
+             pool, which a call whose list does not fit spills to the software stack one \
+             argument at a time: the generator budgets a level's worth, and a program that \
+             exhausts it anyway is skipped and counted rather than reported",
         ),
         (
             "TypeExpr::Function",

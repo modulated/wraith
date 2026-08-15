@@ -170,8 +170,10 @@ pub(super) fn generate_call(
     // This would overwrite previously evaluated arguments.
     // Use the arg temp pool ($F4-$FE) managed by TempAllocator.
 
-    // Calculate total bytes needed for all arguments
-    let mut total_bytes = 0u8;
+    // Bytes each argument occupies while it waits, and the totals derived from
+    // them: the whole block for pool staging, the widest single one for the
+    // scratch slot stack staging reuses.
+    let mut arg_sizes: Vec<u8> = Vec::with_capacity(args.len());
     for (i, _arg) in args.iter().enumerate() {
         let is_16bit = param_types.get(i).is_some_and(|param_ty| {
             matches!(
@@ -198,35 +200,66 @@ pub(super) fn generate_call(
         let is_pointer = param_types
             .get(i)
             .is_some_and(|param_ty| matches!(param_ty, Type::Pointer(_)));
-        total_bytes += if is_slice {
+        arg_sizes.push(if is_slice {
             4
         } else if is_16bit || is_struct || is_array || is_string || is_pointer {
             2
         } else {
             1
-        };
+        });
     }
+    let total_bytes: u8 = arg_sizes.iter().sum();
+    let widest_arg: u8 = arg_sizes.iter().copied().max().unwrap_or(0);
 
-    // Allocate temp storage for all arguments at once
-    let temp_base = if total_bytes == 0 {
-        0 // No arguments: base is unused (the copy loop below runs zero times).
+    // Where this call's arguments wait between being evaluated and being copied
+    // into the callee's frame.
+    //
+    // The pool is a fixed zero-page region, so a call nested in another call's
+    // argument list needs room for both lists at once and four 16-bit
+    // arguments inside four more will not fit. That used to be a compile
+    // error. When the block does not fit, each argument is moved to the
+    // software stack as soon as it is evaluated instead, so the pool holds one
+    // argument at a time and the depth is bounded by the stack's 256 bytes.
+    //
+    // The pool is still tried first and is still the common case: staging
+    // there is `LDA temp; STA param` per byte, where the stack costs a push
+    // and a pop. Nothing that used to fit changes.
+    let staging = if total_bytes == 0 {
+        // No arguments: the base is unused, the copy loop runs zero times.
+        Staging::Pool { base: 0 }
+    } else if let Some(base) = emitter.temp_alloc.alloc_arg(total_bytes) {
+        Staging::Pool { base }
     } else {
-        match emitter.temp_alloc.alloc_arg(total_bytes) {
-            Some(addr) => addr,
-            None => {
-                return Err(CodegenError::Internal(format!(
-                    "argument-evaluation pool exhausted calling '{}' ({} bytes of arguments, \
-                     {} free of {}). Arguments are staged in a fixed zero-page pool, and a \
-                     call nested in another call's argument list needs room for both at \
-                     once. Bind the inner call to a `let` first.",
-                    function.node,
-                    total_bytes,
-                    emitter.temp_alloc.arg_bytes_free(),
-                    crate::codegen::memory_layout::TempAllocator::ARG_SIZE,
-                )));
-            }
-        }
+        // Room for one argument at a time — this call's widest, not the
+        // language's, so a call whose parameters are all bytes needs one.
+        let scratch = emitter.temp_alloc.alloc_arg(widest_arg).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "argument-evaluation pool exhausted calling '{}': {} free of {}, and even \
+                 one argument at a time needs {}",
+                function.node,
+                emitter.temp_alloc.arg_bytes_free(),
+                crate::codegen::memory_layout::TempAllocator::ARG_SIZE,
+                widest_arg,
+            ))
+        })?;
+        Staging::Stack { scratch }
     };
+    let temp_base = match staging {
+        Staging::Pool { base } => base,
+        Staging::Stack { scratch } => scratch,
+    };
+
+    // A frame save pushes the callee's frame onto the same software stack the
+    // arguments are being parked on, so with stack staging it has to happen
+    // *before* them or it would bury them. Saving earlier is safe: the frame
+    // still holds this invocation's live values, argument expressions only
+    // read it, and its parameter slots are not written until the copy below.
+    if matches!(staging, Staging::Stack { .. })
+        && is_recursive_edge
+        && let Some(frame) = callee_frame
+    {
+        emitter.push_frame(frame.base, frame.size);
+    }
     let mut temp_offset = 0u8;
     let mut arg_info = Vec::new(); // Track argument sizes and temp locations
 
@@ -249,7 +282,19 @@ pub(super) fn generate_call(
             emitter.pop_frame(temp_base, sheltered);
             sheltered = 0;
         }
-        let temp_addr = temp_base + temp_offset;
+        // Stack staging reuses one scratch slot, so the previous argument has
+        // to be parked before this one overwrites it. Deferred to here, and to
+        // after the loop, for the same reason the shelter's pop is: the body
+        // below leaves through a dozen different `continue`s.
+        if let Staging::Stack { scratch } = staging
+            && let Some((_, size)) = arg_info.last()
+        {
+            emitter.push_frame(scratch, *size);
+        }
+        let temp_addr = match staging {
+            Staging::Pool { base } => base + temp_offset,
+            Staging::Stack { scratch } => scratch,
+        };
 
         // The argument pool is a *fixed* zero-page region ($F4-$FE) and the
         // allocator is reset at every function boundary, so a callee stages its
@@ -264,7 +309,14 @@ pub(super) fn generate_call(
         // address, cannot. Only the bytes already written need saving, and only
         // when this argument can reach a call at all, so a call whose arguments
         // are plain values pays nothing.
-        if temp_offset > 0 && super::binary::contains_call(&arg.node) {
+        //
+        // Stack staging needs none of this: each argument is already on the
+        // stack before the next is evaluated, so the pool holds nothing worth
+        // saving.
+        if matches!(staging, Staging::Pool { .. })
+            && temp_offset > 0
+            && super::binary::contains_call(&arg.node)
+        {
             emitter.push_frame(temp_base, temp_offset);
             sheltered = temp_offset;
         }
@@ -529,30 +581,49 @@ pub(super) fn generate_call(
     if sheltered > 0 {
         emitter.pop_frame(temp_base, sheltered);
     }
+    // The last argument, still in the scratch slot.
+    if let Staging::Stack { scratch } = staging
+        && let Some((_, size)) = arg_info.last()
+    {
+        emitter.push_frame(scratch, *size);
+    }
 
     // RECURSION SAVE: for a call inside a cycle, preserve the callee's frame
     // (which may hold the live values of an outer invocation) before we overwrite
     // its parameter slots. Done after argument evaluation and before the copy, so
-    // the arguments (already parked in the temp pool) are unaffected.
-    if is_recursive_edge && let Some(frame) = callee_frame {
+    // the arguments (already parked in the temp pool) are unaffected. Stack
+    // staging did this before the arguments went on, since they share a stack.
+    if matches!(staging, Staging::Pool { .. })
+        && is_recursive_edge
+        && let Some(frame) = callee_frame
+    {
         emitter.push_frame(frame.base, frame.size);
     }
 
-    // STEP 2: Copy each argument (arg_size bytes) from temp storage to the
-    // callee's parameter slots.
-    let mut byte_offset = 0u8;
-    for (temp_addr, arg_size) in arg_info.iter() {
-        let param_addr = param_base + byte_offset;
-        for k in 0..*arg_size {
-            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + k));
-            emitter.emit_inst("STA", &format!("${:02X}", param_addr + k));
+    // STEP 2: move each argument into the callee's parameter slots.
+    match staging {
+        Staging::Pool { base } => {
+            let mut byte_offset = 0u8;
+            for (temp_addr, arg_size) in arg_info.iter() {
+                let param_addr = param_base + byte_offset;
+                for k in 0..*arg_size {
+                    emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + k));
+                    emitter.emit_inst("STA", &format!("${:02X}", param_addr + k));
+                }
+                byte_offset += arg_size;
+            }
+            emitter.temp_alloc.free_arg(base, total_bytes);
         }
-        byte_offset += arg_size;
-    }
-
-    // Free the temp storage after copying to parameters
-    if total_bytes > 0 {
-        emitter.temp_alloc.free_arg(temp_base, total_bytes);
+        // The stack hands them back in reverse, so walk the parameter block
+        // backwards and pop each argument straight into its slot.
+        Staging::Stack { scratch } => {
+            let mut byte_offset = total_bytes;
+            for (_, arg_size) in arg_info.iter().rev() {
+                byte_offset -= arg_size;
+                emitter.pop_frame(param_base + byte_offset, *arg_size);
+            }
+            emitter.temp_alloc.free_arg(scratch, widest_arg);
+        }
     }
 
     // STEP 3: Call the function
@@ -641,6 +712,19 @@ pub(super) fn generate_call(
 /// How the callee's address is obtained for an indirect call: either it is
 /// stored in a variable at a known location, or it is produced by evaluating an
 /// expression (a vtable field, a dispatch-table element, ...).
+/// Where a call's arguments wait between evaluation and the copy into the
+/// callee's frame.
+#[derive(Clone, Copy)]
+enum Staging {
+    /// One contiguous block in the fixed zero-page pool, the common case.
+    Pool { base: u8 },
+    /// One argument at a time through `scratch`, each pushed to the software
+    /// stack as soon as it is evaluated. Used when the whole block does not
+    /// fit, which is what a call nested in another call's argument list can
+    /// cause. The stack nests, so the depth is bounded by its 256 bytes.
+    Stack { scratch: u8 },
+}
+
 enum CalleeSource<'a> {
     Location(crate::sema::table::SymbolLocation),
     Expr(&'a Spanned<Expr>),

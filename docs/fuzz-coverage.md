@@ -30,7 +30,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Expr` | 400 |  |
 | `Return` | 324 | every generated function returns a value of the program's type, so the `u8`/`i8` (A) and `u16`/`i16` (A:Y) return conventions are covered but the pointer one (A:X) is not — that needs aggregates |
 | `If` | 326 |  |
-| `While` | 206 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
+| `While` | 205 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
 | `Loop` | 400 |  |
 | `For` | 400 | bounds are literals; a computed bound is not generated |
 | `ForEach` | — | not generated: iterating needs a slice or a string, neither of which is generated |
@@ -52,7 +52,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Field` | 291 | two fields of the program's type; no nested struct and no array field |
 | `Index` | 270 | the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, because the language does no bounds checking and an out-of-range access would be the generator's bug rather than the compiler's |
 | `Slice` | — | not generated: a slice is a descriptor over storage the oracle would have to alias-model |
-| `Call` | 400 | 1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing budget parameter. Mutual recursion is not generated, and a callee reads only its own scope, so argument evaluation order cannot be observed. Nesting depth is limited by the compiler's 11-byte argument-staging pool: the generator budgets it, and a program that exhausts it anyway is skipped and counted rather than reported |
+| `Call` | 400 | 1-3 arguments, an acyclic call graph, and self-recursion bounded by a decreasing budget parameter. Mutual recursion is not generated, and a callee reads only its own scope, so argument evaluation order cannot be observed. Nesting depth is limited by the compiler's 11-byte argument-staging pool, which a call whose list does not fit spills to the software stack one argument at a time: the generator budgets a level's worth, and a program that exhausts it anyway is skipped and counted rather than reported |
 | `CallIndirect` | 151 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
 | `StructInit` | 297 |  |
 | `AnonStructInit` | — | not generated: the named form is generated; this one adds inference, not a codegen path |
@@ -83,7 +83,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Add` | 330 |  |
+| `Add` | 331 |  |
 | `Sub` | 346 |  |
 | `Mul` | 302 |  |
 | `Div` | 341 | divisor is always a nonzero positive literal — zero is an error-behaviour question, and positive keeps `i8::MIN / -1` out |
@@ -96,7 +96,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Eq` | 196 |  |
 | `Ne` | 127 |  |
 | `Lt` | 95 |  |
-| `Gt` | 245 |  |
+| `Gt` | 244 |  |
 | `Le` | 131 |  |
 | `Ge` | 127 |  |
 | `And` | 114 |  |

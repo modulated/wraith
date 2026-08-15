@@ -161,22 +161,49 @@ fn recursion_through_an_argument_list() {
     assert_eq!(e.mem(0x0900), 42, "the first argument must survive");
 }
 
-/// The staging pool is finite, and a nested call needs room for both argument
-/// lists at once. Exceeding it must fail loudly at compile time rather than
-/// emit code that reuses the bytes — the failure this whole file is about.
+/// More arguments than the fixed staging pool holds. Four 16-bit arguments
+/// nested inside four more is sixteen bytes against the pool's eleven, so this
+/// used to be a compile error naming a workaround. It now stages on the
+/// software stack instead — one argument at a time, each parked as soon as it
+/// is evaluated — and the depth is bounded by that stack rather than by the
+/// pool. Every argument still has to arrive intact, which is what the weights
+/// below check: a wrong slot shows up as a wrong multiple.
 #[test]
-fn exhausting_the_staging_pool_is_a_compile_error() {
+fn arguments_beyond_the_staging_pool_still_arrive() {
     // `side` keeps `w` non-leaf so the inliner leaves it alone; only a real
-    // call stages arguments through the pool.
-    let src = "const OUT0: addr = 0x0900;\n\
+    // call stages arguments.
+    let src = "const LO: addr = 0x0900;\nconst HI: addr = 0x0901;\n\
                fn side(x: u16) -> u16 { return x + 1; }\n\
-               fn w(a: u16, b: u16, c: u16, d: u16) -> u16 { return a + side(b); }\n\
+               fn w(a: u16, b: u16, c: u16, d: u16) -> u16 {\n\
+               \x20   return a + (b * 3) + (c * 7) + (d * 11) + side(0);\n\
+               }\n\
                #[reset]\nfn main() {\n\
-               \x20   let v: u16 = 1;\n\
-               \x20   let r: u16 = w(v, v, v, w(v, v, v, v));\n\
-               \x20   OUT0 = r.low;\n    loop {}\n}\n";
-    crate::common::assert_error_contains(src, "argument-evaluation pool exhausted");
-    crate::common::assert_error_contains(src, "Bind the inner call to a `let` first");
+               \x20   let r: u16 = w(1, 2, 3, w(4, 5, 6, 7));\n\
+               \x20   LO = r.low;\n    HI = r.high;\n    loop {}\n}\n";
+    let mut e = crate::common::exec::run(src);
+    // inner: 4 + 15 + 42 + 77 + 1 = 139
+    // outer: 1 + 6 + 21 + 1529 + 1 = 1558
+    assert_eq!(e.mem16(0x0900), 1558);
+}
+
+/// The same overflow with a *recursive* callee. The frame save and the
+/// arguments share one software stack, so with stack staging the save has to
+/// happen before the arguments go on or it would bury them.
+#[test]
+fn stack_staged_arguments_survive_a_recursive_callee() {
+    let mut e = crate::common::exec::run(
+        "const LO: addr = 0x0900;\nconst HI: addr = 0x0901;\n\
+         fn sum(d: u16, a: u16, b: u16, c: u16) -> u16 {\n\
+         \x20   if d == 0 { return a + (b * 3) + (c * 7); }\n\
+         \x20   return sum(d - 1, a, b, c) + 1;\n\
+         }\n\
+         #[reset]\nfn main() {\n\
+         \x20   let r: u16 = sum(2, 1, 2, sum(1, 4, 5, 6));\n\
+         \x20   LO = r.low;\n    HI = r.high;\n    loop {}\n}\n",
+    );
+    // inner sum(1,4,5,6): base 4 + 15 + 42 = 61, one level of +1 => 62
+    // outer sum(2,1,2,62): base 1 + 6 + 434 = 441, two levels of +1 => 443
+    assert_eq!(e.mem16(0x0900), 443);
 }
 
 /// A bit test whose object is a call, sitting in a later argument. `contains_call`

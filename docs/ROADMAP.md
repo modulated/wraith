@@ -260,26 +260,31 @@ emulator) turned these up. The silent-miscompile findings from that run are
 fixed and regression-tested in `tests/e2e/match_ranges.rs`; what follows is what
 it found and left standing.
 
-### Argument staging is bounded by a fixed 11-byte pool
+### Argument staging holds one argument per nesting level
 
-Arguments are evaluated into a fixed zero-page pool (`$F4-$FE`) before being
-copied into the callee's frame, and a call nested in another call's argument
-list needs room for both lists at once. Four 16-bit arguments nested inside four
-more exceeds it. The failure is a compile error naming the workaround (bind the
-inner call to a `let`), not a miscompile — the miscompiles that used to hide
-here are fixed and regression-tested in `tests/e2e/nested_calls.rs`.
+*Mostly lifted.* Arguments used to be evaluated into a fixed 11-byte zero-page
+pool (`$F4-$FE`) as one contiguous block, so a call nested in another call's
+argument list needed room for both lists at once and four 16-bit arguments
+inside four more was a compile error.
 
-Lifting it means staging arguments on the software stack rather than in a pool
-at a fixed address, which is the same mechanism the nested-call fix already uses
-to shelter what is staged so far. The pool would then hold one argument at a
-time and the depth would be bounded by the 256-byte stack instead.
+A call whose whole list fits still stages there — it is the cheaper path, `LDA
+temp; STA param` per byte, and nothing that used to fit changed by a byte. When
+the block does not fit, each argument now moves to the software stack as soon
+as it is evaluated, so the pool holds only that call's *widest single
+argument* and the depth is bounded by the stack's 256 bytes. Because the frame
+save shares that stack, a recursive callee's save happens before the arguments
+go on rather than after, or it would bury them.
 
-The fuzzer budgets the pool so it rarely generates a program that exhausts it,
-and skips (and counts) the ones that slip through — the budget cannot be exact,
-because the pool has other consumers a program's source does not reveal, and
-modelling the compiler's allocator inside the generator would put that knowledge
-in the wrong place. The skip count is printed and capped, so if lifting this
-limit ever stops mattering the test will say so rather than drift.
+What is left is that a nesting level still costs its widest argument, so around
+five levels of 16-bit nesting exhausts the pool. Removing even that means
+pushing each argument straight from the registers it is produced in, without a
+zero-page slot in between — which needs the per-argument staging in
+`generate_call` restructured so the push has one place to happen, rather than
+being reached through a dozen `continue`s.
+
+The failure is still a compile error rather than a miscompile, and the fuzzer
+budgets one argument per level to match, skipping and counting anything that
+overruns anyway.
 
 ### A mutable slice type
 
