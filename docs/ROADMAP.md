@@ -25,11 +25,15 @@ read against a current picture:
 | Two-branch comparisons (`>`, `<=`) fused into their branch; the V guard dropped | `tests/e2e/branch_fusion.rs` |
 | The fuzzer dispatches through function pointers, two ways | `docs/fuzz-coverage.md` |
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
+| Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
+| Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
-whose fallback is *another strategy* rather than a failure. It is the highest-
-value structural item open.
+whose fallback is *another strategy* rather than a failure. The three sites
+that decide an aggregate's fate now refuse what they cannot carry, which is
+where it did its damage; the resolvers underneath still cannot tell a caller
+"not this shape" apart from "unhandled".
 
 ---
 
@@ -285,6 +289,15 @@ and an oracle that is merely *probably* right is worse than no oracle:
 - **Slices, pointers and enums.** Arrays and structs of scalars are generated;
   a slice or a `&T` gives two names for one piece of storage, which the oracle
   would have to alias-model, and enums are a separate lowering again.
+
+  This one has now cost what the function-pointer gap cost. Three slice bugs
+  were found by hand — a binding that copied one of four descriptor bytes, an
+  assignment that did the same, and an argument that staged one byte of a
+  pointer to a descriptor — and each would have shown up as a wrong answer in a
+  generator that binds a slice, passes it, and reads an element and `.len`.
+  None of that needs alias modelling: a slice of a `const` table is read-only,
+  so an oracle that tracks base and length against the same table it generated
+  is exact. That much is worth doing before the aliasing question.
 - **Aggregates across a call.** A struct is a local today — never passed,
   returned, or pointed at — and an array field inside a struct is not
   generated. Both are shapes where a miscompile has already been found by hand.
@@ -425,11 +438,12 @@ Also open:
   it; the import-merge half is already done, and `contains_call` /
   `expr_contains_call` are exhaustive.
 - **Make codegen's per-form dispatch exhaustive, or make its fallback loud.**
-  The same defect, one layer down, and now the more common one. Where a walker
-  asks "is there a call in here", these matches ask "which strategy does this
-  form need" — and their fallback is not `false`, it is *another strategy*,
-  usually the scalar one. A form nobody enumerated does not fail; it gets
-  loaded as though it were a `u8`.
+  *Largely done — the three sites that decide an aggregate's fate now refuse
+  what they cannot carry.* The defect was the walker one a layer down, and the
+  more common of the two. Where a walker asks "is there a call in here", these
+  matches ask "which strategy does this form need" — and their fallback is not
+  `false`, it is *another strategy*, usually the scalar one. A form nobody
+  enumerated did not fail; it got loaded as though it were a `u8`.
 
   Six bugs in a row had this shape. Struct copy handled a literal and a call
   and fell through to the scalar path for every *place*, so `let q: P = PS[1]`
@@ -439,13 +453,30 @@ Also open:
   value generically *and* again per target, so `arr[i] = f()` called `f` twice.
   Each compiled silently and produced a wrong answer.
 
-  Two shapes to attack. Resolvers returning `Option`/`bool` (
-  `resolve_static_addr`, `yields_struct_pointer`, `emit_struct_place_address`)
-  whose `None` a caller reads as "not applicable, use the ordinary path" —
-  those want callers that distinguish "not this shape" from "unhandled", and
-  error on the second. And genuine `_ =>` arms in strategy matches, which want
-  the treatment `contains_call` got: enumerate every variant so a new one is a
-  compile error. `aggregate.rs` alone has 24 catch-alls, 9 of which error.
+  **What changed.** Binding, assignment and argument staging all end in a store
+  of a register. Each now classifies what it is about to store first: a slot
+  wider than the registers carry (a struct, a four-byte slice descriptor) that
+  reaches the store has been declined by every copy path above it, and errors
+  naming the type and its width. The estimate that bounds loop unrolling was
+  the third kind — a flat `_ => 12` for ten expression forms, a match
+  expression costed as a variable — and now enumerates every variant, so a new
+  form is a compile error rather than an under-charge.
+
+  **Three more bugs, found by asking the question.** `let b: &[u8] = a;` and
+  `b = a;` had no case at all, so a slice binding copied one byte of the
+  descriptor: `b[i]` read through a half-written pointer and `b.len` was never
+  written. `g(mk())` staged one byte of a *pointer to* a descriptor as though
+  it were the base. And the four sites asking "did this return an aggregate in
+  A:X" matched `Call` but not `CallIndirect`, though the two return
+  identically, so nothing claimed a struct or slice from `DEV.get()`. All three
+  are fixed and pinned in `tests/e2e/aggregate_dispatch.rs`.
+
+  **What is left** is the first shape rather than the second: resolvers
+  returning `Option`/`bool` (`resolve_static_addr`, `yields_struct_pointer`,
+  `emit_struct_place_address`) whose `None` a caller still reads as "not
+  applicable, use the ordinary path". The guards above are a backstop under the
+  three sites that matter, not a fix at the resolvers — a caller that wants to
+  distinguish "not this shape" from "unhandled" still cannot ask.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
   `types.rs` and `control_flow.rs` were already behavioral or are asserting
