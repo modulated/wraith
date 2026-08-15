@@ -208,7 +208,11 @@ and an oracle that is merely *probably* right is worse than no oracle:
   caller's locals, and `examples/device_drivers.wr` found it by hand. A
   generator that installs one of several same-signature functions in a vtable
   and dispatches through it would have found it first — the oracle only needs
-  to know which function it installed.
+  to know which function it installed. The area has since grown: an indirect
+  call now stages pointer, string, enum and struct arguments as well as
+  scalars, and the escape rule that guarded it was re-derived rather than
+  merely relaxed. All of it is covered by hand-written tests and none of it by
+  the generator.
 - **Slices, pointers and enums.** Arrays and structs of scalars are generated;
   a slice or a `&T` gives two names for one piece of storage, which the oracle
   would have to alias-model, and enums are a separate lowering again.

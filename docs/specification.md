@@ -793,8 +793,13 @@ indirect trampoline rather than a direct `JSR`, so they cost a few extra cycles.
 
 **Indirect arguments.** A function whose address is taken receives its arguments
 through a fixed staging block and copies them into its frame in a prologue, so
-direct and indirect callers agree on where arguments live. Only scalar
-(1- and 2-byte) parameters may be passed to an indirect call.
+direct and indirect callers agree on where arguments live.
+
+The staging block is a fixed size at a fixed address, so a parameter has to be
+one or two bytes with a settled register convention. That admits the scalars,
+a pointer, a `str`, an enum, and a struct — which goes by reference, indirectly
+just as it does directly. An array or a slice may not be passed to an indirect
+call; pass a `&T` instead.
 
 ### Vtables and Dynamic Dispatch
 
@@ -1700,9 +1705,15 @@ The analysis is flow-insensitive: a variable's provenance is the meet of every
 value assigned to it anywhere in the function. `let p = &GLOBAL; p = &x;`
 makes `p` local throughout.
 
-A pointer passed to an **indirect** call must point at a global. A call through
-a function pointer records no call edge, so the callee's frame is uncoloured
-with respect to the caller's and the usual guarantee does not hold.
+An **indirect** call gets the same rule, asked of every function it could
+reach. Which one runs is unknown, but the candidates are not — only a function
+whose address was taken is reachable through a pointer — so a pointer to a
+local is rejected if *any* of them stores that parameter beyond the call.
+
+Frame colouring holds across an indirect call as it does across a direct one:
+a function that dispatches through a pointer is given a colouring edge to every
+address-taken function, so the callee's frame cannot overlap the caller's and a
+pointer into that frame stays valid.
 
 ### Pointers in statics
 

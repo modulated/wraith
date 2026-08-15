@@ -25,6 +25,7 @@ mod frames;
 mod functions;
 mod import_diagnostics;
 mod imports;
+mod indirect_args;
 mod inline;
 mod int_conversions;
 mod interrupts;

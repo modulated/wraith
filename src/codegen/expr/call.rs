@@ -646,6 +646,58 @@ enum CalleeSource<'a> {
     Expr(&'a Spanned<Expr>),
 }
 
+/// How one argument of an indirect call reaches the staging block.
+///
+/// The callee is unknown, so every argument has to arrive in a fixed place
+/// rather than in the callee's own frame. That is what limits this list: each
+/// kind is one or two bytes with a settled register convention. An array or a
+/// slice is neither — an array parameter is a descriptor whose shape depends
+/// on the callee, and a slice is four bytes — so they stay out.
+#[derive(Clone, Copy)]
+enum IndirectArgKind {
+    /// One byte in A.
+    Byte,
+    /// Two bytes, high in Y: `u16`, `i16`, `b16`, and function pointers.
+    Word,
+    /// Two bytes, high in X: the pointer convention. A `&T`, a `str`, an enum,
+    /// or the address of a struct passed by reference.
+    Address,
+}
+
+impl IndirectArgKind {
+    fn of(ty: &Type) -> Result<Self, CodegenError> {
+        use crate::ast::PrimitiveType;
+        Ok(match ty {
+            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16) => {
+                Self::Word
+            }
+            Type::Primitive(_) => Self::Byte,
+            Type::Pointer(_) | Type::String => Self::Address,
+            // A struct goes by reference; an enum is already a 2-byte value in
+            // the same registers. Both are `Named`.
+            Type::Named(_) => Self::Address,
+            // A function pointer is two bytes, high in Y, like a `u16`.
+            Type::Function(..) => Self::Word,
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "an indirect call cannot take a {} argument: it is staged at a fixed \
+                     address for a callee that is not known until run time, which suits a \
+                     scalar, a pointer, a string, an enum or a struct. Pass a `&T` to it \
+                     instead",
+                    ty.display_name()
+                )));
+            }
+        })
+    }
+
+    fn size(self) -> u8 {
+        match self {
+            Self::Byte => 1,
+            Self::Word | Self::Address => 2,
+        }
+    }
+}
+
 fn generate_indirect_call(
     callee: CalleeSource<'_>,
     param_types: &[Type],
@@ -671,18 +723,16 @@ fn generate_indirect_call(
     emitter.emit_comment("Indirect call through function pointer");
 
     if !args.is_empty() {
-        // Only scalar (1- or 2-byte) parameters are supported indirectly.
-        for pty in param_types {
-            if !matches!(pty, Type::Primitive(_)) {
-                return Err(CodegenError::UnsupportedOperation(
-                    "indirect calls only support scalar (u8/i8/u16/i16/bool) arguments".to_string(),
-                ));
-            }
-        }
-        let total: u8 = param_types
+        // How each parameter reaches the callee. Everything here is one or two
+        // bytes in the staging block; the callee's prologue copies them into
+        // its frame by byte count, so what matters is producing the right two
+        // bytes in the right registers.
+        let kinds: Vec<IndirectArgKind> = param_types
             .iter()
-            .map(|p| if is_16(Some(p)) { 2 } else { 1 })
-            .sum();
+            .map(IndirectArgKind::of)
+            .collect::<Result<_, _>>()?;
+
+        let total: u8 = kinds.iter().map(|k| k.size()).sum();
         if total > INDIRECT_ARG_MAX {
             return Err(CodegenError::UnsupportedOperation(format!(
                 "indirect call arguments exceed the {}-byte staging block",
@@ -698,19 +748,43 @@ fn generate_indirect_call(
         })?;
         let mut off = 0u8;
         let mut placed = Vec::new();
-        for (arg, pty) in args.iter().zip(param_types.iter()) {
-            let p16 = is_16(Some(pty));
-            let arg16 = is_16(info.resolved_types.get(&arg.span));
-            generate_expr(arg, emitter, info, string_collector)?;
-            emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
-            if p16 {
-                if !arg16 {
-                    emitter.emit_inst("LDY", "#$00"); // zero-extend u8 arg -> u16 param
+        for ((arg, pty), kind) in args.iter().zip(param_types.iter()).zip(kinds.iter()) {
+            match kind {
+                IndirectArgKind::Byte | IndirectArgKind::Word => {
+                    let p16 = matches!(kind, IndirectArgKind::Word);
+                    let arg16 = is_16(info.resolved_types.get(&arg.span));
+                    generate_expr(arg, emitter, info, string_collector)?;
+                    emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
+                    if p16 {
+                        if !arg16 {
+                            emitter.emit_inst("LDY", "#$00"); // zero-extend u8 arg -> u16 param
+                        }
+                        emitter.emit_inst("STY", &format!("${:02X}", temp_base + off + 1));
+                    }
                 }
-                emitter.emit_inst("STY", &format!("${:02X}", temp_base + off + 1));
+                // A two-byte address, high byte in X: a pointer, a string, an
+                // enum, or the address of a struct passed by reference. The
+                // struct case has to resolve a *place* to its address; a
+                // literal or a call already leaves a pointer to its own bytes.
+                IndirectArgKind::Address => {
+                    let is_struct_place = matches!(pty, Type::Named(n)
+                        if info.type_registry.get_struct(n).is_some())
+                        && super::aggregate::emit_struct_place_address(
+                            arg,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?
+                        .is_some();
+                    if !is_struct_place {
+                        generate_expr(arg, emitter, info, string_collector)?;
+                    }
+                    emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
+                    emitter.emit_inst("STX", &format!("${:02X}", temp_base + off + 1));
+                }
             }
-            placed.push((temp_base + off, p16));
-            off += if p16 { 2 } else { 1 };
+            placed.push((temp_base + off, kind.size() == 2));
+            off += kind.size();
         }
 
         // STEP 2: copy the staged args into the fixed staging block.
