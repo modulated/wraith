@@ -1300,7 +1300,10 @@ fn render_program(p: &Prog, form: Form) -> String {
             .map(|k| format!("f{}", p.candidate(k)))
             .collect();
         format!(
-            "const VT_LEN: u8 = {};\n             struct VT {{ call: fn({tn}) -> {tn} }}\n             static VTBL: [fn({tn}) -> {tn}; {}] = [{}];\n             static DEV: VT = VT {{ call: {} }};\n",
+            "const VT_LEN: u8 = {};\n\
+struct VT {{ call: fn({tn}) -> {tn} }}\n\
+static VTBL: [fn({tn}) -> {tn}; {}] = [{}];\n\
+static DEV: VT = VT {{ call: {} }};\n",
             p.vtable,
             p.vtable,
             entries.join(", "),

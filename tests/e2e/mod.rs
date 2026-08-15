@@ -8,6 +8,7 @@ mod assign_side_effects;
 mod bcd;
 mod bcd_validation;
 mod bitfields;
+mod bss_reclaim;
 mod cmos;
 mod complex_features;
 mod const_folding;

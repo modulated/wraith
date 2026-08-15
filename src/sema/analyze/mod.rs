@@ -441,6 +441,11 @@ impl SemanticAnalyzer {
         let reachable_symbols = self.reachable_symbols(source);
         self.warn_unreachable_items(source, &reachable_symbols);
 
+        // Now that liveness is known, give back the RAM a dropped `static`
+        // reserved during registration. Before `finalize_frames`, which lays
+        // local-array blocks above whatever the BSS cursor ends at.
+        self.compact_bss(source, &reachable_symbols)?;
+
         // Finalize frames once, over the merged program (main module plus every
         // imported module whose call graph and frame sizes were merged in during
         // import processing). This assigns concrete zero-page frame bases and

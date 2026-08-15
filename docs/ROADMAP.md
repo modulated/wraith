@@ -70,18 +70,21 @@ outset (`Emitter::emit_label` already does this for registers).
 
 ### Smaller code
 
-- **Reclaim BSS from dropped statics.** Dead statics are no longer emitted, but
-  the registration pass (`register.rs` `bss_alloc`) assigns every mutable
-  static a RAM address before liveness (`reachable_symbols`) is known, so a
-  dropped static still reserves its bytes. A naive "allocate after the liveness
-  walk" reorder does not work directly: initializer `&OTHER_STATIC` references
-  and the flattened init bytes are resolved at registration time, in
-  declaration order, from the already-assigned addresses. Recovering the space
-  means splitting static registration into phases — declare symbols and collect
-  refs, run liveness, then assign BSS addresses to the live statics (still in
-  declaration order) and flatten their init bytes — and keeping the shared
-  `bss_cursor` consistent before `finalize_frames` lays local-array blocks
-  above it.
+- **Reclaim BSS from dropped statics.** *Done.* Registration hands out BSS
+  addresses in declaration order, long before liveness is known — an
+  initializer's `&OTHER` has to resolve to a number as it is flattened — so a
+  dropped static used to keep its bytes. Rather than defer allocation, the
+  layout is repacked between `reachable_symbols` and `finalize_frames`: live
+  statics keep their relative order and the gaps close. Sizes come from the
+  gaps between consecutive addresses, so nothing re-derives a type's width.
+
+  The lesson worth keeping is where an address lives by that point. There are
+  *three* copies — the symbol table, the per-use snapshots in
+  `resolved_symbols`, and `inline_param_symbols`, which despite its name holds
+  every symbol a function's body resolved and is merged back over
+  `resolved_symbols` at each inline call site. Moving a static in fewer than
+  all three silently puts it back. `rewrite_frame_offsets` already had to keep
+  the same three in step; the fuzzer caught both halves of getting it wrong.
 
 ---
 
@@ -142,7 +145,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Eleven real bugs so far, most of them silent:
+Twelve real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -184,10 +187,17 @@ Eleven real bugs so far, most of them silent:
    expression, codegen's pattern-matched a bare literal, and `-5` parses as
    `Unary(Neg, 5)`. Codegen now evaluates too, with the constant environment, so
    `[N - 1, 0]` resolves as well.
+10. Repacking BSS to reclaim a dropped static's bytes moved a live one, and
+    two of the three places an address lives were left behind — the per-use
+    snapshots in `resolved_symbols`, and then `inline_param_symbols`, which is
+    re-merged over those at every inline call site. Both showed up as a
+    function pointer read out of the hole the dropped static left, on the very
+    first run after the change. Caught before the change was ever committed,
+    which is the case for having the fuzzer at all.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
-`tests/e2e/loop_sweep.rs`.
+`tests/e2e/loop_sweep.rs`, `tests/e2e/bss_reclaim.rs`.
 
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
