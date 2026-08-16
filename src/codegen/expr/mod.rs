@@ -42,6 +42,7 @@ pub(crate) use aggregate::{
 };
 pub(crate) use bitop::bit_test_zp;
 pub use call::generate_tail_recursive_update;
+pub(crate) use cast::{emit_widen_a_into_y, implicit_widening};
 
 pub fn generate_expr(
     expr: &Spanned<Expr>,

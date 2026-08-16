@@ -64,6 +64,16 @@ pub(super) fn generate_index_assignment(
     emitter.emit_comment("Evaluate value to assign");
     generate_expr(value, emitter, info, string_collector)?;
 
+    // A narrow value stored into a wide element is widened by the language.
+    // Nothing did it here, so `arr[0] = b` on a `[u16; N]` stored the byte and
+    // whatever Y held as its high half.
+    if let Some(elem) = element_type
+        && let Some(signed) =
+            crate::codegen::expr::implicit_widening(info.resolved_types.get(&value.span), elem)
+    {
+        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+    }
+
     // Step 3: Save the value while the index is evaluated. It cannot live in the
     // shared $20 temp: evaluating a compound index like `a[i + 2]` uses $20 for
     // its own operand, overwriting the value, and the store below would then
@@ -739,7 +749,13 @@ pub(super) fn generate_field_assignment(
         // Function-pointer fields are 2-byte code addresses stored as a pair like
         // u16 — a device vtable depends on it; `store_value_pair` handles the width.
         let at = base.plus(field_info.offset as u16);
-        store_value_pair(emitter, &field_info.ty, &at.operand(0), &at.operand(1));
+        store_value_pair(
+            emitter,
+            &field_info.ty,
+            info.resolved_types.get(&value.span),
+            &at.operand(0),
+            &at.operand(1),
+        );
         return Ok(());
     }
 
@@ -828,7 +844,13 @@ pub(super) fn generate_field_assignment(
             let offset = field_info.offset;
 
             // Save value to temp
-            store_value_pair(emitter, &field_info.ty, "$20", "$21");
+            store_value_pair(
+                emitter,
+                &field_info.ty,
+                info.resolved_types.get(&value.span),
+                "$20",
+                "$21",
+            );
 
             // Set Y to field offset and store via indirect
             emitter.emit_inst("LDY", &format!("#${:02X}", offset));
@@ -845,10 +867,12 @@ pub(super) fn generate_field_assignment(
             // Local struct - direct access
             let field_addr = base_addr + field_info.offset as u16;
 
+            let src = info.resolved_types.get(&value.span);
             if field_addr < 0x100 {
                 store_value_pair(
                     emitter,
                     &field_info.ty,
+                    src,
                     &format!("${:02X}", field_addr),
                     &format!("${:02X}", field_addr + 1),
                 );
@@ -856,6 +880,7 @@ pub(super) fn generate_field_assignment(
                 store_value_pair(
                     emitter,
                     &field_info.ty,
+                    src,
                     &format!("${:04X}", field_addr),
                     &format!("${:04X}", field_addr + 1),
                 );
@@ -892,7 +917,20 @@ fn store_high(ty: &crate::sema::types::Type) -> &'static str {
 /// operands, so the same store shape serves zero-page, absolute, and indirect
 /// destinations. The one place that decides a value's store width and high-byte
 /// register.
-fn store_value_pair(emitter: &mut Emitter, ty: &crate::sema::types::Type, lo: &str, hi: &str) {
+fn store_value_pair(
+    emitter: &mut Emitter,
+    ty: &crate::sema::types::Type,
+    src: Option<&crate::sema::types::Type>,
+    lo: &str,
+    hi: &str,
+) {
+    // A narrow value reaching a wide field is widened by the language, and this
+    // is where the width is decided, so it is where the extension belongs. It
+    // was not happening at all: `s.f = b` on an `i16` field stored the byte and
+    // left the high half as whatever Y held.
+    if let Some(signed) = crate::codegen::expr::implicit_widening(src, ty) {
+        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+    }
     emitter.emit_inst("STA", lo);
     if crate::codegen::expr::is_two_byte_value(ty) {
         emitter.emit_inst(store_high(ty), hi);
@@ -1519,26 +1557,16 @@ pub(super) fn generate_var_decl(
         // Generate initialization expression (result in A, and X if u16)
         generate_expr(init_expr, emitter, info, string_collector)?;
 
-        // Check if we need to zero-extend (u8 -> u16)
-        // Get the init expression type from resolved_types
-        let init_type = info.resolved_types.get(&init.span);
-        let target_type = &sym.ty;
-
-        let needs_zero_extend = if let Some(init_ty) = init_type {
-            matches!(init_ty, Type::Primitive(crate::ast::PrimitiveType::U8))
-                && matches!(
-                    target_type,
-                    Type::Primitive(crate::ast::PrimitiveType::U16)
-                        | Type::Primitive(crate::ast::PrimitiveType::I16)
-                        | Type::Primitive(crate::ast::PrimitiveType::B16)
-                )
-        } else {
-            false
-        };
-
-        // If we need to zero-extend, set Y=0 for the high byte
-        if needs_zero_extend {
-            emitter.emit_inst("LDY", "#$00");
+        // A narrow value bound to a wide slot is widened by the language with
+        // no `as` written. Which extension applies is the *source's* business:
+        // this used to zero-extend whatever arrived, so `let b: i16 = a;` on a
+        // negative `i8` dropped the sign and −59 became 197. It also only
+        // recognised a `u8` source, so an `i8` one left the high byte as
+        // whatever Y happened to hold.
+        if let Some(signed) =
+            crate::codegen::expr::implicit_widening(info.resolved_types.get(&init.span), &sym.ty)
+        {
+            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
         }
 
         // Check if this is a multi-byte type (arrays, u16, i16, b16, enums)
@@ -1914,6 +1942,16 @@ pub(super) fn generate_assign(
                 // so a wider slot reaching it means every copy path declined.
                 if let SlotFill::Block(bytes) = slot_fill(&sym.ty, info) {
                     return Err(unfilled_block_error(&sym.ty, bytes, "assign"));
+                }
+
+                // And, as there, a narrow value stored into a wide slot is
+                // widened by the language rather than by an `as`. Nothing
+                // widened it here at all: the high byte was whatever Y held.
+                if let Some(signed) = crate::codegen::expr::implicit_widening(
+                    info.resolved_types.get(&value.span),
+                    &sym.ty,
+                ) {
+                    crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
                 }
 
                 // Check if this is an enum type

@@ -125,6 +125,41 @@ impl Ty {
     }
 }
 
+/// The two types a program mixes: a narrow one, and the wide one it widens to
+/// without an `as`.
+///
+/// The language's only quiet conversions between integers are `u8` -> `u16` and
+/// `i8` -> `i16` — lossless, and within one signedness. `u8` -> `i16` is a type
+/// error even though every `u8` fits an `i16`, and so is every narrowing. So a
+/// program that mixes widths mixes exactly one such pair, and every other
+/// conversion in it is written out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Pair {
+    narrow: Ty,
+    wide: Ty,
+}
+
+const PAIRS: [Pair; 2] = [
+    Pair {
+        narrow: Ty::U8,
+        wide: Ty::U16,
+    },
+    Pair {
+        narrow: Ty::I8,
+        wide: Ty::I16,
+    },
+];
+
+impl Pair {
+    /// The two types, so a generator can pick one.
+    fn both(self) -> [Ty; 2] {
+        [self.narrow, self.wide]
+    }
+    fn pick(self, rng: &mut Rng) -> Ty {
+        self.both()[rng.below(2) as usize]
+    }
+}
+
 /// Wrap a value into `ty`, exactly as the language does: "all arithmetic
 /// operators wrap on overflow", and a narrowing cast keeps the low bits.
 fn narrow(v: i64, ty: Ty) -> i64 {
@@ -242,6 +277,22 @@ enum E {
     /// Out to another type and straight back: truncation and sign-extension,
     /// with no mixed-width arithmetic attached.
     Cast(Ty, Box<E>),
+    /// An operand at a *boundary* — a binding, an assignment, an argument, or a
+    /// `return` — tagged with the type it was generated at.
+    ///
+    /// A boundary is the only place the two can differ. Where the destination
+    /// is the wide half of the pair and this says the narrow half, the language
+    /// widens with no syntax at all, so the node renders as nothing and exists
+    /// to record where the arithmetic stopped: the operand is computed at the
+    /// *narrow* type first, so `200u8 + 100` bound to a `u16` is 44 and not
+    /// 300. Where they agree it is a no-op, and still carried, because the
+    /// renderer has no other way to know a call argument's type differs from
+    /// the type of the expression it sits inside.
+    ///
+    /// It appears at those four places only. Inside an expression the operands
+    /// of an operator have already had to agree — `u8 + u16` is a type error —
+    /// so there is nothing for a widening to attach to.
+    At(Ty, Box<E>),
     /// A call to a generated function. `budget` is the recursion budget, and is
     /// present exactly when the callee is recursive — which is also what says
     /// whether the call site passes one.
@@ -326,7 +377,8 @@ enum Ix {
     Wrapped(usize),
 }
 
-/// Somewhere a value can be stored.
+/// Somewhere a value can be stored. Its type decides the assignment's
+/// boundary: a narrow expression stored into a wide variable widens.
 #[derive(Clone)]
 enum Place {
     Var(usize),
@@ -345,7 +397,11 @@ const SFIELDS: usize = 2;
 /// widening rule, which is a separate question from control flow.
 #[derive(Clone)]
 enum B {
-    Rel(Box<E>, Cmp, Box<E>),
+    /// A comparison, and the type *both* its operands were generated at. A
+    /// comparison is not a boundary — `u8 < u16` is a type error — so the two
+    /// sides agree and the type has to be recorded for the oracle to evaluate
+    /// them at the same width.
+    Rel(Ty, Box<E>, Cmp, Box<E>),
     And(Box<B>, Box<B>),
     Or(Box<B>, Box<B>),
     Not(Box<B>),
@@ -353,7 +409,11 @@ enum B {
 
 #[derive(Clone)]
 enum S {
-    Assign(Place, E),
+    /// A store, the type of its destination, and the value. The type is what
+    /// the value renders and evaluates at — a `Widen` inside it says the
+    /// arithmetic happened narrower — and it is not the enclosing scope's:
+    /// `main` renders at the aggregate type, and its variables are a mix.
+    Assign(Place, Ty, E),
     If(B, Vec<S>, Option<Vec<S>>),
     /// `for i{id} in 0..{count}`.
     For(usize, u32, Vec<S>),
@@ -398,6 +458,13 @@ const SLICES: usize = 2;
 struct Func {
     /// Parameters, not counting a recursive function's depth budget.
     params: usize,
+    /// The type of each parameter, then of each local, in the order `Scope::var`
+    /// resolves them. A scope holds a mix, which is the point: an expression
+    /// can only name a variable of the type it is being generated at.
+    var_types: Vec<Ty>,
+    /// What the function returns. A `return` widens to it implicitly when the
+    /// expression is the narrow half of the pair.
+    ret_ty: Ty,
     /// Whether a leading `sp: &[T]` parameter carries a slice in. Only ever set
     /// on `f0`, which no other function can call — the call graph runs from low
     /// to high — so the only caller is `main`, and `main` is the only scope
@@ -420,6 +487,14 @@ struct Func {
     /// What a recursive function returns at `d == 0`. Never contains a
     /// self-call — that is what makes the base case a base case.
     base: E,
+}
+
+/// What a call site needs to know about a callee it has not seen generated.
+#[derive(Clone)]
+struct Sig {
+    params: Vec<Ty>,
+    ret: Ty,
+    recursive: bool,
 }
 
 /// Which names `E::Var` resolves to, and which function a self-call names.
@@ -451,7 +526,14 @@ impl Scope {
 
 struct Gen<'a> {
     rng: &'a mut Rng,
-    ty: Ty,
+    /// The widths this program mixes, and the type its aggregates take.
+    pair: Pair,
+    base: Ty,
+    /// The type of each variable the scope being generated can name, indexed as
+    /// `E::Var`. An expression at type `T` may name only the ones whose type is
+    /// exactly `T`: the operands of an operator have to agree, and the language
+    /// widens at boundaries rather than inside expressions.
+    var_types: Vec<Ty>,
     /// Loop ids currently in scope, innermost last.
     scope: Vec<usize>,
     /// Start value of each `while` counter, by id.
@@ -463,8 +545,8 @@ struct Gen<'a> {
     /// "only `let` locals and `static` globals can be assigned" — so inside a
     /// function this is the locals alone.
     assignable: std::ops::Range<usize>,
-    /// Arity of each function generated so far, and whether it is recursive.
-    sigs: Vec<(usize, bool)>,
+    /// The signature of each function generated so far.
+    sigs: Vec<Sig>,
     /// Functions this scope may call. Restricted to higher-numbered ones inside
     /// a function body, so the call graph is acyclic and the only recursion is
     /// the explicit `SelfCall`.
@@ -507,6 +589,12 @@ struct Gen<'a> {
     /// function, where the only slice is the parameter. What separates the two
     /// is that a statement can *move* a named slice, and `sp` is not one.
     main_slices: usize,
+    /// The function being generated, for a self-call's signature. Unused in
+    /// `main`, which has no self-call.
+    current_fn: usize,
+    /// The vtable candidates' shared `(parameter, return)` types, or `None`
+    /// when this program has no table. They must agree to sit in one array.
+    cand_sig: Option<(Ty, Ty)>,
     /// Bytes still available in the compiler's fixed argument-staging pool.
     /// A call whose whole argument list fits stages there; one that does not
     /// moves each argument to the software stack as it is evaluated, holding
@@ -521,15 +609,25 @@ struct Gen<'a> {
 const ARG_POOL_BYTES: u8 = 11;
 
 impl Gen<'_> {
-    fn lit(&mut self) -> i64 {
+    fn lit(&mut self, ty: Ty) -> i64 {
         // `-128` as a literal would be unary minus applied to an out-of-range
         // `128`; the value is still reachable by arithmetic.
-        let lo = if self.ty.signed() {
-            self.ty.min() + 1
-        } else {
-            self.ty.min()
-        };
-        lo + self.rng.below((self.ty.max() - lo + 1) as u64) as i64
+        let lo = if ty.signed() { ty.min() + 1 } else { ty.min() };
+        lo + self.rng.below((ty.max() - lo + 1) as u64) as i64
+    }
+
+    /// Whether an expression at `ty` has anything of that type to name.
+    ///
+    /// A run of pure literals carries no program type — the language types it
+    /// from the literals' own range — so an expression at a type with no
+    /// variable and no aggregate to anchor it has to be a *bare* literal,
+    /// which does adopt the type its context expects. Anything compound would
+    /// be typed by its own literals and the oracle would evaluate it at the
+    /// wrong width.
+    fn anchorable(&self, ty: Ty) -> bool {
+        self.var_types.contains(&ty)
+            || (self.allow_aggregates && self.base == ty)
+            || (self.allow_slices && self.base == ty)
     }
 }
 
@@ -541,11 +639,17 @@ impl Gen<'_> {
 /// — keeps every subexpression at the program's type, which is the type the
 /// oracle evaluates at. A bare literal beside an anchored sibling is fine: it
 /// adopts the sibling's type.
-fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
+fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
+    // Nothing of this type is in scope, so only a bare literal is safe: it
+    // adopts the type its context expects, where a compound run of literals
+    // would be typed by its own range instead.
+    if !g.anchorable(ty) {
+        return E::Lit(g.lit(ty));
+    }
     if depth == 0 || g.rng.below(100) < 30 {
         // An element or a field is storage of the program's type, so it anchors
         // an expression exactly as a variable does.
-        if g.allow_aggregates && g.rng.below(100) < 35 {
+        if g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
             return match g.rng.below(3) {
                 0 => E::Elem(gen_index(g)),
                 1 => E::Konst(gen_index(g)),
@@ -558,21 +662,39 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
             // Inside a function the only slice is `sp`, which every slice
             // expression there names; rendering keys off the scope.
             let i = g.rng.below(g.main_slices.max(1) as u64) as usize;
-            return if g.rng.below(100) < 30 {
-                E::SliceLen(i)
-            } else {
-                E::SliceElem(i, gen_slice_index(g))
-            };
+            // `.len` is a `u16` the source casts to the context type, so it
+            // fits any of them; an element is storage at the aggregate type.
+            if g.rng.below(100) < 30 {
+                return E::SliceLen(i);
+            }
+            if g.base == ty {
+                return E::SliceElem(i, gen_slice_index(g));
+            }
         }
-        let choices = if g.scope.is_empty() { 2 } else { 3 };
-        let pick = if anchored {
+        // Only variables of exactly this type: an operator's operands have to
+        // agree, and this expression may end up under one.
+        let named: Vec<usize> = (0..g.vars).filter(|i| g.var_types[*i] == ty).collect();
+        let choices = if g.scope.is_empty() || named.is_empty() {
+            2
+        } else {
+            3
+        };
+        let pick = if anchored && !named.is_empty() {
             1 + g.rng.below(choices - 1)
+        } else if named.is_empty() {
+            // No variable of this type, but an aggregate anchored us here, so
+            // a literal or a loop variable is still safe beside one.
+            if g.scope.is_empty() {
+                0
+            } else {
+                g.rng.below(2) * 2
+            }
         } else {
             g.rng.below(choices)
         };
         return match pick {
-            0 => E::Lit(g.lit()),
-            1 => E::Var(g.rng.below(g.vars as u64) as usize),
+            0 => E::Lit(g.lit(ty)),
+            1 => E::Var(named[g.rng.below(named.len() as u64) as usize]),
             _ => {
                 let k = g.rng.below(g.scope.len() as u64) as usize;
                 E::Loop(g.scope[k])
@@ -583,25 +705,31 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
     // A call. Its type comes from the callee's signature, so it anchors an
     // expression the way a variable does, and putting one under an operator is
     // what forces the other operand to be spilled across the JSR.
-    if g.self_call && g.rng.below(100) < 25 {
+    // A call's type is its callee's return type, so it can only stand where
+    // that is what is wanted. Its *argument* is a boundary, and may widen.
+    if g.self_call && g.sigs[g.current_fn].ret == ty && g.rng.below(100) < 25 {
         g.self_call = false;
-        return E::SelfCall(Box::new(gen_expr(g, depth - 1, false)));
+        let at = g.sigs[g.current_fn].params[0];
+        return E::SelfCall(Box::new(gen_arg(g, at, depth - 1)));
     }
     if let Some(partner) = g.mutual_call
+        && g.sigs[partner].ret == ty
         && g.rng.below(100) < 25
     {
         g.mutual_call = None;
-        return E::MutualCall(partner, Box::new(gen_expr(g, depth - 1, false)));
+        let at = g.sigs[partner].params[0];
+        return E::MutualCall(partner, Box::new(gen_arg(g, at, depth - 1)));
     }
     // An indirect call. Same cost to the staging pool as a direct one-argument
     // call — the argument is evaluated into the pool before being copied to
     // the fixed indirect block — so it is budgeted the same way.
-    if g.allow_indirect && g.vtable > 0 && g.rng.below(100) < 16 {
-        let cost = if g.ty.wide() { 2 } else { 1 };
-        if cost <= g.pool_left {
+    if g.allow_indirect && g.vtable > 0 && g.cand_sig.is_some_and(|(_, r)| r == ty) {
+        let (param_ty, _) = g.cand_sig.expect("checked just above");
+        let cost = if param_ty.wide() { 2 } else { 1 };
+        if g.rng.below(100) < 16 && cost <= g.pool_left {
             let saved = g.pool_left;
             g.pool_left -= cost;
-            let arg = Box::new(gen_expr(g, depth - 1, false));
+            let arg = Box::new(gen_arg(g, param_ty, depth - 1));
             g.pool_left = saved;
             return if g.rng.below(2) == 0 {
                 E::DevCall(arg)
@@ -619,14 +747,18 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
     if !g.callable.is_empty() && g.rng.below(100) < 14 {
         let id =
             g.callable.start + g.rng.below((g.callable.end - g.callable.start) as u64) as usize;
-        let (arity, recursive) = g.sigs[id];
+        let sig = g.sigs[id].clone();
+        if sig.ret != ty {
+            return gen_expr(g, ty, 0, anchored);
+        }
         // One argument's worth: the widest a nesting level holds. A slice
         // descriptor is four bytes and so is the widest of all, which is why
         // it is charged rather than assumed to fit.
         let takes_slice = g.slice_taker == Some(id);
+        let widest = sig.params.iter().any(|t| t.wide());
         let cost = if takes_slice {
             4
-        } else if g.ty.wide() {
+        } else if widest {
             2
         } else {
             1
@@ -634,9 +766,15 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
         if cost <= g.pool_left {
             let saved = g.pool_left;
             g.pool_left -= cost;
-            let args = (0..arity).map(|_| gen_expr(g, depth - 1, false)).collect();
+            let args = sig
+                .params
+                .iter()
+                .map(|pt| gen_arg(g, *pt, depth - 1))
+                .collect();
             g.pool_left = saved;
-            let budget = recursive.then(|| g.rng.below(RECURSION_BUDGET as u64 + 1) as u32);
+            let budget = sig
+                .recursive
+                .then(|| g.rng.below(RECURSION_BUDGET as u64 + 1) as u32);
             let slice_arg = (takes_slice && g.main_slices > 0)
                 .then(|| g.rng.below(g.main_slices as u64) as usize);
             return E::Call {
@@ -650,20 +788,38 @@ fn gen_expr(g: &mut Gen, depth: u32, anchored: bool) -> E {
 
     if g.rng.below(100) < 12 {
         let mut to = TYPES[g.rng.below(TYPES.len() as u64) as usize];
-        if to == g.ty {
-            to = TYPES[(TYPES.iter().position(|t| *t == g.ty).unwrap() + 1) % TYPES.len()];
+        if to == ty {
+            to = TYPES[(TYPES.iter().position(|t| *t == ty).unwrap() + 1) % TYPES.len()];
         }
-        return E::Cast(to, Box::new(gen_expr(g, depth - 1, true)));
+        return E::Cast(to, Box::new(gen_expr(g, ty, depth - 1, true)));
     }
 
     let op = OPS[g.rng.below(OPS.len() as u64) as usize];
-    let lhs = gen_expr(g, depth - 1, true);
+    let lhs = gen_expr(g, ty, depth - 1, true);
     let rhs = match op {
-        Op::Div | Op::Rem => E::Lit(1 + g.rng.below(g.ty.max() as u64) as i64),
-        Op::Shl | Op::Shr => E::Lit(g.rng.below(g.ty.bits() as u64) as i64),
-        _ => gen_expr(g, depth - 1, false),
+        Op::Div | Op::Rem => E::Lit(1 + g.rng.below(ty.max() as u64) as i64),
+        Op::Shl | Op::Shr => E::Lit(g.rng.below(ty.bits() as u64) as i64),
+        _ => gen_expr(g, ty, depth - 1, false),
     };
     E::Bin(Box::new(lhs), op, Box::new(rhs))
+}
+
+/// An expression at a *boundary*, where the language widens without an `as`:
+/// a binding, an assignment, an argument, or a `return`.
+///
+/// Where the destination is the wide half of the pair, the expression is
+/// sometimes generated at the narrow half instead and left to widen. What that
+/// tests is the order of the two: the arithmetic happens at the narrow type and
+/// the result is extended afterwards, so a sum that overflows a byte stays
+/// overflowed. Getting it the other way round is fuzz bug 1 wearing a
+/// different hat.
+fn gen_arg(g: &mut Gen, want: Ty, depth: u32) -> E {
+    let at = if want == g.pair.wide && g.rng.below(100) < 35 {
+        g.pair.narrow
+    } else {
+        want
+    };
+    E::At(at, Box::new(gen_expr(g, at, depth, false)))
 }
 
 /// An index that is in range whatever the program computes.
@@ -706,16 +862,20 @@ fn gen_range(g: &mut Gen) -> (usize, usize) {
 
 /// Where an assignment stores. Restricted to the locals a function may write:
 /// a parameter is immutable, and the aggregates belong to `main`.
-fn gen_place(g: &mut Gen) -> Place {
+/// A place to store into, with the type it holds — which is what decides
+/// whether the value assigned to it may widen.
+fn gen_place(g: &mut Gen) -> (Place, Ty) {
     if g.allow_aggregates && g.rng.below(100) < 40 {
-        return if g.rng.below(2) == 0 {
+        let p = if g.rng.below(2) == 0 {
             Place::Elem(gen_index(g))
         } else {
             Place::Field(g.rng.below(SFIELDS as u64) as usize)
         };
+        return (p, g.base);
     }
     let span = g.assignable.end - g.assignable.start;
-    Place::Var(g.assignable.start + g.rng.below(span as u64) as usize)
+    let i = g.assignable.start + g.rng.below(span as u64) as usize;
+    (Place::Var(i), g.var_types[i])
 }
 
 fn gen_bool(g: &mut Gen, depth: u32) -> B {
@@ -732,10 +892,21 @@ fn gen_bool(g: &mut Gen, depth: u32) -> B {
             _ => B::Not(Box::new(gen_bool(g, depth - 1))),
         };
     }
-    let l = gen_expr(g, 2, true);
+    // One type for both sides. Preferring one that is anchorable keeps the
+    // comparison from collapsing to two bare literals, which the language
+    // types from their own range rather than from the program around them.
+    let mut ty = g.pair.pick(g.rng);
+    if !g.anchorable(ty) {
+        ty = if ty == g.pair.narrow {
+            g.pair.wide
+        } else {
+            g.pair.narrow
+        };
+    }
+    let l = gen_expr(g, ty, 2, true);
     let cmp = CMPS[g.rng.below(CMPS.len() as u64) as usize];
-    let r = gen_expr(g, 2, false);
-    B::Rel(Box::new(l), cmp, Box::new(r))
+    let r = gen_expr(g, ty, 2, false);
+    B::Rel(ty, Box::new(l), cmp, Box::new(r))
 }
 
 fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
@@ -766,10 +937,10 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     }
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
-        let place = gen_place(g);
-        // The assignment target supplies the type, so the right-hand side does
-        // not need its own anchor.
-        return S::Assign(place, gen_expr(g, 3, false));
+        let (place, want) = gen_place(g);
+        // The target supplies the type, and is a boundary: a narrow value
+        // stored into a wide slot widens with no syntax to mark it.
+        return S::Assign(place, want, gen_arg(g, want, 3));
     }
     match pick {
         50..=71 => {
@@ -805,7 +976,15 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
 
 #[derive(Clone)]
 struct Prog {
-    ty: Ty,
+    /// The pair of widths this program mixes.
+    pair: Pair,
+    /// The type of the aggregates: the array, the struct's fields, the `const`
+    /// table and the slices over it. One type for all of them, so an element
+    /// read anchors an expression at exactly that type and mixing stays a
+    /// question about variables and signatures.
+    base: Ty,
+    /// The type of each of `main`'s variables.
+    var_types: [Ty; VARS],
     init: [i64; VARS],
     counters: Vec<u32>,
     stmts: Vec<S>,
@@ -856,15 +1035,39 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
     let mut funcs: Vec<Func> = Vec::new();
     // Indexed by function id, so a caller can look up a callee generated
     // earlier in this back-to-front walk.
-    g.sigs = vec![(0, false); count];
+    g.sigs = vec![
+        Sig {
+            params: Vec::new(),
+            ret: g.base,
+            recursive: false,
+        };
+        count
+    ];
     // The pair's signatures have to be known before either body is generated:
     // the higher-numbered member is generated first and calls the lower one,
     // which the back-to-front walk has not reached yet. Both are shaped like
     // the self-recursive function — a budget and one value parameter — so the
-    // mutual call has an argument to vary.
+    // mutual call has an argument to vary. They also share a type on both
+    // sides, so either can pass its own result straight back to the other.
     if let Some((a, b)) = mutual {
-        g.sigs[a] = (1, true);
-        g.sigs[b] = (1, true);
+        let mt = g.pair.pick(g.rng);
+        for k in [a, b] {
+            g.sigs[k] = Sig {
+                params: vec![mt],
+                ret: mt,
+                recursive: true,
+            };
+        }
+    }
+    // The candidates share one signature or they cannot sit in one array.
+    if let Some((pt, rt)) = g.cand_sig {
+        for k in count - g.vtable..count {
+            g.sigs[k] = Sig {
+                params: vec![pt],
+                ret: rt,
+                recursive: false,
+            };
+        }
     }
     for i in (0..count).rev() {
         // The highest-numbered functions are the table's candidates. They must
@@ -888,13 +1091,33 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // through its partner instead — one cycle per function either way.
         let recursive = partner.is_some()
             || (!is_candidate && i + 1 == count - g.vtable && g.rng.below(2) == 0);
-        let params = if recursive || is_candidate {
-            1
+        // A pair member's and a candidate's signature were fixed above; any
+        // other function picks its own parameter and return types from the
+        // pair, which is where a mixed-width call site comes from.
+        let sig = if partner.is_some() || is_candidate {
+            g.sigs[i].clone()
         } else {
-            1 + g.rng.below(3) as usize
+            // A self-recursive function takes exactly one value parameter
+            // besides its budget: `SelfCall` passes one argument, so the
+            // recursion has one thing to vary and the shape stays fixed.
+            let n = if recursive {
+                1
+            } else {
+                1 + g.rng.below(3) as usize
+            };
+            let s = Sig {
+                params: (0..n).map(|_| g.pair.pick(g.rng)).collect(),
+                ret: g.pair.pick(g.rng),
+                recursive,
+            };
+            g.sigs[i] = s.clone();
+            s
         };
-        let locals: Vec<i64> = (0..g.rng.below(3)).map(|_| g.lit()).collect();
-        g.sigs[i] = (params, recursive);
+        let params = sig.params.len();
+        let local_types: Vec<Ty> = (0..g.rng.below(3)).map(|_| g.pair.pick(g.rng)).collect();
+        let locals: Vec<i64> = local_types.iter().map(|t| g.lit(*t)).collect();
+        let mut var_types = sig.params.clone();
+        var_types.extend(local_types.iter().copied());
 
         let saved_vars = g.vars;
         let saved_assignable = g.assignable.clone();
@@ -908,6 +1131,9 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // which every slice expression there names and no statement can move.
         g.allow_slices = slice_param;
         g.main_slices = 0;
+        let saved_var_types = std::mem::replace(&mut g.var_types, var_types.clone());
+        let saved_current = g.current_fn;
+        g.current_fn = i;
         g.vars = params + locals.len();
         g.assignable = params..params + locals.len();
         // The lower member of the pair may not call the higher one *except*
@@ -926,7 +1152,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // recursing at `d == 0` would pass `d - 1` on a `u8` and wrap to 255.
         g.self_call = false;
         g.mutual_call = None;
-        let base = gen_expr(g, 2, false);
+        let base = gen_arg(g, sig.ret, 2);
 
         // Statements need somewhere to assign, and a parameter is not it, so a
         // function with no locals is a bare `return`.
@@ -944,8 +1170,11 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         g.self_call = recursive && partner.is_none();
         g.mutual_call = partner;
         let ret = if recursive {
-            let arg = gen_expr(g, 2, false);
-            let other = gen_expr(g, 2, false);
+            // The recursive call returns this function's own type, so the
+            // operator around it works at that type and no widening applies.
+            let rt = sig.ret;
+            let arg = gen_arg(g, sig.params[0], 2);
+            let other = gen_expr(g, rt, 2, false);
             let call = match partner {
                 Some(p) => E::MutualCall(p, Box::new(arg)),
                 None => E::SelfCall(Box::new(arg)),
@@ -955,13 +1184,13 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
             // has to survive the JSR, which is the software-stack spill path.
             match op {
                 Op::Div | Op::Rem | Op::Shl | Op::Shr => {
-                    E::Bin(Box::new(call), Op::Add, Box::new(E::Lit(g.lit())))
+                    E::Bin(Box::new(call), Op::Add, Box::new(E::Lit(g.lit(rt))))
                 }
                 _ if g.rng.below(2) == 0 => E::Bin(Box::new(call), op, Box::new(other)),
                 _ => E::Bin(Box::new(other), op, Box::new(call)),
             }
         } else {
-            gen_expr(g, 3, false)
+            gen_arg(g, sig.ret, 3)
         };
         g.self_call = false;
         g.mutual_call = None;
@@ -973,10 +1202,14 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         g.allow_aggregates = saved_aggregates;
         g.allow_slices = saved_slices;
         g.main_slices = saved_main_slices;
+        g.var_types = saved_var_types;
+        g.current_fn = saved_current;
 
         funcs.push(Func {
             slice_param,
             partner,
+            var_types,
+            ret_ty: sig.ret,
             params,
             local_init: locals,
             recursive,
@@ -991,11 +1224,27 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
 
 fn gen_program(seed: u64) -> Prog {
     let mut rng = Rng::new(seed);
-    let ty = TYPES[rng.below(TYPES.len() as u64) as usize];
+    // One signedness family per program, so the pair it mixes is the pair the
+    // language widens between. The aggregates take one of the two.
+    let pair = PAIRS[rng.below(PAIRS.len() as u64) as usize];
+    let base = pair.both()[rng.below(2) as usize];
+    // `main`'s variables. Both halves of the pair always appear, so an
+    // expression at either has something to name and a mixed-width assignment
+    // is always available.
+    let mut var_types = [pair.narrow; VARS];
+    for (i, t) in var_types.iter_mut().enumerate() {
+        *t = if i < 2 {
+            pair.both()[i]
+        } else {
+            pair.both()[rng.below(2) as usize]
+        };
+    }
     let mut init = [0i64; VARS];
     let mut g = Gen {
         rng: &mut rng,
-        ty,
+        pair,
+        base,
+        var_types: var_types.to_vec(),
         scope: Vec::new(),
         counters: Vec::new(),
         loops: 0,
@@ -1012,22 +1261,24 @@ fn gen_program(seed: u64) -> Prog {
         allow_slices: false,
         main_slices: 0,
         slice_taker: None,
+        current_fn: 0,
+        cand_sig: None,
         pool_left: ARG_POOL_BYTES,
     };
-    for v in init.iter_mut() {
-        *v = g.lit();
+    for (v, t) in init.iter_mut().zip(var_types.iter()) {
+        *v = g.lit(*t);
     }
     let mut arr_init = [0i64; ALEN];
     for v in arr_init.iter_mut() {
-        *v = g.lit();
+        *v = g.lit(base);
     }
     let mut field_init = [0i64; SFIELDS];
     for v in field_init.iter_mut() {
-        *v = g.lit();
+        *v = g.lit(base);
     }
     let mut konst = [0i64; ALEN];
     for v in konst.iter_mut() {
-        *v = g.lit();
+        *v = g.lit(base);
     }
 
     // Decide the table before the functions, since it constrains the shape of
@@ -1041,6 +1292,8 @@ fn gen_program(seed: u64) -> Prog {
     };
     let count = vtable + g.rng.below(3) as usize;
     g.vtable = vtable;
+    // One signature for every candidate, since they sit in one array.
+    g.cand_sig = (vtable > 0).then(|| (g.pair.pick(g.rng), g.pair.pick(g.rng)));
 
     // The aggregates are `main`'s locals and affect only `main`'s body, but a
     // slice can also arrive as `f0`'s parameter — so both are decided before
@@ -1083,7 +1336,9 @@ fn gen_program(seed: u64) -> Prog {
     let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
     let (counters, loops) = (g.counters, g.loops);
     Prog {
-        ty,
+        pair,
+        base,
+        var_types,
         init,
         counters,
         stmts,
@@ -1138,8 +1393,15 @@ fn call_fn(
     ty: Ty,
 ) -> i64 {
     let f = &p.funcs[id];
+    // Arguments arrive already narrowed to the *parameter's* type — the caller
+    // widened at the boundary if it had to — and each local is at its own.
     let mut vars: Vec<i64> = args.to_vec();
-    vars.extend(f.local_init.iter().map(|v| narrow(*v, ty)));
+    vars.extend(
+        f.local_init
+            .iter()
+            .zip(f.var_types[f.params..].iter())
+            .map(|(v, t)| narrow(*v, *t)),
+    );
     let mut st = St {
         prog: p,
         vars,
@@ -1157,11 +1419,12 @@ fn call_fn(
         // body can name, and the one `sp` resolves to.
         slices: slice.into_iter().collect(),
     };
+    let _ = ty; // the caller's type; a callee works entirely at its own
     if f.recursive && budget == 0 {
-        return eval(&f.base, &st, ty);
+        return eval(&f.base, &st, f.ret_ty);
     }
-    exec(&f.body, &mut st, ty);
-    eval(&f.ret, &st, ty)
+    exec(&f.body, &mut st, f.ret_ty);
+    eval(&f.ret, &st, f.ret_ty)
 }
 
 fn eval(e: &E, st: &St, ty: Ty) -> i64 {
@@ -1170,6 +1433,8 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         E::Var(i) => st.vars[*i],
         E::Loop(id) => narrow(st.loops[*id], ty),
         E::Cast(to, inner) => narrow(narrow(eval(inner, st, ty), *to), ty),
+        // The arithmetic happened at `from`; any extension is after it.
+        E::At(from, inner) => narrow(eval(inner, st, *from), ty),
         E::Call {
             id,
             budget,
@@ -1265,20 +1530,28 @@ fn eval_index_mod(ix: &Ix, st: &St, ty: Ty, len: usize) -> usize {
     }
 }
 
-fn eval_bool(b: &B, st: &St, ty: Ty) -> bool {
+/// A condition needs no context type: each comparison carries the type its two
+/// sides were generated at, which is not the type of the statement around it.
+fn eval_bool(b: &B, st: &St) -> bool {
     match b {
-        B::Rel(l, c, r) => c.apply(eval(l, st, ty), eval(r, st, ty)),
-        B::And(l, r) => eval_bool(l, st, ty) && eval_bool(r, st, ty),
-        B::Or(l, r) => eval_bool(l, st, ty) || eval_bool(r, st, ty),
-        B::Not(inner) => !eval_bool(inner, st, ty),
+        // Both sides at the type the generator compared them at, which is not
+        // necessarily the type of the statement around them.
+        B::Rel(at, l, c, r) => c.apply(eval(l, st, *at), eval(r, st, *at)),
+        B::And(l, r) => eval_bool(l, st) && eval_bool(r, st),
+        B::Or(l, r) => eval_bool(l, st) || eval_bool(r, st),
+        B::Not(inner) => !eval_bool(inner, st),
     }
 }
 
 fn exec(stmts: &[S], st: &mut St, ty: Ty) {
     for s in stmts {
         match s {
-            S::Assign(place, e) => {
-                let value = eval(e, st, ty);
+            S::Assign(place, want, e) => {
+                // The destination's width, not the statement's: a narrow value
+                // stored into a wide slot is widened by the language, and the
+                // expression's own `Widen` node has already said where the
+                // arithmetic happened.
+                let value = eval(e, st, *want);
                 match place {
                     Place::Var(v) => st.vars[*v] = value,
                     Place::Elem(ix) => {
@@ -1293,7 +1566,7 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             S::Reslice(i, start, len) => st.slices[*i] = (*start, *len),
             S::SliceFromCall(i, k) => st.slices[*i] = st.prog.mk_ranges[*k],
             S::If(c, then, otherwise) => {
-                if eval_bool(c, st, ty) {
+                if eval_bool(c, st) {
                     exec(then, st, ty);
                 } else if let Some(e) = otherwise {
                     exec(e, st, ty);
@@ -1317,17 +1590,22 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
 
 /// The final bit pattern of every program variable.
 fn expected(p: &Prog) -> Vec<u32> {
-    let narrowed = |xs: &[i64]| -> Vec<i64> { xs.iter().map(|v| narrow(*v, p.ty)).collect() };
+    let at_base = |xs: &[i64]| -> Vec<i64> { xs.iter().map(|v| narrow(*v, p.base)).collect() };
     let mut st = St {
         prog: p,
-        vars: narrowed(&p.init),
+        vars: p
+            .init
+            .iter()
+            .zip(p.var_types.iter())
+            .map(|(v, t)| narrow(*v, *t))
+            .collect(),
         arr: if p.aggregates {
-            narrowed(&p.arr_init)
+            at_base(&p.arr_init)
         } else {
             Vec::new()
         },
         fields: if p.aggregates {
-            narrowed(&p.field_init)
+            at_base(&p.field_init)
         } else {
             Vec::new()
         },
@@ -1338,22 +1616,34 @@ fn expected(p: &Prog) -> Vec<u32> {
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
         slices: p.slices.clone(),
     };
-    exec(&p.stmts, &mut st, p.ty);
+    exec(&p.stmts, &mut st, p.base);
     // Each slice reports its first element and its length — the two halves of
     // the descriptor, so a copy that moves one and not the other shows up here
     // even in a program whose expressions never happened to read it.
     let descriptors: Vec<i64> = st
         .slices
         .iter()
-        .flat_map(|(start, len)| [narrow(p.konst[*start], p.ty), narrow(*len as i64, p.ty)])
+        .flat_map(|(start, len)| [narrow(p.konst[*start], p.base), narrow(*len as i64, p.base)])
         .collect();
+    // Each cell at its own width, which is no longer one number per program.
     st.vars
         .iter()
         .chain(st.arr.iter())
         .chain(st.fields.iter())
         .chain(descriptors.iter())
-        .map(|v| raw(*v, p.ty))
+        .zip(cell_types(p))
+        .map(|(v, t)| raw(*v, t))
         .collect()
+}
+
+/// The type of every reported cell, in the order `expected` produces them.
+fn cell_types(p: &Prog) -> Vec<Ty> {
+    let mut out: Vec<Ty> = p.var_types.to_vec();
+    if p.aggregates {
+        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS));
+    }
+    out.extend(std::iter::repeat_n(p.base, 2 * p.slices.len()));
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,6 +1732,9 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             format!("{n}[{}]", render_slice_index(&n, ix, sc))
         }
         E::SliceLen(i) => format!("({}.len as {})", slice_name(*i, sc), ty.name()),
+        // No syntax of its own: where this narrows the type, the widening back
+        // is what the language does by itself.
+        E::At(from, inner) => render(inner, *from, sc),
     }
 }
 
@@ -1475,27 +1768,38 @@ fn render_sel(sel: &Sel) -> String {
     }
 }
 
-fn render_bool(b: &B, ty: Ty, sc: Scope) -> String {
+fn render_bool(b: &B, sc: Scope) -> String {
     match b {
-        B::Rel(l, c, r) => format!("({} {} {})", render(l, ty, sc), c.sym(), render(r, ty, sc)),
-        B::And(l, r) => format!("({} && {})", render_bool(l, ty, sc), render_bool(r, ty, sc)),
-        B::Or(l, r) => format!("({} || {})", render_bool(l, ty, sc), render_bool(r, ty, sc)),
-        B::Not(inner) => format!("(!{})", render_bool(inner, ty, sc)),
+        B::Rel(at, l, c, r) => format!(
+            "({} {} {})",
+            render(l, *at, sc),
+            c.sym(),
+            render(r, *at, sc)
+        ),
+        B::And(l, r) => format!("({} && {})", render_bool(l, sc), render_bool(r, sc)),
+        B::Or(l, r) => format!("({} || {})", render_bool(l, sc), render_bool(r, sc)),
+        B::Not(inner) => format!("(!{})", render_bool(inner, sc)),
     }
 }
 
+/// Statements no longer render at a scope type: an assignment carries its
+/// destination's, and a comparison carries the type its two sides were
+/// compared at. What is left threads through to nested blocks only, which is
+/// what the lint is pointing at — it is kept so a statement form that *does*
+/// need a scope type has somewhere to read one.
+#[allow(clippy::only_used_in_recursion)]
 fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
     let pad = " ".repeat(indent);
     let mut out = String::new();
     for s in stmts {
         match s {
-            S::Assign(place, e) => out.push_str(&format!(
+            S::Assign(place, at, e) => out.push_str(&format!(
                 "{pad}{} = {};\n",
                 render_place(place, sc),
-                render(e, ty, sc)
+                render(e, *at, sc)
             )),
             S::If(c, then, otherwise) => {
-                out.push_str(&format!("{pad}if {} {{\n", render_bool(c, ty, sc)));
+                out.push_str(&format!("{pad}if {} {{\n", render_bool(c, sc)));
                 out.push_str(&render_stmts(then, ty, indent + 4, sc));
                 match otherwise {
                     Some(e) => {
@@ -1531,7 +1835,9 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
 /// One generated function, declarations and all.
 fn render_func(p: &Prog, id: usize) -> String {
     let f = &p.funcs[id];
-    let ty = p.ty;
+    // A function works at its own return type; its parameters and locals each
+    // have theirs, and the aggregates are not in scope here at all.
+    let ty = f.ret_ty;
     let tn = ty.name();
     let sc = Scope::Func {
         id,
@@ -1545,11 +1851,13 @@ fn render_func(p: &Prog, id: usize) -> String {
     }
     // The descriptor comes before the values, so a recursive slice-taking
     // function reads `f0(d - 1, sp, …)` at its self-call.
+    // A slice is over the `const` table, so its element type is the aggregate
+    // type — not this function's return type, which is its own choice.
     if f.slice_param {
-        params.push(format!("sp: &[{tn}]"));
+        params.push(format!("sp: &[{}]", p.base.name()));
     }
     for i in 0..f.params {
-        params.push(format!("p{i}: {tn}"));
+        params.push(format!("p{i}: {}", f.var_types[i].name()));
     }
 
     let mut out = format!("fn f{id}({}) -> {tn} {{\n", params.join(", "));
@@ -1559,7 +1867,10 @@ fn render_func(p: &Prog, id: usize) -> String {
         } else {
             format!("{v}")
         };
-        out.push_str(&format!("    let q{i}: {tn} = {lit};\n"));
+        out.push_str(&format!(
+            "    let q{i}: {} = {lit};\n",
+            f.var_types[f.params + i].name()
+        ));
     }
     if f.recursive {
         out.push_str(&format!(
@@ -1593,19 +1904,20 @@ const FORMS: [Form; 4] = [
     Form::ViaLoop,
 ];
 
-/// The cells a program reports: its variables, then the array elements, the
-/// struct fields, and two per slice — its first element and its length.
-fn out_cells(p: &Prog) -> usize {
-    VARS + if p.aggregates { ALEN + SFIELDS } else { 0 } + 2 * p.slices.len()
-}
-
-/// One output byte per 8-bit cell, two per 16-bit one.
+/// One output byte per 8-bit cell, two per 16-bit one — summed rather than
+/// multiplied, since a program's cells no longer share a width.
 fn out_bytes(p: &Prog) -> usize {
-    out_cells(p) * if p.ty.wide() { 2 } else { 1 }
+    cell_types(p)
+        .iter()
+        .map(|t| if t.wide() { 2 } else { 1 })
+        .sum()
 }
 
 fn render_program(p: &Prog, form: Form) -> String {
-    let ty = p.ty;
+    // `main`'s statements are rendered at the aggregate type: it is what an
+    // element or a field reads as, and every expression that is not one
+    // carries its own type in the tree.
+    let ty = p.base;
     let tn = ty.name();
 
     let head: String = (0..out_bytes(p))
@@ -1659,10 +1971,15 @@ fn render_program(p: &Prog, form: Form) -> String {
         let entries: Vec<String> = (0..p.vtable)
             .map(|k| format!("f{}", p.candidate(k)))
             .collect();
+        // The candidates' own signature, which they all share: it is not the
+        // aggregate type, and a table declared at the wrong one does not
+        // compile.
+        let c = &p.funcs[p.candidate(0)];
+        let (pt, rt) = (c.var_types[0].name(), c.ret_ty.name());
         format!(
             "const VT_LEN: u8 = {};\n\
-struct VT {{ call: fn({tn}) -> {tn} }}\n\
-static VTBL: [fn({tn}) -> {tn}; {}] = [{}];\n\
+struct VT {{ call: fn({pt}) -> {rt} }}\n\
+static VTBL: [fn({pt}) -> {rt}; {}] = [{}];\n\
 static DEV: VT = VT {{ call: {} }};\n",
             p.vtable,
             p.vtable,
@@ -1674,13 +1991,13 @@ static DEV: VT = VT {{ call: {} }};\n",
     };
 
     let mut decls = String::new();
-    for (i, v) in p.init.iter().enumerate() {
+    for (i, (v, vt)) in p.init.iter().zip(p.var_types.iter()).enumerate() {
         let lit = if *v < 0 {
             format!("({v})")
         } else {
             format!("{v}")
         };
-        decls.push_str(&format!("    let v{i}: {tn} = {lit};\n"));
+        decls.push_str(&format!("    let v{i}: {} = {lit};\n", vt.name()));
     }
     for (i, c) in p.counters.iter().enumerate() {
         decls.push_str(&format!("    let c{i}: u8 = {c};\n"));
@@ -1717,24 +2034,29 @@ static DEV: VT = VT {{ call: {} }};\n",
         cells.push(format!("(sl{i}.len as {tn})"));
     }
 
+    // Cells are packed at their own widths, so an output index counts bytes
+    // written so far rather than cells.
     let mut stores = String::new();
-    for (i, cell) in cells.iter().enumerate() {
-        if ty.wide() {
-            let src = if ty.signed() {
+    let mut out = 0usize;
+    for (cell, cty) in cells.iter().zip(cell_types(p)) {
+        if cty.wide() {
+            let src = if cty.signed() {
                 format!("{cell} as u16")
             } else {
                 cell.clone()
             };
-            stores.push_str(&format!("    let o{i}: u16 = {src};\n"));
-            stores.push_str(&format!("    OUT{} = o{i}.low;\n", i * 2));
-            stores.push_str(&format!("    OUT{} = o{i}.high;\n", i * 2 + 1));
+            stores.push_str(&format!("    let o{out}: u16 = {src};\n"));
+            stores.push_str(&format!("    OUT{} = o{out}.low;\n", out));
+            stores.push_str(&format!("    OUT{} = o{out}.high;\n", out + 1));
+            out += 2;
         } else {
-            let src = if ty.signed() {
+            let src = if cty.signed() {
                 format!("{cell} as u8")
             } else {
                 cell.clone()
             };
-            stores.push_str(&format!("    OUT{i} = {src};\n"));
+            stores.push_str(&format!("    OUT{out} = {src};\n"));
+            out += 1;
         }
     }
 
@@ -1776,16 +2098,22 @@ static DEV: VT = VT {{ call: {} }};\n",
 /// Compile and run one program, reading back every variable, or reporting the
 /// reason it did not get there.
 fn observe(src: &str, p: &Prog) -> Result<Vec<u32>, String> {
-    let (ty, cells) = (p.ty, out_cells(p));
+    // Cells are packed, each taking one byte or two, so the address of the
+    // next depends on the widths of all the ones before it.
+    let types = cell_types(p);
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut e = run(src);
-        (0..cells)
-            .map(|i| {
-                if ty.wide() {
-                    e.mem16(0x0900 + (i * 2) as u16) as u32
+        let mut at = 0x0900u16;
+        types
+            .iter()
+            .map(|t| {
+                let v = if t.wide() {
+                    e.mem16(at) as u32
                 } else {
-                    e.mem(0x0900 + i as u16) as u32
-                }
+                    e.mem(at) as u32
+                };
+                at += if t.wide() { 2 } else { 1 };
+                v
             })
             .collect::<Vec<u32>>()
     }));
@@ -1951,7 +2279,8 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::MutualCall(_, arg)
             | E::Dispatch { arg, .. }
             | E::DevCall(arg)
-            | E::Cast(_, arg) => in_expr(arg, id),
+            | E::Cast(_, arg)
+            | E::At(_, arg) => in_expr(arg, id),
             E::Bin(l, _, r) => {
                 in_expr(l, id);
                 in_expr(r, id);
@@ -1972,7 +2301,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
     }
     fn in_bool(b: &mut B, id: usize) {
         match b {
-            B::Rel(l, _, r) => {
+            B::Rel(_, l, _, r) => {
                 in_expr(l, id);
                 in_expr(r, id);
             }
@@ -1986,7 +2315,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
     fn in_block(stmts: &mut [S], id: usize) {
         for s in stmts {
             match s {
-                S::Assign(_, e) => in_expr(e, id),
+                S::Assign(_, _, e) => in_expr(e, id),
                 S::If(c, t, e) => {
                     in_bool(c, id);
                     in_block(t, id);
@@ -2022,9 +2351,10 @@ fn strip_self_calls(e: &mut E) {
             strip_self_calls(l);
             strip_self_calls(r);
         }
-        E::Cast(_, inner) | E::Dispatch { arg: inner, .. } | E::DevCall(inner) => {
-            strip_self_calls(inner)
-        }
+        E::Cast(_, inner)
+        | E::At(_, inner)
+        | E::Dispatch { arg: inner, .. }
+        | E::DevCall(inner) => strip_self_calls(inner),
         E::Call { args, .. } => {
             for a in args {
                 strip_self_calls(a);
@@ -2045,7 +2375,7 @@ fn strip_self_calls(e: &mut E) {
 /// above. A function's body can hold one as readily as its `return` can.
 fn strip_stmt_self_calls(s: &mut S) {
     match s {
-        S::Assign(_, e) => strip_self_calls(e),
+        S::Assign(_, _, e) => strip_self_calls(e),
         S::If(c, t, e) => {
             strip_bool_self_calls(c);
             t.iter_mut().for_each(strip_stmt_self_calls);
@@ -2060,7 +2390,7 @@ fn strip_stmt_self_calls(s: &mut S) {
 
 fn strip_bool_self_calls(b: &mut B) {
     match b {
-        B::Rel(l, _, r) => {
+        B::Rel(_, l, _, r) => {
             strip_self_calls(l);
             strip_self_calls(r);
         }
@@ -2106,7 +2436,7 @@ fn mutate_index(ix: &mut Ix, target: usize, seen: &mut usize) -> bool {
 
 fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
     match s {
-        S::Assign(place, e) => {
+        S::Assign(place, _, e) => {
             // Storing to `v0` instead of an element or a field takes the index
             // and the aggregate out of the picture when neither is the cause.
             // Only for an element or a field: those occur in `main` alone,
@@ -2311,6 +2641,10 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             false
         }
+        // The tag cannot be dropped: lifting a narrow operand into a wide
+        // destination is exactly the type error it exists to prevent. What is
+        // inside it still reduces.
+        E::At(_, inner) => mutate_expr(inner, target, seen),
         // Leaves: nothing smaller to try.
         E::Var(_) | E::Loop(_) => false,
     }
@@ -2318,7 +2652,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
 
 fn mutate_bool(b: &mut B, target: usize, seen: &mut usize) -> bool {
     match b {
-        B::Rel(l, _, r) => mutate_expr(l, target, seen) || mutate_expr(r, target, seen),
+        B::Rel(_, l, _, r) => mutate_expr(l, target, seen) || mutate_expr(r, target, seen),
         B::And(l, r) | B::Or(l, r) => {
             if *seen == target {
                 let lifted = (**l).clone();
@@ -2416,9 +2750,10 @@ fn check_seed(seed: u64) -> Result<bool, String> {
     let why = disagrees_as(&small, form)
         .map(|(_, why)| why)
         .unwrap_or_else(|| "no longer reproduces".into());
+    let pair_name = format!("{}/{}", p.pair.narrow.name(), p.pair.wide.name());
     Err(format!(
         "seed {seed}: {form:?} form {why}\ntype: {}\n--- reduced source ---\n{}",
-        small.ty.name(),
+        pair_name,
         render_program(&small, form)
     ))
 }
@@ -2509,20 +2844,21 @@ fn the_generator_covers_what_it_claims() {
         multi_arg_calls: usize,
         table_dispatches: usize,
         installed_dispatches: usize,
+        widenings: usize,
         slice_reads: usize,
         slice_lens: usize,
     }
 
-    fn walk_e(e: &E, s: &mut Seen) {
+    fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
         match e {
             E::Bin(l, op, r) => {
                 s.ops.insert(op.sym());
-                walk_e(l, s);
-                walk_e(r, s);
+                walk_e(l, s, narrow_half);
+                walk_e(r, s, narrow_half);
             }
             E::Cast(_, inner) => {
                 s.casts += 1;
-                walk_e(inner, s);
+                walk_e(inner, s, narrow_half);
             }
             E::Loop(_) => s.loop_vars += 1,
             E::Call { args, .. } => {
@@ -2531,75 +2867,81 @@ fn the_generator_covers_what_it_claims() {
                     s.multi_arg_calls += 1;
                 }
                 for a in args {
-                    walk_e(a, s);
+                    walk_e(a, s, narrow_half);
                 }
             }
             E::SelfCall(arg) => {
                 s.self_calls += 1;
-                walk_e(arg, s);
+                walk_e(arg, s, narrow_half);
             }
             E::MutualCall(_, arg) => {
                 s.mutual_calls += 1;
-                walk_e(arg, s);
+                walk_e(arg, s, narrow_half);
             }
             E::Dispatch { arg, .. } => {
                 s.table_dispatches += 1;
-                walk_e(arg, s);
+                walk_e(arg, s, narrow_half);
             }
             E::DevCall(arg) => {
                 s.installed_dispatches += 1;
-                walk_e(arg, s);
+                walk_e(arg, s, narrow_half);
+            }
+            E::At(at, inner) => {
+                if *at == narrow_half {
+                    s.widenings += 1;
+                }
+                walk_e(inner, s, narrow_half);
             }
             E::SliceElem(_, _) => s.slice_reads += 1,
             E::SliceLen(_) => s.slice_lens += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) | E::Field(_) => {}
         }
     }
-    fn walk_b(b: &B, s: &mut Seen) {
+    fn walk_b(b: &B, s: &mut Seen, narrow_half: Ty) {
         match b {
-            B::Rel(l, c, r) => {
+            B::Rel(_, l, c, r) => {
                 s.cmps.insert(c.sym());
-                walk_e(l, s);
-                walk_e(r, s);
+                walk_e(l, s, narrow_half);
+                walk_e(r, s, narrow_half);
             }
             B::And(l, r) => {
                 s.bools.insert("&&");
-                walk_b(l, s);
-                walk_b(r, s);
+                walk_b(l, s, narrow_half);
+                walk_b(r, s, narrow_half);
             }
             B::Or(l, r) => {
                 s.bools.insert("||");
-                walk_b(l, s);
-                walk_b(r, s);
+                walk_b(l, s, narrow_half);
+                walk_b(r, s, narrow_half);
             }
             B::Not(i) => {
                 s.bools.insert("!");
-                walk_b(i, s);
+                walk_b(i, s, narrow_half);
             }
         }
     }
-    fn walk_s(stmts: &[S], s: &mut Seen) {
+    fn walk_s(stmts: &[S], s: &mut Seen, narrow_half: Ty) {
         for st in stmts {
             match st {
-                S::Assign(_, e) => {
+                S::Assign(_, _, e) => {
                     s.stmts.insert("assign");
-                    walk_e(e, s);
+                    walk_e(e, s, narrow_half);
                 }
                 S::If(c, t, e) => {
                     s.stmts.insert(if e.is_some() { "if-else" } else { "if" });
-                    walk_b(c, s);
-                    walk_s(t, s);
+                    walk_b(c, s, narrow_half);
+                    walk_s(t, s, narrow_half);
                     if let Some(e) = e {
-                        walk_s(e, s);
+                        walk_s(e, s, narrow_half);
                     }
                 }
                 S::For(_, _, b) => {
                     s.stmts.insert("for");
-                    walk_s(b, s);
+                    walk_s(b, s, narrow_half);
                 }
                 S::While(_, b) => {
                     s.stmts.insert("while");
-                    walk_s(b, s);
+                    walk_s(b, s, narrow_half);
                 }
                 S::Install(_) => {
                     s.stmts.insert("install");
@@ -2620,12 +2962,15 @@ fn the_generator_covers_what_it_claims() {
     let mut seen = Seen::default();
     for seed in 0..400u64 {
         let p = gen_program(seed);
-        seen.types.insert(p.ty.name());
-        walk_s(&p.stmts, &mut seen);
+        seen.types.insert(p.base.name());
+        for t in p.pair.both() {
+            seen.types.insert(t.name());
+        }
+        walk_s(&p.stmts, &mut seen, p.pair.narrow);
         for f in &p.funcs {
-            walk_s(&f.body, &mut seen);
-            walk_e(&f.ret, &mut seen);
-            walk_e(&f.base, &mut seen);
+            walk_s(&f.body, &mut seen, p.pair.narrow);
+            walk_e(&f.ret, &mut seen, p.pair.narrow);
+            walk_e(&f.base, &mut seen, p.pair.narrow);
         }
     }
 
@@ -2765,7 +3110,9 @@ fn the_oracle_matches_the_documented_semantics() {
         (Ty::I8, -128, Op::Xor, -128, 0),
     ];
     let empty = Prog {
-        ty: Ty::U8,
+        pair: PAIRS[0],
+        base: Ty::U8,
+        var_types: [Ty::U8; VARS],
         init: [0; VARS],
         counters: Vec::new(),
         stmts: Vec::new(),
@@ -2968,6 +3315,14 @@ mod coverage {
             "bounds are literals; a computed bound is not generated",
         ),
         (
+            "Stmt::VarDecl",
+            "a program picks one signedness family and mixes its two widths — `u8`/`u16` or \
+             `i8`/`i16` — because those are the two the language widens between without an \
+             `as`. Variables, parameters, locals and return types each take either half; the \
+             array, the struct's fields, the `const` table and the slices all take one. \
+             Mixing across families, and any narrowing, happens only through a written cast",
+        ),
+        (
             "Expr::Slice",
             "always a sub-range of the `const` table, with literal bounds. That table lives in \
              ROM and nothing writes it, so a slice is a read-only view and the oracle needs its \
@@ -3000,8 +3355,11 @@ mod coverage {
         ),
         (
             "Expr::Call",
-            "1-3 arguments, and a callee that reads only its own scope, so argument \
-             evaluation order cannot be observed. The call graph is acyclic apart from \
+            "1-3 arguments at either width, a return type of either width, and a callee that \
+             reads only its own scope, so argument evaluation order cannot be observed. A \
+             narrow argument to a wide parameter is widened by the language rather than by a \
+             cast, and the arithmetic happens at the narrow type first — which is the order \
+             this generates calls to check. The call graph is acyclic apart from \
              recursion, which comes two ways: a function that calls itself, and a pair that \
              call each other. Both are bounded by a budget parameter that every recursive \
              edge decrements, so termination is a property of the shape — a pair member \

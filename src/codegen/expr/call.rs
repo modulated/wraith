@@ -599,12 +599,27 @@ pub(super) fn generate_call(
             )
         });
 
+        // A narrow argument reaching a wide parameter is widened by the
+        // language, and by the *source's* signedness: this zero-extended
+        // whatever arrived, so a negative `i8` passed to an `i16` parameter
+        // lost its sign on the way in.
+        //
+        // The widening has to happen before the low byte is stored, because
+        // sign-extending works through A and X.
+        if is_16bit
+            && let Some(signed) = param_types
+                .get(i)
+                .and_then(|pt| crate::codegen::expr::implicit_widening(arg_type, pt))
+        {
+            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+        }
+
         // Store to TEMPORARY location
         emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
         if is_16bit {
-            // For 16-bit parameters
-            if arg_is_8bit {
-                // Argument is 8-bit but parameter is 16-bit: zero-extend
+            // A parameter whose argument's type sema did not resolve still
+            // needs a defined high byte.
+            if arg_is_8bit && arg_type.is_none() {
                 emitter.emit_inst("LDY", "#$00");
             }
             // Store high byte (in Y) to next location
@@ -877,10 +892,20 @@ fn generate_indirect_call(
                     let p16 = matches!(kind, IndirectArgKind::Word);
                     let arg16 = is_16(info.resolved_types.get(&arg.span));
                     generate_expr(arg, emitter, info, string_collector)?;
+                    // The same implicit widening as a direct call's, and by the
+                    // source's signedness rather than always by zero.
+                    if p16
+                        && let Some(signed) = crate::codegen::expr::implicit_widening(
+                            info.resolved_types.get(&arg.span),
+                            pty,
+                        )
+                    {
+                        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+                    }
                     emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
                     if p16 {
-                        if !arg16 {
-                            emitter.emit_inst("LDY", "#$00"); // zero-extend u8 arg -> u16 param
+                        if !arg16 && !info.resolved_types.contains_key(&arg.span) {
+                            emitter.emit_inst("LDY", "#$00");
                         }
                         emitter.emit_inst("STY", &format!("${:02X}", temp_base + off + 1));
                     }
@@ -1295,17 +1320,16 @@ fn store_inline_arg(
             | Type::Primitive(crate::ast::PrimitiveType::I16)
             | Type::Primitive(crate::ast::PrimitiveType::B16)
     );
+    // An inlined call widens its arguments like any other, and by the source's
+    // signedness: this zero-extended, so a negative `i8` handed to an `i16`
+    // parameter lost its sign — and a *small* function is inlined by default,
+    // so this is the path most one-line callees actually take.
+    if let Some(signed) = crate::codegen::expr::implicit_widening(arg_ty, param_ty) {
+        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+    }
     emitter.emit_inst("STA", &format!("${:02X}", dest));
     if is_16bit {
-        let arg_is_8bit = arg_ty.is_some_and(|ty| {
-            matches!(
-                ty,
-                Type::Primitive(crate::ast::PrimitiveType::U8)
-                    | Type::Primitive(crate::ast::PrimitiveType::I8)
-                    | Type::Primitive(crate::ast::PrimitiveType::B8)
-                    | Type::Primitive(crate::ast::PrimitiveType::Bool)
-            )
-        });
+        let arg_is_8bit = arg_ty.is_none();
         if arg_is_8bit {
             emitter.emit_inst("LDY", "#$00");
         }
