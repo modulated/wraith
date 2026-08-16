@@ -31,13 +31,14 @@ read against a current picture:
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
+| The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
 whose fallback is *another strategy* rather than a failure. The three sites
-that decide an aggregate's fate now refuse what they cannot carry, which is
-where it did its damage; the resolvers underneath still cannot tell a caller
-"not this shape" apart from "unhandled".
+that decide an aggregate's fate refuse what they cannot carry, and the
+resolvers under them now distinguish "not this shape" from "unhandled" rather
+than saying `None` to both.
 
 ---
 
@@ -510,8 +511,7 @@ Also open:
   it; the import-merge half is already done, and `contains_call` /
   `expr_contains_call` are exhaustive.
 - **Make codegen's per-form dispatch exhaustive, or make its fallback loud.**
-  *Largely done — the three sites that decide an aggregate's fate now refuse
-  what they cannot carry.* The defect was the walker one a layer down, and the
+  *Done for the sites and for the resolvers under them.* The defect was the walker one a layer down, and the
   more common of the two. Where a walker asks "is there a call in here", these
   matches ask "which strategy does this form need" — and their fallback is not
   `false`, it is *another strategy*, usually the scalar one. A form nobody
@@ -543,12 +543,29 @@ Also open:
   identically, so nothing claimed a struct or slice from `DEV.get()`. All three
   are fixed and pinned in `tests/e2e/aggregate_dispatch.rs`.
 
-  **What is left** is the first shape rather than the second: resolvers
-  returning `Option`/`bool` (`resolve_static_addr`, `yields_struct_pointer`,
-  `emit_struct_place_address`) whose `None` a caller still reads as "not
-  applicable, use the ordinary path". The guards above are a backstop under the
-  three sites that matter, not a fix at the resolvers — a caller that wants to
-  distinguish "not this shape" from "unhandled" still cannot ask.
+  **The resolvers can now tell a caller which it means.** That was the other
+  half: `resolve_static_addr`, `resolve_static_struct_lvalue` and
+  `emit_struct_place_address` said `None` both for "this form has no address,
+  and never could" and for "this form has one and nobody wrote the case", and a
+  caller reads both as "use the ordinary path".
+
+  `Denotes` supplies the missing question — does this form *name storage* — and
+  is exhaustive over `Expr` with no catch-all, so a construct added to the
+  language has to be placed on one side rather than defaulting to "value". A
+  `Call` has no address because a call produces its result, which is a fact
+  about the form; a *place* no case claimed is a gap, and
+  `emit_struct_place_address` errors on it. That is stronger than the three
+  guards above, which catch the consequence at the call site: this catches it
+  at the resolver, so a fourth caller inherits the check.
+
+  It is deliberately conservative — a form that *might* name storage counts as
+  a place, because over-reporting costs a false alarm and under-reporting lets
+  the original defect back in.
+
+  What is left in this area is smaller and known: `array_field_base` and
+  `array_of_struct_base` are narrow enough that their `None` has one meaning,
+  and the `Option`-returning helpers outside `aggregate.rs` have not been
+  audited against this distinction.
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
   `types.rs` and `control_flow.rs` were already behavioral or are asserting
