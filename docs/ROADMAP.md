@@ -36,6 +36,7 @@ read against a current picture:
 | Every struct field kind round-trips; a whole-array store is refused where it cannot work | `tests/e2e/aggregate_dispatch.rs` |
 | Every return kind survives every call form — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 | An interrupt arriving *mid-computation* leaves the interrupted work alone | `tests/e2e/interrupts_exec.rs` |
+| A function-pointer argument is sized and staged like the two bytes it is | `tests/e2e/vtable.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -43,6 +44,15 @@ whose fallback is *another strategy* rather than a failure. The three sites
 that decide an aggregate's fate refuse what they cannot carry, and the
 resolvers under them now distinguish "not this shape" from "unhandled" rather
 than saying `None` to both.
+
+Its sibling — **one rule with several implementations** — keeps producing
+findings after the fallbacks were closed. A function pointer is two bytes with
+its high byte in Y, which is neither the number convention's reason nor the
+address convention's; three separate hand-written lists of "the wide types"
+omitted it, and each omission was a different silent wrong answer. The table
+(`param_byte_width`, `is_two_byte_value`, `high_byte_in_x`) already existed and
+already knew. What is left is to make the sites *ask* it — the sweep is
+recorded under [Structure & maintainability](#structure--maintainability).
 
 ---
 
@@ -615,6 +625,22 @@ Also open:
   now `every_parameter_kind_survives_every_call_form`. The deeper fix would be
   one staging routine the four share; the matrix is the cheap version, and it
   means a fifth form has to answer for every kind.
+
+  Widening the matrix by one kind found two more. A **function pointer** is the
+  awkward case: two bytes, high byte in Y, and neither a number nor an address,
+  so it falls off any list written by enumerating "the 16-bit primitives, plus
+  the things reached by a pointer". A direct call reserved one staging byte for
+  it and shifted every later parameter down; the inlined path did the same. The
+  authoritative widths were already in `param_byte_width`, so the fix was to
+  ask rather than re-list.
+
+  **The sweep that is left.** `PrimitiveType::U16` appears in thirteen codegen
+  files, and each occurrence is a site that decided the width question for
+  itself. Most are legitimately about *numbers* (a 16-bit add, a `u16`
+  comparison) and a function pointer can never reach them. The ones worth
+  auditing are those asking "how wide is this *value*" — where the answer is
+  `is_two_byte_value` and the register is `high_byte_in_x`. Two were found by
+  widening one matrix by one row; the rest have not been checked.
 
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
