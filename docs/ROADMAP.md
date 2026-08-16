@@ -27,7 +27,7 @@ read against a current picture:
 | The fuzzer binds, copies, passes and returns slices | `docs/fuzz-coverage.md` |
 | The fuzzer builds a two-function call cycle, reaching the SCC path | `docs/fuzz-coverage.md` |
 | The fuzzer mixes the two widths the language widens between | `docs/fuzz-coverage.md` |
-| Implicit widening carries the source's sign at all six sites | `tests/e2e/int_conversions.rs` |
+| Implicit widening carries the source's sign at all seven sites | `tests/e2e/int_conversions.rs` |
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
@@ -37,6 +37,9 @@ read against a current picture:
 | Every return kind survives every call form — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 | An interrupt arriving *mid-computation* leaves the interrupted work alone | `tests/e2e/interrupts_exec.rs` |
 | A function-pointer argument is sized and staged like the two bytes it is | `tests/e2e/vtable.rs` |
+| Re-pointing a `str` local writes both bytes, page crossing and all | `tests/e2e/strings_slices.rs` |
+| A match expression's arm widens by the arm's sign, not by zero | `tests/e2e/int_conversions.rs` |
+| A for-loop bound the counter cannot represent is refused, sign as well as width | `tests/e2e/control_flow.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -51,8 +54,9 @@ its high byte in Y, which is neither the number convention's reason nor the
 address convention's; three separate hand-written lists of "the wide types"
 omitted it, and each omission was a different silent wrong answer. The table
 (`param_byte_width`, `is_two_byte_value`, `high_byte_in_x`) already existed and
-already knew. What is left is to make the sites *ask* it — the sweep is
-recorded under [Structure & maintainability](#structure--maintainability).
+already knew. The sweep through every codegen site that re-listed the wide
+types found five in total, and is written up under
+[Structure & maintainability](#structure--maintainability).
 
 ---
 
@@ -634,13 +638,34 @@ Also open:
   authoritative widths were already in `param_byte_width`, so the fix was to
   ask rather than re-list.
 
-  **The sweep that is left.** `PrimitiveType::U16` appears in thirteen codegen
-  files, and each occurrence is a site that decided the width question for
-  itself. Most are legitimately about *numbers* (a 16-bit add, a `u16`
-  comparison) and a function pointer can never reach them. The ones worth
-  auditing are those asking "how wide is this *value*" — where the answer is
-  `is_two_byte_value` and the register is `high_byte_in_x`. Two were found by
-  widening one matrix by one row; the rest have not been checked.
+  **The sweep, done.** `PrimitiveType::U16` appears in thirteen codegen files,
+  each a site that decided the width question for itself. Most are legitimately
+  about *numbers* — a 16-bit add, a `u16` comparison, a match scrutinee — and no
+  address can reach them. The ones asking "how wide is this *value*" were
+  audited against `is_two_byte_value` / `high_byte_in_x`, and found three more:
+
+  * **A `str` local re-pointed.** Binding and assignment keep separate copies of
+    the width match, and the assignment copy had `str` on neither list, so
+    `s = "xy"` wrote the new pointer's low byte over the old and kept the old
+    high byte. String literals are laid out consecutively, so two of them
+    almost always share a page and the stale byte was accidentally right; the
+    test forces the crossing that makes it wrong.
+  * **A match expression's arm.** The last site still writing `LDY #$00` by
+    hand, so an `i8` arm of an `i16` match lost its sign. A match *statement*
+    widens through the assignment inside it and was already right, which is
+    why the earlier six-site sweep did not reach this one.
+  * **A for-loop bound of the wrong sign.** Not a width question but the same
+    shape: the runtime-bound check was a list of rejected *pairs*, about width
+    only, so an `i8` bound on a `u8` counter passed and the loop compared 254
+    against 2. Restated as range containment.
+
+  The pattern worth keeping from this: the authoritative table already existed
+  and already had the right answer in every one of these cases. Nothing needed
+  to be *decided*, only asked. A site that re-lists the variants is the defect,
+  independent of which variant it forgets.
+
+  What is still open is the underlying merge — one staging routine, one width
+  question — rather than more sites converted one at a time.
 
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
