@@ -437,3 +437,118 @@ fn every_struct_place_still_yields_an_address() {
         "inline storage, a by-reference parameter, and a runtime-indexed element"
     );
 }
+
+/// Every kind of two-byte parameter survives a tail-recursive call.
+///
+/// The loop that replaces the `JSR` has to know two things about each
+/// parameter: how wide it is, and which register its high byte arrives in. It
+/// got the second wrong for the two kinds whose convention the type alone does
+/// not settle.
+///
+/// A `str` is a two-byte address and loads as `LDA #<label / LDX #>label`, but
+/// `is_two_byte_value` did not list it at all and `high_byte_in_x` did not
+/// either — so it was rebound as one byte, from the wrong register. An enum's
+/// value is a two-byte pointer to its data block, also in A:X, but its type is
+/// spelled `Named`, which covers structs as well; a struct *field* is stored
+/// inline rather than as a pointer, so only the registry can separate them.
+///
+/// Both came back as zero after one iteration, and at depth 0 — where the loop
+/// is never taken — both were fine, which is why this runs each at both depths.
+#[test]
+fn every_kind_of_parameter_survives_a_tail_call() {
+    let cases: [(&str, &str, u8); 5] = [
+        (
+            "a pointer",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            static V: u8 = 77;
+            fn rec(d: u8, p: &u8, n: u8) -> u8 { if d == 0 { return *p + n; } return rec(d - 1, p, n); }
+            #[reset]
+            fn main() { O0 = rec(0, &V, 1); O1 = rec(3, &V, 1); loop {} }
+        "#,
+            78,
+        ),
+        (
+            "a struct, by reference",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            struct P { x: u8, y: u8 }
+            fn rec(d: u8, s: P, n: u8) -> u8 { if d == 0 { return s.x + s.y + n; } return rec(d - 1, s, n); }
+            #[reset]
+            fn main() { let q: P = P { x: 4, y: 38 }; O0 = rec(0, q, 0); O1 = rec(3, q, 0); loop {} }
+        "#,
+            42,
+        ),
+        (
+            "a str",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            fn rec(d: u8, s: str, n: u8) -> u8 { if d == 0 { return (s.len as u8) + n; } return rec(d - 1, s, n); }
+            #[reset]
+            fn main() { O0 = rec(0, "abcd", 1); O1 = rec(3, "abcd", 1); loop {} }
+        "#,
+            5,
+        ),
+        (
+            "an enum",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            enum C { R, G, B }
+            fn rec(d: u8, c: C, n: u8) -> u8 { if d == 0 { return (c as u8) + n; } return rec(d - 1, c, n); }
+            #[reset]
+            fn main() { O0 = rec(0, C::B, 1); O1 = rec(3, C::B, 1); loop {} }
+        "#,
+            3,
+        ),
+        (
+            "an array",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            fn rec(d: u8, a: [u8; 3], n: u8) -> u8 { if d == 0 { return a[1] + n; } return rec(d - 1, a, n); }
+            #[reset]
+            fn main() { let arr: [u8; 3] = [5, 6, 7]; O0 = rec(0, arr, 1); O1 = rec(3, arr, 1); loop {} }
+        "#,
+            7,
+        ),
+    ];
+    for (what, src, want) in cases {
+        let mut e = run(src);
+        assert_eq!(
+            (e.mem(0x0900), e.mem(0x0901)),
+            (want, want),
+            "{what} passed through a tail call, at depth 0 and depth 3"
+        );
+    }
+}
+
+/// A `str` is a two-byte address wherever it is stored, not just in a slot.
+///
+/// `is_two_byte_value` — "the one authoritative answer", so a load or store
+/// site cannot drift by re-listing the variants — omitted `Type::String`. A
+/// struct literal with a `str` field therefore stored one byte of the pointer
+/// and took the other from `Y`, so `d.name.len` read through a half-formed
+/// address. Reassigning the same field afterwards worked, which is what kept
+/// it hidden: the two paths disagreed.
+#[test]
+fn a_str_field_is_initialised_with_both_its_bytes() {
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        struct D { name: str, tag: u8 }
+        #[reset]
+        fn main() {
+            let d: D = D { name: "abcd", tag: 1 };
+            OUT0 = (d.name.len as u8) + d.tag;
+            // The assignment path, which already worked, so the two stay level.
+            d.name = "abcdefg";
+            OUT1 = (d.name.len as u8) + d.tag;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
+}

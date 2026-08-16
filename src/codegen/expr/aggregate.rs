@@ -819,12 +819,17 @@ fn addr_operand(addr: u16) -> String {
 
 /// Which register holds the high byte of a two-byte value once loaded.
 ///
-/// A `&T` follows the pointer convention (A:X); everything else that is two
-/// bytes — 16-bit scalars, and function pointers — uses A:Y. Storing a pointer
-/// as though it were A:Y writes the wrong high byte, which is how `*pp = q` on a
-/// `&&u8` used to lose half its address.
+/// A `&T` and a `str` follow the pointer convention (A:X) — both are addresses,
+/// and a string literal loads as `LDA #<label / LDX #>label`. Everything else
+/// that is two bytes — 16-bit scalars, and function pointers — uses A:Y.
+/// Storing one as though it were the other writes the wrong high byte, which is
+/// how `*pp = q` on a `&&u8` used to lose half its address and how a `str`
+/// field in a struct literal came to be initialised from whatever `Y` held.
 pub(crate) fn high_byte_in_x(ty: &crate::sema::types::Type) -> bool {
-    matches!(ty, crate::sema::types::Type::Pointer(_))
+    matches!(
+        ty,
+        crate::sema::types::Type::Pointer(_) | crate::sema::types::Type::String
+    )
 }
 
 /// Whether a scalar value occupies two bytes (a field, array element, pointee,
@@ -844,6 +849,7 @@ pub(crate) fn is_two_byte_value(ty: &crate::sema::types::Type) -> bool {
         ty,
         Type::Function(..)
             | Type::Pointer(_)
+            | Type::String
             | Type::Primitive(
                 crate::ast::PrimitiveType::U16
                     | crate::ast::PrimitiveType::I16

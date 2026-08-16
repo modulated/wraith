@@ -1379,6 +1379,21 @@ pub(crate) fn param_byte_width(ty: &crate::sema::types::Type) -> u8 {
     }
 }
 
+/// Which register holds the high byte of a two-byte *argument*, by the
+/// parameter's type.
+///
+/// [`high_byte_in_x`](crate::codegen::expr::high_byte_in_x) answers this for
+/// the types whose convention the type alone settles. An enum cannot be one of
+/// those: its value is a two-byte pointer to its data block and arrives in A:X
+/// like any address, but the type is spelled `Named`, which also covers
+/// structs — and a struct *field* is stored inline rather than as a pointer.
+/// Only the registry can tell the two apart, so this is the variant that has
+/// it, and it is about parameters specifically.
+fn arg_high_byte_in_x(ty: &Type, info: &ProgramInfo) -> bool {
+    crate::codegen::expr::high_byte_in_x(ty)
+        || matches!(ty, Type::Named(n) if info.type_registry.get_enum(n).is_some())
+}
+
 /// The zero-page slot holding a slice descriptor named by `expr`, for the
 /// paths that move four bytes rather than produce a value in registers.
 fn slice_descriptor_slot(expr: &Spanned<Expr>, info: &ProgramInfo) -> Option<u8> {
@@ -1493,6 +1508,34 @@ pub fn generate_tail_recursive_update(
             continue;
         }
 
+        // A struct is passed by *reference*, so what the parameter takes is the
+        // address of the argument's storage — which `generate_expr` does not
+        // produce for a place. It loaded the first byte of the struct's
+        // contents and left the high byte to whatever `Y` held, which happened
+        // to be right often enough to survive a single call.
+        if width == 2
+            && let Some(Type::Named(n)) = pty
+            && info.type_registry.get_struct(n).is_some()
+        {
+            if crate::codegen::expr::emit_struct_place_address(
+                arg,
+                emitter,
+                info,
+                string_collector,
+            )?
+            .is_none()
+            {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "cannot rebind the `{n}` parameter from this expression in a                      tail-recursive call: a struct is passed by address, and this                      expression has none"
+                )));
+            }
+            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
+            temp_offset += 2;
+            arg_info.push((temp_addr, 2));
+            continue;
+        }
+
         generate_expr(arg, emitter, info, string_collector)?;
 
         // As at every other call site, a narrow argument reaching a wide
@@ -1508,7 +1551,7 @@ pub fn generate_tail_recursive_update(
         emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
         if width == 2 {
             // An address arrives in A:X, a 16-bit number in A:Y.
-            let hi = if pty.is_some_and(crate::codegen::expr::high_byte_in_x) {
+            let hi = if pty.is_some_and(|pt| arg_high_byte_in_x(pt, info)) {
                 "STX"
             } else {
                 "STY"
