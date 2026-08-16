@@ -655,3 +655,97 @@ fn an_array_through_a_function_pointer_is_refused_with_a_way_out() {
         "Pass a `&T` to it instead",
     );
 }
+
+/// Assigning a *whole array* repoints a slot; only a local array has one.
+///
+/// A local array's slot holds a pointer to its data, so `a = [4, 5, 6]` is a
+/// coherent rebind — the slot points at the new literal. A `static` array and
+/// a struct field are the data, at a fixed address, so there is nothing to
+/// repoint. Both accepted the assignment anyway and stored the literal's ROM
+/// address over the elements: the static came back as `128`, part of an
+/// address, and the field kept its old value with `d.f[0]` corrupted.
+///
+/// Refused now, with the element-wise form named. Whether whole-array
+/// assignment should *copy* — which would also change what the local form
+/// means — is a language question, and is on the roadmap rather than decided
+/// here.
+#[test]
+fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
+    // The local form keeps working: the slot is a pointer, and repointing it
+    // is what the assignment has always meant.
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let a: [u8; 3] = [1, 2, 3];
+            a = [4, 5, 6];
+            OUT0 = a[1];
+            let b: [u8; 3] = [7, 8, 9];
+            a = b;
+            OUT1 = a[1];
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
+
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        static A: [u8; 3] = [1, 2, 3];
+        #[reset]
+        fn main() { A = [4, 5, 6]; OUT = A[1]; loop {} }
+    "#,
+        "a `static` array is its elements",
+    );
+
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        struct D { f: [u8; 3] }
+        #[reset]
+        fn main() { let d: D = D { f: [1, 2, 3] }; d.f = [4, 5, 6]; OUT = d.f[1]; loop {} }
+    "#,
+        "a field holds its elements inline",
+    );
+}
+
+/// Every kind of struct field, initialised then reassigned then read.
+///
+/// A field's type decides both how wide the store is and which register the
+/// high byte comes from, and the two predicates that answer those had drifted
+/// — `Type::String` was missing from both, so a `str` field was a one-byte
+/// store from the wrong register.
+#[test]
+fn every_kind_of_struct_field_round_trips() {
+    // (field type, initial value, reassigned value, how to read it, expected)
+    let cases: [(&str, &str, &str, &str, u8); 5] = [
+        ("u16", "300", "301", "(d.f as u8)", 45),
+        ("&u8", "&V", "&W", "*d.f", 88),
+        ("str", "\"ab\"", "\"abcd\"", "(d.f.len as u8)", 4),
+        ("C", "C::R", "C::B", "(d.f as u8)", 2),
+        ("fn(u8) -> u8", "bump", "dbl", "d.f(21)", 42),
+    ];
+    for (ty, init, reassigned, read, want) in cases {
+        let mut e = run(&format!(
+            "const OUT0: addr = 0x0900;\n\
+             const OUT1: addr = 0x0901;\n\
+             static V: u8 = 77;\n\
+             static W: u8 = 88;\n\
+             enum C {{ R, G, B }}\n\
+             fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
+             fn dbl(a: u8) -> u8 {{ return a + a; }}\n\
+             struct D {{ f: {ty}, tag: u8 }}\n\
+             #[reset]\nfn main() {{\n\
+             \x20   let d: D = D {{ f: {init}, tag: 9 }};\n\
+             \x20   OUT0 = d.tag;\n\
+             \x20   d.f = {reassigned};\n\
+             \x20   OUT1 = {read};\n    loop {{}}\n}}\n"
+        ));
+        assert_eq!(
+            (e.mem(0x0900), e.mem(0x0901)),
+            (9, want),
+            "a `{ty}` field: the tag beside it must survive the store, and the field must read back"
+        );
+    }
+}

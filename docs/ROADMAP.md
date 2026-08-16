@@ -33,6 +33,7 @@ read against a current picture:
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
 | The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
 | Every parameter kind survives every call form — direct, inlined, recursive, indirect | `tests/e2e/aggregate_dispatch.rs` |
+| Every struct field kind round-trips; a whole-array store is refused where it cannot work | `tests/e2e/aggregate_dispatch.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -567,6 +568,18 @@ Also open:
   `array_of_struct_base` are narrow enough that their `None` has one meaning,
   and the `Option`-returning helpers outside `aggregate.rs` have not been
   audited against this distinction.
+- **Whole-array assignment means "repoint", and only a local can be
+  repointed.** A local array's slot holds a pointer to its data, so
+  `a = [4, 5, 6]` rebinds the slot. A `static` array and a struct field *are*
+  the data, at a fixed address, so there is nothing to repoint — and both used
+  to accept the assignment and store the literal's ROM address over the
+  elements. Refused now, naming the element-wise form.
+
+  The open question is a language one, not a bug: should assigning an array
+  *copy*? That would give the three forms one meaning, at the cost of changing
+  what the local form does today. Worth deciding before anything is built on
+  the current behaviour.
+
 - **One rule, four implementations.** A call's arguments are staged in four
   separate pieces of code — a direct `JSR`, an inlined body, a recursive call
   that saves the callee's frame, and an indirect call through a fixed block —

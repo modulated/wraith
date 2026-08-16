@@ -702,6 +702,20 @@ pub(super) fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
+    // A whole array cannot be assigned to a *field*. Assigning one only ever
+    // meant repointing a slot at the data, which is how a local array is
+    // stored; a field is the data itself, and the store wrote two bytes of the
+    // literal's ROM address over the first two elements. `d.f = [4, 5, 6]`
+    // left `d.f[1]` at its old value and corrupted `d.f[0]`.
+    if let Some(Type::Array(..)) = field_type_of(object, field, info) {
+        return Err(CodegenError::UnsupportedOperation(format!(
+            "cannot assign a whole array to field `{}`: a field holds its elements inline, so \
+             there is no pointer to repoint. Assign the elements — `x.{}[i] = v` — or rebuild \
+             the struct",
+            field.node, field.node
+        )));
+    }
+
     // arr[i].field = x with a runtime index: absolute,Y indexed store.
     if let Expr::Index {
         object: array,
@@ -899,6 +913,29 @@ pub(super) fn generate_field_assignment(
             "Field assignment only supported on variables (not expressions)".to_string(),
         ))
     }
+}
+
+/// The declared type of `object.field`, when the object's struct is known.
+///
+/// Used to refuse a whole-array store before any of the field-assignment
+/// paths pick a shape for it.
+fn field_type_of(
+    object: &Spanned<crate::ast::Expr>,
+    field: &Spanned<String>,
+    info: &ProgramInfo,
+) -> Option<crate::sema::types::Type> {
+    let name = match info.resolved_types.get(&object.span) {
+        Some(crate::sema::types::Type::Named(n)) => n.clone(),
+        Some(crate::sema::types::Type::Pointer(inner)) => match &**inner {
+            crate::sema::types::Type::Named(n) => n.clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    info.type_registry
+        .get_struct(&name)?
+        .get_field(&field.node)
+        .map(|f| f.ty.clone())
 }
 
 /// Which register holds the high byte of a value about to be stored into a
@@ -1942,6 +1979,24 @@ pub(super) fn generate_assign(
                 // so a wider slot reaching it means every copy path declined.
                 if let SlotFill::Block(bytes) = slot_fill(&sym.ty, info) {
                     return Err(unfilled_block_error(&sym.ty, bytes, "assign"));
+                }
+
+                // Assigning a whole array repoints a slot at the data, which
+                // only exists for a *local* array. A `static` array is the
+                // data, at a fixed address, so the store put two bytes of the
+                // literal's ROM address over the first two elements and every
+                // later read came back as part of an address.
+                if matches!(sym.ty, Type::Array(..))
+                    && !matches!(
+                        sym.location,
+                        crate::sema::table::SymbolLocation::ZeroPage(_)
+                    )
+                {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "cannot assign a whole array to `{name}`: a `static` array is its \
+                         elements, at a fixed address, so there is no pointer to repoint. Assign \
+                         the elements — `{name}[i] = v` — or use a local"
+                    )));
                 }
 
                 // And, as there, a narrow value stored into a wide slot is
