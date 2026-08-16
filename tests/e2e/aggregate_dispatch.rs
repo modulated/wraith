@@ -815,3 +815,95 @@ fn every_kind_of_return_value_survives_every_call_form() {
         }
     }
 }
+
+/// Field chains, which is what the address resolvers recurse through.
+///
+/// `resolve_static_addr` and `resolve_static_struct_lvalue` walk a chain a
+/// level at a time, and both were changed to answer three ways rather than
+/// two. Nothing about that should move a nested access, and this is how that
+/// stays true — read and write, a scalar field and a wide one, through a local
+/// and through a `static`, and passing an inner struct on by address.
+#[test]
+fn a_nested_field_chain_resolves_through_every_form() {
+    let cases: [(&str, &str, u8); 5] = [
+        (
+            "reading through a local",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 41, b: 300 } };
+                OUT = o.inner.a + o.tag;
+                loop {}
+            }
+        "#,
+            42,
+        ),
+        (
+            "writing through a local",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 0, b: 300 } };
+                o.inner.a = 41;
+                OUT = o.inner.a + o.tag;
+                loop {}
+            }
+        "#,
+            42,
+        ),
+        (
+            "a wide nested field, which stores two bytes",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 0, b: 300 } };
+                o.inner.b = 301;
+                OUT = (o.inner.b as u8) + 1;
+                loop {}
+            }
+        "#,
+            46,
+        ),
+        (
+            "through a static, whose base is an address not a slot",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            static S: Out = Out { tag: 1, inner: In { a: 41, b: 300 } };
+            #[reset]
+            fn main() { OUT = S.inner.a + S.tag; loop {} }
+        "#,
+            42,
+        ),
+        (
+            "passing the inner struct on by address",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u8 }
+            struct Out { tag: u8, inner: In }
+            fn sum(i: In) -> u8 { return i.a + i.b; }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 4, b: 38 } };
+                OUT = sum(o.inner);
+                loop {}
+            }
+        "#,
+            42,
+        ),
+    ];
+    for (what, src, want) in cases {
+        let mut e = run(src);
+        assert_eq!(e.mem(0x0900), want, "a nested chain, {what}");
+    }
+}
