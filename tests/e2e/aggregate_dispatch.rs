@@ -771,6 +771,48 @@ fn every_kind_of_struct_field_round_trips() {
     }
 }
 
+/// The same question where the struct is a `static` rather than a local.
+///
+/// A local struct sits in the frame and its fields are reached from a
+/// zero-page base; a `static` is at a fixed address and resolves through a
+/// different path entirely. The field matrix above exercises only the first.
+///
+/// Two of the five field kinds cannot get here: a `str` field and an enum
+/// field are both refused at the initialiser as *not a compile-time constant*,
+/// and a `&u8` field with them. That is a `const`-evaluation gap rather than a
+/// codegen one — a `fn` field is accepted, which is the same two bytes of
+/// address — and it is recorded on the roadmap rather than worked around here.
+/// The two that do get here round-trip, tag intact on both sides of the store.
+#[test]
+fn a_static_structs_two_byte_fields_round_trip() {
+    let cases: [(&str, &str, &str, &str, u8); 2] = [
+        ("u16", "300", "301", "(G.f as u8)", 45),
+        ("fn(u8) -> u8", "bump", "dbl", "G.f(21)", 42),
+    ];
+    for (ty, init, reassigned, read, want) in cases {
+        let mut e = run(&format!(
+            "const OUT0: addr = 0x0900;\n\
+             const OUT1: addr = 0x0901;\n\
+             const OUT2: addr = 0x0902;\n\
+             fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
+             fn dbl(a: u8) -> u8 {{ return a + a; }}\n\
+             struct D {{ f: {ty}, tag: u8 }}\n\
+             static G: D = D {{ f: {init}, tag: 9 }};\n\
+             #[reset]\nfn main() {{\n\
+             \x20   OUT0 = G.tag;\n\
+             \x20   G.f = {reassigned};\n\
+             \x20   OUT1 = {read};\n\
+             \x20   OUT2 = G.tag;\n    loop {{}}\n}}\n"
+        ));
+        assert_eq!(
+            (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+            (9, want, 9),
+            "a `{ty}` field of a static struct: the tag beside it must survive \
+             the store, and the field must read back"
+        );
+    }
+}
+
 /// Every kind of return value, out of every form a function is called by.
 ///
 /// The mirror of `every_parameter_kind_survives_every_call_form`. Arguments go

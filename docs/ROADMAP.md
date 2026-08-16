@@ -40,6 +40,7 @@ read against a current picture:
 | Re-pointing a `str` local writes both bytes, page crossing and all | `tests/e2e/strings_slices.rs` |
 | A match expression's arm widens by the arm's sign, not by zero | `tests/e2e/int_conversions.rs` |
 | A for-loop bound the counter cannot represent is refused, sign as well as width | `tests/e2e/control_flow.rs` |
+| Two-byte `static`s and `static` struct fields store both bytes — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -664,8 +665,27 @@ Also open:
   to be *decided*, only asked. A site that re-lists the variants is the defect,
   independent of which variant it forgets.
 
+  **Two seams came back clean**, which is worth as much as the findings. A
+  `static` of every two-byte kind stores both bytes when reassigned — the
+  `Absolute` branch is a separate copy of the same decision and it agrees. So
+  do the fields of a `static` struct, which resolve through a different address
+  path from a local's. Both are pinned.
+
   What is still open is the underlying merge — one staging routine, one width
   question — rather than more sites converted one at a time.
+
+- **A `static` struct can only initialise some of its field kinds.** A `u16`
+  field and a `fn` field are accepted; a `str`, an enum and a `&T` are refused
+  at the initialiser as *not a compile-time constant*. That is inconsistent
+  rather than wrong: a `fn` field is two bytes of address resolved by the
+  assembler, and a `str` field is the same shape — a label reference to the
+  literal's data — so `const` evaluation could accept it on the same terms. A
+  `&T` pointing at another `static` is the same again once BSS addresses are
+  assigned.
+
+  The diagnostic is clear and the workaround (assign in `main`) is one line, so
+  this is a feature gap rather than a defect. Worth closing when static device
+  tables want a name beside their function pointers.
 
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
