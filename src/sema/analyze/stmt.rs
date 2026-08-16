@@ -845,23 +845,30 @@ impl SemanticAnalyzer {
             });
         }
 
+        // A runtime bound is checked by type: every value the bound's type can
+        // hold has to be representable in the counter's, or the comparison
+        // driving the loop is against something other than what was written.
+        //
+        // Stated as range containment rather than as a list of rejected pairs.
+        // The list caught a `u16` bound on a `u8` counter but said nothing
+        // about an `i8` one, though half of `i8` is just as unrepresentable:
+        // `let lo: i8 = -2; for i in lo..2` compared 254 against 2, ran zero
+        // times, and said nothing — while the same loop written with the
+        // literal `-2` was rejected by the by-value check above.
+        let range_of = |ty: &Type| match ty {
+            Type::Primitive(PrimitiveType::U8) => Some((0i64, 255i64)),
+            Type::Primitive(PrimitiveType::I8) => Some((-128, 127)),
+            Type::Primitive(PrimitiveType::U16) => Some((0, 65535)),
+            Type::Primitive(PrimitiveType::I16) => Some((-32768, 32767)),
+            _ => None,
+        };
         if let Some(bound_ty) = self.resolved_types.get(&bound.span) {
-            let too_wide = matches!(
-                (counter_ty, bound_ty),
-                (
-                    Type::Primitive(PrimitiveType::U8),
-                    Type::Primitive(PrimitiveType::U16)
-                ) | (
-                    Type::Primitive(PrimitiveType::U8),
-                    Type::Primitive(PrimitiveType::I16)
-                ) | (
-                    Type::Primitive(PrimitiveType::I8),
-                    Type::Primitive(PrimitiveType::U16)
-                ) | (
-                    Type::Primitive(PrimitiveType::I8),
-                    Type::Primitive(PrimitiveType::I16)
-                )
-            );
+            let too_wide = match (range_of(counter_ty), range_of(bound_ty)) {
+                (Some((clo, chi)), Some((blo, bhi))) => blo < clo || bhi > chi,
+                // A type without a numeric range here (`b16`, `bool`, `char`)
+                // is not this check's business.
+                _ => false,
+            };
             if too_wide {
                 return Err(SemaError::Custom {
                     message: format!(
