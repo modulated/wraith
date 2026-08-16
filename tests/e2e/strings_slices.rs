@@ -645,3 +645,86 @@ fn char_from_iteration_copies_into_a_buffer_without_a_cast() {
     assert_eq!(e.mem(0x0900), 0x64, "dst[0] copied to 'd'");
     assert_eq!(e.mem(0x0901), 0x67, "dst[2] copied to 'g'");
 }
+
+// ---------------------------------------------------------------------------
+// Reassigning a two-byte local writes both bytes.
+// ---------------------------------------------------------------------------
+
+/// Re-pointing a `str` local across a page boundary.
+///
+/// Binding and assignment each decide, separately, whether a variable's slot
+/// takes one byte or two. The assignment copy listed the wide types by hand and
+/// left `str` off, so `s = "xy"` stored the new pointer's low byte over the old
+/// one and kept the *old* high byte.
+///
+/// Two literals almost always share a page, which is why this survived: the
+/// stale high byte was the right one. Here the second string is deliberately
+/// pushed past a page boundary, so the half-written pointer lands in the middle
+/// of the padding string and `.len` reads a `'c'` (99) instead of 250.
+#[test]
+fn reassigning_a_str_across_a_page_writes_both_bytes() {
+    let a = "a".repeat(250);
+    let b = "b".repeat(250);
+    let c = "c".repeat(200);
+    let mut e = run(&format!(
+        "const OUT0: addr = 0x0900;\n\
+         const OUT1: addr = 0x0901;\n\
+         #[reset]\nfn main() {{\n\
+         \x20   let pad: str = \"{c}\";\n\
+         \x20   OUT0 = pad.len as u8;\n\
+         \x20   let s: str = \"{a}\";\n\
+         \x20   s = \"{b}\";\n\
+         \x20   OUT1 = s.len as u8;\n    loop {{}}\n}}\n"
+    ));
+    assert_eq!(e.mem(0x0900), 200, "the pad's own length");
+    assert_eq!(e.mem(0x0901), 250, "the reassigned string's length");
+}
+
+/// The same question for every kind whose slot is two bytes, asked of the
+/// emitted code rather than of the run.
+///
+/// Whether a dropped high byte is *visible* depends on where the linker put
+/// the two values: same page and the stale byte is accidentally right, which
+/// is precisely how the `str` case above went unnoticed. The property is not
+/// "the answer came out right for this layout", it is "both bytes were
+/// stored", and that is what the store itself says.
+///
+/// So: bind a local, reassign it, and require the assignment to write the slot
+/// *and* the byte after it.
+#[test]
+fn every_two_byte_local_stores_a_high_byte_on_reassignment() {
+    // (name, type, first value, second value)
+    let kinds: [(&str, &str, &str, &str); 6] = [
+        ("a u16", "u16", "300", "301"),
+        ("an i16", "i16", "300", "301"),
+        ("a b16", "b16", "1234 as b16", "5678 as b16"),
+        ("a str", "str", "\"ab\"", "\"cd\""),
+        ("a pointer", "&u8", "&V", "&W"),
+        ("a function pointer", "fn(u8) -> u8", "bump", "dbl"),
+    ];
+    for (what, ty, first, second) in kinds {
+        let asm = crate::common::compile_success(&format!(
+            "const OUT: addr = 0x0900;\n\
+             static V: u8 = 1;\n\
+             static W: u8 = 2;\n\
+             fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
+             fn dbl(a: u8) -> u8 {{ return a + a; }}\n\
+             #[reset]\nfn main() {{\n\
+             \x20   let x: {ty} = {first};\n\
+             \x20   x = {second};\n    loop {{}}\n}}\n"
+        ));
+        // The local is the first thing in `main`'s frame, so its slot is the
+        // frame base and its high byte the byte after.
+        let base = wraith::codegen::memory_layout::FRAME_REGION_START;
+        let hi = format!("${:02X}", base + 1);
+        let stores = asm
+            .lines()
+            .filter(|l| l.trim_start().starts_with("ST") && l.trim_end().ends_with(&hi))
+            .count();
+        assert!(
+            stores >= 2,
+            "{what}: expected the binding and the reassignment each to store a \
+             high byte at {hi}, found {stores} such stores in:\n{asm}"
+        );
+    }
+}

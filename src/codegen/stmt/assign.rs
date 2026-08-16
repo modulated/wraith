@@ -1614,23 +1614,21 @@ pub(super) fn generate_var_decl(
             false
         };
 
-        let is_multibyte = matches!(
-            sym.ty,
-            Type::Array(_, _)
-                | Type::String
-                | Type::Pointer(_)
-                | Type::Function(_, _)
-                | Type::Primitive(crate::ast::PrimitiveType::U16)
-                | Type::Primitive(crate::ast::PrimitiveType::I16)
-                | Type::Primitive(crate::ast::PrimitiveType::B16)
-        ) || is_enum;
+        // Two bytes, in whichever register pair carries them. Asked of the one
+        // table, plus the two kinds it cannot answer alone: an array's slot
+        // holds a pointer to its data, and an enum is spelled `Named` like a
+        // struct, which only the registry separates.
+        let is_multibyte = crate::codegen::expr::is_two_byte_value(&sym.ty)
+            || matches!(sym.ty, Type::Array(_, _))
+            || is_enum;
 
         // Arrays, enums, strings and pointers carry an address in
         // A (low) and X (high); other 16-bit values use A (low) and
         // Y (high). Storing only A leaves the high byte as whatever was
         // in the slot, which reads as a pointer into an arbitrary page.
-        let is_array_or_enum =
-            matches!(sym.ty, Type::Array(_, _) | Type::String | Type::Pointer(_)) || is_enum;
+        let is_array_or_enum = crate::codegen::expr::high_byte_in_x(&sym.ty)
+            || matches!(sym.ty, Type::Array(_, _))
+            || is_enum;
 
         // An enum value binds by *copy*: the constructed bytes live in
         // shared codegen scratch until here (and a returned enum points
@@ -2016,22 +2014,21 @@ pub(super) fn generate_assign(
                     false
                 };
 
-                // Check if this is a multi-byte type (u16/i16/b16, arrays,
-                // enums, function pointers)
-                let is_multibyte = matches!(
-                    sym.ty,
-                    Type::Array(_, _)
-                        | Type::Pointer(_)
-                        | Type::Function(_, _)
-                        | Type::Primitive(crate::ast::PrimitiveType::U16)
-                        | Type::Primitive(crate::ast::PrimitiveType::I16)
-                        | Type::Primitive(crate::ast::PrimitiveType::B16)
-                ) || is_enum;
+                // The same two questions the binding path above asks, of the
+                // same tables. This copy listed the wide types by hand and had
+                // left `str` off *both* lists, so `s = "xy"` stored the new
+                // pointer's low byte over the old one and kept the old high
+                // byte. Two literals in one page hid it; across a page
+                // boundary `s.len` read into the middle of another string.
+                let is_multibyte = crate::codegen::expr::is_two_byte_value(&sym.ty)
+                    || matches!(sym.ty, Type::Array(_, _))
+                    || is_enum;
 
-                // Arrays, enums and pointers carry an address in
+                // Arrays, enums, strings and pointers carry an address in
                 // A (low) and X (high); other 16-bit values use A:Y.
-                let is_array_or_enum =
-                    matches!(sym.ty, Type::Array(_, _) | Type::Pointer(_)) || is_enum;
+                let is_array_or_enum = crate::codegen::expr::high_byte_in_x(&sym.ty)
+                    || matches!(sym.ty, Type::Array(_, _))
+                    || is_enum;
 
                 // Same copy-on-bind as the VarDecl path: an enum
                 // reassignment must land in the variable's own block,
