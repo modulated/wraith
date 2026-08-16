@@ -32,6 +32,7 @@ read against a current picture:
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
 | The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
+| Every parameter kind survives every call form — direct, inlined, recursive, indirect | `tests/e2e/aggregate_dispatch.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -566,6 +567,19 @@ Also open:
   `array_of_struct_base` are narrow enough that their `None` has one meaning,
   and the `Option`-returning helpers outside `aggregate.rs` have not been
   audited against this distinction.
+- **One rule, four implementations.** A call's arguments are staged in four
+  separate pieces of code — a direct `JSR`, an inlined body, a recursive call
+  that saves the callee's frame, and an indirect call through a fixed block —
+  and each decides a parameter's width and register convention for itself.
+  Three chances to differ, and they did: a struct reached an inlined callee as
+  the first two bytes of its *contents*, and a `str` and an enum reached a
+  tail-recursive one from the wrong register.
+
+  What made those findable was asking every kind through every form, which is
+  now `every_parameter_kind_survives_every_call_form`. The deeper fix would be
+  one staging routine the four share; the matrix is the cheap version, and it
+  means a fifth form has to answer for every kind.
+
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
   `types.rs` and `control_flow.rs` were already behavioral or are asserting
