@@ -334,3 +334,53 @@ fn a_slice_assigned_from_a_call_copies_the_descriptor() {
     ));
     assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (30, 50, 3));
 }
+
+/// A tail-recursive call rebinds its own parameters, at their own widths.
+///
+/// The loop that replaces the `JSR` sized every argument by its *own* type and
+/// recognised only the 16-bit primitives, so a slice parameter — four bytes —
+/// counted as one. It rebound a quarter of the descriptor, and, because the
+/// destination offsets assumed one byte each, wrote the parameter after it
+/// *inside* the descriptor. A `u16` parameter followed by anything had the
+/// same shape.
+///
+/// The recursion has to run at least once for any of that to show: at depth 0
+/// the loop is never taken and the original parameters are still intact, which
+/// is why this checks both.
+#[test]
+fn a_tail_recursive_call_rebinds_wide_parameters_whole() {
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        const OUT2: addr = 0x0902;
+        const OUT3: addr = 0x0903;
+        const T: [u8; 4] = [11, 22, 33, 44];
+        fn rec(d: u8, sp: &[u8], tail: u8) -> u8 {
+            if d == 0 { return sp[0] + tail + (sp.len as u8); }
+            return rec(d - 1, sp, tail);
+        }
+        fn wide(d: u8, w: u16, tail: u8) -> u8 {
+            if d == 0 { return (w as u8) + tail; }
+            return wide(d - 1, w, tail);
+        }
+        #[reset]
+        fn main() {
+            let s: &[u8] = T[1..4];
+            OUT0 = rec(0, s, 5);
+            OUT1 = rec(3, s, 5);
+            OUT2 = wide(0, 300, 7);
+            OUT3 = wide(3, 300, 7);
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (30, 30),
+        "22 + 5 + 3: the descriptor and the parameter after it survive the loop"
+    );
+    assert_eq!(
+        (e.mem(0x0902), e.mem(0x0903)),
+        (51, 51),
+        "300 truncates to 44, plus 7: a wide parameter does not shift the next one"
+    );
+}

@@ -1441,7 +1441,15 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             args,
             slice_arg,
         } => {
-            let vals: Vec<i64> = args.iter().map(|a| eval(a, st, ty)).collect();
+            // Each argument at its *parameter's* type, not at the type of the
+            // expression the call sits inside. The two are the same only in a
+            // program of one width: elsewhere a `u8` context would truncate a
+            // value the machine hands over whole.
+            let vals: Vec<i64> = args
+                .iter()
+                .zip(st.prog.funcs[*id].var_types.iter())
+                .map(|(a, pt)| eval(a, st, *pt))
+                .collect();
             let sl = slice_arg.map(|k| st.slices[k]);
             narrow(
                 call_fn(st.prog, *id, budget.unwrap_or(0) as i64, &vals, sl, ty),
@@ -1450,7 +1458,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         }
         E::SelfCall(arg) => {
             let (id, budget) = st.current.expect("a self-call outside a function");
-            let v = eval(arg, st, ty);
+            let v = eval(arg, st, st.prog.funcs[id].var_types[0]);
             // The slice travels down the recursion unchanged: the self-call
             // passes `sp` along, so the callee sees what this frame sees.
             let sl = st.slices.first().copied();
@@ -1458,7 +1466,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         }
         E::MutualCall(partner, arg) => {
             let (_, budget) = st.current.expect("a mutual call outside a function");
-            let v = eval(arg, st, ty);
+            let v = eval(arg, st, st.prog.funcs[*partner].var_types[0]);
             // The partner takes no slice — a pair member never carries one, so
             // there is nothing to pass along.
             narrow(call_fn(st.prog, *partner, budget - 1, &[v], None, ty), ty)
@@ -1468,14 +1476,12 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                 Sel::Lit(k) => *k,
                 Sel::Wrapped(i) => (raw(st.vars[*i], ty) as u8 as usize) % st.prog.vtable,
             };
-            let v = eval(arg, st, ty);
-            narrow(
-                call_fn(st.prog, st.prog.candidate(k), 0, &[v], None, ty),
-                ty,
-            )
+            let callee = st.prog.candidate(k);
+            let v = eval(arg, st, st.prog.funcs[callee].var_types[0]);
+            narrow(call_fn(st.prog, callee, 0, &[v], None, ty), ty)
         }
         E::DevCall(arg) => {
-            let v = eval(arg, st, ty);
+            let v = eval(arg, st, st.prog.funcs[st.dev].var_types[0]);
             narrow(call_fn(st.prog, st.dev, 0, &[v], None, ty), ty)
         }
         E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
