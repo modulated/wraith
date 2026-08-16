@@ -749,3 +749,69 @@ fn every_kind_of_struct_field_round_trips() {
         );
     }
 }
+
+/// Every kind of return value, out of every form a function is called by.
+///
+/// The mirror of `every_parameter_kind_survives_every_call_form`. Arguments go
+/// in through four separate staging routines and had drifted; returns come back
+/// through the register conventions — `A` for a byte, `A:Y` for a 16-bit
+/// number, `A:X` for anything reached by address — and these were found to
+/// agree. Kept because that is worth knowing, and because the next convention
+/// added has somewhere to prove itself.
+#[test]
+fn every_kind_of_return_value_survives_every_call_form() {
+    // (name, type, expression producing one, how to consume it, expected)
+    let kinds: [(&str, &str, &str, &str, u8); 6] = [
+        ("a u16", "u16", "300", "(r as u8) + 1", 45),
+        ("a pointer", "&u8", "&V", "*r + 1", 78),
+        ("a struct", "P", "P { x: 4, y: 38 }", "r.x + r.y", 42),
+        ("a str", "str", "\"abcd\"", "(r.len as u8) + 1", 5),
+        ("an enum", "C", "C::B", "(r as u8) + 1", 3),
+        // 20 from T[1], plus a length of 3.
+        ("a slice", "&[u8]", "T[1..4]", "r[0] + (r.len as u8)", 23),
+    ];
+    for (what, ty, produce, consume, want) in kinds {
+        let forms: [(&str, String, &str); 4] = [
+            (
+                "a direct call",
+                format!("fn g() -> {ty} {{ return {produce}; }}"),
+                "g()",
+            ),
+            (
+                "an inlined call",
+                format!("#[inline]\nfn g() -> {ty} {{ return {produce}; }}"),
+                "g()",
+            ),
+            (
+                "a recursive call",
+                format!(
+                    "fn g(d: u8) -> {ty} {{ if d == 0 {{ return {produce}; }} return g(d - 1); }}"
+                ),
+                "g(2)",
+            ),
+            (
+                "a call through a function pointer",
+                format!(
+                    "fn g() -> {ty} {{ return {produce}; }}\n\
+                     struct DV {{ call: fn() -> {ty} }}\n\
+                     static DEV: DV = DV {{ call: g }};"
+                ),
+                "DEV.call()",
+            ),
+        ];
+        for (form, decl, call) in forms {
+            let mut e = run(&format!(
+                "const OUT: addr = 0x0900;\n\
+                 static V: u8 = 77;\n\
+                 const T: [u8; 5] = [10, 20, 30, 40, 50];\n\
+                 struct P {{ x: u8, y: u8 }}\n\
+                 enum C {{ R, G, B }}\n\
+                 {decl}\n\
+                 #[reset]\nfn main() {{\n\
+                 \x20   let r: {ty} = {call};\n\
+                 \x20   OUT = {consume};\n    loop {{}}\n}}\n"
+            ));
+            assert_eq!(e.mem(0x0900), want, "{what} returned from {form}");
+        }
+    }
+}
