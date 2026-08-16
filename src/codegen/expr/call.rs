@@ -173,41 +173,15 @@ pub(super) fn generate_call(
     // Bytes each argument occupies while it waits, and the totals derived from
     // them: the whole block for pool staging, the widest single one for the
     // scratch slot stack staging reuses.
-    let mut arg_sizes: Vec<u8> = Vec::with_capacity(args.len());
-    for (i, _arg) in args.iter().enumerate() {
-        let is_16bit = param_types.get(i).is_some_and(|param_ty| {
-            matches!(
-                param_ty,
-                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
-            )
-        });
-        // Struct, array, and string parameters take 2 bytes (pointer)
-        let is_struct = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Named(_)));
-        let is_array = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Array(_, _)));
-        let is_string = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::String));
-        // A slice parameter is a 4-byte fat-pointer descriptor (base + length).
-        let is_slice = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
-        let is_pointer = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Pointer(_)));
-        arg_sizes.push(if is_slice {
-            4
-        } else if is_16bit || is_struct || is_array || is_string || is_pointer {
-            2
-        } else {
-            1
-        });
-    }
+    //
+    // Sized by [`param_byte_width`], the one table, rather than by a private
+    // list of the wide types. This site used to keep its own and had left a
+    // function pointer off it: `apply(add_one, 7)` reserved one byte for
+    // `add_one`, staged its low byte alone, and every parameter after it
+    // landed a byte early.
+    let arg_sizes: Vec<u8> = (0..args.len())
+        .map(|i| param_types.get(i).map_or(1, param_byte_width))
+        .collect();
     let total_bytes: u8 = arg_sizes.iter().sum();
     let widest_arg: u8 = arg_sizes.iter().copied().max().unwrap_or(0);
 
@@ -469,16 +443,12 @@ pub(super) fn generate_call(
             }
         }
 
-        // Check if this PARAMETER (not argument) is a 16-bit type
-        // This is critical for correct code generation when passing smaller types to larger parameters
-        let is_16bit = param_types.get(i).is_some_and(|param_ty| {
-            matches!(
-                param_ty,
-                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
-            )
-        });
+        // How wide this PARAMETER (not argument) is, from the same table that
+        // reserved its staging bytes above — so what is written here and what
+        // was reserved cannot disagree. That matters for a narrow argument
+        // reaching a wide parameter, and for a function pointer, which is two
+        // bytes without being a number.
+        let is_16bit = param_types.get(i).map_or(1, param_byte_width) == 2;
 
         // Check if argument is an array (pass by reference as 2-byte pointer)
         let is_array = arg_type.is_some_and(|ty| matches!(ty, Type::Array(_, _)));
@@ -617,13 +587,19 @@ pub(super) fn generate_call(
         // Store to TEMPORARY location
         emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
         if is_16bit {
+            // An address arrives in A:X, a number or a function pointer in A:Y
+            // — the same choice the tail-recursive rebind makes, from the same
+            // predicate.
+            let high_in_x = param_types
+                .get(i)
+                .is_some_and(|pt| arg_high_byte_in_x(pt, info));
             // A parameter whose argument's type sema did not resolve still
             // needs a defined high byte.
-            if arg_is_8bit && arg_type.is_none() {
+            if arg_is_8bit && arg_type.is_none() && !high_in_x {
                 emitter.emit_inst("LDY", "#$00");
             }
-            // Store high byte (in Y) to next location
-            emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
+            let hi = if high_in_x { "STX" } else { "STY" };
+            emitter.emit_inst(hi, &format!("${:02X}", temp_addr + 1));
             temp_offset += 2;
         } else {
             temp_offset += 1;
@@ -1323,26 +1299,20 @@ fn store_inline_arg(
 
     generate_expr(arg, emitter, info, string_collector)?;
 
-    // Enums and strings are 2-byte pointers returned in A:X.
-    let is_pointer_pair = match param_ty {
-        Type::Named(name) => info.type_registry.enums.contains_key(name),
-        Type::String | Type::Pointer(_) => true,
-        _ => false,
-    };
-    if is_pointer_pair {
+    // Enums, strings and `&T` are 2-byte pointers returned in A:X.
+    if arg_high_byte_in_x(param_ty, info) {
         emitter.emit_inst("STA", &format!("${:02X}", dest));
         emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
         return Ok(());
     }
 
-    // 16-bit scalars come back in A:Y. An 8-bit argument widening to a 16-bit
-    // parameter has no high byte to store, so zero-extend it.
-    let is_16bit = matches!(
-        param_ty,
-        Type::Primitive(crate::ast::PrimitiveType::U16)
-            | Type::Primitive(crate::ast::PrimitiveType::I16)
-            | Type::Primitive(crate::ast::PrimitiveType::B16)
-    );
+    // Whatever is left that is two bytes comes back in A:Y. That is the 16-bit
+    // scalars and a function pointer — which this used to list by hand and
+    // omit, so an inlined `apply(add_one, v)` filled the parameter's low byte
+    // and left its high byte at whatever the slot held. An 8-bit argument
+    // widening to a 16-bit parameter has no high byte to store, so
+    // zero-extend it.
+    let is_16bit = param_byte_width(param_ty) == 2;
     // An inlined call widens its arguments like any other, and by the source's
     // signedness: this zero-extended, so a negative `i8` handed to an `i16`
     // parameter lost its sign — and a *small* function is inlined by default,

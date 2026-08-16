@@ -456,7 +456,7 @@ fn every_struct_place_still_yields_an_address() {
 /// is never taken — both were fine, which is why this runs each at both depths.
 #[test]
 fn every_kind_of_parameter_survives_a_tail_call() {
-    let cases: [(&str, &str, u8); 5] = [
+    let cases: [(&str, &str, u8); 6] = [
         (
             "a pointer",
             r#"
@@ -515,6 +515,22 @@ fn every_kind_of_parameter_survives_a_tail_call() {
         "#,
             7,
         ),
+        (
+            // Two bytes, high in Y, and neither a number nor an address —
+            // the shape most easily left off a hand-written list of the
+            // wide types. Rebinding it also has to *read* it back out of
+            // the parameter slot rather than treat the name as a label.
+            "a function pointer",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            fn bump(a: u8) -> u8 { return a + 1; }
+            fn rec(d: u8, f: fn(u8) -> u8, n: u8) -> u8 { if d == 0 { return f(6) + n; } return rec(d - 1, f, n); }
+            #[reset]
+            fn main() { O0 = rec(0, bump, 1); O1 = rec(3, bump, 1); loop {} }
+        "#,
+            8,
+        ),
     ];
     for (what, src, want) in cases {
         let mut e = run(src);
@@ -569,7 +585,7 @@ fn a_str_field_is_initialised_with_both_its_bytes() {
 #[test]
 fn every_parameter_kind_survives_every_call_form() {
     // (name, type, body, argument, expected)
-    let kinds: [(&str, &str, &str, &str, u8); 7] = [
+    let kinds: [(&str, &str, &str, &str, u8); 8] = [
         ("a u16", "u16", "(p as u8) + 1", "300", 45),
         ("an i8 widened to i16", "i16", "(p as u8) + 0", "neg", 197),
         ("a pointer", "&u8", "*p + 1", "&V", 78),
@@ -577,6 +593,10 @@ fn every_parameter_kind_survives_every_call_form() {
         ("a str", "str", "(p.len as u8) + 1", "\"abcd\"", 5),
         ("an enum", "C", "(p as u8) + 1", "C::B", 3),
         ("an array", "[u8; 3]", "p[1] + 1", "arr", 7),
+        // A function pointer is two bytes with the high byte in Y, like a
+        // `u16` — the one two-byte kind that is neither a number nor reached
+        // by address, and the one two call forms sized as a single byte.
+        ("a function pointer", "fn(u8) -> u8", "p(6) + 1", "bump", 8),
     ];
     for (what, ty, body, arg, want) in kinds {
         // Each form declares `f` its own way and calls it its own way.
@@ -622,6 +642,7 @@ fn every_parameter_kind_survives_every_call_form() {
                  static V: u8 = 77;\n\
                  struct P {{ x: u8, y: u8 }}\n\
                  enum C {{ R, G, B }}\n\
+                 fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
                  {decl}\n\
                  #[reset]\nfn main() {{\n\
                  \x20   let q: P = P {{ x: 4, y: 38 }};\n\
