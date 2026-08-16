@@ -64,6 +64,16 @@ pub(super) fn generate_index_assignment(
     emitter.emit_comment("Evaluate value to assign");
     generate_expr(value, emitter, info, string_collector)?;
 
+    // A narrow value stored into a wide element is widened by the language.
+    // Nothing did it here, so `arr[0] = b` on a `[u16; N]` stored the byte and
+    // whatever Y held as its high half.
+    if let Some(elem) = element_type
+        && let Some(signed) =
+            crate::codegen::expr::implicit_widening(info.resolved_types.get(&value.span), elem)
+    {
+        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+    }
+
     // Step 3: Save the value while the index is evaluated. It cannot live in the
     // shared $20 temp: evaluating a compound index like `a[i + 2]` uses $20 for
     // its own operand, overwriting the value, and the store below would then
@@ -260,6 +270,125 @@ impl ArrayBase {
             ArrayBase::Label(name) => emitter.emit_inst("LDA", &format!("#>{}", name)),
         }
     }
+}
+
+/// Copy a four-byte slice descriptor out of a slice-typed *place* into `dest`.
+///
+/// `let b: &[u8] = a;` and `b = a;` have no descriptor to build — one already
+/// exists, in `a`'s slot, and the binding is a copy of those four bytes. This
+/// used to fall through to the scalar store, which writes `A` and stops: `b`
+/// got the low byte of the base pointer, its high byte was whatever the slot
+/// held before, and its length was never written at all. `b[i]` then read
+/// through a half-written pointer and `b.len` was garbage — silently, since
+/// nothing in the source says four bytes are involved.
+///
+/// Returns `false` when `value` is not such a place. A slice *expression* and a
+/// call each build their descriptor another way and are handled by the callers
+/// above this one; anything else reaches the aggregate guard and errors.
+fn try_slice_place_copy(
+    dest: u8,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+) -> bool {
+    let Some(src) = slice_place_slot(value, info) else {
+        return false;
+    };
+    if src == dest {
+        return true; // `s = s;` — nothing to move
+    }
+    emitter.emit_comment(&format!(
+        "Slice copy: 4-byte descriptor ${:02X} -> ${:02X}",
+        src, dest
+    ));
+    for k in 0..4u8 {
+        emitter.emit_inst("LDA", &format!("${:02X}", src + k));
+        emitter.emit_inst("STA", &format!("${:02X}", dest + k));
+    }
+    emitter.invalidate_registers();
+    true
+}
+
+/// The zero-page slot of a slice-typed variable, local or parameter.
+///
+/// A slice parameter holds its descriptor inline, unlike a struct parameter,
+/// which holds a pointer — the caller copies all four bytes into the slot. So
+/// both are sources here, and `resolve_static_addr` (which refuses parameters
+/// for the struct reason) is deliberately not used.
+fn slice_place_slot(expr: &Spanned<crate::ast::Expr>, info: &ProgramInfo) -> Option<u8> {
+    let mut cur = expr;
+    while let crate::ast::Expr::Paren(inner) = &cur.node {
+        cur = inner;
+    }
+    let crate::ast::Expr::Variable(name) = &cur.node else {
+        return None;
+    };
+    let sym = info
+        .resolved_symbols
+        .get(&cur.span)
+        .or_else(|| info.table.lookup(name))?;
+    if !matches!(sym.ty, crate::sema::types::Type::Slice(_)) {
+        return None;
+    }
+    match sym.location {
+        crate::sema::table::SymbolLocation::ZeroPage(slot) => Some(slot),
+        _ => None,
+    }
+}
+
+/// How the scalar store at the end of `generate_var_decl` and `generate_assign`
+/// fills a variable's slot.
+///
+/// That store writes `A`, and for a two-byte slot `X` or `Y` after it. It
+/// covers every scalar and every type whose slot holds an *address* rather than
+/// the data — an array, a string, a pointer, a function pointer, an enum. It
+/// does not cover a struct, whose slot holds the struct, or a slice, whose slot
+/// holds a four-byte descriptor. For those it writes one byte and leaves the
+/// rest as it found them.
+///
+/// Naming that distinction is the point. Every strategy match above the store
+/// falls through to it, so a shape nobody enumerated is not a failure — it is a
+/// one-byte copy of an aggregate, which compiles and answers wrongly. Six bugs
+/// on this branch had exactly that shape. `Block` makes the fall-through an
+/// error instead, which is how the seventh (`let b: &[u8] = a;`) was found.
+enum SlotFill {
+    /// The registers hold the whole value: one or two bytes.
+    Registers,
+    /// More bytes than the registers carry; only a copy can fill this slot.
+    Block(usize),
+}
+
+fn slot_fill(ty: &crate::sema::types::Type, info: &ProgramInfo) -> SlotFill {
+    use crate::sema::types::Type;
+    match ty {
+        // Four bytes of base and length.
+        Type::Slice(_) => SlotFill::Block(4),
+        // A struct is stored inline; an enum's slot is a two-byte pointer to
+        // its block, which the registers do carry.
+        Type::Named(name) => match info.type_registry.get_struct(name) {
+            Some(sdef) => SlotFill::Block(sdef.total_size),
+            None => SlotFill::Registers,
+        },
+        _ => SlotFill::Registers,
+    }
+}
+
+/// The error a `Block` slot raises when no copy path claimed it.
+///
+/// It names the type and the width, because the alternative — the store that
+/// used to happen here — was indistinguishable from correct code.
+fn unfilled_block_error(ty: &crate::sema::types::Type, bytes: usize, what: &str) -> CodegenError {
+    let hint = match ty {
+        crate::sema::types::Type::Slice(_) => {
+            "a slice comes from a range expression (`a[0..n]`), another slice, or a call"
+        }
+        _ => "a struct comes from a literal, another struct with an address, or a call",
+    };
+    CodegenError::UnsupportedOperation(format!(
+        "cannot {what} a value of type `{}`: it is {bytes} bytes, and no copy path matched \
+         this expression — storing it would write one byte and leave the rest. {hint}",
+        ty.display_name()
+    ))
 }
 
 /// Materialize a slice descriptor `arr[start..end]` into the 4-byte frame slot
@@ -620,7 +749,13 @@ pub(super) fn generate_field_assignment(
         // Function-pointer fields are 2-byte code addresses stored as a pair like
         // u16 — a device vtable depends on it; `store_value_pair` handles the width.
         let at = base.plus(field_info.offset as u16);
-        store_value_pair(emitter, &field_info.ty, &at.operand(0), &at.operand(1));
+        store_value_pair(
+            emitter,
+            &field_info.ty,
+            info.resolved_types.get(&value.span),
+            &at.operand(0),
+            &at.operand(1),
+        );
         return Ok(());
     }
 
@@ -709,7 +844,13 @@ pub(super) fn generate_field_assignment(
             let offset = field_info.offset;
 
             // Save value to temp
-            store_value_pair(emitter, &field_info.ty, "$20", "$21");
+            store_value_pair(
+                emitter,
+                &field_info.ty,
+                info.resolved_types.get(&value.span),
+                "$20",
+                "$21",
+            );
 
             // Set Y to field offset and store via indirect
             emitter.emit_inst("LDY", &format!("#${:02X}", offset));
@@ -726,10 +867,12 @@ pub(super) fn generate_field_assignment(
             // Local struct - direct access
             let field_addr = base_addr + field_info.offset as u16;
 
+            let src = info.resolved_types.get(&value.span);
             if field_addr < 0x100 {
                 store_value_pair(
                     emitter,
                     &field_info.ty,
+                    src,
                     &format!("${:02X}", field_addr),
                     &format!("${:02X}", field_addr + 1),
                 );
@@ -737,6 +880,7 @@ pub(super) fn generate_field_assignment(
                 store_value_pair(
                     emitter,
                     &field_info.ty,
+                    src,
                     &format!("${:04X}", field_addr),
                     &format!("${:04X}", field_addr + 1),
                 );
@@ -773,7 +917,20 @@ fn store_high(ty: &crate::sema::types::Type) -> &'static str {
 /// operands, so the same store shape serves zero-page, absolute, and indirect
 /// destinations. The one place that decides a value's store width and high-byte
 /// register.
-fn store_value_pair(emitter: &mut Emitter, ty: &crate::sema::types::Type, lo: &str, hi: &str) {
+fn store_value_pair(
+    emitter: &mut Emitter,
+    ty: &crate::sema::types::Type,
+    src: Option<&crate::sema::types::Type>,
+    lo: &str,
+    hi: &str,
+) {
+    // A narrow value reaching a wide field is widened by the language, and this
+    // is where the width is decided, so it is where the extension belongs. It
+    // was not happening at all: `s.f = b` on an `i16` field stored the byte and
+    // left the high half as whatever Y held.
+    if let Some(signed) = crate::codegen::expr::implicit_widening(src, ty) {
+        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+    }
     emitter.emit_inst("STA", lo);
     if crate::codegen::expr::is_two_byte_value(ty) {
         emitter.emit_inst(store_high(ty), hi);
@@ -1195,7 +1352,7 @@ pub(super) fn generate_var_decl(
             // coloring keeps the returned pointer valid until the next
             // call, and the copy is the first thing after the call).
             if is_struct_type
-                && matches!(&init.node, crate::ast::Expr::Call { .. })
+                && crate::codegen::expr::is_call(init)
                 && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
                 && let Some(sdef) = info.type_registry.get_struct(struct_name)
             {
@@ -1305,13 +1462,22 @@ pub(super) fn generate_var_decl(
         // Slice returned from a call: the callee left a pointer to its
         // 4-byte descriptor in A:X; copy the descriptor into this slot.
         if let Type::Slice(_) = &sym.ty
-            && matches!(&init.node, crate::ast::Expr::Call { .. })
+            && crate::codegen::expr::is_call(init)
             && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
         {
             emitter.emit_comment("Slice return-by-value: copy 4-byte descriptor");
             generate_expr(init, emitter, info, string_collector)?;
             emit_return_by_value_copy(emitter, dest as u16, 4);
             emitter.invalidate_registers();
+            return Ok(());
+        }
+
+        // Slice bound from another slice: `let b: &[u8] = a;`. The descriptor
+        // already exists; this is a four-byte copy of it.
+        if let Type::Slice(_) = &sym.ty
+            && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+            && try_slice_place_copy(dest, init, emitter, info)
+        {
             return Ok(());
         }
 
@@ -1381,29 +1547,26 @@ pub(super) fn generate_var_decl(
             init
         };
 
+        // Every strategy above falls through to here, and here stores a
+        // register. A slot too wide for the registers has therefore gone
+        // unclaimed by all of them — say so rather than write its first byte.
+        if let SlotFill::Block(bytes) = slot_fill(&sym.ty, info) {
+            return Err(unfilled_block_error(&sym.ty, bytes, "bind"));
+        }
+
         // Generate initialization expression (result in A, and X if u16)
         generate_expr(init_expr, emitter, info, string_collector)?;
 
-        // Check if we need to zero-extend (u8 -> u16)
-        // Get the init expression type from resolved_types
-        let init_type = info.resolved_types.get(&init.span);
-        let target_type = &sym.ty;
-
-        let needs_zero_extend = if let Some(init_ty) = init_type {
-            matches!(init_ty, Type::Primitive(crate::ast::PrimitiveType::U8))
-                && matches!(
-                    target_type,
-                    Type::Primitive(crate::ast::PrimitiveType::U16)
-                        | Type::Primitive(crate::ast::PrimitiveType::I16)
-                        | Type::Primitive(crate::ast::PrimitiveType::B16)
-                )
-        } else {
-            false
-        };
-
-        // If we need to zero-extend, set Y=0 for the high byte
-        if needs_zero_extend {
-            emitter.emit_inst("LDY", "#$00");
+        // A narrow value bound to a wide slot is widened by the language with
+        // no `as` written. Which extension applies is the *source's* business:
+        // this used to zero-extend whatever arrived, so `let b: i16 = a;` on a
+        // negative `i8` dropped the sign and −59 became 197. It also only
+        // recognised a `u8` source, so an `i8` one left the high byte as
+        // whatever Y happened to hold.
+        if let Some(signed) =
+            crate::codegen::expr::implicit_widening(info.resolved_types.get(&init.span), &sym.ty)
+        {
+            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
         }
 
         // Check if this is a multi-byte type (arrays, u16, i16, b16, enums)
@@ -1616,6 +1779,33 @@ pub(super) fn generate_assign(
         return Ok(());
     }
 
+    // `b = a` between slices — a copy of the four-byte descriptor, for the same
+    // reason. (`b = arr[0..n]`, which builds a new one, was handled above.)
+    //
+    // `b = mk()` lands here too: a slice-returning call leaves a pointer to its
+    // descriptor in A:X, exactly as it does for the `let` form. The two forms
+    // had drifted apart — binding handled a call and assignment did not — which
+    // the aggregate guard reported rather than storing one byte of the pointer.
+    if let crate::ast::Expr::Variable(target_name) = &target.node
+        && let Some(sym) = info
+            .resolved_symbols
+            .get(&target.span)
+            .or_else(|| info.table.lookup(target_name))
+        && matches!(sym.ty, crate::sema::types::Type::Slice(_))
+        && let crate::sema::table::SymbolLocation::ZeroPage(dest) = sym.location
+    {
+        if try_slice_place_copy(dest, value, emitter, info) {
+            return Ok(());
+        }
+        if crate::codegen::expr::is_call(value) {
+            emitter.emit_comment("Slice return-by-value assign: copy 4-byte descriptor");
+            generate_expr(value, emitter, info, string_collector)?;
+            emit_return_by_value_copy(emitter, dest as u16, 4);
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+    }
+
     // `*p = v` — write through a pointer. Handled before the value is
     // evaluated below, because the pointer has to be staged first and
     // the generic path assumes the target is a name.
@@ -1746,6 +1936,22 @@ pub(super) fn generate_assign(
                     emit_return_by_value_copy(emitter, dest as u16, total);
                     emitter.invalidate_registers();
                     return Ok(());
+                }
+
+                // As in `generate_var_decl`: the store below writes a register,
+                // so a wider slot reaching it means every copy path declined.
+                if let SlotFill::Block(bytes) = slot_fill(&sym.ty, info) {
+                    return Err(unfilled_block_error(&sym.ty, bytes, "assign"));
+                }
+
+                // And, as there, a narrow value stored into a wide slot is
+                // widened by the language rather than by an `as`. Nothing
+                // widened it here at all: the high byte was whatever Y held.
+                if let Some(signed) = crate::codegen::expr::implicit_widening(
+                    info.resolved_types.get(&value.span),
+                    &sym.ty,
+                ) {
+                    crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
                 }
 
                 // Check if this is an enum type

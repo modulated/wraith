@@ -33,6 +33,72 @@ fn move_y_to_x(emitter: &mut Emitter) {
     emitter.emit_inst("LDX", &format!("${:02X}", tmp));
 }
 
+/// Widen the byte in `A` to the 16-bit `A:Y` convention, extending by the
+/// **source's** signedness.
+///
+/// A signed source carries its sign into the new high byte; an unsigned one
+/// carries zero. Which of the two applies is a property of what is being
+/// widened, never of where it is going: reading it off the destination gets
+/// both mixed cases backwards, which is what made `200u8 as i16` come out −56.
+///
+/// Shared by the explicit cast and by the three places the language widens
+/// *without* an `as` — a binding, an assignment and an argument. Those three
+/// zero-extended unconditionally, so `let b: i16 = a;` on a negative `i8` lost
+/// the sign and −59 arrived as 197. `return` already did this correctly, by
+/// itself; now all four agree because they are the same code.
+pub(crate) fn emit_widen_a_into_y(emitter: &mut Emitter, source_is_signed: bool) {
+    if !source_is_signed {
+        if emitter.is_verbose() {
+            emitter.emit_comment("Zero-extend to 16-bit: high byte = 0");
+        }
+        emitter.emit_inst("LDY", "#$00");
+        return;
+    }
+    if emitter.is_verbose() {
+        emitter.emit_comment("Sign-extend to 16-bit: replicate sign bit into the high byte");
+    }
+    // A is the value and has to survive, so it goes to X while the high byte
+    // is worked out in A, and the two swap back at the end.
+    emitter.emit_inst("TAX", "");
+    emitter.emit_inst("AND", "#$80");
+    let pos_label = emitter.next_label("sn");
+    let end_label = emitter.next_label("sx");
+    emitter.emit_inst("BEQ", &pos_label);
+    emitter.emit_inst("LDA", "#$FF");
+    emitter.emit_inst("JMP", &end_label);
+    emitter.emit_label(&pos_label);
+    emitter.emit_inst("LDA", "#$00");
+    emitter.emit_label(&end_label);
+    emitter.emit_inst("TAY", "");
+    emitter.emit_inst("TXA", "");
+}
+
+/// Whether a value of `src` reaching a `dst` slot is widened by the language
+/// with no `as` written, and if so whether the extension is signed.
+///
+/// The language widens `u8` -> `u16` and `i8` -> `i16` quietly, and nothing
+/// else: every narrowing and every change of signedness has to be spelled out.
+/// The signedness reported is the *source's*, which is what decides the
+/// extension.
+pub(crate) fn implicit_widening(
+    src: Option<&crate::sema::types::Type>,
+    dst: &crate::sema::types::Type,
+) -> Option<bool> {
+    use crate::sema::types::Type;
+    let (Some(Type::Primitive(s)), Type::Primitive(d)) = (src, dst) else {
+        return None;
+    };
+    let eight = matches!(
+        s,
+        PrimitiveType::U8 | PrimitiveType::I8 | PrimitiveType::B8 | PrimitiveType::Bool
+    );
+    let sixteen = matches!(
+        d,
+        PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16
+    );
+    (eight && sixteen).then_some(matches!(s, PrimitiveType::I8))
+}
+
 /// Generate code for type casting expressions
 ///
 /// Handles all primitive type conversions:
@@ -139,43 +205,7 @@ pub(super) fn generate_type_cast(
                     };
 
                     emitter.emit_comment(&format!("Cast to {:?}", target_prim));
-
-                    if source_is_signed {
-                        // Sign extension: if bit 7 of A is set, Y = $FF, else Y = $00
-                        if emitter.is_verbose() {
-                            emitter.emit_comment(
-                                "Sign-extend i8 to i16: replicate sign bit to high byte",
-                            );
-                        }
-                        emitter.emit_inst("TAX", ""); // Save value in X temporarily
-                        emitter.emit_inst("AND", "#$80"); // Check sign bit
-                        let neg_label = emitter.next_label("sn");
-                        let end_label = emitter.next_label("sx");
-
-                        emitter.emit_inst("BEQ", &neg_label); // If zero (positive), use 0
-                        emitter.emit_inst("LDA", "#$FF"); // Negative: high byte = $FF
-                        emitter.emit_inst("JMP", &end_label);
-                        emitter.emit_label(&neg_label);
-                        emitter.emit_inst("LDA", "#$00"); // Positive: high byte = $00
-                        emitter.emit_label(&end_label);
-
-                        // Now A has high byte, X has low byte - put high byte in Y
-                        emitter.emit_inst("TAY", ""); // Y = high byte
-                        emitter.emit_inst("TXA", ""); // A = low byte
-                        if emitter.is_verbose() {
-                            emitter.emit_comment("Result: A=low_byte, Y=sign_extended_high_byte");
-                        }
-                    } else {
-                        // Zero extension: Y = 0
-                        if emitter.is_verbose() {
-                            emitter.emit_comment("Zero-extend u8 to u16: high byte = 0");
-                        }
-                        emitter.emit_inst("LDY", "#$00");
-                        // A already has the low byte
-                        if emitter.is_verbose() {
-                            emitter.emit_comment("Result: A=low_byte, Y=$00");
-                        }
-                    }
+                    emit_widen_a_into_y(emitter, source_is_signed);
                 }
                 PrimitiveType::Addr => {
                     // addr type cannot be used as a cast target - it's only for declarations

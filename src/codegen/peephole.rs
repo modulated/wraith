@@ -682,6 +682,28 @@ fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
 /// becomes `Bcc then_X` — the boolean never exists. This is the hottest
 /// pattern in the language (`if (x > 3)`), worth 6 instructions per site.
 ///
+/// An unsigned `<=` or `>` has no single 6502 branch, so its tail is *two*
+/// branches — `A > m` is `!Z && C`:
+///
+/// ```text
+///     B1 false_N          (BEQ: equal, so not greater)
+///     B2 true_N           (BCS: greater-or-equal, and not equal, so greater)
+/// false_N:
+///     LDA #$00
+///     JMP end_M
+/// true_N:
+///     LDA #$01
+/// end_M:
+///     CMP #$00
+///     BNE then_X
+/// ```
+///
+/// Both false paths — `B1` taken, and neither taken — converge, so this
+/// becomes `B1 end_M; B2 then_X; end_M:`, keeping the one label as the place
+/// the false paths meet. Signed comparisons already end in a single branch and
+/// took the shorter form above; these did not, and materialised a boolean at
+/// 96 sites across the example corpus.
+///
 /// Safe only when the labels are used nowhere else (so the removed region
 /// has no other entrants), no flags are live after the BNE (the rewrite leaves
 /// the original compare's flags, not `CMP #$00`'s, on the fall-through path),
@@ -690,6 +712,24 @@ fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
 /// the only thing that put the boolean in A, so a reader downstream would get
 /// the comparison's intermediate instead. `(v < -102) && …` read `0 - 0x9A`
 /// as a truthy "false" that way.
+/// The flags the collapsed region writes, and so the only ones whose liveness
+/// can make the rewrite unsafe.
+///
+/// Everything deleted here is a `CMP #$00`, two `LDA`s and a `JMP`. `CMP` and
+/// `LDA` write N and Z, `CMP` also writes C, and none of them touches V — so V
+/// holds whatever the original comparison left it at, before the rewrite and
+/// after. Requiring it dead anyway refused 48 of the 225 sites this pass finds
+/// in the example corpus, for a property the rewrite cannot affect.
+const CMP_FLAGS: u8 = FLAG_N | FLAG_Z | FLAG_C;
+
+/// Whether a mnemonic is one of the 6502's conditional branches.
+fn is_cond_branch(m: &str) -> bool {
+    matches!(
+        m,
+        "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS"
+    )
+}
+
 fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
     // How many times `label` appears as an operand or a definition.
     let uses = |lines: &[Line], label: &str| {
@@ -718,6 +758,189 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
         .collect();
 
     while i < lines.len() {
+        // The two-branch tail first: its window starts the same way, so trying
+        // the shorter one first would match the wrong shape.
+        if let Some(w) = significant
+            .iter()
+            .position(|&idx| idx == i)
+            .and_then(|p| significant.get(p..p + 10))
+            .map(|w| -> [usize; 10] { w.try_into().unwrap() })
+            && let (
+                Line::Instruction {
+                    mnemonic: b1,
+                    operand: Some(false_target),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: b2,
+                    operand: Some(true_target),
+                    ..
+                },
+                Line::Label(false_label),
+                Line::Instruction {
+                    mnemonic: m3,
+                    operand: Some(a3),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m4,
+                    operand: Some(end_target),
+                    ..
+                },
+                Line::Label(true_label),
+                Line::Instruction {
+                    mnemonic: m6,
+                    operand: Some(a6),
+                    ..
+                },
+                Line::Label(end_label),
+                Line::Instruction {
+                    mnemonic: m8,
+                    operand: Some(a8),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m9,
+                    operand: Some(then_target),
+                    ..
+                },
+            ) = (
+                &lines[w[0]],
+                &lines[w[1]],
+                &lines[w[2]],
+                &lines[w[3]],
+                &lines[w[4]],
+                &lines[w[5]],
+                &lines[w[6]],
+                &lines[w[7]],
+                &lines[w[8]],
+                &lines[w[9]],
+            )
+            && is_cond_branch(b1)
+            && is_cond_branch(b2)
+            && false_target == false_label
+            && true_target == true_label
+            && end_target == end_label
+            && m3 == "LDA"
+            && a3 == "#$00"
+            && m4 == "JMP"
+            && m6 == "LDA"
+            && a6 == "#$01"
+            && m8 == "CMP"
+            && a8 == "#$00"
+            && m9 == "BNE"
+            && uses(lines, false_label) == 2
+            && uses(lines, true_label) == 2
+            && uses(lines, end_label) == 2
+            && live_out[w[9]] & CMP_FLAGS == 0
+            && a_live_out[w[9]] & CMP_FLAGS == 0
+        {
+            // `B1` taken means false, and falling past `B2` means false too, so
+            // both land on the label the `JMP` used to target — which is where
+            // the `JMP else` after the `BNE` still sits.
+            result.push(Line::Instruction {
+                mnemonic: b1.clone(),
+                operand: Some(end_label.clone()),
+                comment: None,
+            });
+            result.push(Line::Instruction {
+                mnemonic: b2.clone(),
+                operand: Some(then_target.clone()),
+                comment: None,
+            });
+            result.push(Line::Label(end_label.clone()));
+            i = w[9] + 1;
+            continue;
+        }
+
+        // The other two-branch tail. An unsigned `<=` is `Z || !C`, so both
+        // branches go to the *same* (true) label and the false path is the
+        // fall-through — there is no false label to keep, and retargeting both
+        // at `then` leaves the `JMP else` after the `BNE` as the false path.
+        if let Some(w) = significant
+            .iter()
+            .position(|&idx| idx == i)
+            .and_then(|p| significant.get(p..p + 9))
+            .map(|w| -> [usize; 9] { w.try_into().unwrap() })
+            && let (
+                Line::Instruction {
+                    mnemonic: b1,
+                    operand: Some(t1),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: b2,
+                    operand: Some(t2),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m2,
+                    operand: Some(a2),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m3,
+                    operand: Some(end_target),
+                    ..
+                },
+                Line::Label(true_label),
+                Line::Instruction {
+                    mnemonic: m5,
+                    operand: Some(a5),
+                    ..
+                },
+                Line::Label(end_label),
+                Line::Instruction {
+                    mnemonic: m7,
+                    operand: Some(a7),
+                    ..
+                },
+                Line::Instruction {
+                    mnemonic: m8,
+                    operand: Some(then_target),
+                    ..
+                },
+            ) = (
+                &lines[w[0]],
+                &lines[w[1]],
+                &lines[w[2]],
+                &lines[w[3]],
+                &lines[w[4]],
+                &lines[w[5]],
+                &lines[w[6]],
+                &lines[w[7]],
+                &lines[w[8]],
+            )
+            && is_cond_branch(b1)
+            && is_cond_branch(b2)
+            && t1 == true_label
+            && t2 == true_label
+            && m2 == "LDA"
+            && a2 == "#$00"
+            && m3 == "JMP"
+            && end_target == end_label
+            && m5 == "LDA"
+            && a5 == "#$01"
+            && m7 == "CMP"
+            && a7 == "#$00"
+            && m8 == "BNE"
+            // Definition plus the two branches that reach it.
+            && uses(lines, true_label) == 3
+            && uses(lines, end_label) == 2
+            && live_out[w[8]] & CMP_FLAGS == 0
+            && a_live_out[w[8]] & CMP_FLAGS == 0
+        {
+            for b in [b1, b2] {
+                result.push(Line::Instruction {
+                    mnemonic: b.clone(),
+                    operand: Some(then_target.clone()),
+                    comment: None,
+                });
+            }
+            i = w[8] + 1;
+            continue;
+        }
+
         // Significant-line window starting at i.
         let win: Option<[usize; 8]> = significant
             .iter()
@@ -768,37 +991,31 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
                 &lines[w[6]],
                 &lines[w[7]],
             )
+            && is_cond_branch(br)
+            && true_target == true_label
+            && m1 == "LDA"
+            && a1 == "#$00"
+            && m2 == "JMP"
+            && end_target == end_label
+            && m4 == "LDA"
+            && a4 == "#$01"
+            && m6 == "CMP"
+            && a6 == "#$00"
+            && m7 == "BNE"
+            && uses(lines, true_label) == 2
+            && uses(lines, end_label) == 2
+            && live_out[w[7]] & CMP_FLAGS == 0
+            && a_live_out[w[7]] & CMP_FLAGS == 0
         {
-            let is_cond_branch = matches!(
-                br.as_str(),
-                "BCC" | "BCS" | "BEQ" | "BNE" | "BMI" | "BPL" | "BVC" | "BVS"
-            );
-            if is_cond_branch
-                && true_target == true_label
-                && m1 == "LDA"
-                && a1 == "#$00"
-                && m2 == "JMP"
-                && end_target == end_label
-                && m4 == "LDA"
-                && a4 == "#$01"
-                && m6 == "CMP"
-                && a6 == "#$00"
-                && m7 == "BNE"
-                && uses(lines, true_label) == 2
-                && uses(lines, end_label) == 2
-                && live_out[w[7]] == 0
-                && a_live_out[w[7]] == 0
-            {
-                result.push(Line::Instruction {
-                    mnemonic: br.clone(),
-                    operand: Some(then_target.clone()),
-                    comment: None,
-                });
-                // Skip everything up to and including the BNE; comments in
-                // the middle go with it.
-                i = w[7] + 1;
-                continue;
-            }
+            result.push(Line::Instruction {
+                mnemonic: br.clone(),
+                operand: Some(then_target.clone()),
+                comment: None,
+            });
+            // Skip everything up to and including the BNE; comments in the
+            // middle go with it.
+            i = w[7] + 1;
+            continue;
         }
 
         result.push(lines[i].clone());

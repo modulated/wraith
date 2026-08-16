@@ -138,3 +138,163 @@ fn a_declared_type_still_wins_over_the_literals_own_range() {
          \x20   loop {}\n}\n");
     assert_eq!(e.mem16(0x0900), 0xFFFE, "-2 at 16 bits, not 254 at 8");
 }
+
+// ---------------------------------------------------------------------------
+// Implicit widening: the conversion the language performs with no `as`.
+// ---------------------------------------------------------------------------
+
+/// `i8` -> `i16` without a cast has to carry the sign, at every boundary.
+///
+/// The language widens `u8` -> `u16` and `i8` -> `i16` quietly, and which
+/// extension applies is a property of the *source*: a signed one carries its
+/// sign into the new high byte. Five places perform that widening, and four of
+/// them zero-extended instead — one of those did not even do that, leaving the
+/// high byte as whatever `Y` happened to hold from an unrelated instruction.
+/// So `-59` arrived as `197`, or as something that depended on the code before
+/// it.
+///
+/// The explicit cast was already right (`tests/e2e/int_conversions.rs` has
+/// pinned `-1i8 as u16` since the fuzzer found it), and so was `return`. The
+/// other four now share that one code path rather than each having their own.
+#[test]
+fn a_signed_byte_widens_with_its_sign_at_every_boundary() {
+    let mut e = crate::common::exec::run(
+        r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        const O4: addr = 0x0904;
+        const O5: addr = 0x0905;
+        const O6: addr = 0x0906;
+        const O7: addr = 0x0907;
+        const O8: addr = 0x0908;
+        const O9: addr = 0x0909;
+        const OA: addr = 0x090A;
+        const OB: addr = 0x090B;
+        struct S { f: i16 }
+        fn take(p: i16) -> i16 { return p; }
+        fn give(v: i8) -> i16 { return v; }
+        #[reset]
+        fn main() {
+            let a: i8 = -59;
+            let bound: i16 = a;
+            let assigned: i16 = 0;
+            assigned = a;
+            let arg: i16 = take(a);
+            let returned: i16 = give(a);
+            let arr: [i16; 2] = [0, 0];
+            arr[0] = a;
+            let s: S = S { f: 0 };
+            s.f = a;
+            O0 = bound.low;    O1 = bound.high;
+            O2 = assigned.low; O3 = assigned.high;
+            O4 = arg.low;      O5 = arg.high;
+            O6 = returned.low; O7 = returned.high;
+            let el: i16 = arr[0];
+            O8 = el.low;       O9 = el.high;
+            let fl: i16 = s.f;
+            OA = fl.low;       OB = fl.high;
+            loop {}
+        }
+    "#,
+    );
+    let mut at = |lo: u16| -> u16 { e.mem(lo) as u16 | ((e.mem(lo + 1) as u16) << 8) };
+    for (what, base) in [
+        ("binding", 0x0900u16),
+        ("assignment", 0x0902),
+        ("argument", 0x0904),
+        ("return", 0x0906),
+        ("array element", 0x0908),
+        ("struct field", 0x090A),
+    ] {
+        assert_eq!(at(base), 0xFFC5, "-59 widened at a {what} should stay -59");
+    }
+}
+
+/// The unsigned half of the same rule, which must *not* sign-extend.
+#[test]
+fn an_unsigned_byte_widens_with_zero_at_every_boundary() {
+    let mut e = crate::common::exec::run(
+        r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        const O4: addr = 0x0904;
+        const O5: addr = 0x0905;
+        const O6: addr = 0x0906;
+        const O7: addr = 0x0907;
+        struct S { f: u16 }
+        fn take(p: u16) -> u16 { return p; }
+        #[reset]
+        fn main() {
+            let a: u8 = 200;
+            let bound: u16 = a;
+            let assigned: u16 = 0;
+            assigned = a;
+            let arg: u16 = take(a);
+            let arr: [u16; 2] = [0, 0];
+            arr[0] = a;
+            O0 = bound.low;    O1 = bound.high;
+            O2 = assigned.low; O3 = assigned.high;
+            O4 = arg.low;      O5 = arg.high;
+            let el: u16 = arr[0];
+            O6 = el.low;       O7 = el.high;
+            loop {}
+        }
+    "#,
+    );
+    let mut at = |lo: u16| -> u16 { e.mem(lo) as u16 | ((e.mem(lo + 1) as u16) << 8) };
+    for (what, base) in [
+        ("binding", 0x0900u16),
+        ("assignment", 0x0902),
+        ("argument", 0x0904),
+        ("array element", 0x0906),
+    ] {
+        assert_eq!(
+            at(base),
+            200,
+            "200 widened at a {what} has no sign to carry"
+        );
+    }
+}
+
+/// The arithmetic happens at the narrow type, and the widening after it.
+///
+/// `200u8 + 100` wraps to 44 in a byte; binding it to a `u16` widens the 44
+/// rather than recomputing at sixteen bits. Getting that order wrong is the
+/// same mistake constant folding made in `i64`, one layer down.
+#[test]
+fn a_widened_expression_is_computed_before_it_is_widened() {
+    let mut e = crate::common::exec::run(
+        r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        fn take(p: i16) -> i16 { return p; }
+        #[reset]
+        fn main() {
+            let a: u8 = 200;
+            let sum: u16 = a + 100;
+            let b: i8 = 100;
+            let over: i16 = take(b + 100);
+            O0 = sum.low;  O1 = sum.high;
+            O2 = over.low; O3 = over.high;
+            loop {}
+        }
+    "#,
+    );
+    let mut at = |lo: u16| -> u16 { e.mem(lo) as u16 | ((e.mem(lo + 1) as u16) << 8) };
+    assert_eq!(
+        at(0x0900),
+        44,
+        "200 + 100 wrapped in a byte before widening"
+    );
+    assert_eq!(
+        at(0x0902),
+        0xFFC8,
+        "100 + 100 overflowed to -56, and -56 widened is still -56"
+    );
+}

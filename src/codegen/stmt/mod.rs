@@ -577,7 +577,7 @@ fn emit_enum_copy_to_block(
 /// so it wins once the aggregate exceeds ~3 bytes (a `DEX/BNE`-class trade of a
 /// little speed for much smaller code). `A:X` are dead afterwards; callers
 /// invalidate register state.
-fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u16, size: u8) {
+pub(crate) fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u16, size: u8) {
     /// Aggregate size at/above which the loop is smaller than unrolling.
     const COPY_LOOP_THRESHOLD: u8 = 4;
 

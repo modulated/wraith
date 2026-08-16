@@ -453,6 +453,20 @@ pub(super) fn generate_call(
                 arg_info.push((temp_addr, 4));
                 continue;
             }
+
+            // A slice from a call — `total(mk())`, direct or through a
+            // function pointer. The callee left a *pointer* to its descriptor
+            // in A:X, so the four bytes have to be copied through it. Staging
+            // A alone handed the callee one byte of that pointer as though it
+            // were the base of the slice.
+            if crate::codegen::expr::is_call(arg) {
+                generate_expr(arg, emitter, info, string_collector)?;
+                crate::codegen::stmt::emit_return_by_value_copy(emitter, temp_addr as u16, 4);
+                emitter.invalidate_registers();
+                temp_offset += 4;
+                arg_info.push((temp_addr, 4));
+                continue;
+            }
         }
 
         // Check if this PARAMETER (not argument) is a 16-bit type
@@ -531,18 +545,43 @@ pub(super) fn generate_call(
             // (`sum(P { x: 6, y: 7 })`) points into ROM and so has a non-zero
             // high byte, which is why dropping it was a silent miscompile
             // rather than merely a zero-page assumption.
-            if matches!(
-                &arg.node,
-                crate::ast::Expr::StructInit { .. }
-                    | crate::ast::Expr::AnonStructInit { .. }
-                    | crate::ast::Expr::Call { .. }
-            ) {
+            if crate::codegen::expr::is_call(arg)
+                || matches!(
+                    &arg.node,
+                    crate::ast::Expr::StructInit { .. } | crate::ast::Expr::AnonStructInit { .. }
+                )
+            {
                 generate_expr(arg, emitter, info, string_collector)?;
                 emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
                 emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
                 temp_offset += 2;
                 arg_info.push((temp_addr, 2)); // 2-byte pointer
                 continue;
+            }
+        }
+
+        // A struct or slice parameter is staged by one of the paths above — a
+        // two-byte pointer for the first, four descriptor bytes for the second
+        // — and never by the register staging below, which writes A and at
+        // most one more byte. Reaching here means every one of those paths
+        // declined this argument, so say so rather than hand the callee a
+        // fraction of what it will read. (An enum is also `Named`, and does
+        // stage as a two-byte pointer through the register path.)
+        if let Some(param_ty) = param_types.get(i) {
+            let staged_by_copy = match param_ty {
+                Type::Slice(_) => true,
+                Type::Named(n) => info.type_registry.get_struct(n).is_some(),
+                _ => false,
+            };
+            if staged_by_copy {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "cannot pass this expression as argument {} of '{}': a `{}` is passed by \
+                     address or by descriptor, and this expression provides neither. Bind it \
+                     to a `let` first and pass that",
+                    i + 1,
+                    function.node,
+                    param_ty.display_name()
+                )));
             }
         }
 
@@ -560,12 +599,27 @@ pub(super) fn generate_call(
             )
         });
 
+        // A narrow argument reaching a wide parameter is widened by the
+        // language, and by the *source's* signedness: this zero-extended
+        // whatever arrived, so a negative `i8` passed to an `i16` parameter
+        // lost its sign on the way in.
+        //
+        // The widening has to happen before the low byte is stored, because
+        // sign-extending works through A and X.
+        if is_16bit
+            && let Some(signed) = param_types
+                .get(i)
+                .and_then(|pt| crate::codegen::expr::implicit_widening(arg_type, pt))
+        {
+            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+        }
+
         // Store to TEMPORARY location
         emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
         if is_16bit {
-            // For 16-bit parameters
-            if arg_is_8bit {
-                // Argument is 8-bit but parameter is 16-bit: zero-extend
+            // A parameter whose argument's type sema did not resolve still
+            // needs a defined high byte.
+            if arg_is_8bit && arg_type.is_none() {
                 emitter.emit_inst("LDY", "#$00");
             }
             // Store high byte (in Y) to next location
@@ -838,10 +892,20 @@ fn generate_indirect_call(
                     let p16 = matches!(kind, IndirectArgKind::Word);
                     let arg16 = is_16(info.resolved_types.get(&arg.span));
                     generate_expr(arg, emitter, info, string_collector)?;
+                    // The same implicit widening as a direct call's, and by the
+                    // source's signedness rather than always by zero.
+                    if p16
+                        && let Some(signed) = crate::codegen::expr::implicit_widening(
+                            info.resolved_types.get(&arg.span),
+                            pty,
+                        )
+                    {
+                        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+                    }
                     emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
                     if p16 {
-                        if !arg16 {
-                            emitter.emit_inst("LDY", "#$00"); // zero-extend u8 arg -> u16 param
+                        if !arg16 && !info.resolved_types.contains_key(&arg.span) {
+                            emitter.emit_inst("LDY", "#$00");
                         }
                         emitter.emit_inst("STY", &format!("${:02X}", temp_base + off + 1));
                     }
@@ -1256,17 +1320,16 @@ fn store_inline_arg(
             | Type::Primitive(crate::ast::PrimitiveType::I16)
             | Type::Primitive(crate::ast::PrimitiveType::B16)
     );
+    // An inlined call widens its arguments like any other, and by the source's
+    // signedness: this zero-extended, so a negative `i8` handed to an `i16`
+    // parameter lost its sign — and a *small* function is inlined by default,
+    // so this is the path most one-line callees actually take.
+    if let Some(signed) = crate::codegen::expr::implicit_widening(arg_ty, param_ty) {
+        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+    }
     emitter.emit_inst("STA", &format!("${:02X}", dest));
     if is_16bit {
-        let arg_is_8bit = arg_ty.is_some_and(|ty| {
-            matches!(
-                ty,
-                Type::Primitive(crate::ast::PrimitiveType::U8)
-                    | Type::Primitive(crate::ast::PrimitiveType::I8)
-                    | Type::Primitive(crate::ast::PrimitiveType::B8)
-                    | Type::Primitive(crate::ast::PrimitiveType::Bool)
-            )
-        });
+        let arg_is_8bit = arg_ty.is_none();
         if arg_is_8bit {
             emitter.emit_inst("LDY", "#$00");
         }
@@ -1291,6 +1354,51 @@ fn format_type_name(ty: &Type) -> String {
 /// This is similar to generate_call but WITHOUT the JSR instruction.
 /// It evaluates arguments and updates parameter locations in place,
 /// allowing a JMP back to the function start for tail call optimization.
+/// The bytes a parameter of this type occupies in a frame.
+///
+/// A slice is a four-byte descriptor; a 16-bit number, an address, a string, an
+/// enum and a struct (passed by reference) are two; everything else is one.
+/// The one place a parameter's width is decided, so a site cannot re-list the
+/// variants and forget one — which is exactly how the tail-call loop came to
+/// rebind a quarter of a slice and put the next parameter inside it.
+pub(crate) fn param_byte_width(ty: &crate::sema::types::Type) -> u8 {
+    use crate::sema::types::Type;
+    match ty {
+        Type::Slice(_) => 4,
+        Type::Primitive(
+            crate::ast::PrimitiveType::U16
+            | crate::ast::PrimitiveType::I16
+            | crate::ast::PrimitiveType::B16,
+        )
+        | Type::Pointer(_)
+        | Type::Function(_, _)
+        | Type::Array(_, _)
+        | Type::String
+        | Type::Named(_) => 2,
+        _ => 1,
+    }
+}
+
+/// The zero-page slot holding a slice descriptor named by `expr`, for the
+/// paths that move four bytes rather than produce a value in registers.
+fn slice_descriptor_slot(expr: &Spanned<Expr>, info: &ProgramInfo) -> Option<u8> {
+    let mut cur = expr;
+    while let Expr::Paren(inner) = &cur.node {
+        cur = inner;
+    }
+    let Expr::Variable(name) = &cur.node else {
+        return None;
+    };
+    let sym = info
+        .resolved_symbols
+        .get(&cur.span)
+        .or_else(|| info.table.lookup(name))?;
+    match (&sym.ty, &sym.location) {
+        (Type::Slice(_), crate::sema::table::SymbolLocation::ZeroPage(slot)) => Some(*slot),
+        _ => None,
+    }
+}
+
 pub fn generate_tail_recursive_update(
     _function: &Spanned<String>,
     args: &[Spanned<Expr>],
@@ -1321,20 +1429,30 @@ pub fn generate_tail_recursive_update(
     // This would overwrite previously evaluated arguments.
     // Use the arg temp pool ($F4-$FE) managed by TempAllocator.
 
-    // Calculate total bytes needed for all arguments
-    let mut total_bytes = 0u8;
-    for arg in args.iter() {
-        let arg_type = info.resolved_types.get(&arg.span);
-        let is_16bit = arg_type.is_some_and(|ty| {
-            matches!(
-                ty,
-                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
-            )
-        });
-        total_bytes += if is_16bit { 2 } else { 1 };
-    }
+    // What each parameter occupies, read off the function's *own* signature.
+    //
+    // This used to size every argument by its own type and recognise only the
+    // 16-bit primitives, which was wrong twice over. A slice parameter is four
+    // bytes and counted as one, so the loop rebound a quarter of its
+    // descriptor — and, worse, every parameter *after* a wide one was written
+    // at an offset that assumed one byte each, so the third parameter landed
+    // inside the second. A `u8` argument reaching a `u16` parameter had the
+    // same shape.
+    let param_types = match emitter
+        .current_function()
+        .and_then(|f| info.table.lookup(f).map(|s| &s.ty))
+        .or_else(|| {
+            emitter
+                .current_function()
+                .and_then(|f| info.function_signatures.get(f))
+        }) {
+        Some(crate::sema::types::Type::Function(params, _)) => params.clone(),
+        _ => Vec::new(),
+    };
+    let widths: Vec<u8> = (0..args.len())
+        .map(|i| param_types.get(i).map_or(1, param_byte_width))
+        .collect();
+    let total_bytes: u8 = widths.iter().sum();
 
     // Allocate temp storage for all arguments at once
     let temp_base = if total_bytes == 0 {
@@ -1350,56 +1468,67 @@ pub fn generate_tail_recursive_update(
         }
     };
     let mut temp_offset = 0u8;
-    let mut arg_info = Vec::new();
+    let mut arg_info: Vec<(u8, u8)> = Vec::new();
 
-    for arg in args.iter() {
+    for (i, arg) in args.iter().enumerate() {
         let temp_addr = temp_base + temp_offset;
+        let width = widths[i];
+        let pty = param_types.get(i);
 
-        // Check if this argument is a 16-bit type
-        let arg_type = info.resolved_types.get(&arg.span);
-        let is_16bit = arg_type.is_some_and(|ty| {
-            matches!(
-                ty,
-                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
-            )
-        });
-
-        // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
-        generate_expr(arg, emitter, info, string_collector)?;
-
-        // Store to TEMPORARY location
-        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-        if is_16bit {
-            // For 16-bit types, also store high byte (in Y) to next location
-            emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
-            temp_offset += 2;
-        } else {
-            temp_offset += 1;
+        // A four-byte descriptor is not produced in a register: it is copied
+        // out of the slot that already holds one.
+        if width == 4 {
+            let Some(src) = slice_descriptor_slot(arg, info) else {
+                return Err(CodegenError::UnsupportedOperation(
+                    "cannot rebind a slice parameter from this expression in a tail-recursive                      call: a slice comes from a variable or another parameter"
+                        .to_string(),
+                ));
+            };
+            for k in 0..4u8 {
+                emitter.emit_inst("LDA", &format!("${:02X}", src + k));
+                emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
+            }
+            temp_offset += 4;
+            arg_info.push((temp_addr, 4));
+            continue;
         }
 
-        arg_info.push((temp_addr, is_16bit));
+        generate_expr(arg, emitter, info, string_collector)?;
+
+        // As at every other call site, a narrow argument reaching a wide
+        // parameter is widened by the source's signedness.
+        if width == 2
+            && let Some(signed) = pty.and_then(|pt| {
+                crate::codegen::expr::implicit_widening(info.resolved_types.get(&arg.span), pt)
+            })
+        {
+            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+        }
+
+        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
+        if width == 2 {
+            // An address arrives in A:X, a 16-bit number in A:Y.
+            let hi = if pty.is_some_and(crate::codegen::expr::high_byte_in_x) {
+                "STX"
+            } else {
+                "STY"
+            };
+            emitter.emit_inst(hi, &format!("${:02X}", temp_addr + 1));
+        }
+        temp_offset += width;
+        arg_info.push((temp_addr, width));
     }
 
     // STEP 2: Copy arguments from temporary storage to parameter locations
     // Now we can safely update all parameters without conflicts
     let mut byte_offset = 0u8;
-    for (temp_addr, is_16bit) in arg_info.iter() {
+    for (temp_addr, width) in arg_info.iter() {
         let param_addr = param_base + byte_offset;
-
-        // Copy from temp to param location
-        emitter.emit_inst("LDA", &format!("${:02X}", temp_addr));
-        emitter.emit_inst("STA", &format!("${:02X}", param_addr));
-
-        if *is_16bit {
-            // For 16-bit types, also copy high byte
-            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + 1));
-            emitter.emit_inst("STA", &format!("${:02X}", param_addr + 1));
-            byte_offset += 2;
-        } else {
-            byte_offset += 1;
+        for k in 0..*width {
+            emitter.emit_inst("LDA", &format!("${:02X}", temp_addr + k));
+            emitter.emit_inst("STA", &format!("${:02X}", param_addr + k));
         }
+        byte_offset += width;
     }
 
     // Free the temp storage after copying to parameters

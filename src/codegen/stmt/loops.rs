@@ -1409,6 +1409,13 @@ pub(super) fn generate_foreach(
 /// worth copying and one that is not. Measured against the emitted code: a
 /// 16-bit division costs about 105 bytes per site, a multiply about 70, an
 /// ordinary 16-bit operation about 20, and a load or store about 6.
+///
+/// Both walkers enumerate every variant rather than ending in a catch-all.
+/// Rough is fine here; *flat* is not. A `_ => 12` charged a match expression
+/// the same as a variable however many arms it had, and a new form would
+/// inherit that — which is the shape of the bug this estimate exists to
+/// prevent, an unrolling decision made without seeing the size of what it was
+/// copying eight times.
 fn estimate_bytes(stmt: &Spanned<Stmt>, info: &ProgramInfo) -> u32 {
     fn wide(expr: &Spanned<crate::ast::Expr>, info: &ProgramInfo) -> bool {
         matches!(
@@ -1485,7 +1492,44 @@ fn estimate_bytes(stmt: &Spanned<Stmt>, info: &ProgramInfo) -> u32 {
                     5
                 }
             }
-            _ => 12,
+            // A descriptor build: four stores, plus the pointer arithmetic when
+            // the bounds are not constant.
+            Expr::Slice {
+                object, start, end, ..
+            } => 24 + expr_bytes(object, info) + expr_bytes(start, info) + expr_bytes(end, info),
+            // A literal built at run time stores each field where it stands.
+            Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
+                fields.iter().map(|f| 6 + expr_bytes(&f.value, info)).sum()
+            }
+            // Construction, then the copy into the value's own block.
+            Expr::EnumVariant { data, .. } => {
+                20 + match data {
+                    crate::ast::VariantData::Unit => 0,
+                    crate::ast::VariantData::Tuple(es) => {
+                        es.iter().map(|e| expr_bytes(e, info)).sum()
+                    }
+                    crate::ast::VariantData::Struct(fs) => {
+                        fs.iter().map(|f| expr_bytes(&f.value, info)).sum()
+                    }
+                }
+            }
+            // A branch and two loads to turn a status bit into a 0/1.
+            Expr::CpuFlagCarry
+            | Expr::CpuFlagZero
+            | Expr::CpuFlagOverflow
+            | Expr::CpuFlagNegative => 8,
+            // A compare-and-branch per arm, plus the arms themselves — which is
+            // why this cannot be a flat number. Charged whole: an unrolled copy
+            // emits every arm again.
+            Expr::Match { expr: sel, arms } => {
+                8 + expr_bytes(sel, info)
+                    + arms
+                        .iter()
+                        .map(|a| 6 + expr_bytes(&a.body, info))
+                        .sum::<u32>()
+            }
+            // A mask and a compare, or one `SMB`/`RMB` on a 65C02.
+            Expr::BitOp { object, .. } => 10 + expr_bytes(object, info),
         }
     }
 

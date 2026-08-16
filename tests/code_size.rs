@@ -1,9 +1,18 @@
 //! Code-size benchmark.
 //!
-//! Records the bytes each example program emits, against a checked-in baseline.
+//! Records what each example program emits, against a checked-in baseline.
 //! Without this there is no way to tell whether an optimization helped, or
 //! whether an unrelated change made every program bigger — "smaller code" stays
 //! an assertion rather than a measurement.
+//!
+//! Two numbers per program, because one of them is blind to half the compiler.
+//! The **section** figures come from the allocator, which reserves space at
+//! *placement* — before the peephole runs. A pass that deletes instructions
+//! therefore moves nothing there, and every "code size unchanged" this
+//! benchmark reported for a peephole change was measuring something that could
+//! not move. The **instruction count** is taken from the emitted assembly, so
+//! it sees the whole pipeline. Section bytes still matter — they are what has
+//! to fit the memory map — so both are kept.
 //!
 //! Any change in either direction fails, because both are worth seeing: growth
 //! is a regression to explain, and shrinkage is a win whose size belongs in the
@@ -24,6 +33,8 @@ use std::path::{Path, PathBuf};
 struct Sizes {
     code: u32,
     data: u32,
+    /// Instructions in the emitted assembly, after every pass.
+    instrs: u32,
 }
 
 fn baseline_path() -> PathBuf {
@@ -43,7 +54,7 @@ fn measure(path: &Path) -> Result<Sizes, String> {
     // example importing `../std/mem.wr` finds the stdlib.
     let mut program = wraith::sema::analyze_with_path(&ast, path.to_path_buf())
         .map_err(|e| format!("sema: {e:?}"))?;
-    let (_asm, alloc) = wraith::codegen::generate(
+    let (asm, alloc) = wraith::codegen::generate(
         &ast,
         &mut program,
         wraith::codegen::CommentVerbosity::Minimal,
@@ -51,7 +62,20 @@ fn measure(path: &Path) -> Result<Sizes, String> {
     )
     .map_err(|e| format!("codegen: {e:?}"))?;
 
-    let mut sizes = Sizes::default();
+    // A line whose first token is a three-letter uppercase mnemonic. Labels
+    // end in `:`, directives start with `.`, comments with `;`.
+    let instrs = asm
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            let head = l.split_whitespace().next().unwrap_or("");
+            head.len() == 3 && head.bytes().all(|b| b.is_ascii_uppercase())
+        })
+        .count() as u32;
+    let mut sizes = Sizes {
+        instrs,
+        ..Sizes::default()
+    };
     for stat in alloc.get_statistics() {
         match stat.name.as_str() {
             "CODE" => sizes.code = stat.used as u32,
@@ -86,12 +110,14 @@ fn measure_corpus() -> BTreeMap<String, Sizes> {
 
 fn render(sizes: &BTreeMap<String, Sizes>) -> String {
     let mut s = String::from(
-        "# Bytes emitted per example, by section. Regenerate with:\n\
+        "# What each example emits. Regenerate with:\n\
          #   WRAITH_BLESS_SIZES=1 cargo test --test code_size\n\
-         # name code data\n",
+         # `code`/`data` are section bytes reserved at placement; `instrs` is\n\
+         # instructions in the final assembly, which is what a peephole moves.\n\
+         # name code data instrs\n",
     );
     for (name, z) in sizes {
-        s.push_str(&format!("{} {} {}\n", name, z.code, z.data));
+        s.push_str(&format!("{} {} {} {}\n", name, z.code, z.data, z.instrs));
     }
     s
 }
@@ -112,6 +138,7 @@ fn parse_baseline(text: &str) -> BTreeMap<String, Sizes> {
             Sizes {
                 code: code.parse().unwrap_or(0),
                 data: data.parse().unwrap_or(0),
+                instrs: it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             },
         );
     }
@@ -143,25 +170,33 @@ fn code_size_matches_the_baseline() {
     let mut lines = Vec::new();
     let mut total_before = 0i64;
     let mut total_after = 0i64;
+    let mut instrs_before = 0i64;
+    let mut instrs_after = 0i64;
 
     for (name, now) in &measured {
         match baseline.get(name) {
             None => lines.push(format!(
-                "  {name:<24} NEW            code {:>5}  data {:>5}",
-                now.code, now.data
+                "  {name:<24} NEW            code {:>5}  data {:>5}  instrs {:>5}",
+                now.code, now.data, now.instrs
             )),
             Some(was) => {
                 total_before += (was.code + was.data) as i64;
                 total_after += (now.code + now.data) as i64;
+                instrs_before += was.instrs as i64;
+                instrs_after += now.instrs as i64;
                 if was != now {
                     lines.push(format!(
-                        "  {name:<24} code {:>5} -> {:<5} ({:+})   data {:>5} -> {:<5} ({:+})",
+                        "  {name:<24} code {:>5} -> {:<5} ({:+})   data {:>5} -> {:<5} ({:+})   \
+                         instrs {:>5} -> {:<5} ({:+})",
                         was.code,
                         now.code,
                         now.code as i64 - was.code as i64,
                         was.data,
                         now.data,
                         now.data as i64 - was.data as i64,
+                        was.instrs,
+                        now.instrs,
+                        now.instrs as i64 - was.instrs as i64,
                     ));
                 }
             }
@@ -175,7 +210,8 @@ fn code_size_matches_the_baseline() {
 
     assert!(
         lines.is_empty(),
-        "emitted code size changed:\n{}\n  {:<24} {} -> {} ({:+} bytes overall)\n\n\
+        "emitted code changed:\n{}\n  {:<24} section {} -> {} ({:+} bytes)   \
+         instrs {} -> {} ({:+})\n\n\
          If this is intended — an optimization landing, or an example edited — \
          re-bless the baseline so the win (or the cost) shows up in the diff:\n\
          \x20  WRAITH_BLESS_SIZES=1 cargo test --test code_size",
@@ -184,6 +220,9 @@ fn code_size_matches_the_baseline() {
         total_before,
         total_after,
         total_after - total_before,
+        instrs_before,
+        instrs_after,
+        instrs_after - instrs_before,
     );
 }
 

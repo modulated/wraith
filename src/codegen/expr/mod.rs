@@ -37,11 +37,12 @@ pub use aggregate::generate_struct_init_runtime;
 pub(crate) use aggregate::yields_struct_pointer;
 pub(crate) use aggregate::{
     StaticBase, array_field_base, check_runtime_index_range, emit_array_struct_field_indexed,
-    emit_struct_place_address, high_byte_in_x, is_two_byte_value, resolve_static_addr,
+    emit_struct_place_address, high_byte_in_x, is_call, is_two_byte_value, resolve_static_addr,
     resolve_static_struct_lvalue, type_byte_size,
 };
 pub(crate) use bitop::bit_test_zp;
 pub use call::generate_tail_recursive_update;
+pub(crate) use cast::{emit_widen_a_into_y, implicit_widening};
 
 pub fn generate_expr(
     expr: &Spanned<Expr>,

@@ -3,11 +3,13 @@
 //! Tests complete language features from source to assembly output
 
 mod addr_of_rom;
+mod aggregate_dispatch;
 mod aggregate_init;
 mod assign_side_effects;
 mod bcd;
 mod bcd_validation;
 mod bitfields;
+mod branch_fusion;
 mod bss_reclaim;
 mod cmos;
 mod complex_features;
