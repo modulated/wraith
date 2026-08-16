@@ -271,10 +271,53 @@ pub fn run_with_devices_expect_spin(source: &str, devices: super::devices::Devic
     run_with_devices_impl(source, devices, false)
 }
 
+/// Compile and run, asserting the IRQ line every `every` instructions *while
+/// the program is still working* — not once it has parked in its idle loop.
+///
+/// This is the case an interrupt handler's zero-page save exists for, and the
+/// one nothing tested. Frame colouring cannot separate a handler from `main`:
+/// a handler is not `main`'s callee, so their frames may share addresses, and
+/// correctness rests entirely on the handler saving that span on entry and
+/// restoring it on exit. [`Exec::pulse_irq`] waits for the idle loop first,
+/// where `main` has already stored everything it computed and there is nothing
+/// live to corrupt.
+///
+/// The program must enable IRQs itself (`asm {{ "CLI" }}`) before the work it
+/// wants interrupted.
+///
+/// The storm is bounded by [`IRQ_STORM_PULSES`], so the program can reach its
+/// idle loop and the run can end.
+pub fn run_interrupted(source: &str, every: usize) -> Exec {
+    run_impl(
+        source,
+        super::devices::Devices::default(),
+        true,
+        Some(every),
+    )
+}
+
+/// How many times [`run_interrupted`] asserts the line before going quiet.
+///
+/// The storm has to be bounded or the run never ends: an interrupt pulls the
+/// CPU out of `loop {}` as readily as out of anything else, and the harness
+/// detects termination by seeing the program counter stand still. Five hundred
+/// is enough to land inside every phase of a short computation many times over,
+/// and leaves the program free to settle afterwards.
+const IRQ_STORM_PULSES: usize = 500;
+
 fn run_with_devices_impl(
     source: &str,
     devices: super::devices::Devices,
     require_halt: bool,
+) -> Exec {
+    run_impl(source, devices, require_halt, None)
+}
+
+fn run_impl(
+    source: &str,
+    devices: super::devices::Devices,
+    require_halt: bool,
+    interrupt_every: Option<usize>,
 ) -> Exec {
     let asm = compile_success(source);
     let image = assemble(&asm);
@@ -289,9 +332,19 @@ fn run_with_devices_impl(
 
     const BUDGET: usize = 20_000_000;
     let mut steps = 0usize;
+    let mut pulses = 0usize;
     let mut halted = false;
     let mut idle_pc = 0u16;
     while steps < BUDGET {
+        // Assert the line for one step at a time, so the handler is entered
+        // from wherever `main` happens to be rather than from a quiet point.
+        if let Some(every) = interrupt_every {
+            let assert_now = steps.is_multiple_of(every) && pulses < IRQ_STORM_PULSES;
+            if assert_now {
+                pulses += 1;
+            }
+            cpu.memory.irq = assert_now;
+        }
         let pc_before = cpu.registers.program_counter;
         let executed = cpu.single_step();
         steps += 1;

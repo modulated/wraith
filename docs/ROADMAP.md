@@ -34,6 +34,8 @@ read against a current picture:
 | The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
 | Every parameter kind survives every call form — direct, inlined, recursive, indirect | `tests/e2e/aggregate_dispatch.rs` |
 | Every struct field kind round-trips; a whole-array store is refused where it cannot work | `tests/e2e/aggregate_dispatch.rs` |
+| Every return kind survives every call form — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
+| An interrupt arriving *mid-computation* leaves the interrupted work alone | `tests/e2e/interrupts_exec.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -579,6 +581,27 @@ Also open:
   *copy*? That would give the three forms one meaning, at the cost of changing
   what the local form does today. Worth deciding before anything is built on
   the current behaviour.
+
+- **Interrupts were only ever tested from the idle loop.** `pulse_irq` waits
+  for `main` to park in `loop {}` before asserting the line — where `main` has
+  stored everything it computed and there is nothing live to corrupt. But a
+  handler's zero-page frame may *share addresses* with `main`'s, because a
+  handler is not `main`'s callee and colouring cannot separate them; the whole
+  design rests on the handler saving that span and restoring it, and nothing
+  exercised that.
+
+  `run_interrupted` asserts the line every *n* instructions while `main` works,
+  so the handler is entered between the halves of a 16-bit add, inside a
+  multiply, across a `JSR` with the argument pool staged. The saves hold — a
+  negative result — and the test is worth its weight because of what it can
+  see: with the math working storage dropped from the save list (leaving the
+  push/pop balance intact, so nothing else breaks), the new test fails and
+  every existing interrupt test still passes.
+
+  The storm has to be bounded, which is worth knowing before writing another
+  one: an interrupt pulls the CPU out of `loop {}` as readily as out of
+  anything else, and the harness detects termination by the program counter
+  standing still, so an unbounded storm never halts.
 
 - **One rule, four implementations.** A call's arguments are staged in four
   separate pieces of code — a direct `JSR`, an inlined body, a recursive call
