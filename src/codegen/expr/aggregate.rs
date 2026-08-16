@@ -692,7 +692,98 @@ pub(crate) fn yields_struct_pointer(expr: &Spanned<Expr>, info: &ProgramInfo) ->
         Expr::StructInit { .. } | Expr::AnonStructInit { .. } => {
             info.struct_temps.contains_key(&expr.span)
         }
-        _ => false,
+        // Enumerated rather than left to a catch-all: a new form that returns
+        // an aggregate by pointer would otherwise be read as a scalar, which is
+        // how a call through a function pointer came to store one byte of the
+        // struct it returned.
+        Expr::Call { .. }
+        | Expr::CallIndirect { .. }
+        | Expr::Paren(_)
+        | Expr::Variable(_)
+        | Expr::Field { .. }
+        | Expr::Index { .. }
+        | Expr::Unary { .. }
+        | Expr::U16Low(_)
+        | Expr::U16High(_)
+        | Expr::SliceLen(_)
+        | Expr::BitOp { .. }
+        | Expr::Literal(_)
+        | Expr::Binary { .. }
+        | Expr::Cast { .. }
+        | Expr::Slice { .. }
+        | Expr::EnumVariant { .. }
+        | Expr::CpuFlagCarry
+        | Expr::CpuFlagZero
+        | Expr::CpuFlagOverflow
+        | Expr::CpuFlagNegative
+        | Expr::Match { .. } => false,
+    }
+}
+
+/// Whether an expression form can *name storage*, as opposed to producing a
+/// value by being evaluated.
+///
+/// The resolvers below all answer questions about addresses, and all of them
+/// used to say `None` for two different things: "this form has no address, and
+/// never could" and "this form has one and nobody wrote the case". A caller
+/// cannot tell those apart, so it reads both as "not applicable, use the
+/// ordinary path" — and the ordinary path is the scalar one. Six bugs came
+/// through that door.
+///
+/// This is the missing half of the question. A `Call` has no address because a
+/// call produces its result; that is a fact about the form. A place that no
+/// case claimed is a gap, and the resolver can say so rather than shrug.
+///
+/// **Conservative on purpose**: a form that *might* name storage counts as a
+/// place. Over-reporting costs at most a false alarm on a shape that turns out
+/// to be a value; under-reporting would let the original defect back in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Denotes {
+    /// Named storage. An address exists — though not necessarily one known at
+    /// compile time, which is a separate question each resolver asks itself.
+    Place,
+    /// A value, produced by evaluating the expression. There is no storage to
+    /// take the address of.
+    Value,
+}
+
+/// Classify a form. Exhaustive over `Expr` with no catch-all, so a construct
+/// added to the language is a compile error here rather than a silent `Value`.
+pub(crate) fn denotes(expr: &Expr) -> Denotes {
+    match expr {
+        // Storage, directly or through something that is.
+        Expr::Variable(_) => Denotes::Place,
+        Expr::Field { object, .. } | Expr::Index { object, .. } => denotes(&object.node),
+        Expr::Paren(inner) => denotes(&inner.node),
+        // `*p` names what `p` points at, whatever `p` itself is.
+        Expr::Unary {
+            op: crate::ast::UnaryOp::Deref,
+            ..
+        } => Denotes::Place,
+        // Byte and length accessors: assignable where their operand is, so they
+        // follow it. (`.len` on a genuine slice is not, but a slice is never a
+        // struct, so no resolver's answer turns on it.)
+        Expr::U16Low(inner) | Expr::U16High(inner) | Expr::SliceLen(inner) => denotes(&inner.node),
+        // Bit access reads or writes bits of its object.
+        Expr::BitOp { object, .. } => denotes(&object.node),
+
+        // Values. Each of these produces its result; asking for an address is
+        // a category error, not an unimplemented case.
+        Expr::Literal(_)
+        | Expr::Binary { .. }
+        | Expr::Unary { .. }
+        | Expr::Cast { .. }
+        | Expr::Slice { .. }
+        | Expr::Call { .. }
+        | Expr::CallIndirect { .. }
+        | Expr::StructInit { .. }
+        | Expr::AnonStructInit { .. }
+        | Expr::EnumVariant { .. }
+        | Expr::CpuFlagCarry
+        | Expr::CpuFlagZero
+        | Expr::CpuFlagOverflow
+        | Expr::CpuFlagNegative
+        | Expr::Match { .. } => Denotes::Value,
     }
 }
 
@@ -878,19 +969,51 @@ pub(crate) fn resolve_static_struct_lvalue(
             let sdef = info.type_registry.get_struct(&elem_struct)?;
             Some((base.plus((idx * sdef.total_size) as u16), elem_struct))
         }
-        _ => None,
+        Expr::Paren(inner) => resolve_static_struct_lvalue(inner, info),
+
+        // Not a struct place with a constant address. Enumerated for the same
+        // reason as in `resolve_static_addr`: a form added to the language
+        // should have to be classified rather than fall through as "no".
+        Expr::Unary { .. }
+        | Expr::U16Low(_)
+        | Expr::U16High(_)
+        | Expr::SliceLen(_)
+        | Expr::BitOp { .. }
+        | Expr::Literal(_)
+        | Expr::Binary { .. }
+        | Expr::Cast { .. }
+        | Expr::Slice { .. }
+        | Expr::Call { .. }
+        | Expr::CallIndirect { .. }
+        | Expr::StructInit { .. }
+        | Expr::AnonStructInit { .. }
+        | Expr::EnumVariant { .. }
+        | Expr::CpuFlagCarry
+        | Expr::CpuFlagZero
+        | Expr::CpuFlagOverflow
+        | Expr::CpuFlagNegative
+        | Expr::Match { .. } => None,
     }
 }
 
 /// Emit the *address* of a struct-valued place into A:X — the pointer
-/// convention — and return the struct's name. `None` when `expr` is not a
-/// place: a literal or a call chooses its own storage and leaves a pointer to
-/// it already, which the return-by-value path handles.
+/// convention — and return the struct's name.
 ///
 /// Three shapes, because a struct's bytes are reachable three ways: inline
 /// storage whose address the assembler knows, a by-reference parameter whose
 /// slot holds a pointer to the caller's storage, and an array element whose
 /// offset exists only at run time.
+///
+/// The three answers are distinct, which is the point of the signature:
+///
+/// * `Ok(Some(name))` — here is the address.
+/// * `Ok(None)` — `expr` is not a place. A literal or a call chooses its own
+///   storage and hands back a pointer already, which is the return-by-value
+///   path's business, not this one's.
+/// * `Err(..)` — `expr` *is* a struct-typed place and no case produced an
+///   address. That is a gap in this function, and it says so rather than
+///   returning `None`, which every caller reads as "use the ordinary path" —
+///   and the ordinary path copies one byte.
 pub(crate) fn emit_struct_place_address(
     expr: &Spanned<Expr>,
     emitter: &mut Emitter,
@@ -970,6 +1093,25 @@ pub(crate) fn emit_struct_place_address(
         emitter.emit_inst("PLA", "");
         emitter.invalidate_registers();
         return Ok(Some(elem_struct));
+    }
+
+    // Nothing above claimed it. If the expression *names storage* and that
+    // storage is a struct, then it has an address and no case here knows how
+    // to produce one — a gap, not a fact about the form. Saying `None` sends
+    // the caller down its ordinary path, which for every caller is the scalar
+    // one, and one byte of a struct gets copied.
+    //
+    // A `Value` reaching here is the honest `None`: a literal or a call builds
+    // its own storage and hands back a pointer, which is a different
+    // convention and a different caller's business.
+    if denotes(&expr.node) == Denotes::Place
+        && let Some(Type::Named(name)) = info.resolved_types.get(&expr.span)
+        && info.type_registry.get_struct(name).is_some()
+    {
+        return Err(CodegenError::Internal(format!(
+            "no way to take the address of this `{name}` place: it names storage, so an \
+             address exists, but no case in `emit_struct_place_address` produces one"
+        )));
     }
 
     Ok(None)
@@ -1147,7 +1289,35 @@ pub(crate) fn resolve_static_addr(
             let esize = type_byte_size(&elem, info);
             Some((base.plus((idx * esize) as u16), (*elem).clone()))
         }
-        _ => None,
+        // A parenthesised place is the place inside it.
+        Expr::Paren(inner) => resolve_static_addr(inner, info),
+
+        // No *constant* address, for one of two reasons, and enumerated rather
+        // than left to a catch-all so a new form has to be classified here.
+        //
+        // `Deref` and the accessors below name storage, but through a pointer
+        // or at an offset this function is not asked about — the `.low` store
+        // path resolves the *object*, not the accessor node. Everything after
+        // them produces a value and has no storage at all.
+        Expr::Unary { .. }
+        | Expr::U16Low(_)
+        | Expr::U16High(_)
+        | Expr::SliceLen(_)
+        | Expr::BitOp { .. }
+        | Expr::Literal(_)
+        | Expr::Binary { .. }
+        | Expr::Cast { .. }
+        | Expr::Slice { .. }
+        | Expr::Call { .. }
+        | Expr::CallIndirect { .. }
+        | Expr::StructInit { .. }
+        | Expr::AnonStructInit { .. }
+        | Expr::EnumVariant { .. }
+        | Expr::CpuFlagCarry
+        | Expr::CpuFlagZero
+        | Expr::CpuFlagOverflow
+        | Expr::CpuFlagNegative
+        | Expr::Match { .. } => None,
     }
 }
 

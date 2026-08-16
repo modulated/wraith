@@ -384,3 +384,56 @@ fn a_tail_recursive_call_rebinds_wide_parameters_whole() {
         "300 truncates to 44, plus 7: a wide parameter does not shift the next one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The resolvers themselves, not just the sites that call them.
+// ---------------------------------------------------------------------------
+
+/// A struct's address is reachable three ways, and all three still work.
+///
+/// The guards above are a backstop at the three *call sites* that decide an
+/// aggregate's fate. `emit_struct_place_address` now answers in three ways of
+/// its own — an address, "not a place", or an error saying it is a place with
+/// no case — so a fourth caller added later inherits the check instead of
+/// needing its own. What that error costs is a `Denotes` classification that
+/// enumerates every expression form, so a construct added to the language has
+/// to be placed on one side or the other rather than defaulting to "value".
+///
+/// This pins the three shapes that must keep resolving. Removing any one of
+/// them turns this from a silent one-byte copy into a compiler error, which is
+/// the whole point; the test is here so the shapes themselves cannot quietly
+/// stop working.
+#[test]
+fn every_struct_place_still_yields_an_address() {
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        const OUT2: addr = 0x0902;
+        struct P { x: u8, y: u8 }
+        static PS: [P; 3] = [
+            P { x: 1, y: 2 },
+            P { x: 4, y: 38 },
+            P { x: 7, y: 8 },
+        ];
+        fn sum(p: P) -> u8 { return p.x + p.y; }
+        // A by-reference parameter: the slot holds a pointer to the caller's
+        // storage, so the address is a load rather than a constant.
+        fn relay(p: P) -> u8 { return sum(p); }
+        #[reset]
+        fn main() {
+            // Inline storage the assembler knows the address of.
+            let local: P = P { x: 5, y: 37 };
+            OUT0 = sum(local);
+            OUT1 = relay(local);
+            // An array element whose offset exists only at run time.
+            let i: u8 = 1;
+            OUT2 = sum(PS[i]);
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (42, 42, 42),
+        "inline storage, a by-reference parameter, and a runtime-indexed element"
+    );
+}
