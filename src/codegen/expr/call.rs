@@ -1268,12 +1268,35 @@ fn store_inline_arg(
 ) -> Result<(), CodegenError> {
     let arg_ty = info.resolved_types.get(&arg.span);
 
-    // Aggregates are passed by reference: copy the descriptor straight out of
-    // the argument variable's slot. A slice is 4 bytes (base + length); a struct
-    // or array is a 2-byte pointer.
+    // A struct is passed by *address*, and its slot is not where that address
+    // lives: a local holds the struct inline, so copying two bytes out of the
+    // slot hands the callee the first two bytes of the *contents*. `p.x` then
+    // dereferenced (4, 38) as though it were a pointer. Only a struct
+    // parameter's slot holds an address, which is the case that made this look
+    // right. `emit_struct_place_address` covers both, and a static, a nested
+    // field and an array element besides.
+    if let Type::Named(name) = param_ty
+        && info.type_registry.get_struct(name).is_some()
+    {
+        if super::aggregate::emit_struct_place_address(arg, emitter, info, string_collector)?
+            .is_none()
+        {
+            // A literal or a call leaves a pointer to its own bytes in A:X,
+            // which is the same convention; anything else has no address and
+            // the parameter cannot be filled.
+            generate_expr(arg, emitter, info, string_collector)?;
+        }
+        emitter.emit_inst("STA", &format!("${:02X}", dest));
+        emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
+        emitter.invalidate_registers();
+        return Ok(());
+    }
+
+    // The remaining aggregates really do keep a pointer or a descriptor in the
+    // argument variable's slot, so those bytes are copied across as they are.
+    // A slice is 4 (base + length); an array is a 2-byte pointer to its data.
     let aggregate_bytes = match param_ty {
         Type::Slice(_) => Some(4u8),
-        Type::Named(name) if !info.type_registry.enums.contains_key(name) => Some(2),
         Type::Array(_, _) => Some(2),
         _ => None,
     };

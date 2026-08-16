@@ -552,3 +552,106 @@ fn a_str_field_is_initialised_with_both_its_bytes() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
 }
+
+/// Every parameter kind, through every way a call is emitted.
+///
+/// The conventions meet here, and each call form stages its arguments in its
+/// own code: a direct `JSR`, an inlined body, a recursive call that saves the
+/// callee's frame, and an indirect call through a fixed staging block. Four
+/// implementations of one rule is three chances to differ, and they did.
+///
+/// A struct is passed by *address*. An inlined call copied two bytes out of the
+/// argument variable's slot instead — which is right for an array, whose slot
+/// holds a pointer to its data, and for a struct *parameter*, whose slot holds
+/// the caller's address, but wrong for a struct *local*, whose slot holds the
+/// struct itself. `p.x` dereferenced the first two bytes of the contents: with
+/// `P { x: 4, y: 38 }` that is the address `$2604`.
+#[test]
+fn every_parameter_kind_survives_every_call_form() {
+    // (name, type, body, argument, expected)
+    let kinds: [(&str, &str, &str, &str, u8); 7] = [
+        ("a u16", "u16", "(p as u8) + 1", "300", 45),
+        ("an i8 widened to i16", "i16", "(p as u8) + 0", "neg", 197),
+        ("a pointer", "&u8", "*p + 1", "&V", 78),
+        ("a struct", "P", "p.x + p.y", "q", 42),
+        ("a str", "str", "(p.len as u8) + 1", "\"abcd\"", 5),
+        ("an enum", "C", "(p as u8) + 1", "C::B", 3),
+        ("an array", "[u8; 3]", "p[1] + 1", "arr", 7),
+    ];
+    for (what, ty, body, arg, want) in kinds {
+        // Each form declares `f` its own way and calls it its own way.
+        let forms: [(&str, String, String); 4] = [
+            (
+                "a direct call",
+                format!("fn f(p: {ty}) -> u8 {{ return {body}; }}"),
+                format!("f({arg})"),
+            ),
+            (
+                "an inlined call",
+                format!("#[inline]\nfn f(p: {ty}) -> u8 {{ return {body}; }}"),
+                format!("f({arg})"),
+            ),
+            (
+                "a recursive call",
+                format!(
+                    "fn f(d: u8, p: {ty}) -> u8 {{ if d == 0 {{ return {body}; }} \
+                     return f(d - 1, p) + 0; }}"
+                ),
+                format!("f(3, {arg})"),
+            ),
+            (
+                "a call through a function pointer",
+                format!(
+                    "fn f(p: {ty}) -> u8 {{ return {body}; }}\n\
+                     struct DV {{ call: fn({ty}) -> u8 }}\n\
+                     static DEV: DV = DV {{ call: f }};"
+                ),
+                "DEV.call(ARG)".replace("ARG", arg),
+            ),
+        ];
+        for (form, decl, call) in forms {
+            // An array through an indirect call is refused on purpose: the
+            // argument is staged at a fixed address for a callee not known
+            // until run time, and the diagnostic says to pass a `&T`. Pinned
+            // below rather than skipped silently.
+            if ty.starts_with('[') && form.contains("function pointer") {
+                continue;
+            }
+            let mut e = run(&format!(
+                "const OUT: addr = 0x0900;\n\
+                 static V: u8 = 77;\n\
+                 struct P {{ x: u8, y: u8 }}\n\
+                 enum C {{ R, G, B }}\n\
+                 {decl}\n\
+                 #[reset]\nfn main() {{\n\
+                 \x20   let q: P = P {{ x: 4, y: 38 }};\n\
+                 \x20   let arr: [u8; 3] = [5, 6, 7];\n\
+                 \x20   let neg: i8 = (-59);\n\
+                 \x20   OUT = {call};\n    loop {{}}\n}}\n"
+            ));
+            assert_eq!(e.mem(0x0900), want, "{what} through {form}");
+        }
+    }
+}
+
+/// The one combination above that is refused, and why it is not a gap.
+///
+/// An indirect call stages its arguments at a fixed block, because the callee
+/// is not known until run time and every candidate has to read them from the
+/// same place. That suits anything that fits the registers or is reached by
+/// address; a whole array does not, and the diagnostic says what to pass
+/// instead rather than staging something wrong.
+#[test]
+fn an_array_through_a_function_pointer_is_refused_with_a_way_out() {
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        fn f(p: [u8; 3]) -> u8 { return p[1]; }
+        struct DV { call: fn([u8; 3]) -> u8 }
+        static DEV: DV = DV { call: f };
+        #[reset]
+        fn main() { let arr: [u8; 3] = [5, 6, 7]; OUT = DEV.call(arr); loop {} }
+    "#,
+        "Pass a `&T` to it instead",
+    );
+}
