@@ -26,6 +26,8 @@ read against a current picture:
 | The fuzzer dispatches through function pointers, two ways | `docs/fuzz-coverage.md` |
 | The fuzzer binds, copies, passes and returns slices | `docs/fuzz-coverage.md` |
 | The fuzzer builds a two-function call cycle, reaching the SCC path | `docs/fuzz-coverage.md` |
+| The fuzzer mixes the two widths the language widens between | `docs/fuzz-coverage.md` |
+| Implicit widening carries the source's sign at all six sites | `tests/e2e/int_conversions.rs` |
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
@@ -208,7 +210,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Thirteen real bugs so far, most of them silent:
+Fourteen real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -262,6 +264,15 @@ Thirteen real bugs so far, most of them silent:
     Found while teaching the generator to pass slices around, by the guard
     under the store rather than by a wrong answer, since that guard had landed
     the day before.
+12. The widening the language performs *without* an `as` zero-extended, at five
+    of the six places it happens: a binding, an assignment, an argument
+    (direct, inlined and indirect), an array element and a struct field. Only
+    the explicit cast and `return` were right. So `let b: i16 = a;` on a
+    negative `i8` dropped the sign — and four of the five did not recognise a
+    signed source at all, emitting no high byte, so the slot took whatever `Y`
+    held from an unrelated instruction and the same program could answer
+    differently depending on the statement before it. All six now share one
+    `emit_widen_a_into_y`.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
@@ -278,8 +289,22 @@ and an oracle that is merely *probably* right is worse than no oracle:
   disagreement cannot masquerade as a codegen bug; a separate generator that
   omits parentheses and compares against a parenthesised twin would test it
   metamorphically.
-- **Mixed widths.** One type per program today, because mixed-width arithmetic
-  brings the implicit widening rules into the oracle.
+- **Mixing across signedness families**, and narrowing. *The widening half is
+  done.* A program now picks one family and mixes its two widths — `u8`/`u16`
+  or `i8`/`i16` — because those are the two the language widens between without
+  an `as`. Variables, parameters, locals and return types each take either
+  half; the aggregates take one.
+
+  The oracle needed less than expected, because arithmetic is never mixed:
+  operands of an operator have to agree, so the only place the two widths meet
+  is a *boundary* — a binding, an assignment, an argument, a `return`. A
+  boundary operand carries the type it was generated at, and the rule is that
+  the arithmetic happens at the narrow type and the widening after it, so
+  `200u8 + 100` bound to a `u16` is 44 and not 300.
+
+  It found the widening was zero-extending everywhere the language did it
+  implicitly — five of the six sites. See the note under
+  [Correctness & diagnostics](#correctness--diagnostics).
 - **Cycles of three or more.** *Done for two.* Self-recursion only ever reaches
   the trivial strongly-connected component; a pair that call each other is the
   case frame colouring solves with Tarjan, and the generator now builds one —
@@ -446,6 +471,20 @@ work the rest did not:
   `merge_imported` — or a diamond import reports the same module twice.
 
 Also open:
+
+- **The widening the language performs by itself is now one code path.** *Done,
+  and worth keeping in view.* Only lossless widening is implicit — `u8` to
+  `u16`, `i8` to `i16` — and which extension applies is a property of the
+  *source*: a signed one carries its sign into the new high byte. Six places
+  perform it, and five zero-extended. Four of those five did not recognise a
+  signed source at all, so they emitted no high byte and the destination took
+  whatever `Y` held from an unrelated instruction — the same program could
+  answer differently depending on the statement before it.
+
+  The lesson is the one the aggregate guards taught a layer up: six sites each
+  deciding the same rule for themselves is five chances to get it wrong. They
+  share `emit_widen_a_into_y` and `implicit_widening` now, so a seventh site
+  asks rather than re-derives.
 
 - **Widen the spec-example harness further.** 82 of the spec's ~210 code blocks
   are now compiled on every run (`tests/e2e/spec_examples.rs`), via
