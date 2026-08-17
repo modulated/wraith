@@ -306,3 +306,49 @@ fn an_indirect_call_in_an_argument_list_leaves_the_other_arguments_alone() {
         "the first argument must survive the driver"
     );
 }
+
+#[test]
+fn a_function_pointer_passes_as_an_argument() {
+    // A function pointer is two bytes with the high byte in Y, and it is the
+    // one wide kind that is neither a number nor reached by address — so a
+    // call site that lists the wide types by hand tends to leave it off.
+    // Two sites had:
+    //
+    //   * A direct call and an inlined call both reserved *one* staging byte
+    //     for a `fn(u8) -> u8` parameter and stored only the low half. Every
+    //     parameter after it then landed a byte early, so `apply(bump, 7)`
+    //     called through `(low(bump), 7)` and passed 7 as nothing.
+    //   * Relaying a function-pointer *variable* emitted `LDA #<g` — the name
+    //     assembled as a label rather than read from the variable's slot. A
+    //     parameter has no label at all, so the assembler rejected it; a
+    //     local that shadowed a real function name would have silently
+    //     called the wrong one.
+    //
+    // Both halves are exercised here: `bump` by name and `g` by variable,
+    // through a callee big enough not to be inlined and one that is.
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        const OUT2: addr = 0x0902;
+        fn bump(a: u8) -> u8 { return a + 1; }
+        fn apply(f: fn(u8) -> u8, v: u8) -> u8 {
+            let acc: u8 = 0;
+            let i: u8 = 0;
+            while i < 3 { acc = acc + f(v); i = i + 1; }
+            return acc;
+        }
+        #[inline]
+        fn once(f: fn(u8) -> u8, v: u8) -> u8 { return f(v); }
+        #[reset]
+        fn main() {
+            let g: fn(u8) -> u8 = bump;
+            OUT0 = apply(bump, 7);
+            OUT1 = apply(g, 7);
+            OUT2 = once(g, 40);
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 24, "by name, through a direct call");
+    assert_eq!(e.mem(0x0901), 24, "by variable, through a direct call");
+    assert_eq!(e.mem(0x0902), 41, "by variable, through an inlined call");
+}

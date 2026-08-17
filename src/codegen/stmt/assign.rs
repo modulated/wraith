@@ -702,6 +702,20 @@ pub(super) fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
+    // A whole array cannot be assigned to a *field*. Assigning one only ever
+    // meant repointing a slot at the data, which is how a local array is
+    // stored; a field is the data itself, and the store wrote two bytes of the
+    // literal's ROM address over the first two elements. `d.f = [4, 5, 6]`
+    // left `d.f[1]` at its old value and corrupted `d.f[0]`.
+    if let Some(Type::Array(..)) = field_type_of(object, field, info) {
+        return Err(CodegenError::UnsupportedOperation(format!(
+            "cannot assign a whole array to field `{}`: a field holds its elements inline, so \
+             there is no pointer to repoint. Assign the elements — `x.{}[i] = v` — or rebuild \
+             the struct",
+            field.node, field.node
+        )));
+    }
+
     // arr[i].field = x with a runtime index: absolute,Y indexed store.
     if let Expr::Index {
         object: array,
@@ -899,6 +913,29 @@ pub(super) fn generate_field_assignment(
             "Field assignment only supported on variables (not expressions)".to_string(),
         ))
     }
+}
+
+/// The declared type of `object.field`, when the object's struct is known.
+///
+/// Used to refuse a whole-array store before any of the field-assignment
+/// paths pick a shape for it.
+fn field_type_of(
+    object: &Spanned<crate::ast::Expr>,
+    field: &Spanned<String>,
+    info: &ProgramInfo,
+) -> Option<crate::sema::types::Type> {
+    let name = match info.resolved_types.get(&object.span) {
+        Some(crate::sema::types::Type::Named(n)) => n.clone(),
+        Some(crate::sema::types::Type::Pointer(inner)) => match &**inner {
+            crate::sema::types::Type::Named(n) => n.clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    info.type_registry
+        .get_struct(&name)?
+        .get_field(&field.node)
+        .map(|f| f.ty.clone())
 }
 
 /// Which register holds the high byte of a value about to be stored into a
@@ -1577,23 +1614,21 @@ pub(super) fn generate_var_decl(
             false
         };
 
-        let is_multibyte = matches!(
-            sym.ty,
-            Type::Array(_, _)
-                | Type::String
-                | Type::Pointer(_)
-                | Type::Function(_, _)
-                | Type::Primitive(crate::ast::PrimitiveType::U16)
-                | Type::Primitive(crate::ast::PrimitiveType::I16)
-                | Type::Primitive(crate::ast::PrimitiveType::B16)
-        ) || is_enum;
+        // Two bytes, in whichever register pair carries them. Asked of the one
+        // table, plus the two kinds it cannot answer alone: an array's slot
+        // holds a pointer to its data, and an enum is spelled `Named` like a
+        // struct, which only the registry separates.
+        let is_multibyte = crate::codegen::expr::is_two_byte_value(&sym.ty)
+            || matches!(sym.ty, Type::Array(_, _))
+            || is_enum;
 
         // Arrays, enums, strings and pointers carry an address in
         // A (low) and X (high); other 16-bit values use A (low) and
         // Y (high). Storing only A leaves the high byte as whatever was
         // in the slot, which reads as a pointer into an arbitrary page.
-        let is_array_or_enum =
-            matches!(sym.ty, Type::Array(_, _) | Type::String | Type::Pointer(_)) || is_enum;
+        let is_array_or_enum = crate::codegen::expr::high_byte_in_x(&sym.ty)
+            || matches!(sym.ty, Type::Array(_, _))
+            || is_enum;
 
         // An enum value binds by *copy*: the constructed bytes live in
         // shared codegen scratch until here (and a returned enum points
@@ -1944,6 +1979,24 @@ pub(super) fn generate_assign(
                     return Err(unfilled_block_error(&sym.ty, bytes, "assign"));
                 }
 
+                // Assigning a whole array repoints a slot at the data, which
+                // only exists for a *local* array. A `static` array is the
+                // data, at a fixed address, so the store put two bytes of the
+                // literal's ROM address over the first two elements and every
+                // later read came back as part of an address.
+                if matches!(sym.ty, Type::Array(..))
+                    && !matches!(
+                        sym.location,
+                        crate::sema::table::SymbolLocation::ZeroPage(_)
+                    )
+                {
+                    return Err(CodegenError::UnsupportedOperation(format!(
+                        "cannot assign a whole array to `{name}`: a `static` array is its \
+                         elements, at a fixed address, so there is no pointer to repoint. Assign \
+                         the elements — `{name}[i] = v` — or use a local"
+                    )));
+                }
+
                 // And, as there, a narrow value stored into a wide slot is
                 // widened by the language rather than by an `as`. Nothing
                 // widened it here at all: the high byte was whatever Y held.
@@ -1961,22 +2014,21 @@ pub(super) fn generate_assign(
                     false
                 };
 
-                // Check if this is a multi-byte type (u16/i16/b16, arrays,
-                // enums, function pointers)
-                let is_multibyte = matches!(
-                    sym.ty,
-                    Type::Array(_, _)
-                        | Type::Pointer(_)
-                        | Type::Function(_, _)
-                        | Type::Primitive(crate::ast::PrimitiveType::U16)
-                        | Type::Primitive(crate::ast::PrimitiveType::I16)
-                        | Type::Primitive(crate::ast::PrimitiveType::B16)
-                ) || is_enum;
+                // The same two questions the binding path above asks, of the
+                // same tables. This copy listed the wide types by hand and had
+                // left `str` off *both* lists, so `s = "xy"` stored the new
+                // pointer's low byte over the old one and kept the old high
+                // byte. Two literals in one page hid it; across a page
+                // boundary `s.len` read into the middle of another string.
+                let is_multibyte = crate::codegen::expr::is_two_byte_value(&sym.ty)
+                    || matches!(sym.ty, Type::Array(_, _))
+                    || is_enum;
 
-                // Arrays, enums and pointers carry an address in
+                // Arrays, enums, strings and pointers carry an address in
                 // A (low) and X (high); other 16-bit values use A:Y.
-                let is_array_or_enum =
-                    matches!(sym.ty, Type::Array(_, _) | Type::Pointer(_)) || is_enum;
+                let is_array_or_enum = crate::codegen::expr::high_byte_in_x(&sym.ty)
+                    || matches!(sym.ty, Type::Array(_, _))
+                    || is_enum;
 
                 // Same copy-on-bind as the VarDecl path: an enum
                 // reassignment must land in the variable's own block,

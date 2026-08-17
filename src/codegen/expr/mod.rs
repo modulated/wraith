@@ -456,24 +456,12 @@ pub fn generate_expr(
             expr: match_expr,
             arms,
         } => {
-            // Whether the unified result type is 16-bit — narrow arm bodies must
-            // then be zero-extended so their high byte in Y is well-defined.
-            let result_is_u16 = matches!(
-                info.resolved_types.get(&expr.span),
-                Some(crate::sema::types::Type::Primitive(
-                    crate::ast::PrimitiveType::U16
-                        | crate::ast::PrimitiveType::I16
-                        | crate::ast::PrimitiveType::B16
-                ))
-            );
-            generate_match_expr(
-                match_expr,
-                arms,
-                result_is_u16,
-                emitter,
-                info,
-                string_collector,
-            )
+            // The unified result type. A narrow arm body reaching a 16-bit
+            // result has to be extended so its high byte in Y is defined, and
+            // by which extension depends on the *arm's* type, so the arm needs
+            // the result type rather than a yes/no.
+            let result_ty = info.resolved_types.get(&expr.span);
+            generate_match_expr(match_expr, arms, result_ty, emitter, info, string_collector)
         }
     }
 }
@@ -483,16 +471,32 @@ pub fn generate_expr(
 fn generate_match_expr(
     match_expr: &Spanned<Expr>,
     arms: &[crate::ast::ExprMatchArm],
-    result_is_u16: bool,
+    result_ty: Option<&crate::sema::types::Type>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
     use crate::ast::Pattern;
 
-    // Generate an arm body, then zero-extend its high byte (Y) when the unified
+    let result_is_u16 = matches!(
+        result_ty,
+        Some(crate::sema::types::Type::Primitive(
+            crate::ast::PrimitiveType::U16
+                | crate::ast::PrimitiveType::I16
+                | crate::ast::PrimitiveType::B16
+        ))
+    );
+
+    // Generate an arm body, then extend its high byte (Y) when the unified
     // result is 16-bit but this arm produced only an 8-bit value — otherwise Y
     // would carry a garbage high byte into the u16 result.
+    //
+    // *Which* extension is the arm's own question, not the result's: an `i8`
+    // arm of an `i16` match keeps its sign. This zero-extended every narrow
+    // arm, so `match k { 0 => neg, _ => 300 }` turned −59 into 197 — the same
+    // defect fixed at the six other widening sites, in a seventh they did not
+    // reach, because a match *statement* widens through the assignment and
+    // only the expression form comes through here.
     let gen_body = |body: &Spanned<Expr>,
                     emitter: &mut Emitter,
                     info: &ProgramInfo,
@@ -500,8 +504,9 @@ fn generate_match_expr(
      -> Result<(), CodegenError> {
         generate_expr(body, emitter, info, sc)?;
         if result_is_u16 {
+            let body_ty = info.resolved_types.get(&body.span);
             let body_is_u16 = matches!(
-                info.resolved_types.get(&body.span),
+                body_ty,
                 Some(crate::sema::types::Type::Primitive(
                     crate::ast::PrimitiveType::U16
                         | crate::ast::PrimitiveType::I16
@@ -509,7 +514,12 @@ fn generate_match_expr(
                 ))
             );
             if !body_is_u16 {
-                emitter.emit_inst("LDY", "#$00"); // zero-extend to u16
+                match result_ty.and_then(|rt| implicit_widening(body_ty, rt)) {
+                    Some(signed) => emit_widen_a_into_y(emitter, signed),
+                    // No widening rule applies (a `bool` arm, or a type sema
+                    // did not resolve): the high byte still has to be defined.
+                    None => emitter.emit_inst("LDY", "#$00"),
+                }
             }
         }
         Ok(())

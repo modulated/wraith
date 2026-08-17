@@ -170,6 +170,32 @@ fn for_loop_runtime_bound_wider_than_the_counter_is_rejected() {
 }
 
 #[test]
+fn for_loop_runtime_bound_of_the_wrong_sign_is_rejected() {
+    // The width half of this rule was checked and the sign half was not,
+    // though half of `i8` is exactly as unrepresentable in a `u8` counter as
+    // all of `u16` is. `let lo: i8 = -2; for i in lo..2` compared 254 against
+    // 2, ran zero times, and said nothing — while the same loop written with
+    // the literal `-2` was already rejected by the by-value check.
+    assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { let lo: i8 = (-2); for i: u8 in lo..2 { OUT = i; } loop {} }
+    "#,
+        "does not fit in counter type u8",
+    );
+    // And the mirror: a `u8` bound reaches 255, which an `i8` counter cannot.
+    assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { let hi: u8 = 200; for i: i8 in 0..hi { OUT = i as u8; } loop {} }
+    "#,
+        "does not fit in counter type i8",
+    );
+}
+
+#[test]
 fn for_loop_with_a_wide_counter_counts_past_255() {
     // The u16 form of the same loop, which is the fix the error points at.
     assert_eq!(

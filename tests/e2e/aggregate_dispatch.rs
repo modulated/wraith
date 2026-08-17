@@ -437,3 +437,536 @@ fn every_struct_place_still_yields_an_address() {
         "inline storage, a by-reference parameter, and a runtime-indexed element"
     );
 }
+
+/// Every kind of two-byte parameter survives a tail-recursive call.
+///
+/// The loop that replaces the `JSR` has to know two things about each
+/// parameter: how wide it is, and which register its high byte arrives in. It
+/// got the second wrong for the two kinds whose convention the type alone does
+/// not settle.
+///
+/// A `str` is a two-byte address and loads as `LDA #<label / LDX #>label`, but
+/// `is_two_byte_value` did not list it at all and `high_byte_in_x` did not
+/// either — so it was rebound as one byte, from the wrong register. An enum's
+/// value is a two-byte pointer to its data block, also in A:X, but its type is
+/// spelled `Named`, which covers structs as well; a struct *field* is stored
+/// inline rather than as a pointer, so only the registry can separate them.
+///
+/// Both came back as zero after one iteration, and at depth 0 — where the loop
+/// is never taken — both were fine, which is why this runs each at both depths.
+#[test]
+fn every_kind_of_parameter_survives_a_tail_call() {
+    let cases: [(&str, &str, u8); 6] = [
+        (
+            "a pointer",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            static V: u8 = 77;
+            fn rec(d: u8, p: &u8, n: u8) -> u8 { if d == 0 { return *p + n; } return rec(d - 1, p, n); }
+            #[reset]
+            fn main() { O0 = rec(0, &V, 1); O1 = rec(3, &V, 1); loop {} }
+        "#,
+            78,
+        ),
+        (
+            "a struct, by reference",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            struct P { x: u8, y: u8 }
+            fn rec(d: u8, s: P, n: u8) -> u8 { if d == 0 { return s.x + s.y + n; } return rec(d - 1, s, n); }
+            #[reset]
+            fn main() { let q: P = P { x: 4, y: 38 }; O0 = rec(0, q, 0); O1 = rec(3, q, 0); loop {} }
+        "#,
+            42,
+        ),
+        (
+            "a str",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            fn rec(d: u8, s: str, n: u8) -> u8 { if d == 0 { return (s.len as u8) + n; } return rec(d - 1, s, n); }
+            #[reset]
+            fn main() { O0 = rec(0, "abcd", 1); O1 = rec(3, "abcd", 1); loop {} }
+        "#,
+            5,
+        ),
+        (
+            "an enum",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            enum C { R, G, B }
+            fn rec(d: u8, c: C, n: u8) -> u8 { if d == 0 { return (c as u8) + n; } return rec(d - 1, c, n); }
+            #[reset]
+            fn main() { O0 = rec(0, C::B, 1); O1 = rec(3, C::B, 1); loop {} }
+        "#,
+            3,
+        ),
+        (
+            "an array",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            fn rec(d: u8, a: [u8; 3], n: u8) -> u8 { if d == 0 { return a[1] + n; } return rec(d - 1, a, n); }
+            #[reset]
+            fn main() { let arr: [u8; 3] = [5, 6, 7]; O0 = rec(0, arr, 1); O1 = rec(3, arr, 1); loop {} }
+        "#,
+            7,
+        ),
+        (
+            // Two bytes, high in Y, and neither a number nor an address —
+            // the shape most easily left off a hand-written list of the
+            // wide types. Rebinding it also has to *read* it back out of
+            // the parameter slot rather than treat the name as a label.
+            "a function pointer",
+            r#"
+            const O0: addr = 0x0900;
+            const O1: addr = 0x0901;
+            fn bump(a: u8) -> u8 { return a + 1; }
+            fn rec(d: u8, f: fn(u8) -> u8, n: u8) -> u8 { if d == 0 { return f(6) + n; } return rec(d - 1, f, n); }
+            #[reset]
+            fn main() { O0 = rec(0, bump, 1); O1 = rec(3, bump, 1); loop {} }
+        "#,
+            8,
+        ),
+    ];
+    for (what, src, want) in cases {
+        let mut e = run(src);
+        assert_eq!(
+            (e.mem(0x0900), e.mem(0x0901)),
+            (want, want),
+            "{what} passed through a tail call, at depth 0 and depth 3"
+        );
+    }
+}
+
+/// A `str` is a two-byte address wherever it is stored, not just in a slot.
+///
+/// `is_two_byte_value` — "the one authoritative answer", so a load or store
+/// site cannot drift by re-listing the variants — omitted `Type::String`. A
+/// struct literal with a `str` field therefore stored one byte of the pointer
+/// and took the other from `Y`, so `d.name.len` read through a half-formed
+/// address. Reassigning the same field afterwards worked, which is what kept
+/// it hidden: the two paths disagreed.
+#[test]
+fn a_str_field_is_initialised_with_both_its_bytes() {
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        struct D { name: str, tag: u8 }
+        #[reset]
+        fn main() {
+            let d: D = D { name: "abcd", tag: 1 };
+            OUT0 = (d.name.len as u8) + d.tag;
+            // The assignment path, which already worked, so the two stay level.
+            d.name = "abcdefg";
+            OUT1 = (d.name.len as u8) + d.tag;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
+}
+
+/// Every parameter kind, through every way a call is emitted.
+///
+/// The conventions meet here, and each call form stages its arguments in its
+/// own code: a direct `JSR`, an inlined body, a recursive call that saves the
+/// callee's frame, and an indirect call through a fixed staging block. Four
+/// implementations of one rule is three chances to differ, and they did.
+///
+/// A struct is passed by *address*. An inlined call copied two bytes out of the
+/// argument variable's slot instead — which is right for an array, whose slot
+/// holds a pointer to its data, and for a struct *parameter*, whose slot holds
+/// the caller's address, but wrong for a struct *local*, whose slot holds the
+/// struct itself. `p.x` dereferenced the first two bytes of the contents: with
+/// `P { x: 4, y: 38 }` that is the address `$2604`.
+#[test]
+fn every_parameter_kind_survives_every_call_form() {
+    // (name, type, body, argument, expected)
+    let kinds: [(&str, &str, &str, &str, u8); 8] = [
+        ("a u16", "u16", "(p as u8) + 1", "300", 45),
+        ("an i8 widened to i16", "i16", "(p as u8) + 0", "neg", 197),
+        ("a pointer", "&u8", "*p + 1", "&V", 78),
+        ("a struct", "P", "p.x + p.y", "q", 42),
+        ("a str", "str", "(p.len as u8) + 1", "\"abcd\"", 5),
+        ("an enum", "C", "(p as u8) + 1", "C::B", 3),
+        ("an array", "[u8; 3]", "p[1] + 1", "arr", 7),
+        // A function pointer is two bytes with the high byte in Y, like a
+        // `u16` — the one two-byte kind that is neither a number nor reached
+        // by address, and the one two call forms sized as a single byte.
+        ("a function pointer", "fn(u8) -> u8", "p(6) + 1", "bump", 8),
+    ];
+    for (what, ty, body, arg, want) in kinds {
+        // Each form declares `f` its own way and calls it its own way.
+        let forms: [(&str, String, String); 4] = [
+            (
+                "a direct call",
+                format!("fn f(p: {ty}) -> u8 {{ return {body}; }}"),
+                format!("f({arg})"),
+            ),
+            (
+                "an inlined call",
+                format!("#[inline]\nfn f(p: {ty}) -> u8 {{ return {body}; }}"),
+                format!("f({arg})"),
+            ),
+            (
+                "a recursive call",
+                format!(
+                    "fn f(d: u8, p: {ty}) -> u8 {{ if d == 0 {{ return {body}; }} \
+                     return f(d - 1, p) + 0; }}"
+                ),
+                format!("f(3, {arg})"),
+            ),
+            (
+                "a call through a function pointer",
+                format!(
+                    "fn f(p: {ty}) -> u8 {{ return {body}; }}\n\
+                     struct DV {{ call: fn({ty}) -> u8 }}\n\
+                     static DEV: DV = DV {{ call: f }};"
+                ),
+                "DEV.call(ARG)".replace("ARG", arg),
+            ),
+        ];
+        for (form, decl, call) in forms {
+            // An array through an indirect call is refused on purpose: the
+            // argument is staged at a fixed address for a callee not known
+            // until run time, and the diagnostic says to pass a `&T`. Pinned
+            // below rather than skipped silently.
+            if ty.starts_with('[') && form.contains("function pointer") {
+                continue;
+            }
+            let mut e = run(&format!(
+                "const OUT: addr = 0x0900;\n\
+                 static V: u8 = 77;\n\
+                 struct P {{ x: u8, y: u8 }}\n\
+                 enum C {{ R, G, B }}\n\
+                 fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
+                 {decl}\n\
+                 #[reset]\nfn main() {{\n\
+                 \x20   let q: P = P {{ x: 4, y: 38 }};\n\
+                 \x20   let arr: [u8; 3] = [5, 6, 7];\n\
+                 \x20   let neg: i8 = (-59);\n\
+                 \x20   OUT = {call};\n    loop {{}}\n}}\n"
+            ));
+            assert_eq!(e.mem(0x0900), want, "{what} through {form}");
+        }
+    }
+}
+
+/// The one combination above that is refused, and why it is not a gap.
+///
+/// An indirect call stages its arguments at a fixed block, because the callee
+/// is not known until run time and every candidate has to read them from the
+/// same place. That suits anything that fits the registers or is reached by
+/// address; a whole array does not, and the diagnostic says what to pass
+/// instead rather than staging something wrong.
+#[test]
+fn an_array_through_a_function_pointer_is_refused_with_a_way_out() {
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        fn f(p: [u8; 3]) -> u8 { return p[1]; }
+        struct DV { call: fn([u8; 3]) -> u8 }
+        static DEV: DV = DV { call: f };
+        #[reset]
+        fn main() { let arr: [u8; 3] = [5, 6, 7]; OUT = DEV.call(arr); loop {} }
+    "#,
+        "Pass a `&T` to it instead",
+    );
+}
+
+/// Assigning a *whole array* repoints a slot; only a local array has one.
+///
+/// A local array's slot holds a pointer to its data, so `a = [4, 5, 6]` is a
+/// coherent rebind — the slot points at the new literal. A `static` array and
+/// a struct field are the data, at a fixed address, so there is nothing to
+/// repoint. Both accepted the assignment anyway and stored the literal's ROM
+/// address over the elements: the static came back as `128`, part of an
+/// address, and the field kept its old value with `d.f[0]` corrupted.
+///
+/// Refused now, with the element-wise form named. Whether whole-array
+/// assignment should *copy* — which would also change what the local form
+/// means — is a language question, and is on the roadmap rather than decided
+/// here.
+#[test]
+fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
+    // The local form keeps working: the slot is a pointer, and repointing it
+    // is what the assignment has always meant.
+    let mut e = run(r#"
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let a: [u8; 3] = [1, 2, 3];
+            a = [4, 5, 6];
+            OUT0 = a[1];
+            let b: [u8; 3] = [7, 8, 9];
+            a = b;
+            OUT1 = a[1];
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
+
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        static A: [u8; 3] = [1, 2, 3];
+        #[reset]
+        fn main() { A = [4, 5, 6]; OUT = A[1]; loop {} }
+    "#,
+        "a `static` array is its elements",
+    );
+
+    crate::common::assert_error_contains(
+        r#"
+        const OUT: addr = 0x0900;
+        struct D { f: [u8; 3] }
+        #[reset]
+        fn main() { let d: D = D { f: [1, 2, 3] }; d.f = [4, 5, 6]; OUT = d.f[1]; loop {} }
+    "#,
+        "a field holds its elements inline",
+    );
+}
+
+/// Every kind of struct field, initialised then reassigned then read.
+///
+/// A field's type decides both how wide the store is and which register the
+/// high byte comes from, and the two predicates that answer those had drifted
+/// — `Type::String` was missing from both, so a `str` field was a one-byte
+/// store from the wrong register.
+#[test]
+fn every_kind_of_struct_field_round_trips() {
+    // (field type, initial value, reassigned value, how to read it, expected)
+    let cases: [(&str, &str, &str, &str, u8); 5] = [
+        ("u16", "300", "301", "(d.f as u8)", 45),
+        ("&u8", "&V", "&W", "*d.f", 88),
+        ("str", "\"ab\"", "\"abcd\"", "(d.f.len as u8)", 4),
+        ("C", "C::R", "C::B", "(d.f as u8)", 2),
+        ("fn(u8) -> u8", "bump", "dbl", "d.f(21)", 42),
+    ];
+    for (ty, init, reassigned, read, want) in cases {
+        let mut e = run(&format!(
+            "const OUT0: addr = 0x0900;\n\
+             const OUT1: addr = 0x0901;\n\
+             static V: u8 = 77;\n\
+             static W: u8 = 88;\n\
+             enum C {{ R, G, B }}\n\
+             fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
+             fn dbl(a: u8) -> u8 {{ return a + a; }}\n\
+             struct D {{ f: {ty}, tag: u8 }}\n\
+             #[reset]\nfn main() {{\n\
+             \x20   let d: D = D {{ f: {init}, tag: 9 }};\n\
+             \x20   OUT0 = d.tag;\n\
+             \x20   d.f = {reassigned};\n\
+             \x20   OUT1 = {read};\n    loop {{}}\n}}\n"
+        ));
+        assert_eq!(
+            (e.mem(0x0900), e.mem(0x0901)),
+            (9, want),
+            "a `{ty}` field: the tag beside it must survive the store, and the field must read back"
+        );
+    }
+}
+
+/// The same question where the struct is a `static` rather than a local.
+///
+/// A local struct sits in the frame and its fields are reached from a
+/// zero-page base; a `static` is at a fixed address and resolves through a
+/// different path entirely. The field matrix above exercises only the first.
+///
+/// Two of the five field kinds cannot get here: a `str` field and an enum
+/// field are both refused at the initialiser as *not a compile-time constant*,
+/// and a `&u8` field with them. That is a `const`-evaluation gap rather than a
+/// codegen one — a `fn` field is accepted, which is the same two bytes of
+/// address — and it is recorded on the roadmap rather than worked around here.
+/// The two that do get here round-trip, tag intact on both sides of the store.
+#[test]
+fn a_static_structs_two_byte_fields_round_trip() {
+    let cases: [(&str, &str, &str, &str, u8); 2] = [
+        ("u16", "300", "301", "(G.f as u8)", 45),
+        ("fn(u8) -> u8", "bump", "dbl", "G.f(21)", 42),
+    ];
+    for (ty, init, reassigned, read, want) in cases {
+        let mut e = run(&format!(
+            "const OUT0: addr = 0x0900;\n\
+             const OUT1: addr = 0x0901;\n\
+             const OUT2: addr = 0x0902;\n\
+             fn bump(a: u8) -> u8 {{ return a + 1; }}\n\
+             fn dbl(a: u8) -> u8 {{ return a + a; }}\n\
+             struct D {{ f: {ty}, tag: u8 }}\n\
+             static G: D = D {{ f: {init}, tag: 9 }};\n\
+             #[reset]\nfn main() {{\n\
+             \x20   OUT0 = G.tag;\n\
+             \x20   G.f = {reassigned};\n\
+             \x20   OUT1 = {read};\n\
+             \x20   OUT2 = G.tag;\n    loop {{}}\n}}\n"
+        ));
+        assert_eq!(
+            (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+            (9, want, 9),
+            "a `{ty}` field of a static struct: the tag beside it must survive \
+             the store, and the field must read back"
+        );
+    }
+}
+
+/// Every kind of return value, out of every form a function is called by.
+///
+/// The mirror of `every_parameter_kind_survives_every_call_form`. Arguments go
+/// in through four separate staging routines and had drifted; returns come back
+/// through the register conventions — `A` for a byte, `A:Y` for a 16-bit
+/// number, `A:X` for anything reached by address — and these were found to
+/// agree. Kept because that is worth knowing, and because the next convention
+/// added has somewhere to prove itself.
+#[test]
+fn every_kind_of_return_value_survives_every_call_form() {
+    // (name, type, expression producing one, how to consume it, expected)
+    let kinds: [(&str, &str, &str, &str, u8); 6] = [
+        ("a u16", "u16", "300", "(r as u8) + 1", 45),
+        ("a pointer", "&u8", "&V", "*r + 1", 78),
+        ("a struct", "P", "P { x: 4, y: 38 }", "r.x + r.y", 42),
+        ("a str", "str", "\"abcd\"", "(r.len as u8) + 1", 5),
+        ("an enum", "C", "C::B", "(r as u8) + 1", 3),
+        // 20 from T[1], plus a length of 3.
+        ("a slice", "&[u8]", "T[1..4]", "r[0] + (r.len as u8)", 23),
+    ];
+    for (what, ty, produce, consume, want) in kinds {
+        let forms: [(&str, String, &str); 4] = [
+            (
+                "a direct call",
+                format!("fn g() -> {ty} {{ return {produce}; }}"),
+                "g()",
+            ),
+            (
+                "an inlined call",
+                format!("#[inline]\nfn g() -> {ty} {{ return {produce}; }}"),
+                "g()",
+            ),
+            (
+                "a recursive call",
+                format!(
+                    "fn g(d: u8) -> {ty} {{ if d == 0 {{ return {produce}; }} return g(d - 1); }}"
+                ),
+                "g(2)",
+            ),
+            (
+                "a call through a function pointer",
+                format!(
+                    "fn g() -> {ty} {{ return {produce}; }}\n\
+                     struct DV {{ call: fn() -> {ty} }}\n\
+                     static DEV: DV = DV {{ call: g }};"
+                ),
+                "DEV.call()",
+            ),
+        ];
+        for (form, decl, call) in forms {
+            let mut e = run(&format!(
+                "const OUT: addr = 0x0900;\n\
+                 static V: u8 = 77;\n\
+                 const T: [u8; 5] = [10, 20, 30, 40, 50];\n\
+                 struct P {{ x: u8, y: u8 }}\n\
+                 enum C {{ R, G, B }}\n\
+                 {decl}\n\
+                 #[reset]\nfn main() {{\n\
+                 \x20   let r: {ty} = {call};\n\
+                 \x20   OUT = {consume};\n    loop {{}}\n}}\n"
+            ));
+            assert_eq!(e.mem(0x0900), want, "{what} returned from {form}");
+        }
+    }
+}
+
+/// Field chains, which is what the address resolvers recurse through.
+///
+/// `resolve_static_addr` and `resolve_static_struct_lvalue` walk a chain a
+/// level at a time, and both were changed to answer three ways rather than
+/// two. Nothing about that should move a nested access, and this is how that
+/// stays true — read and write, a scalar field and a wide one, through a local
+/// and through a `static`, and passing an inner struct on by address.
+#[test]
+fn a_nested_field_chain_resolves_through_every_form() {
+    let cases: [(&str, &str, u8); 5] = [
+        (
+            "reading through a local",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 41, b: 300 } };
+                OUT = o.inner.a + o.tag;
+                loop {}
+            }
+        "#,
+            42,
+        ),
+        (
+            "writing through a local",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 0, b: 300 } };
+                o.inner.a = 41;
+                OUT = o.inner.a + o.tag;
+                loop {}
+            }
+        "#,
+            42,
+        ),
+        (
+            "a wide nested field, which stores two bytes",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 0, b: 300 } };
+                o.inner.b = 301;
+                OUT = (o.inner.b as u8) + 1;
+                loop {}
+            }
+        "#,
+            46,
+        ),
+        (
+            "through a static, whose base is an address not a slot",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u16 }
+            struct Out { tag: u8, inner: In }
+            static S: Out = Out { tag: 1, inner: In { a: 41, b: 300 } };
+            #[reset]
+            fn main() { OUT = S.inner.a + S.tag; loop {} }
+        "#,
+            42,
+        ),
+        (
+            "passing the inner struct on by address",
+            r#"
+            const OUT: addr = 0x0900;
+            struct In { a: u8, b: u8 }
+            struct Out { tag: u8, inner: In }
+            fn sum(i: In) -> u8 { return i.a + i.b; }
+            #[reset]
+            fn main() {
+                let o: Out = Out { tag: 1, inner: In { a: 4, b: 38 } };
+                OUT = sum(o.inner);
+                loop {}
+            }
+        "#,
+            42,
+        ),
+    ];
+    for (what, src, want) in cases {
+        let mut e = run(src);
+        assert_eq!(e.mem(0x0900), want, "a nested chain, {what}");
+    }
+}

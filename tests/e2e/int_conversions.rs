@@ -156,6 +156,12 @@ fn a_declared_type_still_wins_over_the_literals_own_range() {
 /// The explicit cast was already right (`tests/e2e/int_conversions.rs` has
 /// pinned `-1i8 as u16` since the fuzzer found it), and so was `return`. The
 /// other four now share that one code path rather than each having their own.
+///
+/// A sixth turned up later: a **match expression** unifies its arms at the
+/// wider type and extends each narrow one on the way out, and that arm was the
+/// last site still writing `LDY #$00` by hand. A match *statement* widens
+/// through the assignment it contains and was already right, which is why only
+/// the expression form was wrong — `match k { 0 => neg, _ => 300 }` gave 197.
 #[test]
 fn a_signed_byte_widens_with_its_sign_at_every_boundary() {
     let mut e = crate::common::exec::run(
@@ -172,6 +178,8 @@ fn a_signed_byte_widens_with_its_sign_at_every_boundary() {
         const O9: addr = 0x0909;
         const OA: addr = 0x090A;
         const OB: addr = 0x090B;
+        const OC: addr = 0x090C;
+        const OD: addr = 0x090D;
         struct S { f: i16 }
         fn take(p: i16) -> i16 { return p; }
         fn give(v: i8) -> i16 { return v; }
@@ -187,6 +195,8 @@ fn a_signed_byte_widens_with_its_sign_at_every_boundary() {
             arr[0] = a;
             let s: S = S { f: 0 };
             s.f = a;
+            let sel: u8 = 0;
+            let arm: i16 = match sel { 0 => a, _ => 300 };
             O0 = bound.low;    O1 = bound.high;
             O2 = assigned.low; O3 = assigned.high;
             O4 = arg.low;      O5 = arg.high;
@@ -195,6 +205,7 @@ fn a_signed_byte_widens_with_its_sign_at_every_boundary() {
             O8 = el.low;       O9 = el.high;
             let fl: i16 = s.f;
             OA = fl.low;       OB = fl.high;
+            OC = arm.low;      OD = arm.high;
             loop {}
         }
     "#,
@@ -207,6 +218,7 @@ fn a_signed_byte_widens_with_its_sign_at_every_boundary() {
         ("return", 0x0906),
         ("array element", 0x0908),
         ("struct field", 0x090A),
+        ("match-expression arm", 0x090C),
     ] {
         assert_eq!(at(base), 0xFFC5, "-59 widened at a {what} should stay -59");
     }
@@ -225,6 +237,8 @@ fn an_unsigned_byte_widens_with_zero_at_every_boundary() {
         const O5: addr = 0x0905;
         const O6: addr = 0x0906;
         const O7: addr = 0x0907;
+        const O8: addr = 0x0908;
+        const O9: addr = 0x0909;
         struct S { f: u16 }
         fn take(p: u16) -> u16 { return p; }
         #[reset]
@@ -236,11 +250,14 @@ fn an_unsigned_byte_widens_with_zero_at_every_boundary() {
             let arg: u16 = take(a);
             let arr: [u16; 2] = [0, 0];
             arr[0] = a;
+            let sel: u8 = 0;
+            let arm: u16 = match sel { 0 => a, _ => 300 };
             O0 = bound.low;    O1 = bound.high;
             O2 = assigned.low; O3 = assigned.high;
             O4 = arg.low;      O5 = arg.high;
             let el: u16 = arr[0];
             O6 = el.low;       O7 = el.high;
+            O8 = arm.low;      O9 = arm.high;
             loop {}
         }
     "#,
@@ -251,6 +268,7 @@ fn an_unsigned_byte_widens_with_zero_at_every_boundary() {
         ("assignment", 0x0902),
         ("argument", 0x0904),
         ("array element", 0x0906),
+        ("match-expression arm", 0x0908),
     ] {
         assert_eq!(
             at(base),

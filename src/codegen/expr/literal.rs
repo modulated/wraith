@@ -228,11 +228,20 @@ pub(super) fn generate_variable(
 
     // A bare function name evaluates to its 2-byte code address (a function
     // pointer): low byte in A, high byte in Y (the u16 register convention).
+    //
+    // A *variable* of function type is not that. It holds a pointer in its own
+    // storage and has to be read from there — `#<p` assembles to nothing at
+    // all, because `p` is a parameter, not a label. Having function type was
+    // enough to take this path, so passing a `fn(u8) -> u8` parameter on to
+    // another call named the parameter as though it were the function.
+    // Storage is what separates them: a function name has none.
     if let Some(sym) = info
         .resolved_symbols
         .get(&span)
         .or_else(|| info.table.lookup(name))
-        && (sym.kind == SymbolKind::Function || matches!(sym.ty, Type::Function(..)))
+        && (sym.kind == SymbolKind::Function
+            || (matches!(sym.ty, Type::Function(..))
+                && matches!(sym.location, crate::sema::table::SymbolLocation::None)))
     {
         emitter.emit_inst("LDA", &format!("#<{}", name));
         emitter.emit_inst("LDY", &format!("#>{}", name));
@@ -241,13 +250,12 @@ pub(super) fn generate_variable(
     }
 
     if let Some(sym) = info.resolved_symbols.get(&span) {
-        // Check if this is a u16/i16/b16 variable that needs both bytes loaded
-        let is_u16 = matches!(
-            sym.ty,
-            Type::Primitive(crate::ast::PrimitiveType::U16)
-                | Type::Primitive(crate::ast::PrimitiveType::I16)
-                | Type::Primitive(crate::ast::PrimitiveType::B16)
-        );
+        // Two bytes with the high byte in Y: the 16-bit numbers, and a
+        // function pointer held in a variable. Asked of the one table rather
+        // than by re-listing the primitives, which is how a function-pointer
+        // variable came to load as a single byte.
+        let is_u16 = crate::codegen::expr::is_two_byte_value(&sym.ty)
+            && !crate::codegen::expr::high_byte_in_x(&sym.ty);
 
         // Check if this is an enum variable (needs 2-byte pointer in A:X)
         let is_enum = if let Type::Named(type_name) = &sym.ty {

@@ -27,11 +27,20 @@ read against a current picture:
 | The fuzzer binds, copies, passes and returns slices | `docs/fuzz-coverage.md` |
 | The fuzzer builds a two-function call cycle, reaching the SCC path | `docs/fuzz-coverage.md` |
 | The fuzzer mixes the two widths the language widens between | `docs/fuzz-coverage.md` |
-| Implicit widening carries the source's sign at all six sites | `tests/e2e/int_conversions.rs` |
+| Implicit widening carries the source's sign at all seven sites | `tests/e2e/int_conversions.rs` |
 | Code-size benchmark counts emitted instructions, not just reserved bytes | `tests/code_size.rs` |
 | Binding, assignment and argument staging refuse an aggregate they cannot carry | `tests/e2e/aggregate_dispatch.rs` |
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
 | The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
+| Every parameter kind survives every call form — direct, inlined, recursive, indirect | `tests/e2e/aggregate_dispatch.rs` |
+| Every struct field kind round-trips; a whole-array store is refused where it cannot work | `tests/e2e/aggregate_dispatch.rs` |
+| Every return kind survives every call form — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
+| An interrupt arriving *mid-computation* leaves the interrupted work alone | `tests/e2e/interrupts_exec.rs` |
+| A function-pointer argument is sized and staged like the two bytes it is | `tests/e2e/vtable.rs` |
+| Re-pointing a `str` local writes both bytes, page crossing and all | `tests/e2e/strings_slices.rs` |
+| A match expression's arm widens by the arm's sign, not by zero | `tests/e2e/int_conversions.rs` |
+| A for-loop bound the counter cannot represent is refused, sign as well as width | `tests/e2e/control_flow.rs` |
+| Two-byte `static`s and `static` struct fields store both bytes — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -39,6 +48,16 @@ whose fallback is *another strategy* rather than a failure. The three sites
 that decide an aggregate's fate refuse what they cannot carry, and the
 resolvers under them now distinguish "not this shape" from "unhandled" rather
 than saying `None` to both.
+
+Its sibling — **one rule with several implementations** — keeps producing
+findings after the fallbacks were closed. A function pointer is two bytes with
+its high byte in Y, which is neither the number convention's reason nor the
+address convention's; three separate hand-written lists of "the wide types"
+omitted it, and each omission was a different silent wrong answer. The table
+(`param_byte_width`, `is_two_byte_value`, `high_byte_in_x`) already existed and
+already knew. The sweep through every codegen site that re-listed the wide
+types found five in total, and is written up under
+[Structure & maintainability](#structure--maintainability).
 
 ---
 
@@ -566,6 +585,108 @@ Also open:
   `array_of_struct_base` are narrow enough that their `None` has one meaning,
   and the `Option`-returning helpers outside `aggregate.rs` have not been
   audited against this distinction.
+- **Whole-array assignment means "repoint", and only a local can be
+  repointed.** A local array's slot holds a pointer to its data, so
+  `a = [4, 5, 6]` rebinds the slot. A `static` array and a struct field *are*
+  the data, at a fixed address, so there is nothing to repoint — and both used
+  to accept the assignment and store the literal's ROM address over the
+  elements. Refused now, naming the element-wise form.
+
+  The open question is a language one, not a bug: should assigning an array
+  *copy*? That would give the three forms one meaning, at the cost of changing
+  what the local form does today. Worth deciding before anything is built on
+  the current behaviour.
+
+- **Interrupts were only ever tested from the idle loop.** `pulse_irq` waits
+  for `main` to park in `loop {}` before asserting the line — where `main` has
+  stored everything it computed and there is nothing live to corrupt. But a
+  handler's zero-page frame may *share addresses* with `main`'s, because a
+  handler is not `main`'s callee and colouring cannot separate them; the whole
+  design rests on the handler saving that span and restoring it, and nothing
+  exercised that.
+
+  `run_interrupted` asserts the line every *n* instructions while `main` works,
+  so the handler is entered between the halves of a 16-bit add, inside a
+  multiply, across a `JSR` with the argument pool staged. The saves hold — a
+  negative result — and the test is worth its weight because of what it can
+  see: with the math working storage dropped from the save list (leaving the
+  push/pop balance intact, so nothing else breaks), the new test fails and
+  every existing interrupt test still passes.
+
+  The storm has to be bounded, which is worth knowing before writing another
+  one: an interrupt pulls the CPU out of `loop {}` as readily as out of
+  anything else, and the harness detects termination by the program counter
+  standing still, so an unbounded storm never halts.
+
+- **One rule, four implementations.** A call's arguments are staged in four
+  separate pieces of code — a direct `JSR`, an inlined body, a recursive call
+  that saves the callee's frame, and an indirect call through a fixed block —
+  and each decides a parameter's width and register convention for itself.
+  Three chances to differ, and they did: a struct reached an inlined callee as
+  the first two bytes of its *contents*, and a `str` and an enum reached a
+  tail-recursive one from the wrong register.
+
+  What made those findable was asking every kind through every form, which is
+  now `every_parameter_kind_survives_every_call_form`. The deeper fix would be
+  one staging routine the four share; the matrix is the cheap version, and it
+  means a fifth form has to answer for every kind.
+
+  Widening the matrix by one kind found two more. A **function pointer** is the
+  awkward case: two bytes, high byte in Y, and neither a number nor an address,
+  so it falls off any list written by enumerating "the 16-bit primitives, plus
+  the things reached by a pointer". A direct call reserved one staging byte for
+  it and shifted every later parameter down; the inlined path did the same. The
+  authoritative widths were already in `param_byte_width`, so the fix was to
+  ask rather than re-list.
+
+  **The sweep, done.** `PrimitiveType::U16` appears in thirteen codegen files,
+  each a site that decided the width question for itself. Most are legitimately
+  about *numbers* — a 16-bit add, a `u16` comparison, a match scrutinee — and no
+  address can reach them. The ones asking "how wide is this *value*" were
+  audited against `is_two_byte_value` / `high_byte_in_x`, and found three more:
+
+  * **A `str` local re-pointed.** Binding and assignment keep separate copies of
+    the width match, and the assignment copy had `str` on neither list, so
+    `s = "xy"` wrote the new pointer's low byte over the old and kept the old
+    high byte. String literals are laid out consecutively, so two of them
+    almost always share a page and the stale byte was accidentally right; the
+    test forces the crossing that makes it wrong.
+  * **A match expression's arm.** The last site still writing `LDY #$00` by
+    hand, so an `i8` arm of an `i16` match lost its sign. A match *statement*
+    widens through the assignment inside it and was already right, which is
+    why the earlier six-site sweep did not reach this one.
+  * **A for-loop bound of the wrong sign.** Not a width question but the same
+    shape: the runtime-bound check was a list of rejected *pairs*, about width
+    only, so an `i8` bound on a `u8` counter passed and the loop compared 254
+    against 2. Restated as range containment.
+
+  The pattern worth keeping from this: the authoritative table already existed
+  and already had the right answer in every one of these cases. Nothing needed
+  to be *decided*, only asked. A site that re-lists the variants is the defect,
+  independent of which variant it forgets.
+
+  **Two seams came back clean**, which is worth as much as the findings. A
+  `static` of every two-byte kind stores both bytes when reassigned — the
+  `Absolute` branch is a separate copy of the same decision and it agrees. So
+  do the fields of a `static` struct, which resolve through a different address
+  path from a local's. Both are pinned.
+
+  What is still open is the underlying merge — one staging routine, one width
+  question — rather than more sites converted one at a time.
+
+- **A `static` struct can only initialise some of its field kinds.** A `u16`
+  field and a `fn` field are accepted; a `str`, an enum and a `&T` are refused
+  at the initialiser as *not a compile-time constant*. That is inconsistent
+  rather than wrong: a `fn` field is two bytes of address resolved by the
+  assembler, and a `str` field is the same shape — a label reference to the
+  literal's data — so `const` evaluation could accept it on the same terms. A
+  `&T` pointing at another `static` is the same again once BSS addresses are
+  assigned.
+
+  The diagnostic is clear and the workaround (assign in `main`) is one line, so
+  this is a feature gap rather than a defect. Worth closing when static device
+  tables want a name beside their function pointers.
+
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,
   `types.rs` and `control_flow.rs` were already behavioral or are asserting
