@@ -41,6 +41,7 @@ read against a current picture:
 | A match expression's arm widens by the arm's sign, not by zero | `tests/e2e/int_conversions.rs` |
 | A for-loop bound the counter cannot represent is refused, sign as well as width | `tests/e2e/control_flow.rs` |
 | Two-byte `static`s and `static` struct fields store both bytes — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
+| The four call forms share one argument-staging routine and one width table | `src/codegen/expr/call.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -56,8 +57,9 @@ address convention's; three separate hand-written lists of "the wide types"
 omitted it, and each omission was a different silent wrong answer. The table
 (`param_byte_width`, `is_two_byte_value`, `high_byte_in_x`) already existed and
 already knew. The sweep through every codegen site that re-listed the wide
-types found five in total, and is written up under
-[Structure & maintainability](#structure--maintainability).
+types found five in total, and the four call forms that each staged arguments
+their own way are now one routine over one classification. Both are written up
+under [Structure & maintainability](#structure--maintainability).
 
 ---
 
@@ -618,18 +620,44 @@ Also open:
   anything else, and the harness detects termination by the program counter
   standing still, so an unbounded storm never halts.
 
-- **One rule, four implementations.** A call's arguments are staged in four
-  separate pieces of code — a direct `JSR`, an inlined body, a recursive call
-  that saves the callee's frame, and an indirect call through a fixed block —
-  and each decides a parameter's width and register convention for itself.
-  Three chances to differ, and they did: a struct reached an inlined callee as
-  the first two bytes of its *contents*, and a `str` and an enum reached a
-  tail-recursive one from the wrong register.
+- **One rule, four implementations.** *Done.* A call's arguments were staged in
+  four separate pieces of code — a direct `JSR`, an inlined body, a recursive
+  call that saves the callee's frame, and an indirect call through a fixed
+  block — and each decided a parameter's width and register convention for
+  itself. Three chances to differ, and they did: a struct reached an inlined
+  callee as the first two bytes of its *contents*, and a `str` and an enum
+  reached a tail-recursive one from the wrong register.
 
   What made those findable was asking every kind through every form, which is
-  now `every_parameter_kind_survives_every_call_form`. The deeper fix would be
-  one staging routine the four share; the matrix is the cheap version, and it
-  means a fifth form has to answer for every kind.
+  now `every_parameter_kind_survives_every_call_form`.
+
+  **The merge.** `ParamClass` answers the classification once — exhaustive over
+  `Type` with no catch-all, so a type added to the language has to say how it
+  is passed rather than defaulting to a byte — and `stage_argument` is the one
+  routine that writes an argument where the callee will look for it. All four
+  forms call it. What is left at each site is only what genuinely differs:
+  where the bytes wait (a staging pool, the fixed block, the parameter's own
+  slot), what has to be sheltered across a nested call, and how the site names
+  itself in a diagnostic.
+
+  Two invariants that used to be spread across the four now hold by
+  construction. The bytes written are always `ParamClass::width()`, which is
+  also what the caller reserved — the copies could disagree, and one did, so
+  `apply(bump, 7)` reserved a byte for a function pointer and wrote two. And a
+  parameter class no path can supply is a *refusal*, not a fallback to the
+  scalar store.
+
+  It is 214 lines shorter and emits byte-identical code: the size baseline did
+  not move. Verified by putting each of eight known miscompiles back one at a
+  time — a function pointer sized as a byte, a `str` and an enum on the number
+  convention, a truncated descriptor, an array staged as a byte, a struct from
+  its slot rather than its address, the widening always zero-extending, and a
+  two-byte value storing only its low half. All eight are caught, by named
+  tests, and none merely fails to compile.
+
+  The eighth was found *by* the exercise: the descriptor paths hard-coded `4`
+  where the reservation asked `width()`, so the two could still drift. Every
+  staged width now derives from the one classification.
 
   Widening the matrix by one kind found two more. A **function pointer** is the
   awkward case: two bytes, high byte in Y, and neither a number nor an address,
