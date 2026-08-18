@@ -44,6 +44,7 @@ read against a current picture:
 | The four call forms share one argument-staging routine and one width table | `src/codegen/expr/call.rs` |
 | The fuzzer passes a struct across a call and makes its value observable | `docs/fuzz-coverage.md` |
 | The fuzzer passes an enum across a call, tag and register convention both | `docs/fuzz-coverage.md` |
+| The fuzzer passes a `str` across a call — the last of the four staging kinds | `docs/fuzz-coverage.md` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -413,10 +414,32 @@ and an oracle that is merely *probably* right is worse than no oracle:
   is really A:X, the difference only the type registry knows because both are
   spelled `Named` — fails seed 30 of the default 120.
 
+  **`str` closed the set.** All four kinds that made the argument-staging
+  findings need hand probing — function pointer, struct, enum, `str` — now
+  reach a call from the generator. The oracle carries one literal's length; a
+  `.len` read goes through the pointer, so it is wrong exactly when the pointer
+  is.
+
+  Two things had to give. `.len` stages its pointer through the four-byte high
+  pool, so generating it freely inside expressions put **790 of 6000 seeds**
+  over the limit; only the term folded into the return is kept, which is what
+  tests the staging anyway. And a callee may take at most **two** of the four:
+  a descriptor and three addresses are ten of the argument pool's eleven bytes
+  before a single value parameter, so all four is a shape that cannot be staged
+  at all. Two still reaches several wide arguments side by side, which is where
+  an offset assuming one byte each goes wrong. 30 of 6000 seeds skip, against a
+  cap of 5%.
+
+  **The observability rule needed strengthening, and the same hole nearly
+  reappeared.** Folding *one* term into the return is not enough once a callee
+  takes two wide parameters: the second is passed and never read, so staging it
+  wrongly changes no answer. With one term, giving `str` the number convention
+  went uncaught. With a term per parameter, all three of struct, enum and `str`
+  are caught within the default 120 seeds.
+
   Still open here: a struct *returned* from a call, a struct behind a pointer,
-  an array field inside a struct, and enum payloads. **`str` arguments are the
-  last of the four kinds that made the argument-staging findings need hand
-  probing** — the oracle needs only a literal's length if reads stay at `.len`.
+  an array field inside a struct, enum payloads, and indexing a string rather
+  than measuring it.
 - **Shift counts at or past the width**, and constant expressions standing alone
   (typed by their own literals, not by the program around them — see the
   specification). Both are defined; neither is in the oracle.
