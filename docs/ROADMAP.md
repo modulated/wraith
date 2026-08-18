@@ -43,6 +43,7 @@ read against a current picture:
 | Two-byte `static`s and `static` struct fields store both bytes — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 | The four call forms share one argument-staging routine and one width table | `src/codegen/expr/call.rs` |
 | The fuzzer passes a struct across a call and makes its value observable | `docs/fuzz-coverage.md` |
+| The fuzzer passes an enum across a call, tag and register convention both | `docs/fuzz-coverage.md` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -400,10 +401,22 @@ and an oracle that is merely *probably* right is worse than no oracle:
   under one operator is a type error rather than a widening. Both operands are
   generated strictly at the function's own type instead.
 
+  **Enums followed, and were cheaper.** A unit enum's value *is* its variant
+  index, so the oracle carries one number and no block model. `f0` may take an
+  `ep: C` alongside the other two, chosen independently — which is what keeps
+  the three wide parameters from loading the staging block in every program
+  while still reaching the case where they do. Its tag is folded into the
+  return on the same rule as the field, and it fits any expression type, since
+  `(ep as T)` is a cast rather than storage of the aggregate type.
+
+  Checked the same way: giving an enum the *number* convention — A:Y, where it
+  is really A:X, the difference only the type registry knows because both are
+  spelled `Named` — fails seed 30 of the default 120.
+
   Still open here: a struct *returned* from a call, a struct behind a pointer,
-  and an array field inside a struct. `str` and enum arguments are untouched,
-  and are why four of the twelve findings in the argument-staging work had to
-  be probed by hand.
+  an array field inside a struct, and enum payloads. **`str` arguments are the
+  last of the four kinds that made the argument-staging findings need hand
+  probing** — the oracle needs only a literal's length if reads stay at `.len`.
 - **Shift counts at or past the width**, and constant expressions standing alone
   (typed by their own literals, not by the program around them — see the
   specification). Both are defined; neither is in the oracle.

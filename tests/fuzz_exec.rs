@@ -311,6 +311,11 @@ enum E {
         /// again: not a value in the registers and not a descriptor copied out
         /// of a slot.
         struct_arg: bool,
+        /// The same for `main`'s enum. Two bytes with the high byte in X, like
+        /// a pointer — but spelled `Named` like a struct, so only the type
+        /// registry tells the two apart, and a call form that decides by shape
+        /// alone gets it wrong.
+        enum_arg: bool,
     },
     /// A recursive call from inside the function itself, always at `d - 1` and
     /// never reachable at `d == 0`. Kept as its own node rather than an ordinary
@@ -323,6 +328,10 @@ enum E {
     /// call-graph cycle are one SCC, which is the case frame colouring solves
     /// with Tarjan and which a self-call — a cycle of one — never reaches.
     MutualCall(usize, Box<E>),
+    /// The enum's tag as a number: `(e as T)` in `main`, `(ep as T)` inside
+    /// the function that takes one. A unit enum's value *is* its variant
+    /// index, so the oracle needs nothing but that index.
+    EnumVal,
     /// `arr[<index>]`, in `main` only.
     Elem(Ix),
     /// `TBL[<index>]` — a `const` array, which lives in ROM and is reached
@@ -398,6 +407,9 @@ const ALEN: usize = 4;
 
 /// Fields in the generated struct.
 const SFIELDS: usize = 2;
+/// Variants of the generated unit enum. Three is enough for the tag to be a
+/// value rather than a flag, and few enough that the whole range is reachable.
+const EVARIANTS: usize = 3;
 
 /// A condition. Only ever a condition — `bool` as a *value* has its own
 /// widening rule, which is a separate question from control flow.
@@ -482,6 +494,11 @@ struct Func {
     /// that put two wide parameters in one staging block and shifted every
     /// value after them.
     struct_param: bool,
+    /// Whether a leading `ep: C` parameter carries `main`'s enum in. Chosen
+    /// independently of the other two, so a program takes any subset of the
+    /// three — which keeps the argument pool from being loaded to its limit in
+    /// every program while still reaching the case where it is.
+    enum_param: bool,
     /// The other half of the mutually recursive pair, when this function is
     /// one of them. Both members are `recursive`, and the shrinker needs the
     /// link: dissolving one without the other leaves a call to a function that
@@ -521,6 +538,8 @@ enum Scope {
         slice: bool,
         /// The same for the struct, which `xp` names.
         has_struct: bool,
+        /// And for the enum, which `ep` names.
+        has_enum: bool,
     },
 }
 
@@ -598,6 +617,11 @@ struct Gen<'a> {
     /// The function that takes a struct parameter, chosen the same way and for
     /// the same reasons as [`Gen::slice_taker`].
     struct_taker: Option<usize>,
+    /// The function that takes an enum parameter, chosen like the other two.
+    enum_taker: Option<usize>,
+    /// May the enum's tag be named here? True in `main` when the program
+    /// declares one, and inside the function that takes it.
+    allow_enum: bool,
     /// May `s.f{i}` be generated here? True in `main` when the program has
     /// aggregates, and inside the struct-taking function, where the same node
     /// renders against its parameter instead. Separate from `allow_aggregates`
@@ -683,6 +707,11 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // scope but a field is not: it reads through the parameter.
         if g.allow_fields && !g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
             return E::Field(g.rng.below(SFIELDS as u64) as usize);
+        }
+        // The tag is a small number cast to the expression's type, so unlike a
+        // field it fits any type and is not tied to the aggregate one.
+        if g.allow_enum && g.rng.below(100) < 12 {
+            return E::EnumVal;
         }
         // A slice element and a slice length are both storage of the program's
         // type once cast, so either anchors an expression as a variable does.
@@ -784,12 +813,13 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // it is charged rather than assumed to fit.
         let takes_slice = g.slice_taker == Some(id);
         let takes_struct = g.struct_taker == Some(id);
+        let takes_enum = g.enum_taker == Some(id);
         let widest = sig.params.iter().any(|t| t.wide());
         // A struct arrives as a two-byte address, so it is as wide as a `u16`
         // and never the widest thing here — a descriptor still is.
         let cost = if takes_slice {
             4
-        } else if takes_struct || widest {
+        } else if takes_struct || takes_enum || widest {
             2
         } else {
             1
@@ -814,6 +844,7 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
                 args,
                 slice_arg,
                 struct_arg: takes_struct,
+                enum_arg: takes_enum,
             };
         }
     }
@@ -1027,6 +1058,9 @@ struct Prog {
     aggregates: bool,
     arr_init: [i64; ALEN],
     field_init: [i64; SFIELDS],
+    /// Which variant `main`'s enum local holds, or `None` when the program
+    /// declares no enum.
+    enum_init: Option<usize>,
     /// The `const` table's contents. Declared whenever `aggregates` is set, and
     /// never written, so it needs no cell in the state.
     konst: [i64; ALEN],
@@ -1124,9 +1158,13 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // mutual edge. `allow_fields` is the struct's `allow_slices` — set
         // before the functions are generated, because this is where it is read.
         let struct_param = i == 0 && !is_candidate && g.allow_fields && partner.is_none();
+        // Independent of the other two, so the three wide parameters appear in
+        // every combination rather than always together.
+        let enum_param = i == 0 && !is_candidate && g.allow_enum && partner.is_none();
         // Read once here: the signature below needs it, and so does the return
         // expression further down.
         let takes_struct = struct_param;
+        let takes_enum = enum_param;
         // Otherwise the last function is the one allowed to recurse, and a
         // recursive one takes exactly one value parameter besides its budget,
         // so the self-call has one argument to vary. A pair member is recursive
@@ -1177,6 +1215,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         let saved_slices = g.allow_slices;
         let saved_main_slices = g.main_slices;
         let saved_fields = g.allow_fields;
+        let saved_enum = g.allow_enum;
         g.allow_aggregates = false;
         // Inside the function the only slice in scope is its own parameter,
         // which every slice expression there names and no statement can move.
@@ -1186,6 +1225,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // through `main`'s `s`, which is the renderer's business, not the
         // generator's.
         g.allow_fields = struct_param;
+        g.allow_enum = enum_param;
         g.main_slices = 0;
         let saved_var_types = std::mem::replace(&mut g.var_types, var_types.clone());
         let saved_current = g.current_fn;
@@ -1212,11 +1252,16 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // through `gen_arg`: a boundary operand may be generated at the *narrow*
         // half and rendered without a cast, and pairing that with a field of
         // the wide half under one operator is a type error, not a widening.
-        let base = if takes_struct {
+        let base = if takes_struct || takes_enum {
+            let term = if takes_struct {
+                E::Field(g.rng.below(SFIELDS as u64) as usize)
+            } else {
+                E::EnumVal
+            };
             E::Bin(
                 Box::new(gen_expr(g, sig.ret, 2, false)),
                 Op::Add,
-                Box::new(E::Field(g.rng.below(SFIELDS as u64) as usize)),
+                Box::new(term),
             )
         } else {
             gen_arg(g, sig.ret, 2)
@@ -1257,7 +1302,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
                 _ if g.rng.below(2) == 0 => E::Bin(Box::new(call), op, Box::new(other)),
                 _ => E::Bin(Box::new(other), op, Box::new(call)),
             }
-        } else if takes_struct {
+        } else if takes_struct || takes_enum {
             // Passing the struct proves nothing unless its value reaches an
             // output cell, and generation alone does not get there: a field
             // read landed in a local the return never used, so staging the
@@ -1265,10 +1310,15 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
             // with the bug in place. So the struct-taker's result *is* a
             // function of a field. Both operands at its own type, for the
             // reason given at the base case above.
+            let term = if takes_struct {
+                E::Field(g.rng.below(SFIELDS as u64) as usize)
+            } else {
+                E::EnumVal
+            };
             E::Bin(
                 Box::new(gen_expr(g, sig.ret, 3, false)),
                 Op::Add,
-                Box::new(E::Field(g.rng.below(SFIELDS as u64) as usize)),
+                Box::new(term),
             )
         } else {
             gen_arg(g, sig.ret, 3)
@@ -1276,12 +1326,13 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // A recursive struct-taker returns its base case at `d == 0`, which is
         // why that carries a field read too — otherwise a budget of zero hides
         // the argument entirely.
-        let ret = if recursive && takes_struct {
-            E::Bin(
-                Box::new(ret),
-                Op::Add,
-                Box::new(E::Field(g.rng.below(SFIELDS as u64) as usize)),
-            )
+        let ret = if recursive && (takes_struct || takes_enum) {
+            let term = if takes_struct {
+                E::Field(g.rng.below(SFIELDS as u64) as usize)
+            } else {
+                E::EnumVal
+            };
+            E::Bin(Box::new(ret), Op::Add, Box::new(term))
         } else {
             ret
         };
@@ -1294,6 +1345,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         g.allow_loops = saved_loops;
         g.allow_aggregates = saved_aggregates;
         g.allow_fields = saved_fields;
+        g.allow_enum = saved_enum;
         g.allow_slices = saved_slices;
         g.main_slices = saved_main_slices;
         g.var_types = saved_var_types;
@@ -1302,6 +1354,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         funcs.push(Func {
             slice_param,
             struct_param,
+            enum_param,
             partner,
             var_types,
             ret_ty: sig.ret,
@@ -1352,12 +1405,14 @@ fn gen_program(seed: u64) -> Prog {
         allow_loops: true,
         allow_aggregates: false,
         allow_fields: false,
+        allow_enum: false,
         vtable: 0,
         allow_indirect: false,
         allow_slices: false,
         main_slices: 0,
         slice_taker: None,
         struct_taker: None,
+        enum_taker: None,
         current_fn: 0,
         cand_sig: None,
         pool_left: ARG_POOL_BYTES,
@@ -1418,6 +1473,13 @@ fn gen_program(seed: u64) -> Prog {
     // is one. The per-function loop saves and restores this, so it still reads
     // `aggregates` by the time `main`'s body is generated.
     g.allow_fields = aggregates;
+    // The enum is its own decision, independent of the aggregates: it is a
+    // separate lowering — a two-byte value with its high byte in X, spelled
+    // `Named` like a struct — and programs without one have to keep being
+    // generated.
+    let enum_init: Option<usize> =
+        (g.rng.below(100) < 50).then(|| g.rng.below(EVARIANTS as u64) as usize);
+    g.allow_enum = enum_init.is_some();
 
     // A cycle of two, when there are two non-candidate functions to make one
     // from. It is the two highest-numbered of them, which is also where the
@@ -1435,6 +1497,7 @@ fn gen_program(seed: u64) -> Prog {
     g.slice_taker = (count > vtable && funcs[0].slice_param).then_some(0);
     // Same rule for the struct, and it needs `main` to actually declare one.
     g.struct_taker = (aggregates && count > vtable && funcs[0].struct_param).then_some(0);
+    g.enum_taker = (enum_init.is_some() && count > vtable && funcs[0].enum_param).then_some(0);
 
     let n = 2 + g.rng.below(3) as usize;
     let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
@@ -1451,6 +1514,7 @@ fn gen_program(seed: u64) -> Prog {
         aggregates,
         arr_init,
         field_init,
+        enum_init,
         konst,
         vtable,
         slices,
@@ -1470,6 +1534,10 @@ struct St<'a> {
     /// them, and in a program that declares neither.
     arr: Vec<i64>,
     fields: Vec<i64>,
+    /// The variant `main`'s enum holds, or the one handed to a callee. `None`
+    /// where no enum is in scope, which is what makes naming one there a bug
+    /// in the generator rather than a silent zero.
+    tag: Option<usize>,
     counters: Vec<i64>,
     loops: Vec<i64>,
     /// The function being executed and its remaining budget, for a self-call.
@@ -1496,6 +1564,7 @@ fn call_fn(
     args: &[i64],
     slice: Option<(usize, usize)>,
     fields: &[i64],
+    tag: Option<usize>,
     ty: Ty,
 ) -> i64 {
     let f = &p.funcs[id];
@@ -1518,6 +1587,9 @@ fn call_fn(
         // of the values rather than an aliasing model.
         arr: Vec::new(),
         fields: fields.to_vec(),
+        // The tag, when this function takes the enum. A unit enum's value is
+        // its variant index, so nothing else has to travel.
+        tag,
         // Function bodies contain no loops, so these are never indexed; sized
         // rather than empty so a generator change cannot panic here.
         counters: p.counters.iter().map(|c| *c as i64).collect(),
@@ -1551,6 +1623,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             args,
             slice_arg,
             struct_arg,
+            enum_arg,
         } => {
             // Each argument at its *parameter's* type, not at the type of the
             // expression the call sits inside. The two are the same only in a
@@ -1563,8 +1636,18 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                 .collect();
             let sl = slice_arg.map(|k| st.slices[k]);
             let fl: &[i64] = if *struct_arg { &st.fields } else { &[] };
+            let tg = if *enum_arg { st.tag } else { None };
             narrow(
-                call_fn(st.prog, *id, budget.unwrap_or(0) as i64, &vals, sl, fl, ty),
+                call_fn(
+                    st.prog,
+                    *id,
+                    budget.unwrap_or(0) as i64,
+                    &vals,
+                    sl,
+                    fl,
+                    tg,
+                    ty,
+                ),
                 ty,
             )
         }
@@ -1577,7 +1660,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             // The struct travels down the recursion the same way `sp` does:
             // the self-call passes `xp` along, so the callee sees this frame's.
             narrow(
-                call_fn(st.prog, id, budget - 1, &[v], sl, &st.fields, ty),
+                call_fn(st.prog, id, budget - 1, &[v], sl, &st.fields, st.tag, ty),
                 ty,
             )
         }
@@ -1587,7 +1670,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             // The partner takes no slice — a pair member never carries one, so
             // there is nothing to pass along.
             narrow(
-                call_fn(st.prog, *partner, budget - 1, &[v], None, &[], ty),
+                call_fn(st.prog, *partner, budget - 1, &[v], None, &[], None, ty),
                 ty,
             )
         }
@@ -1598,11 +1681,11 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             };
             let callee = st.prog.candidate(k);
             let v = eval(arg, st, st.prog.funcs[callee].var_types[0]);
-            narrow(call_fn(st.prog, callee, 0, &[v], None, &[], ty), ty)
+            narrow(call_fn(st.prog, callee, 0, &[v], None, &[], None, ty), ty)
         }
         E::DevCall(arg) => {
             let v = eval(arg, st, st.prog.funcs[st.dev].var_types[0]);
-            narrow(call_fn(st.prog, st.dev, 0, &[v], None, &[], ty), ty)
+            narrow(call_fn(st.prog, st.dev, 0, &[v], None, &[], None, ty), ty)
         }
         E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
         E::Konst(ix) => narrow(st.prog.konst[eval_index(ix, st, ty)], ty),
@@ -1612,6 +1695,12 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         }
         E::SliceLen(i) => narrow(st.slices[*i].1 as i64, ty),
         E::Field(i) => st.fields[*i],
+        // `(e as T)` is the variant index at `T`. Reaching this with no tag
+        // would mean the generator named an enum no scope has.
+        E::EnumVal => narrow(
+            st.tag.expect("an enum read with no enum in scope") as i64,
+            ty,
+        ),
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
@@ -1725,6 +1814,7 @@ fn expected(p: &Prog) -> Vec<u32> {
             .zip(p.var_types.iter())
             .map(|(v, t)| narrow(*v, *t))
             .collect(),
+        tag: p.enum_init,
         arr: if p.aggregates {
             at_base(&p.arr_init)
         } else {
@@ -1822,6 +1912,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             args,
             slice_arg,
             struct_arg,
+            enum_arg,
         } => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(b) = budget {
@@ -1837,6 +1928,10 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             if *struct_arg {
                 parts.push(struct_name(sc));
             }
+            // Then the enum, in the order `render_func` declares them.
+            if *enum_arg {
+                parts.push(enum_name(sc));
+            }
             parts.extend(args.iter().map(|a| render(a, ty, sc)));
             format!("f{id}({})", parts.join(", "))
         }
@@ -1845,6 +1940,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
                 id,
                 slice,
                 has_struct,
+                has_enum,
                 ..
             } = sc
             else {
@@ -1854,7 +1950,8 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             // there is nothing else in scope it could pass.
             let sl = if slice { "sp, " } else { "" };
             let xs = if has_struct { "xp, " } else { "" };
-            format!("f{id}(d - 1, {sl}{xs}{})", render(arg, ty, sc))
+            let es = if has_enum { "ep, " } else { "" };
+            format!("f{id}(d - 1, {sl}{xs}{es}{})", render(arg, ty, sc))
         }
         // The partner's budget is this frame's, one lower. A pair member takes
         // no slice, so there is none to pass.
@@ -1862,6 +1959,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
+        E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
         E::Dispatch { sel, arg } => {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
         }
@@ -1893,6 +1991,14 @@ fn struct_name(sc: Scope) -> String {
     match sc {
         Scope::Main => "s".to_string(),
         Scope::Func { .. } => "xp".to_string(),
+    }
+}
+
+/// What the enum is called here, on the same rule as the struct.
+fn enum_name(sc: Scope) -> String {
+    match sc {
+        Scope::Main => "e".to_string(),
+        Scope::Func { .. } => "ep".to_string(),
     }
 }
 
@@ -1993,6 +2099,7 @@ fn render_func(p: &Prog, id: usize) -> String {
         params: f.params,
         slice: f.slice_param,
         has_struct: f.struct_param,
+        has_enum: f.enum_param,
     };
 
     let mut params: Vec<String> = Vec::new();
@@ -2011,6 +2118,11 @@ fn render_func(p: &Prog, id: usize) -> String {
     // the layout that shifted the values after them.
     if f.struct_param {
         params.push("xp: S".to_string());
+    }
+    // Then the enum, also two bytes by address. Three wide parameters ahead of
+    // the values is the heaviest staging block the generator builds.
+    if f.enum_param {
+        params.push("ep: C".to_string());
     }
     for i in 0..f.params {
         params.push(format!("p{i}: {}", f.var_types[i].name()));
@@ -2088,6 +2200,12 @@ fn render_program(p: &Prog, form: Form) -> String {
         } else {
             format!("{v}")
         }
+    };
+    let enum_decl = if p.enum_init.is_some() {
+        let vs: Vec<String> = (0..EVARIANTS).map(|i| format!("C{i}")).collect();
+        format!("enum C {{ {} }}\n", vs.join(", "))
+    } else {
+        String::new()
     };
     let struct_decl = if p.aggregates {
         let fields: Vec<String> = (0..SFIELDS).map(|i| format!("f{i}: {tn}")).collect();
@@ -2172,6 +2290,9 @@ static DEV: VT = VT {{ call: {} }};\n",
             .collect();
         decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", ")));
     }
+    if let Some(k) = p.enum_init {
+        decls.push_str(&format!("    let e: C = C::C{k};\n"));
+    }
     for (i, (start, len)) in p.slices.iter().enumerate() {
         decls.push_str(&format!(
             "    let sl{i}: &[{tn}] = TBL[{start}..{}];\n",
@@ -2224,22 +2345,22 @@ static DEV: VT = VT {{ call: {} }};\n",
     match form {
         Form::Inline => {
             format!(
-                "{head}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
+                "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
             )
         }
         Form::ViaFunction => format!(
-            "{head}{struct_decl}{funcs}{vtable_decl}fn body() {{\n{decls}{body}{stores}}}\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}fn body() {{\n{decls}{body}{stores}}}\n\
              #[reset]\nfn main() {{\n    body();\n    loop {{}}\n}}\n"
         ),
         Form::ViaMatch => format!(
-            "{head}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
                  match sel {{\n        0 => {{\n{}{}        }}\n        _ => {{}}\n    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&bump(&body)),
             bump(&bump(&stores)),
         ),
         Form::ViaLoop => format!(
-            "{head}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&body),
             bump(&stores),
@@ -2451,6 +2572,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::Elem(_)
             | E::Konst(_)
             | E::Field(_)
+            | E::EnumVal
             | E::SliceElem(..)
             | E::SliceLen(_) => {}
         }
@@ -2522,6 +2644,7 @@ fn strip_self_calls(e: &mut E) {
         | E::Elem(_)
         | E::Konst(_)
         | E::Field(_)
+        | E::EnumVal
         | E::SliceElem(..)
         | E::SliceLen(_) => {}
     }
@@ -2703,7 +2826,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_index(ix, target, seen)
         }
-        E::Field(_) => {
+        E::Field(_) | E::EnumVal => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -2965,14 +3088,15 @@ fn generated_programs_compute_what_they_should() {
     // degrade into one that mostly tests the pool limit.
     if skipped > 0 {
         eprintln!(
-            "{skipped} of {iters} seeds skipped: argument-staging pool exhausted \
-             (a documented limit — see docs/ROADMAP.md)"
+            "{skipped} of {iters} seeds skipped: a fixed zero-page pool ran out — the \
+             argument-staging one, or the expression temporaries (both documented limits, \
+             see docs/ROADMAP.md)"
         );
     }
     assert!(
         skipped * 20 <= iters.max(20),
-        "{skipped} of {iters} seeds hit the argument-staging pool limit; the generator's \
-         budget for it has stopped working"
+        "{skipped} of {iters} seeds hit a zero-page pool limit; the generator's budget \
+         for it has stopped working"
     );
 }
 
@@ -3015,6 +3139,8 @@ fn the_generator_covers_what_it_claims() {
         slice_lens: usize,
         struct_args: usize,
         field_reads: usize,
+        enum_args: usize,
+        enum_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -3030,7 +3156,10 @@ fn the_generator_covers_what_it_claims() {
             }
             E::Loop(_) => s.loop_vars += 1,
             E::Call {
-                args, struct_arg, ..
+                args,
+                struct_arg,
+                enum_arg,
+                ..
             } => {
                 s.calls += 1;
                 if args.len() > 1 {
@@ -3038,6 +3167,9 @@ fn the_generator_covers_what_it_claims() {
                 }
                 if *struct_arg {
                     s.struct_args += 1;
+                }
+                if *enum_arg {
+                    s.enum_args += 1;
                 }
                 for a in args {
                     walk_e(a, s, narrow_half);
@@ -3068,6 +3200,7 @@ fn the_generator_covers_what_it_claims() {
             E::SliceElem(_, _) => s.slice_reads += 1,
             E::SliceLen(_) => s.slice_lens += 1,
             E::Field(_) => s.field_reads += 1,
+            E::EnumVal => s.enum_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
         }
     }
@@ -3193,6 +3326,12 @@ fn the_generator_covers_what_it_claims() {
     assert!(seen.slice_reads > 0, "never read a slice element");
     assert!(seen.slice_lens > 0, "never read a slice length");
     assert!(seen.field_reads > 0, "never read a struct field");
+    assert!(
+        seen.enum_args > 0,
+        "never passed an enum to a function — two bytes with the high byte in X, spelled \
+         `Named` like a struct, so only the type registry tells the two apart"
+    );
+    assert!(seen.enum_reads > 0, "never read an enum's tag");
 }
 
 /// No name the generator invents may be a reserved word.
@@ -3216,6 +3355,9 @@ fn generated_names_are_never_reserved() {
         "s".into(),
         "xp".into(),
         "sp".into(),
+        "e".into(),
+        "ep".into(),
+        "C".into(),
         "d".into(),
         "sel".into(),
         "w0".into(),
@@ -3237,6 +3379,7 @@ fn generated_names_are_never_reserved() {
                 params: 2,
                 slice: false,
                 has_struct: false,
+                has_enum: false,
             }
             .var(id),
         );
@@ -3309,6 +3452,7 @@ fn the_oracle_matches_the_documented_semantics() {
         aggregates: false,
         arr_init: [0; ALEN],
         field_init: [0; SFIELDS],
+        enum_init: None,
         konst: [0; ALEN],
         vtable: 0,
         slices: Vec::new(),
@@ -3317,6 +3461,7 @@ fn the_oracle_matches_the_documented_semantics() {
     };
     let st = St {
         prog: &empty,
+        tag: None,
         vars: vec![0; VARS],
         arr: Vec::new(),
         fields: Vec::new(),
@@ -3384,7 +3529,6 @@ mod coverage {
     /// nothing the count has not already told them.
     const REASONS: &[(&str, &str)] = &[
         // --- Items -----------------------------------------------------------
-        ("Item::Enum", "enums are not generated; see the roadmap"),
         (
             "Item::Import",
             "programs are single-file; the import graph is covered by tests/e2e/imports.rs",
@@ -3411,7 +3555,6 @@ mod coverage {
             "Expr::AnonStructInit",
             "the named form is generated; this one adds inference, not a codegen path",
         ),
-        ("Expr::EnumVariant", "enums are not generated"),
         (
             "Expr::CpuFlagCarry",
             "a status flag depends on the instruction that last set it — a property of the \
@@ -3481,6 +3624,17 @@ mod coverage {
     /// table overstates its case: `Div` appearing in most programs says nothing
     /// about division by zero, which never occurs.
     const CAVEATS: &[(&str, &str)] = &[
+        (
+            "Item::Enum",
+            "the enum is unit-only: three variants, no payloads. A payload is a separate \
+             lowering — the value points at a per-declaration block the oracle would have \
+             to model — and the tag is what a call has to carry correctly",
+        ),
+        (
+            "Expr::EnumVariant",
+            "only in `main`'s declaration, so which variant is program state and never a \
+             branch the oracle has to follow",
+        ),
         (
             "BinaryOp::Div",
             "divisor is always a nonzero positive literal — zero is an error-behaviour \
