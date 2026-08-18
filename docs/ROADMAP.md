@@ -45,6 +45,7 @@ read against a current picture:
 | The fuzzer passes a struct across a call and makes its value observable | `docs/fuzz-coverage.md` |
 | The fuzzer passes an enum across a call, tag and register convention both | `docs/fuzz-coverage.md` |
 | The fuzzer passes a `str` across a call — the last of the four staging kinds | `docs/fuzz-coverage.md` |
+| Operator precedence checked against the specification's table, metamorphically | `tests/fuzz_exec.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -307,13 +308,31 @@ Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
 
-- **Division by zero.** Currently sidestepped with nonzero positive literal
-  divisors (positive also keeps `i8::MIN / -1` out). Pinning the behaviour first
-  would let the generator use arbitrary divisors.
-- **Precedence.** Expressions are fully parenthesised so a precedence
-  disagreement cannot masquerade as a codegen bug; a separate generator that
-  omits parentheses and compares against a parenthesised twin would test it
-  metamorphically.
+- **Division by zero — blocked on a language decision, not on the fuzzer.**
+  Currently sidestepped with nonzero positive literal divisors (positive also
+  keeps `i8::MIN / -1` out). The specification says the result is *undefined*
+  with no runtime check, so there is nothing for an oracle to predict: the
+  generator cannot use arbitrary divisors until the language says what `x / 0`
+  produces. Defining it (a fixed value, or a documented trap) is the
+  prerequisite; widening the generator is the easy half that follows.
+- **Precedence.** *Done.* Expressions from the main generator are still fully
+  parenthesised, on purpose — a precedence disagreement there would masquerade
+  as a codegen bug, and the two are fixed in different places. A separate
+  generator now covers the table: one random operator chain written as a flat
+  sequence and as the tree the specification says that sequence means, both
+  compiled and run, both required to agree. No oracle is involved; nothing has
+  to know the right *answer*, only that the two groupings are the same one.
+
+  Six levels mix freely there — `* / %`, `+ -`, `<< >>`, `&`, `^`, `|` — since
+  each takes and returns the same integer type. The relational and logical
+  levels cannot join them: `a & b == c` groups as `a & (b == c)` by the table,
+  which does not type-check, so no program can tell that grouping from the
+  other one.
+
+  Checked by breaking the *reference* rather than the compiler, which is the
+  only direction that proves anything here: `+` above `*`, a shift above `*`,
+  `&` given `|`'s level, `%` given `^`'s, and right- instead of
+  left-associativity are all detected.
 - **Mixing across signedness families**, and narrowing. *The widening half is
   done.* A program now picks one family and mixes its two widths — `u8`/`u16`
   or `i8`/`i16` — because those are the two the language widens between without
@@ -440,9 +459,14 @@ and an oracle that is merely *probably* right is worse than no oracle:
   Still open here: a struct *returned* from a call, a struct behind a pointer,
   an array field inside a struct, enum payloads, and indexing a string rather
   than measuring it.
-- **Shift counts at or past the width**, and constant expressions standing alone
-  (typed by their own literals, not by the program around them — see the
-  specification). Both are defined; neither is in the oracle.
+- **Constant expressions standing alone** — typed by their own literals, not by
+  the program around them. Defined in the specification, not in the oracle.
+- **Shift counts at or past the width.** This entry used to claim the behaviour
+  was defined. It is not: the specification says nothing about a count at or
+  past the type's width, and the compiler currently accepts `a << 9` on a `u8`
+  without comment. So this is the same shape as division by zero — a language
+  decision first, an oracle afterwards — and the precedence generator above
+  deliberately keeps its shift counts below the width for exactly that reason.
 
 ### Code-size benchmark
 

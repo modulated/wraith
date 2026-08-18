@@ -4476,3 +4476,176 @@ mod coverage {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Precedence, checked metamorphically
+// ---------------------------------------------------------------------------
+//
+// Every expression the generator above emits is *fully parenthesised*, on
+// purpose: a precedence disagreement could otherwise masquerade as a codegen
+// bug, and the two are fixed in different places. The cost is that the
+// precedence table — fourteen levels in the specification — is never
+// exercised by it at all.
+//
+// This closes that without an oracle. One random operator chain is written two
+// ways: as a flat sequence with no parentheses, and as the tree the
+// specification says that sequence means, fully parenthesised. Both are
+// compiled and run. If the parser groups the flat form any other way, the two
+// answers differ; nothing has to know what the right answer *is*.
+//
+// Six levels can mix freely here — `* / %`, `+ -`, `<< >>`, `&`, `^`, `|` —
+// because every one of them takes and returns the same integer type. The
+// relational and logical levels cannot join them: `a & b == c` groups as
+// `a & (b == c)` by the table, which does not type-check, so no program can
+// tell the two groupings apart.
+mod precedence {
+    use super::{Rng, Ty};
+
+    /// An operator, with the precedence the specification gives it. Lower
+    /// binds tighter, and every one of these is left-associative.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct POp {
+        sym: &'static str,
+        prec: u8,
+    }
+
+    const POPS: [POp; 10] = [
+        POp { sym: "*", prec: 4 },
+        POp { sym: "/", prec: 4 },
+        POp { sym: "%", prec: 4 },
+        POp { sym: "+", prec: 5 },
+        POp { sym: "-", prec: 5 },
+        POp { sym: "<<", prec: 6 },
+        POp { sym: ">>", prec: 6 },
+        POp { sym: "&", prec: 9 },
+        POp { sym: "^", prec: 10 },
+        POp { sym: "|", prec: 11 },
+    ];
+
+    /// A term is a variable or a literal; the tree is built over these.
+    enum PE {
+        Term(String),
+        Bin(Box<PE>, POp, Box<PE>),
+    }
+
+    /// The tree the specification's table says a flat sequence denotes.
+    ///
+    /// Precedence climbing, left-associative throughout, which is what the
+    /// table's "Left-to-right" column means. This is the *reference*: it is
+    /// written from the specification, not from the parser, so agreeing with
+    /// it is evidence about the parser rather than about itself.
+    fn climb(
+        terms: &mut std::vec::IntoIter<String>,
+        ops: &mut std::iter::Peekable<std::vec::IntoIter<POp>>,
+        min_prec: u8,
+    ) -> PE {
+        let mut lhs = PE::Term(terms.next().expect("a chain starts with a term"));
+        while let Some(op) = ops.peek().copied() {
+            // Lower number binds tighter, so an operator is taken here only
+            // while it binds at least as tightly as the level being parsed.
+            if op.prec > min_prec {
+                break;
+            }
+            ops.next();
+            // Left-associative: the right side takes only operators strictly
+            // tighter than this one, so `a - b - c` is `(a - b) - c`.
+            let rhs = climb(terms, ops, op.prec.saturating_sub(1));
+            lhs = PE::Bin(Box::new(lhs), op, Box::new(rhs));
+        }
+        lhs
+    }
+
+    fn render_tree(e: &PE) -> String {
+        match e {
+            PE::Term(t) => t.clone(),
+            PE::Bin(l, op, r) => {
+                format!("({} {} {})", render_tree(l), op.sym, render_tree(r))
+            }
+        }
+    }
+
+    /// One chain: the flat token sequence, and the parenthesised tree it means.
+    fn chain(rng: &mut Rng, ty: Ty) -> (String, String) {
+        let width = ty.bits() as u64;
+        let n = 3 + rng.below(4) as usize; // 3..6 terms
+        let mut terms: Vec<String> = Vec::new();
+        let mut ops: Vec<POp> = Vec::new();
+
+        let a_term = |rng: &mut Rng| -> String {
+            match rng.below(4) {
+                0 => "a".to_string(),
+                1 => "b".to_string(),
+                2 => "c".to_string(),
+                _ => format!("{}", rng.below(if width == 8 { 200 } else { 5000 })),
+            }
+        };
+
+        terms.push(a_term(rng));
+        for _ in 1..n {
+            let op = POPS[rng.below(POPS.len() as u64) as usize];
+            // A `/` or `%` needs a divisor that is certainly not zero, and a
+            // shift needs a count below the width — the specification leaves
+            // division by zero undefined and says nothing about a count at or
+            // past the width, so neither belongs in a test about *grouping*.
+            //
+            // The term right after the operator is the one it takes: whatever
+            // the surrounding precedence, nothing can bind between an operator
+            // and its immediate right-hand term.
+            let t = match op.sym {
+                "/" | "%" => format!("{}", 1 + rng.below(if width == 8 { 90 } else { 4000 })),
+                "<<" | ">>" => format!("{}", rng.below(width)),
+                _ => a_term(rng),
+            };
+            ops.push(op);
+            terms.push(t);
+        }
+
+        let flat = {
+            let mut s = terms[0].clone();
+            for (op, t) in ops.iter().zip(terms[1..].iter()) {
+                s.push_str(&format!(" {} {}", op.sym, t));
+            }
+            s
+        };
+        let tree = {
+            let mut ti = terms.clone().into_iter();
+            let mut oi = ops.clone().into_iter().peekable();
+            render_tree(&climb(&mut ti, &mut oi, u8::MAX))
+        };
+        (flat, tree)
+    }
+
+    fn program(expr: &str, ty: Ty) -> String {
+        let tn = ty.name();
+        format!(
+            "const OUT0: addr = 0x0900;\nconst OUT1: addr = 0x0901;\n\
+             #[reset]\nfn main() {{\n\
+             \x20   let a: {tn} = 37;\n\
+             \x20   let b: {tn} = 5;\n\
+             \x20   let c: {tn} = 129;\n\
+             \x20   let r: {tn} = {expr};\n\
+             \x20   OUT0 = (r as u8);\n\
+             \x20   OUT1 = ((r >> 8) as u8);\n    loop {{}}\n}}\n"
+        )
+    }
+
+    #[test]
+    fn parentheses_the_table_implies_do_not_change_the_answer() {
+        let iters = super::iterations() * 4;
+        for i in 0..iters {
+            let mut rng = Rng::new(0x9E37_79B9u64 ^ i);
+            let ty = if i % 2 == 0 { Ty::U8 } else { Ty::U16 };
+            let (flat, tree) = chain(&mut rng, ty);
+            let mut a = crate::common::exec::run(&program(&flat, ty));
+            let mut b = crate::common::exec::run(&program(&tree, ty));
+            let (a0, a1) = (a.mem(0x0900), a.mem(0x0901));
+            let (b0, b1) = (b.mem(0x0900), b.mem(0x0901));
+            assert_eq!(
+                (a0, a1),
+                (b0, b1),
+                "iteration {i}: the flat form and the grouping the table implies disagree\n  \
+                 flat: {flat}\n  tree: {tree}"
+            );
+        }
+    }
+}
