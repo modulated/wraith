@@ -29,7 +29,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Assign` | 400 |  |
 | `Expr` | 400 |  |
 | `Return` | 352 | every generated function returns a value of the program's type, so the `u8`/`i8` (A) and `u16`/`i16` (A:Y) return conventions are covered but the pointer one (A:X) is not — that needs aggregates |
-| `If` | 363 |  |
+| `If` | 368 |  |
 | `While` | 158 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
 | `Loop` | 400 |  |
 | `For` | 400 | bounds are literals; a computed bound is not generated |
@@ -47,13 +47,13 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Literal` | 400 |  |
 | `Variable` | 400 |  |
 | `Binary` | 398 |  |
-| `Unary` | 270 |  |
-| `Cast` | 391 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
+| `Unary` | 267 |  |
+| `Cast` | 392 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
 | `Field` | 295 | two fields of the program's type; no nested struct and no array field |
 | `Index` | 272 | the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, because the language does no bounds checking and an out-of-range access would be the generator's bug rather than the compiler's |
 | `Slice` | 141 | always a sub-range of the `const` table, with literal bounds. That table lives in ROM and nothing writes it, so a slice is a read-only view and the oracle needs its two numbers rather than an alias model. A descriptor reaches a slice four ways — a range expression, a copy from another slice, a call to `mk`, and a parameter — which are four different codegen paths. Slices of a local array, of another slice, and with computed bounds are not generated |
 | `Call` | 400 | 1-3 arguments at either width, a return type of either width, and a callee that reads only its own scope, so argument evaluation order cannot be observed. A narrow argument to a wide parameter is widened by the language rather than by a cast, and the arithmetic happens at the narrow type first — which is the order this generates calls to check. The call graph is acyclic apart from recursion, which comes two ways: a function that calls itself, and a pair that call each other. Both are bounded by a budget parameter that every recursive edge decrements, so termination is a property of the shape — a pair member cannot reach its partner by an ordinary call, which would pass a fresh literal budget and reset the cycle's own depth. The pair is what puts two functions in one call-graph SCC, which is the case frame colouring solves with Tarjan and which a self-call never reaches. Cycles of three or more are not generated. Nesting depth is limited by the compiler's 11-byte argument-staging pool, which a call whose list does not fit spills to the software stack one argument at a time: the generator budgets a level's worth, and a program that exhausts it anyway is skipped and counted rather than reported |
-| `CallIndirect` | 92 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
+| `CallIndirect` | 87 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
 | `StructInit` | 312 |  |
 | `AnonStructInit` | — | not generated: the named form is generated; this one adds inference, not a codegen path |
 | `EnumVariant` | — | not generated: enums are not generated |
@@ -83,24 +83,24 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Add` | 312 |  |
-| `Sub` | 337 |  |
-| `Mul` | 298 |  |
-| `Div` | 329 | divisor is always a nonzero positive literal — zero is an error-behaviour question, and positive keeps `i8::MIN / -1` out |
-| `Mod` | 335 | divisor as for `Div` |
-| `BitAnd` | 311 |  |
-| `BitOr` | 326 |  |
-| `BitXor` | 312 |  |
+| `Add` | 337 |  |
+| `Sub` | 344 |  |
+| `Mul` | 290 |  |
+| `Div` | 320 | divisor is always a nonzero positive literal — zero is an error-behaviour question, and positive keeps `i8::MIN / -1` out |
+| `Mod` | 333 | divisor as for `Div` |
+| `BitAnd` | 320 |  |
+| `BitOr` | 327 |  |
+| `BitXor` | 320 |  |
 | `Shl` | 325 | shift count is a literal below the type's width, where the result is the plain shift |
-| `Shr` | 322 | shift count as for `Shl` |
-| `Eq` | 284 |  |
-| `Ne` | 87 |  |
-| `Lt` | 106 |  |
-| `Gt` | 213 |  |
-| `Le` | 98 |  |
-| `Ge` | 106 |  |
-| `And` | 81 |  |
-| `Or` | 51 |  |
+| `Shr` | 311 | shift count as for `Shl` |
+| `Eq` | 283 |  |
+| `Ne` | 89 |  |
+| `Lt` | 108 |  |
+| `Gt` | 211 |  |
+| `Le` | 92 |  |
+| `Ge` | 112 |  |
+| `And` | 79 |  |
+| `Or` | 40 |  |
 
 ## Unary operators
 
@@ -108,7 +108,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 |---|---:|---|
 | `Neg` | 206 | only on a literal |
 | `BitNot` | — | not generated: would widen the oracle for no new codegen path — `^ -1` covers the same lowering |
-| `Not` | 137 | only on a condition |
+| `Not` | 129 | only on a condition |
 | `AddrOf` | — | not generated: pointers are not generated |
 | `Deref` | — | not generated: pointers are not generated |
 
@@ -139,9 +139,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | Construct | Programs | Notes |
 |---|---:|---|
 | `U8` | 400 |  |
-| `I8` | 317 |  |
+| `I8` | 311 |  |
 | `U16` | 400 |  |
-| `I16` | 283 |  |
+| `I16` | 281 |  |
 | `Bool` | — | not generated: generated only as a condition, which is never spelled as a type |
 | `Char` | — | not generated: no character arithmetic is generated |
 | `B8` | — | not generated: BCD is covered by tests/e2e/bcd.rs |

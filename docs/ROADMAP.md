@@ -42,6 +42,7 @@ read against a current picture:
 | A for-loop bound the counter cannot represent is refused, sign as well as width | `tests/e2e/control_flow.rs` |
 | Two-byte `static`s and `static` struct fields store both bytes — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 | The four call forms share one argument-staging routine and one width table | `src/codegen/expr/call.rs` |
+| The fuzzer passes a struct across a call and makes its value observable | `docs/fuzz-coverage.md` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -378,9 +379,31 @@ and an oracle that is merely *probably* right is worse than no oracle:
   bytes fails seed 119, and copying two bytes of a returned descriptor fails
   three of the first hundred and twenty. It also found a fourth on its way in:
   `s = mk();` had no codegen path where `let s: &[u8] = mk();` did.
-- **Aggregates across a call.** A struct is a local today — never passed,
-  returned, or pointed at — and an array field inside a struct is not
-  generated. Both are shapes where a miscompile has already been found by hand.
+- **Aggregates across a call.** *The struct-argument half is done.* `f0` may now
+  take a leading `xp: S` beside its slice parameter, `main` hands over its own
+  struct, and the callee reads fields through it. No aliasing model was needed,
+  for the same reason the slice needed none: the callee only *reads*, so the
+  field values carry in unchanged.
+
+  **Generating the shape was not enough, and that is the lesson.** The first
+  version passed a struct in 11 of 120 programs and read a field in 5 — and
+  still caught nothing, because the read landed in a local the return never
+  used. A field read that reaches no output cell cannot distinguish a correct
+  staging from a wrong one. So the struct-taker's *result* is now a function of
+  a field: its return type is the aggregate type and both its return and its
+  base case carry a field term. With that, misclassifying a struct as an
+  ordinary two-byte value fails 3 seeds in the default 120.
+
+  Building that term needs care about which level it sits at. A return operand
+  may be generated at the *narrow* half of the pair and rendered with no cast —
+  that is what `E::At` records — so pairing it with a field of the wide half
+  under one operator is a type error rather than a widening. Both operands are
+  generated strictly at the function's own type instead.
+
+  Still open here: a struct *returned* from a call, a struct behind a pointer,
+  and an array field inside a struct. `str` and enum arguments are untouched,
+  and are why four of the twelve findings in the argument-staging work had to
+  be probed by hand.
 - **Shift counts at or past the width**, and constant expressions standing alone
   (typed by their own literals, not by the program around them — see the
   specification). Both are defined; neither is in the oracle.
@@ -455,6 +478,27 @@ being reached through a dozen `continue`s.
 The failure is still a compile error rather than a miscompile, and the fuzzer
 budgets one argument per level to match, skipping and counting anything that
 overruns anyway.
+
+### The expression temp pool runs out under combined pressure
+
+A second fixed zero-page pool, separate from the argument one above: the
+four-byte high pool (`$F0-$F3`) that a `u8` multiply, a pointer compare and a
+string index allocate their working storage from.
+
+It became reachable when the fuzzer started passing structs. A function taking
+a slice *and* a struct, recursing, with a multiply in the recursive call's
+argument holds four bytes of descriptor and two of address while the multiply
+asks for its own — and the compiler stops with *temporary storage exhausted in
+u8 multiply*. Seed 270 of the execution fuzzer is the repro; no shorter
+hand-written program reproduces it, which is itself the point: the trigger is
+cumulative pressure, not any one construct.
+
+Like its sibling it is a **compile error and never a wrong answer** — 6000
+seeds produced no miscompile — so the harness skips it under `is_known_limit`
+and it is recorded here rather than reported as a bug on every run. Removing it
+means the same restructuring the argument-pool item describes: values pushed
+straight from the registers they are produced in, rather than through a
+zero-page slot with a fixed budget.
 
 ### A mutable slice type
 

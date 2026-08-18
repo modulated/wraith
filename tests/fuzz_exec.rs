@@ -305,6 +305,12 @@ enum E {
         /// alongside the scalar arguments, which is the widest thing the
         /// argument pool ever holds.
         slice_arg: Option<usize>,
+        /// Whether `main`'s struct is handed to a struct-taking callee. There
+        /// is only one struct in scope, so this is a yes/no where the slice is
+        /// an index. Staged as a two-byte *address*, which is a third thing
+        /// again: not a value in the registers and not a descriptor copied out
+        /// of a slot.
+        struct_arg: bool,
     },
     /// A recursive call from inside the function itself, always at `d - 1` and
     /// never reachable at `d == 0`. Kept as its own node rather than an ordinary
@@ -470,6 +476,12 @@ struct Func {
     /// to high — so the only caller is `main`, and `main` is the only scope
     /// that has a slice to hand over.
     slice_param: bool,
+    /// Whether a leading `xp: S` parameter carries `main`'s struct in, by
+    /// address. Set under the same conditions as `slice_param` and on the same
+    /// function, so a program can hand over both at once — which is the case
+    /// that put two wide parameters in one staging block and shifted every
+    /// value after them.
+    struct_param: bool,
     /// The other half of the mutually recursive pair, when this function is
     /// one of them. Both members are `recursive`, and the shrinker needs the
     /// link: dissolving one without the other leaves a call to a function that
@@ -507,6 +519,8 @@ enum Scope {
         /// Whether this function carries a slice, which a self-call has to
         /// pass along and which `sp` names.
         slice: bool,
+        /// The same for the struct, which `xp` names.
+        has_struct: bool,
     },
 }
 
@@ -581,6 +595,15 @@ struct Gen<'a> {
     /// Always `f0`, and unreachable from any function body, so a call site that
     /// names it is in `main` and has a slice to pass.
     slice_taker: Option<usize>,
+    /// The function that takes a struct parameter, chosen the same way and for
+    /// the same reasons as [`Gen::slice_taker`].
+    struct_taker: Option<usize>,
+    /// May `s.f{i}` be generated here? True in `main` when the program has
+    /// aggregates, and inside the struct-taking function, where the same node
+    /// renders against its parameter instead. Separate from `allow_aggregates`
+    /// because `arr` and `TBL` are *not* in scope inside a function and a
+    /// field now is.
+    allow_fields: bool,
     /// May a slice expression be generated here? True in `main` when the
     /// program declares slices, and inside `f0` when it takes one — the same
     /// restriction as the other aggregates, for the same reason.
@@ -655,6 +678,11 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
                 1 => E::Konst(gen_index(g)),
                 _ => E::Field(g.rng.below(SFIELDS as u64) as usize),
             };
+        }
+        // Inside the struct-taking function the array and the table are out of
+        // scope but a field is not: it reads through the parameter.
+        if g.allow_fields && !g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
+            return E::Field(g.rng.below(SFIELDS as u64) as usize);
         }
         // A slice element and a slice length are both storage of the program's
         // type once cast, so either anchors an expression as a variable does.
@@ -755,10 +783,13 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // descriptor is four bytes and so is the widest of all, which is why
         // it is charged rather than assumed to fit.
         let takes_slice = g.slice_taker == Some(id);
+        let takes_struct = g.struct_taker == Some(id);
         let widest = sig.params.iter().any(|t| t.wide());
+        // A struct arrives as a two-byte address, so it is as wide as a `u16`
+        // and never the widest thing here — a descriptor still is.
         let cost = if takes_slice {
             4
-        } else if widest {
+        } else if takes_struct || widest {
             2
         } else {
             1
@@ -782,6 +813,7 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
                 budget,
                 args,
                 slice_arg,
+                struct_arg: takes_struct,
             };
         }
     }
@@ -1085,6 +1117,16 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // Its partner would have to pass one on every mutual call, and a pair
         // member has none: they are shaped alike so the cycle closes.
         let slice_param = i == 0 && !is_candidate && g.allow_slices && partner.is_none();
+        // The struct rides on the same function and under the same three
+        // conditions, for the same reasons: a vtable candidate is reached by an
+        // indirect call, which stages at a fixed address and cannot carry an
+        // aggregate; a pair member's partner would have to pass one on every
+        // mutual edge. `allow_fields` is the struct's `allow_slices` — set
+        // before the functions are generated, because this is where it is read.
+        let struct_param = i == 0 && !is_candidate && g.allow_fields && partner.is_none();
+        // Read once here: the signature below needs it, and so does the return
+        // expression further down.
+        let takes_struct = struct_param;
         // Otherwise the last function is the one allowed to recurse, and a
         // recursive one takes exactly one value parameter besides its budget,
         // so the self-call has one argument to vary. A pair member is recursive
@@ -1107,7 +1149,15 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
             };
             let s = Sig {
                 params: (0..n).map(|_| g.pair.pick(g.rng)).collect(),
-                ret: g.pair.pick(g.rng),
+                // The struct-taking function returns the aggregate type, so a
+                // field read is type-compatible with its return expression and
+                // can be folded into it below. Both are halves of the pair, so
+                // this is a legal pick and not a new type.
+                ret: if takes_struct {
+                    g.base
+                } else {
+                    g.pair.pick(g.rng)
+                },
                 recursive,
             };
             g.sigs[i] = s.clone();
@@ -1126,10 +1176,16 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         let saved_aggregates = g.allow_aggregates;
         let saved_slices = g.allow_slices;
         let saved_main_slices = g.main_slices;
+        let saved_fields = g.allow_fields;
         g.allow_aggregates = false;
         // Inside the function the only slice in scope is its own parameter,
         // which every slice expression there names and no statement can move.
         g.allow_slices = slice_param;
+        // A field, unlike the array and the table, *is* in scope inside the
+        // function that takes the struct — reached through `xp` rather than
+        // through `main`'s `s`, which is the renderer's business, not the
+        // generator's.
+        g.allow_fields = struct_param;
         g.main_slices = 0;
         let saved_var_types = std::mem::replace(&mut g.var_types, var_types.clone());
         let saved_current = g.current_fn;
@@ -1152,7 +1208,19 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         // recursing at `d == 0` would pass `d - 1` on a `u8` and wrap to 255.
         g.self_call = false;
         g.mutual_call = None;
-        let base = gen_arg(g, sig.ret, 2);
+        // The struct-taker's base case is built strictly at its own type, not
+        // through `gen_arg`: a boundary operand may be generated at the *narrow*
+        // half and rendered without a cast, and pairing that with a field of
+        // the wide half under one operator is a type error, not a widening.
+        let base = if takes_struct {
+            E::Bin(
+                Box::new(gen_expr(g, sig.ret, 2, false)),
+                Op::Add,
+                Box::new(E::Field(g.rng.below(SFIELDS as u64) as usize)),
+            )
+        } else {
+            gen_arg(g, sig.ret, 2)
+        };
 
         // Statements need somewhere to assign, and a parameter is not it, so a
         // function with no locals is a bare `return`.
@@ -1189,8 +1257,33 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
                 _ if g.rng.below(2) == 0 => E::Bin(Box::new(call), op, Box::new(other)),
                 _ => E::Bin(Box::new(other), op, Box::new(call)),
             }
+        } else if takes_struct {
+            // Passing the struct proves nothing unless its value reaches an
+            // output cell, and generation alone does not get there: a field
+            // read landed in a local the return never used, so staging the
+            // argument wrongly changed no answer and the fuzzer stayed quiet
+            // with the bug in place. So the struct-taker's result *is* a
+            // function of a field. Both operands at its own type, for the
+            // reason given at the base case above.
+            E::Bin(
+                Box::new(gen_expr(g, sig.ret, 3, false)),
+                Op::Add,
+                Box::new(E::Field(g.rng.below(SFIELDS as u64) as usize)),
+            )
         } else {
             gen_arg(g, sig.ret, 3)
+        };
+        // A recursive struct-taker returns its base case at `d == 0`, which is
+        // why that carries a field read too — otherwise a budget of zero hides
+        // the argument entirely.
+        let ret = if recursive && takes_struct {
+            E::Bin(
+                Box::new(ret),
+                Op::Add,
+                Box::new(E::Field(g.rng.below(SFIELDS as u64) as usize)),
+            )
+        } else {
+            ret
         };
         g.self_call = false;
         g.mutual_call = None;
@@ -1200,6 +1293,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         g.callable = saved_callable;
         g.allow_loops = saved_loops;
         g.allow_aggregates = saved_aggregates;
+        g.allow_fields = saved_fields;
         g.allow_slices = saved_slices;
         g.main_slices = saved_main_slices;
         g.var_types = saved_var_types;
@@ -1207,6 +1301,7 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
 
         funcs.push(Func {
             slice_param,
+            struct_param,
             partner,
             var_types,
             ret_ty: sig.ret,
@@ -1256,11 +1351,13 @@ fn gen_program(seed: u64) -> Prog {
         mutual_call: None,
         allow_loops: true,
         allow_aggregates: false,
+        allow_fields: false,
         vtable: 0,
         allow_indirect: false,
         allow_slices: false,
         main_slices: 0,
         slice_taker: None,
+        struct_taker: None,
         current_fn: 0,
         cand_sig: None,
         pool_left: ARG_POOL_BYTES,
@@ -1316,6 +1413,11 @@ fn gen_program(seed: u64) -> Prog {
         (0..2).map(|_| gen_range(&mut g)).collect()
     };
     g.allow_slices = !slices.is_empty();
+    // Decided here too, and for the same reason: `f0` may take the struct as a
+    // parameter, so the functions have to be generated knowing whether there
+    // is one. The per-function loop saves and restores this, so it still reads
+    // `aggregates` by the time `main`'s body is generated.
+    g.allow_fields = aggregates;
 
     // A cycle of two, when there are two non-candidate functions to make one
     // from. It is the two highest-numbered of them, which is also where the
@@ -1331,6 +1433,8 @@ fn gen_program(seed: u64) -> Prog {
     // `f0` is the only function that can take a slice, and only when it exists
     // and is not one of the table's candidates.
     g.slice_taker = (count > vtable && funcs[0].slice_param).then_some(0);
+    // Same rule for the struct, and it needs `main` to actually declare one.
+    g.struct_taker = (aggregates && count > vtable && funcs[0].struct_param).then_some(0);
 
     let n = 2 + g.rng.below(3) as usize;
     let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
@@ -1384,12 +1488,14 @@ struct St<'a> {
 /// Call a generated function. Its locals are fresh per invocation — which is
 /// what the compiler's frame save/restore has to reproduce across a recursive
 /// call — and it reads nothing but its own scope, so no caller state is passed.
+#[allow(clippy::too_many_arguments)]
 fn call_fn(
     p: &Prog,
     id: usize,
     budget: i64,
     args: &[i64],
     slice: Option<(usize, usize)>,
+    fields: &[i64],
     ty: Ty,
 ) -> i64 {
     let f = &p.funcs[id];
@@ -1405,9 +1511,13 @@ fn call_fn(
     let mut st = St {
         prog: p,
         vars,
-        // A function names no aggregate, so there is nothing to carry in.
+        // A function names no array and no table — those stay `main`'s. The
+        // struct is different: it is passed by *address*, so the callee reads
+        // the caller's own fields and the values carry in unchanged. Nothing
+        // writes them through the parameter, which is what keeps this a copy
+        // of the values rather than an aliasing model.
         arr: Vec::new(),
-        fields: Vec::new(),
+        fields: fields.to_vec(),
         // Function bodies contain no loops, so these are never indexed; sized
         // rather than empty so a generator change cannot panic here.
         counters: p.counters.iter().map(|c| *c as i64).collect(),
@@ -1440,6 +1550,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             budget,
             args,
             slice_arg,
+            struct_arg,
         } => {
             // Each argument at its *parameter's* type, not at the type of the
             // expression the call sits inside. The two are the same only in a
@@ -1451,8 +1562,9 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                 .map(|(a, pt)| eval(a, st, *pt))
                 .collect();
             let sl = slice_arg.map(|k| st.slices[k]);
+            let fl: &[i64] = if *struct_arg { &st.fields } else { &[] };
             narrow(
-                call_fn(st.prog, *id, budget.unwrap_or(0) as i64, &vals, sl, ty),
+                call_fn(st.prog, *id, budget.unwrap_or(0) as i64, &vals, sl, fl, ty),
                 ty,
             )
         }
@@ -1462,14 +1574,22 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             // The slice travels down the recursion unchanged: the self-call
             // passes `sp` along, so the callee sees what this frame sees.
             let sl = st.slices.first().copied();
-            narrow(call_fn(st.prog, id, budget - 1, &[v], sl, ty), ty)
+            // The struct travels down the recursion the same way `sp` does:
+            // the self-call passes `xp` along, so the callee sees this frame's.
+            narrow(
+                call_fn(st.prog, id, budget - 1, &[v], sl, &st.fields, ty),
+                ty,
+            )
         }
         E::MutualCall(partner, arg) => {
             let (_, budget) = st.current.expect("a mutual call outside a function");
             let v = eval(arg, st, st.prog.funcs[*partner].var_types[0]);
             // The partner takes no slice — a pair member never carries one, so
             // there is nothing to pass along.
-            narrow(call_fn(st.prog, *partner, budget - 1, &[v], None, ty), ty)
+            narrow(
+                call_fn(st.prog, *partner, budget - 1, &[v], None, &[], ty),
+                ty,
+            )
         }
         E::Dispatch { sel, arg } => {
             let k = match sel {
@@ -1478,11 +1598,11 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             };
             let callee = st.prog.candidate(k);
             let v = eval(arg, st, st.prog.funcs[callee].var_types[0]);
-            narrow(call_fn(st.prog, callee, 0, &[v], None, ty), ty)
+            narrow(call_fn(st.prog, callee, 0, &[v], None, &[], ty), ty)
         }
         E::DevCall(arg) => {
             let v = eval(arg, st, st.prog.funcs[st.dev].var_types[0]);
-            narrow(call_fn(st.prog, st.dev, 0, &[v], None, ty), ty)
+            narrow(call_fn(st.prog, st.dev, 0, &[v], None, &[], ty), ty)
         }
         E::Elem(ix) => st.arr[eval_index(ix, st, ty)],
         E::Konst(ix) => narrow(st.prog.konst[eval_index(ix, st, ty)], ty),
@@ -1701,6 +1821,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             budget,
             args,
             slice_arg,
+            struct_arg,
         } => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(b) = budget {
@@ -1711,24 +1832,36 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             if let Some(k) = slice_arg {
                 parts.push(format!("sl{k}"));
             }
+            // Then the struct, by name — the caller hands over a place and the
+            // callee takes its address.
+            if *struct_arg {
+                parts.push(struct_name(sc));
+            }
             parts.extend(args.iter().map(|a| render(a, ty, sc)));
             format!("f{id}({})", parts.join(", "))
         }
         E::SelfCall(arg) => {
-            let Scope::Func { id, slice, .. } = sc else {
+            let Scope::Func {
+                id,
+                slice,
+                has_struct,
+                ..
+            } = sc
+            else {
                 unreachable!("a self-call outside a function")
             };
             // A recursive function that took a slice hands the same one down;
             // there is nothing else in scope it could pass.
             let sl = if slice { "sp, " } else { "" };
-            format!("f{id}(d - 1, {sl}{})", render(arg, ty, sc))
+            let xs = if has_struct { "xp, " } else { "" };
+            format!("f{id}(d - 1, {sl}{xs}{})", render(arg, ty, sc))
         }
         // The partner's budget is this frame's, one lower. A pair member takes
         // no slice, so there is none to pass.
         E::MutualCall(partner, arg) => format!("f{partner}(d - 1, {})", render(arg, ty, sc)),
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
-        E::Field(f) => format!("s.f{f}"),
+        E::Field(f) => format!("{}.f{f}", struct_name(sc)),
         E::Dispatch { sel, arg } => {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
         }
@@ -1750,6 +1883,16 @@ fn slice_name(i: usize, sc: Scope) -> String {
     match sc {
         Scope::Main => format!("sl{i}"),
         Scope::Func { .. } => "sp".to_string(),
+    }
+}
+
+/// What the struct is called here. `main` declares `s`; the function that takes
+/// one calls it `xp`, and the same `E::Field` node reads through whichever is
+/// in scope — which is the point of passing it at all.
+fn struct_name(sc: Scope) -> String {
+    match sc {
+        Scope::Main => "s".to_string(),
+        Scope::Func { .. } => "xp".to_string(),
     }
 }
 
@@ -1849,6 +1992,7 @@ fn render_func(p: &Prog, id: usize) -> String {
         id,
         params: f.params,
         slice: f.slice_param,
+        has_struct: f.struct_param,
     };
 
     let mut params: Vec<String> = Vec::new();
@@ -1861,6 +2005,12 @@ fn render_func(p: &Prog, id: usize) -> String {
     // type — not this function's return type, which is its own choice.
     if f.slice_param {
         params.push(format!("sp: &[{}]", p.base.name()));
+    }
+    // Then the struct, by address. Declared after the descriptor so a function
+    // taking both puts four bytes and then two in the staging block, which is
+    // the layout that shifted the values after them.
+    if f.struct_param {
+        params.push("xp: S".to_string());
     }
     for i in 0..f.params {
         params.push(format!("p{i}: {}", f.var_types[i].name()));
@@ -2738,7 +2888,17 @@ fn shrink(p: &Prog, form: Form, kind: Kind) -> Prog {
 /// here keeps the run spent on wrong answers; the count is reported so it
 /// cannot quietly become the common case.
 fn is_known_limit(why: &str) -> bool {
+    // Two fixed zero-page pools the generator can overrun. Both are compile
+    // errors and neither has ever produced a wrong answer, which is what makes
+    // them limits rather than bugs — see "Known limits found by stress
+    // testing" in `docs/ROADMAP.md`.
+    //
+    // The second only became reachable when a struct joined the arguments: a
+    // function taking a slice *and* a struct, recursing, with a multiply in the
+    // recursive call's argument, holds four bytes of descriptor and two of
+    // address while the multiply asks for its own. 9 seeds in 6000.
     why.contains("argument-evaluation pool exhausted")
+        || why.contains("temporary storage exhausted")
 }
 
 /// One generated case, checked against the oracle in every surface form.
@@ -2853,6 +3013,8 @@ fn the_generator_covers_what_it_claims() {
         widenings: usize,
         slice_reads: usize,
         slice_lens: usize,
+        struct_args: usize,
+        field_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -2867,10 +3029,15 @@ fn the_generator_covers_what_it_claims() {
                 walk_e(inner, s, narrow_half);
             }
             E::Loop(_) => s.loop_vars += 1,
-            E::Call { args, .. } => {
+            E::Call {
+                args, struct_arg, ..
+            } => {
                 s.calls += 1;
                 if args.len() > 1 {
                     s.multi_arg_calls += 1;
+                }
+                if *struct_arg {
+                    s.struct_args += 1;
                 }
                 for a in args {
                     walk_e(a, s, narrow_half);
@@ -2900,7 +3067,8 @@ fn the_generator_covers_what_it_claims() {
             }
             E::SliceElem(_, _) => s.slice_reads += 1,
             E::SliceLen(_) => s.slice_lens += 1,
-            E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) | E::Field(_) => {}
+            E::Field(_) => s.field_reads += 1,
+            E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
         }
     }
     fn walk_b(b: &B, s: &mut Seen, narrow_half: Ty) {
@@ -3014,6 +3182,17 @@ fn the_generator_covers_what_it_claims() {
         "never called through an installed vtable — the shape where which function runs \
          is program state rather than anything the call graph records"
     );
+    assert!(
+        seen.struct_args > 0,
+        "never passed a struct to a function — the shape where the argument is neither a \
+         value in the registers nor a descriptor copied out of a slot, but the *address* \
+         of a place the caller owns"
+    );
+    // Counted since slices arrived and never checked, so a generator change
+    // could have stopped producing either and nothing would have said so.
+    assert!(seen.slice_reads > 0, "never read a slice element");
+    assert!(seen.slice_lens > 0, "never read a slice length");
+    assert!(seen.field_reads > 0, "never read a struct field");
 }
 
 /// No name the generator invents may be a reserved word.
@@ -3035,6 +3214,8 @@ fn generated_names_are_never_reserved() {
     let mut names: Vec<String> = vec![
         "arr".into(),
         "s".into(),
+        "xp".into(),
+        "sp".into(),
         "d".into(),
         "sel".into(),
         "w0".into(),
@@ -3055,6 +3236,7 @@ fn generated_names_are_never_reserved() {
                 id: 0,
                 params: 2,
                 slice: false,
+                has_struct: false,
             }
             .var(id),
         );
