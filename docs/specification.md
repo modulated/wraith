@@ -3828,9 +3828,47 @@ let j: i8 = -128 - 1;    // 127 (signed underflow wraps)
 ```
 
 **Division and Modulo:**
-- Division by zero: Result is undefined (no runtime check)
-- Modulo by zero: Result is undefined (no runtime check)
-- Programmer responsibility to check divisor
+
+Division truncates toward zero, and the remainder takes the dividend's sign:
+`-23 / 5` is `-4` and `-23 % 5` is `-3`.
+
+Division and modulo **by zero are defined**, not undefined: both yield the
+all-ones value of the type.
+
+| Expression | Result |
+|---|---|
+| `u8 x / 0`, `u8 x % 0` | `0xFF` |
+| `u16 x / 0`, `u16 x % 0` | `0xFFFF` |
+| `i8 x / 0`, `i8 x % 0` | `-1` |
+| `i16 x / 0`, `i16 x % 0` | `-1` |
+
+This is what the hardware sequence already produces rather than a value chosen
+for its own sake: shift-and-subtract division with a zero divisor succeeds at
+every trial subtraction, so the quotient fills with ones. Defining it costs
+nothing — the check is three instructions and was already being emitted — and
+it means a program that divides by zero gets the same answer every time instead
+of whatever an uninitialized byte held.
+
+RISC-V's M extension defines the same value for the same reason. It differs in
+one detail: there the *remainder* of `x % 0` is the dividend, where here it is
+all-ones like the quotient. One value for both is simpler to state and to rely
+on.
+
+There is **no runtime check and no trap**. A zero divisor is not an error at
+run time; it produces the sentinel and execution continues.
+
+A divisor the compiler can see is zero is a *compile-time* error:
+
+```rust
+let x: u8 = a / 0;         // error: division by zero
+let y: u8 = a % (3 - 3);   // error: modulo by zero
+let z: u8 = a / b;         // fine: `b` is only known at run time
+```
+
+The sentinel exists for the second case — a divisor that is zero only
+sometimes, which no compiler can catch. A divisor that is *always* zero says
+nothing about the dividend and is a mistake rather than a choice, so it is
+refused where it can be seen.
 
 ### Short-Circuit Evaluation
 

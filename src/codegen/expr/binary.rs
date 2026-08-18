@@ -1201,6 +1201,49 @@ fn generate_modulo_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
 // sign(a) ⊕ sign(b), and the remainder takes the sign of the dividend `a`.
 // ---------------------------------------------------------------------------
 
+/// The divide-by-zero early-out for a *signed* division or modulo.
+///
+/// `x / 0` and `x % 0` are all-ones at every width and signedness. The signed
+/// paths cannot get that from the unsigned core they wrap: `abs()` leaves a
+/// zero divisor zero, the core does return all-ones, and the sign correction
+/// afterwards then turns it into `+1` for a negative dividend — so `-100 / 0`
+/// answered `1` while `100 / 0` answered `-1`.
+///
+/// Answering it before the wrapper starts fixes that and says the rule in one
+/// place: the signed path no longer depends on the core's sentinel surviving a
+/// transformation it was never checked against.
+///
+/// Emits the test and the branch; the caller emits its body, then
+/// [`emit_signed_zero_divisor_tail`] with the same labels.
+fn emit_signed_zero_divisor_check(emitter: &mut Emitter, wide: bool) -> (String, String) {
+    let temp = emitter.memory_layout.temp_reg();
+    let zero = emitter.next_label("sz");
+    let done = emitter.next_label("sq");
+    if wide {
+        // A/Y hold the dividend and have already been parked, so A is free.
+        emitter.emit_inst("LDA", &format!("${:02X}", temp));
+        emitter.emit_inst("ORA", &format!("${:02X}", temp + 1));
+        emitter.emit_inst("BEQ", &zero);
+    } else {
+        // A still holds the dividend, so the test goes through X.
+        emitter.emit_inst("LDX", &format!("${:02X}", temp));
+        emitter.emit_inst("BEQ", &zero);
+    }
+    (zero, done)
+}
+
+/// The tail of [`emit_signed_zero_divisor_check`]: jump past the sentinel, then
+/// the sentinel itself.
+fn emit_signed_zero_divisor_tail(emitter: &mut Emitter, zero: &str, done: &str, wide: bool) {
+    emitter.emit_inst("JMP", done);
+    emitter.emit_label(zero);
+    emitter.emit_inst("LDA", "#$FF");
+    if wide {
+        emitter.emit_inst("LDY", "#$FF");
+    }
+    emitter.emit_label(done);
+}
+
 fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let temp = emitter.memory_layout.temp_reg(); // divisor
     let divd = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
@@ -1209,6 +1252,8 @@ fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let sign = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
         CodegenError::Internal("temporary storage exhausted in i8 divide".to_string())
     })?;
+
+    let (zero, done) = emit_signed_zero_divisor_check(emitter, false);
 
     // Save dividend, then compute result sign = dividend ⊕ divisor (bit 7).
     emitter.emit_inst("STA", &format!("${:02X}", divd));
@@ -1232,6 +1277,7 @@ fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Unsigned quotient in A, then apply the result sign.
     generate_divide(emitter, false, false)?;
     emit_negate8_if_sign(emitter, sign);
+    emit_signed_zero_divisor_tail(emitter, &zero, &done, false);
 
     emitter.temp_alloc.free_primary(divd, 1);
     emitter.temp_alloc.free_primary(sign, 1);
@@ -1244,6 +1290,8 @@ fn generate_modulo_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let divd = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
         CodegenError::Internal("temporary storage exhausted in i8 modulo".to_string())
     })?;
+
+    let (zero, done) = emit_signed_zero_divisor_check(emitter, false);
 
     // Save the dividend; its sign becomes the remainder's sign.
     emitter.emit_inst("STA", &format!("${:02X}", divd));
@@ -1265,6 +1313,7 @@ fn generate_modulo_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     // Unsigned remainder in A, then apply the dividend's sign.
     generate_modulo(emitter, false, false)?;
     emit_negate8_if_sign(emitter, divd);
+    emit_signed_zero_divisor_tail(emitter, &zero, &done, false);
 
     emitter.temp_alloc.free_primary(divd, 1);
     emitter.mark_a_unknown();
@@ -1287,6 +1336,10 @@ fn generate_signed_divmod_i16(
     let temp = emitter.memory_layout.temp_reg();
     emitter.emit_inst("STA", "$22");
     emitter.emit_inst("STY", "$23");
+    let (zero, zdone) = emit_signed_zero_divisor_check(emitter, true);
+    // The dividend was parked above, so reload it for the path that runs.
+    emitter.emit_inst("LDA", "$22");
+    emitter.emit_inst("LDY", "$23");
     park_sign(emitter);
 
     emit_abs16_zp(emitter, temp); // abs divisor
@@ -1306,6 +1359,7 @@ fn generate_signed_divmod_i16(
     emitter.emit_inst("LDA", "$22");
     emitter.emit_inst("LDY", "$23");
     emitter.emit_label(&done);
+    emit_signed_zero_divisor_tail(emitter, &zero, &zdone, true);
     emitter.mark_a_unknown();
     Ok(())
 }

@@ -893,7 +893,11 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
     let op = OPS[g.rng.below(OPS.len() as u64) as usize];
     let lhs = gen_expr(g, ty, depth - 1, true);
     let rhs = match op {
-        Op::Div | Op::Rem => E::Lit(1 + g.rng.below(ty.max() as u64) as i64),
+        // A divisor is an ordinary expression now that a zero one has an
+        // answer. It is *anchored*, which keeps it from being a constant: a
+        // divisor the compiler can see is zero is a compile error, and the
+        // sentinel is for the divisor that is only zero sometimes.
+        Op::Div | Op::Rem => gen_expr(g, ty, depth - 1, true),
         Op::Shl | Op::Shr => E::Lit(g.rng.below(ty.bits() as u64) as i64),
         _ => gen_expr(g, ty, depth - 1, false),
     };
@@ -1823,10 +1827,28 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                 Op::Add => a.wrapping_add(b),
                 Op::Sub => a.wrapping_sub(b),
                 Op::Mul => a.wrapping_mul(b),
-                // Generated divisors are positive literals; the guard is
-                // belt-and-braces so a generator change cannot panic here.
-                Op::Div => a / if b == 0 { 1 } else { b },
-                Op::Rem => a % if b == 0 { 1 } else { b },
+                // `x / 0` and `x % 0` are the all-ones value of the type —
+                // defined, not undefined, so the generator no longer has to
+                // avoid a zero divisor. `narrow` turns -1 into 0xFF or 0xFFFF
+                // for the unsigned halves of the pair.
+                //
+                // `i8::MIN / -1` overflows and is *also* defined: every
+                // arithmetic operator wraps, and `narrow(128, i8)` is -128,
+                // which is what the compiler produces.
+                Op::Div => {
+                    if b == 0 {
+                        -1
+                    } else {
+                        a.wrapping_div(b)
+                    }
+                }
+                Op::Rem => {
+                    if b == 0 {
+                        -1
+                    } else {
+                        a.wrapping_rem(b)
+                    }
+                }
                 // Bitwise operators act on the value's bit pattern, so a
                 // negative operand has to be seen unsigned first.
                 Op::And => (raw(a, ty) & raw(b, ty)) as i64,
@@ -3019,8 +3041,11 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             if mutate_expr(l, target, seen) {
                 return true;
             }
-            // The divisor is a nonzero literal by construction, and zeroing it
-            // would leave a program the oracle is not entitled to an answer for.
+            // The divisor is left alone. Not because zero is unanswerable any
+            // more — it is the sentinel — but because reducing towards a
+            // *constant* zero turns a wrong answer into a compile error, and a
+            // reduction that changes the kind of failure has found a different
+            // bug from the one being shrunk.
             if matches!(op, Op::Div | Op::Rem) {
                 return false;
             }
@@ -3800,8 +3825,10 @@ mod coverage {
         ),
         (
             "BinaryOp::Div",
-            "divisor is always a nonzero positive literal — zero is an error-behaviour \
-             question, and positive keeps `i8::MIN / -1` out",
+            "divisor is any expression, zero included — `x / 0` is the all-ones sentinel \
+             the specification defines, and `i8::MIN / -1` wraps like every other \
+             overflow. Only a *constant* divisor is excluded, since a zero one is a \
+             compile error",
         ),
         ("BinaryOp::Mod", "divisor as for `Div`"),
         (

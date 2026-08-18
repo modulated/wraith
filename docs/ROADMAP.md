@@ -46,6 +46,8 @@ read against a current picture:
 | The fuzzer passes an enum across a call, tag and register convention both | `docs/fuzz-coverage.md` |
 | The fuzzer passes a `str` across a call — the last of the four staging kinds | `docs/fuzz-coverage.md` |
 | Operator precedence checked against the specification's table, metamorphically | `tests/fuzz_exec.rs` |
+| Divide-by-zero defined as the all-ones sentinel at every width and sign | `tests/e2e/operators.rs` |
+| A divisor the compiler can see is zero is refused | `tests/e2e/error_diagnostics.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -308,13 +310,34 @@ Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
 
-- **Division by zero — blocked on a language decision, not on the fuzzer.**
-  Currently sidestepped with nonzero positive literal divisors (positive also
-  keeps `i8::MIN / -1` out). The specification says the result is *undefined*
-  with no runtime check, so there is nothing for an oracle to predict: the
-  generator cannot use arbitrary divisors until the language says what `x / 0`
-  produces. Defining it (a fixed value, or a documented trap) is the
-  prerequisite; widening the generator is the easy half that follows.
+- **Division by zero.** *Done — the decision was made and the generator
+  followed.* The specification said the result was *undefined*; the compiler
+  had not been undefined for some time, because the 8-bit path already checked
+  the divisor and yielded `0xFF`, and `div16`/`mod16` already yielded `0xFFFF`.
+  The specification was simply out of date.
+
+  It now says what the code does: `x / 0` and `x % 0` are the **all-ones value
+  of the type**, at every width and signedness, with no runtime check and no
+  trap. That is not a value chosen for its own sake — shift-and-subtract with a
+  zero divisor succeeds at every trial subtraction, so the quotient fills with
+  ones, and the check costs three instructions that were already being emitted.
+  RISC-V's M extension defines the same value for the same reason; it differs
+  only in making the *remainder* the dividend, where one value for both is
+  simpler to state.
+
+  Two things had to change to make that true. The **signed paths did not
+  produce the sentinel**: they `abs` both operands, run the unsigned core, and
+  negate, so `-100 / 0` answered `1` while `100 / 0` answered `-1`. They now
+  answer before the wrapper starts. And a **constant zero divisor is a compile
+  error** — it has a defined answer, but that answer says nothing about the
+  dividend, so writing one is a mistake rather than a choice. Nothing was
+  catching it, not even `10 / 0`.
+
+  The generator takes arbitrary divisors now, and **670 of 2000 programs
+  divide by zero at run time**, so the sentinel is exercised rather than merely
+  permitted. `i8::MIN / -1` came along with it and needed nothing: it overflows,
+  every arithmetic operator wraps, and `-128` is what both the compiler and the
+  oracle produce.
 - **Precedence.** *Done.* Expressions from the main generator are still fully
   parenthesised, on purpose — a precedence disagreement there would masquerade
   as a codegen bug, and the two are fixed in different places. A separate

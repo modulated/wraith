@@ -75,22 +75,6 @@ fn compound_div_assign() {
 }
 
 #[test]
-fn u8_divide_and_modulo_by_zero_are_defined() {
-    // The zero path used to read an uninitialized temp ("leave A as-is" was a
-    // lie). Both now yield a defined 0xFF, matching div16/mod16's 0xFFFF.
-    assert_eq!(
-        eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a / b;"),
-        0xFF,
-        "u8 x / 0 -> 0xFF"
-    );
-    assert_eq!(
-        eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a % b;"),
-        0xFF,
-        "u8 x % 0 -> 0xFF"
-    );
-}
-
-#[test]
 fn u8_divide_and_modulo_still_correct_for_nonzero() {
     // The div-by-zero restructure must not disturb the normal path.
     assert_eq!(eval_u8("let a: u8 = 23; let b: u8 = 5; OUT = a / b;"), 4);
@@ -414,19 +398,81 @@ fn unary_bitnot_binds_postfix_index() {
 }
 
 // ---------------------------------------------------------------------------
-// Division / modulo by zero is defined (0xFF), not undefined behavior
+// Division / modulo by zero is defined: the all-ones sentinel, at every width
+// and signedness. See "Division and Modulo" in the specification.
 // ---------------------------------------------------------------------------
 
+/// The sentinel is the *same* value everywhere, which it was not.
+///
+/// The unsigned paths have always answered all-ones — it is what shift-and-
+/// subtract produces when every trial subtraction succeeds, and the same value
+/// RISC-V's M extension defines for the same reason. The signed paths did not:
+/// they `abs` both operands, run the unsigned core, and negate if the result
+/// should be negative, so a zero divisor gave `-1` for a positive dividend and
+/// `+1` for a negative one. `-100 / 0` answered `1`.
+///
+/// They now answer the question before the wrapper starts, so the sentinel does
+/// not have to survive a transformation it was never checked against.
 #[test]
-fn u8_divide_by_zero_yields_a_defined_sentinel() {
-    // The zero path once fell through and loaded an uninitialized temp ("leave A
-    // as-is"); it now yields 0xFF, matching div16's 0xFFFF all-ones sentinel.
-    assert_eq!(eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a / b;"), 0xFF);
+fn divide_and_modulo_by_zero_are_all_ones_at_every_width_and_sign() {
+    // (name, type, dividend, how to read the low byte back)
+    let cases: [(&str, &str, &str); 4] = [
+        ("u8", "u8", "42"),
+        ("i8 positive dividend", "i8", "100"),
+        ("i8 negative dividend", "i8", "(-100)"),
+        ("u16", "u16", "5000"),
+    ];
+    for (what, ty, dividend) in cases {
+        for op in ["/", "%"] {
+            assert_eq!(
+                eval_u8(&format!(
+                    "let a: {ty} = {dividend}; let b: {ty} = 0; OUT = ((a {op} b) as u8);"
+                )),
+                0xFF,
+                "{what}: x {op} 0 is all-ones"
+            );
+        }
+    }
+    // i16 needs both bytes, so it is read separately.
+    for dividend in ["5000", "(-5000)"] {
+        for op in ["/", "%"] {
+            assert_eq!(
+                eval_u16(&format!(
+                    "let a: i16 = {dividend}; let b: i16 = 0; let q: i16 = a {op} b; \
+                     LO = q.low; HI = q.high;"
+                )),
+                0xFFFF,
+                "i16 {dividend} {op} 0 is all-ones"
+            );
+        }
+    }
 }
 
+/// The normal path is undisturbed by the zero path in front of it.
 #[test]
-fn u8_modulo_by_zero_yields_a_defined_sentinel() {
-    assert_eq!(eval_u8("let a: u8 = 42; let b: u8 = 0; OUT = a % b;"), 0xFF);
+fn signed_divide_and_modulo_are_still_correct_for_a_nonzero_divisor() {
+    assert_eq!(
+        eval_u8("let a: i8 = 23; let b: i8 = 5; OUT = ((a / b) as u8);"),
+        4
+    );
+    assert_eq!(
+        eval_u8("let a: i8 = 23; let b: i8 = 5; OUT = ((a % b) as u8);"),
+        3
+    );
+    assert_eq!(
+        eval_u8("let a: i8 = (-23); let b: i8 = 5; OUT = ((a / b) as u8);"),
+        0xFC, // -4: division truncates toward zero, it does not floor
+    );
+    assert_eq!(
+        eval_u8("let a: i8 = (-23); let b: i8 = 5; OUT = ((a % b) as u8);"),
+        0xFD, // -3, the dividend's sign
+    );
+    assert_eq!(
+        eval_u16(
+            "let a: i16 = (-5000); let b: i16 = 7; let q: i16 = a / b; LO = q.low; HI = q.high;"
+        ),
+        0xFD36, // -714
+    );
 }
 
 // ---------------------------------------------------------------------------

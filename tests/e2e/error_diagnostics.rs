@@ -387,3 +387,31 @@ fn returning_a_value_from_a_void_function() {
     let e = render("fn f() { return 5; }\n#[reset]\nfn main() { f(); loop {} }\n");
     assert_at(&e, "--> 1:17", "expected void, found u8");
 }
+
+#[test]
+fn a_divisor_known_to_be_zero_points_at_the_divisor() {
+    // `x / 0` has a defined answer — the all-ones sentinel — but no program
+    // means it, so the constant case is refused. The span is the *divisor*,
+    // not the whole expression: that is the sub-expression to change.
+    let e = render(
+        "#[reset]\nfn main() { let a: u8 = 5; let x: u8 = a / 0; OUT = x; loop {} }\nconst OUT: addr = 0x0900;\n",
+    );
+    assert_at(&e, "--> 2:44", "division by zero");
+    assert!(
+        e.contains("all-ones"),
+        "expected the message to say what the value would have been:\n{e}"
+    );
+}
+
+#[test]
+fn a_modulo_by_a_constant_zero_is_refused_too() {
+    // Reached through a constant *expression*, not just a literal, since that
+    // is as much as the compiler can decide here.
+    let e = render(
+        "#[reset]\nfn main() { let a: u8 = 5; let x: u8 = a % (3 - 3); OUT = x; loop {} }\nconst OUT: addr = 0x0900;\n",
+    );
+    assert!(
+        e.contains("modulo by zero"),
+        "expected a modulo-specific message:\n{e}"
+    );
+}

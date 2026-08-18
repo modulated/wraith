@@ -771,6 +771,34 @@ impl SemanticAnalyzer {
             return Ok(Type::Error);
         }
 
+        // A divisor that is *known to be zero* is refused. `x / 0` has a
+        // defined answer — the all-ones sentinel, see the specification — but
+        // no program means it: the value carries no information about `x`, and
+        // writing it is always a mistake rather than a choice. Catching it
+        // costs nothing, because it is exactly the case the compiler can see.
+        //
+        // Only a constant divisor, which is the limit of what can be decided
+        // here. A variable that happens to hold zero at run time still gets the
+        // sentinel, which is why the sentinel is defined at all.
+        if matches!(op, BinaryOp::Div | BinaryOp::Mod)
+            && let Ok(v) = eval_const_expr_with_env(right, &self.const_env)
+            && v.as_integer() == Some(0)
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "{} by zero: the divisor is always zero here. The result would be the \
+                     all-ones value this language defines for it, which says nothing about \
+                     the dividend — so this is a mistake rather than a choice",
+                    if matches!(op, BinaryOp::Div) {
+                        "division"
+                    } else {
+                        "modulo"
+                    }
+                ),
+                span: right.span,
+            });
+        }
+
         // No binary operator applies to a pointer. This has to be said
         // explicitly: the compatibility gate further down is `left_ty ==
         // right_ty`, so `p + q` on two `&u8`s passes it and emits a 16-bit add
