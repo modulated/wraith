@@ -702,16 +702,18 @@ pub(super) fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
-    // A whole array cannot be assigned to a *field*. Assigning one only ever
-    // meant repointing a slot at the data, which is how a local array is
-    // stored; a field is the data itself, and the store wrote two bytes of the
-    // literal's ROM address over the first two elements. `d.f = [4, 5, 6]`
-    // left `d.f[1]` at its old value and corrupted `d.f[0]`.
+    // A whole array is never assigned, here as anywhere else — see the local
+    // case in `generate_assign` for the rule and why it is one rule. This site
+    // used to store two bytes of the literal's ROM address over the first two
+    // elements: `d.f = [4, 5, 6]` left `d.f[1]` alone and corrupted `d.f[0]`.
+    //
+    // `memcpy` is deliberately *not* named as the way out here: it would need
+    // `&x.f[0]`, and the address of an element of a field is not supported.
     if let Some(Type::Array(..)) = field_type_of(object, field, info) {
         return Err(CodegenError::UnsupportedOperation(format!(
-            "cannot assign a whole array to field `{}`: a field holds its elements inline, so \
-             there is no pointer to repoint. Assign the elements — `x.{}[i] = v` — or rebuild \
-             the struct",
+            "cannot assign a whole array to field `{}`: an array is initialised once and never \
+             assigned as a whole, because the copy would be silent and proportional to its \
+             length. Assign the elements — `x.{}[i] = v` — or rebuild the struct",
             field.node, field.node
         )));
     }
@@ -1979,21 +1981,36 @@ pub(super) fn generate_assign(
                     return Err(unfilled_block_error(&sym.ty, bytes, "assign"));
                 }
 
-                // Assigning a whole array repoints a slot at the data, which
-                // only exists for a *local* array. A `static` array is the
-                // data, at a fixed address, so the store put two bytes of the
-                // literal's ROM address over the first two elements and every
-                // later read came back as part of an address.
-                if matches!(sym.ty, Type::Array(..))
-                    && !matches!(
-                        sym.location,
-                        crate::sema::table::SymbolLocation::ZeroPage(_)
-                    )
-                {
+                // A whole array is never assigned, at any storage class.
+                //
+                // A `static` array *is* its elements, at a fixed address, so
+                // there was never a pointer to repoint: the store put two bytes
+                // of the literal's ROM address over the first two elements. A
+                // *local* array does have a slot holding a pointer, and
+                // repointing it compiled — but it meant two things nobody
+                // wrote: `a = b` aliased `b`'s elements rather than copying
+                // them, so a later `b[i] = v` was visible through `a`; and
+                // `a = [1, 2, 3]` pointed `a` at the literal in ROM, where
+                // every subsequent `a[i] = v` is a silent no-op on hardware.
+                //
+                // Binding already refuses everything but a literal (`let b:
+                // [u8; 3] = a` is an error), so refusing assignment outright
+                // leaves one rule: an array is initialised once and copied
+                // explicitly thereafter. That is where every other native 6502
+                // language ended up — Prog8 forbids it and points at
+                // `sys.memcopy`, C forbids it and arrays decay to pointers,
+                // and Mad-Pascal dropped Pascal's value semantics to do the
+                // same. The reason is cost: a copy is two instructions per
+                // byte here, so a 256-byte array would be about 1.5 KB of a
+                // 16 KB ROM for one statement, and an assignment operator is
+                // the wrong place to hide that.
+                if matches!(sym.ty, Type::Array(..)) {
                     return Err(CodegenError::UnsupportedOperation(format!(
-                        "cannot assign a whole array to `{name}`: a `static` array is its \
-                         elements, at a fixed address, so there is no pointer to repoint. Assign \
-                         the elements — `{name}[i] = v` — or use a local"
+                        "cannot assign a whole array to `{name}`: an array is initialised once \
+                         and never assigned as a whole, because the copy would be silent and \
+                         proportional to its length. Assign the elements — `{name}[i] = v` — \
+                         or copy explicitly with `memcpy(&{name}[0], &src[0], len)` from \
+                         `std/mem.wr`"
                     )));
                 }
 

@@ -242,8 +242,15 @@ fn generate_addr_of_element(
             )
         })?;
 
+    // The object has to be a name. `&d.f[0]` and `&m[i][j]` reach here with
+    // nothing resolved, and they are shapes nobody has written rather than a
+    // broken invariant — an `Internal` error here reported a compiler bug for
+    // source the compiler simply does not handle yet.
     let sym = info.resolved_symbols.get(&object.span).ok_or_else(|| {
-        CodegenError::Internal("address-of element has no resolved symbol".to_string())
+        CodegenError::UnsupportedOperation(
+            "the address of an array element can only be taken through the array's name, so              `&x.f[i]` and `&m[i][j]` are not supported yet — copy the elements one at a time"
+                .to_string(),
+        )
     })?;
     let elem_size = match &sym.ty {
         Type::Array(elem, _) | Type::Slice(elem) => {

@@ -677,38 +677,51 @@ fn an_array_through_a_function_pointer_is_refused_with_a_way_out() {
     );
 }
 
-/// Assigning a *whole array* repoints a slot; only a local array has one.
+/// A whole array is never assigned, at any storage class.
 ///
-/// A local array's slot holds a pointer to its data, so `a = [4, 5, 6]` is a
-/// coherent rebind — the slot points at the new literal. A `static` array and
-/// a struct field are the data, at a fixed address, so there is nothing to
-/// repoint. Both accepted the assignment anyway and stored the literal's ROM
-/// address over the elements: the static came back as `128`, part of an
-/// address, and the field kept its old value with `d.f[0]` corrupted.
+/// The rule used to depend on where the array lived. A `static` array and a
+/// struct field *are* their elements at a fixed address, so there was no
+/// pointer to repoint and the store put two bytes of the literal's ROM address
+/// over the first two elements; both were refused. A *local* array does have a
+/// slot holding a pointer, so repointing it compiled — and meant two things
+/// nobody wrote:
 ///
-/// Refused now, with the element-wise form named. Whether whole-array
-/// assignment should *copy* — which would also change what the local form
-/// means — is a language question, and is on the roadmap rather than decided
-/// here.
+///   * `a = b` **aliased** `b`'s elements instead of copying them, so a later
+///     `b[1] = 99` was visible through `a`.
+///   * `a = [1, 2, 3]` pointed `a` at the literal **in ROM**, where every
+///     subsequent `a[i] = v` is a silent no-op on real hardware. The emulator
+///     harness catches the store; a program on a machine would not.
+///
+/// Binding already refuses everything but a literal, so refusing assignment
+/// outright leaves one rule at every storage class: an array is initialised
+/// once and copied explicitly thereafter. That is where the other native 6502
+/// languages ended up too — Prog8 forbids it and points at `sys.memcopy`, C
+/// forbids it and arrays decay to pointers, and Mad-Pascal dropped Pascal's
+/// value semantics to do the same.
 #[test]
-fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
-    // The local form keeps working: the slot is a pointer, and repointing it
-    // is what the assignment has always meant.
-    let mut e = run(r#"
-        const OUT0: addr = 0x0900;
-        const OUT1: addr = 0x0901;
-        #[reset]
-        fn main() {
-            let a: [u8; 3] = [1, 2, 3];
-            a = [4, 5, 6];
-            OUT0 = a[1];
-            let b: [u8; 3] = [7, 8, 9];
-            a = b;
-            OUT1 = a[1];
-            loop {}
-        }
-    "#);
-    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
+fn a_whole_array_is_never_assigned_at_any_storage_class() {
+    for (what, src) in [
+        (
+            "a local, from a literal",
+            "fn main() { let a: [u8; 3] = [1, 2, 3]; a = [4, 5, 6]; OUT = a[1]; loop {} }",
+        ),
+        (
+            "a local, from another local",
+            "fn main() { let a: [u8; 3] = [1, 2, 3]; let b: [u8; 3] = [7, 8, 9]; a = b; \
+             OUT = a[1]; loop {} }",
+        ),
+    ] {
+        crate::common::assert_error_contains(
+            &format!("const OUT: addr = 0x0900;\n#[reset]\n{src}\n"),
+            "an array is initialised once and never assigned as a whole",
+        );
+        // The way out is named, not just the refusal.
+        crate::common::assert_error_contains(
+            &format!("const OUT: addr = 0x0900;\n#[reset]\n{src}\n"),
+            "memcpy",
+        );
+        let _ = what;
+    }
 
     crate::common::assert_error_contains(
         r#"
@@ -717,7 +730,7 @@ fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
         #[reset]
         fn main() { A = [4, 5, 6]; OUT = A[1]; loop {} }
     "#,
-        "a `static` array is its elements",
+        "an array is initialised once and never assigned as a whole",
     );
 
     crate::common::assert_error_contains(
@@ -727,7 +740,64 @@ fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
         #[reset]
         fn main() { let d: D = D { f: [1, 2, 3] }; d.f = [4, 5, 6]; OUT = d.f[1]; loop {} }
     "#,
-        "a field holds its elements inline",
+        "an array is initialised once and never assigned as a whole",
+    );
+}
+
+/// The field case names element-wise and *not* `memcpy`, because `&d.f[0]` is
+/// not something the compiler can emit — and it says which, rather than
+/// reporting an internal error for source it simply does not handle.
+#[test]
+fn the_address_of_an_element_of_a_field_is_refused_by_name() {
+    crate::common::assert_error_contains(
+        r#"
+        import { memcpy } from "std/mem.wr";
+        const OUT: addr = 0x0900;
+        struct D { f: [u8; 3] }
+        #[reset]
+        fn main() {
+            let d: D = D { f: [1, 2, 3] };
+            let s: [u8; 3] = [7, 8, 9];
+            memcpy(&d.f[0], &s[0], 3);
+            OUT = d.f[1];
+            loop {}
+        }
+    "#,
+        "can only be taken through the array's name",
+    );
+}
+
+/// What replaces it: element-wise, or an explicit `memcpy`.
+///
+/// The copy has to be a real one — independent of its source afterwards —
+/// which is exactly what the repointing form was not.
+#[test]
+fn an_array_is_copied_element_wise_or_with_memcpy() {
+    let mut e = run(r#"
+        import { memcpy } from "std/mem.wr";
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        const OUT2: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let a: [u8; 3] = [1, 2, 3];
+            let b: [u8; 3] = [4, 5, 6];
+            memcpy(&a[0], &b[0], 3);
+            OUT0 = a[0];
+            // Independent of its source: changing `b` must not move `a`.
+            b[1] = 99;
+            OUT1 = a[1];
+            // And the destination is still writable, which the ROM repoint
+            // silently was not.
+            a[2] = 42;
+            OUT2 = a[2];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (4, 5, 42),
+        "memcpy copies, the copy is independent, and it stays writable"
     );
 }
 

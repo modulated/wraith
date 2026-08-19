@@ -468,6 +468,24 @@ enum S {
     /// returns a pointer to it in A:X rather than the four bytes themselves.
     /// A different path again from either of the two above.
     SliceFromCall(usize, usize),
+    /// `memcpy(&arr[{dst}], &TBL[{src}], {len});` — a run of bytes moved from
+    /// the `const` table into the local array.
+    ///
+    /// This is what replaces whole-array assignment, which is refused: an array
+    /// is initialised once and copied explicitly thereafter. It also exercises
+    /// two address computations that have their own bug history — `&arr[i]`
+    /// into a BSS array, and `&TBL[i]` into a `const` array reached by label —
+    /// and does it through a three-argument stdlib call.
+    ///
+    /// Only for a `u8` aggregate type: `memcpy` takes `&u8` and a *byte* count,
+    /// so a 16-bit element would need both a doubled length and a cast, and an
+    /// `i8` one would need the address converted — neither is what this is
+    /// testing.
+    CopyRange {
+        dst: usize,
+        src: usize,
+        len: usize,
+    },
 }
 
 /// Variables in `main`.
@@ -1034,6 +1052,16 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
             }
             _ => S::SliceFromCall(i, g.rng.below(2) as usize),
         };
+    }
+    // A byte run copied out of the `const` table. Needs the aggregates to
+    // exist, and a `u8` element: `memcpy` takes `&u8`, so an `i8` array would
+    // need its address converted, and a byte count is an element count only at
+    // a one-byte width.
+    if g.allow_aggregates && g.base == Ty::U8 && g.rng.below(100) < 10 {
+        let len = 1 + g.rng.below(ALEN as u64) as usize;
+        let dst = g.rng.below((ALEN - len + 1) as u64) as usize;
+        let src = g.rng.below((ALEN - len + 1) as u64) as usize;
+        return S::CopyRange { dst, src, len };
     }
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
@@ -1915,6 +1943,11 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             }
             S::Install(id) => st.dev = *id,
             S::CopySlice(d, src) => st.slices[*d] = st.slices[*src],
+            S::CopyRange { dst, src, len } => {
+                for i in 0..*len {
+                    st.arr[dst + i] = st.prog.konst[src + i];
+                }
+            }
             S::Reslice(i, start, len) => st.slices[*i] = (*start, *len),
             S::SliceFromCall(i, k) => st.slices[*i] = st.prog.mk_ranges[*k],
             S::If(c, then, otherwise) => {
@@ -2231,6 +2264,9 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
             }
             S::Install(id) => out.push_str(&format!("{pad}DEV.call = f{id};\n")),
             S::CopySlice(d, src) => out.push_str(&format!("{pad}sl{d} = sl{src};\n")),
+            S::CopyRange { dst, src, len } => {
+                out.push_str(&format!("{pad}memcpy(&arr[{dst}], &TBL[{src}], {len});\n"))
+            }
             S::Reslice(i, start, len) => {
                 out.push_str(&format!("{pad}sl{i} = TBL[{start}..{}];\n", start + len))
             }
@@ -2338,6 +2374,26 @@ fn out_bytes(p: &Prog) -> usize {
         .sum()
 }
 
+/// Whether any statement calls `memcpy`, so the program imports it.
+///
+/// The import is conditional because an unused one warns, and a warning is a
+/// failure here: the run asserts the compiler is silent on a program the
+/// generator believes is clean.
+fn uses_memcpy(stmts: &[S]) -> bool {
+    stmts.iter().any(|s| match s {
+        S::CopyRange { .. } => true,
+        S::If(_, then, otherwise) => {
+            uses_memcpy(then) || otherwise.as_deref().is_some_and(uses_memcpy)
+        }
+        S::For(_, _, body) | S::While(_, body) => uses_memcpy(body),
+        S::Assign(..)
+        | S::Install(_)
+        | S::CopySlice(..)
+        | S::Reslice(..)
+        | S::SliceFromCall(..) => false,
+    })
+}
+
 fn render_program(p: &Prog, form: Form) -> String {
     // `main`'s statements are rendered at the aggregate type: it is what an
     // element or a field reads as, and every expression that is not one
@@ -2347,6 +2403,9 @@ fn render_program(p: &Prog, form: Form) -> String {
 
     let head: String = (0..out_bytes(p))
         .map(|i| format!("const OUT{i}: addr = 0x{:04X};\n", 0x0900 + i))
+        .chain(
+            uses_memcpy(&p.stmts).then(|| "import { memcpy } from \"std/mem.wr\";\n".to_string()),
+        )
         .collect();
 
     // The struct type is declared at the top level, so it exists whether or not
@@ -2764,7 +2823,11 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
                 // Carry no expression, and no budget to drop.
-                S::Install(_) | S::CopySlice(..) | S::Reslice(..) | S::SliceFromCall(..) => {}
+                S::Install(_)
+                | S::CopySlice(..)
+                | S::Reslice(..)
+                | S::SliceFromCall(..)
+                | S::CopyRange { .. } => {}
             }
         }
     }
@@ -2825,7 +2888,11 @@ fn strip_stmt_self_calls(s: &mut S) {
             }
         }
         S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
-        S::Install(_) | S::CopySlice(..) | S::Reslice(..) | S::SliceFromCall(..) => {}
+        S::Install(_)
+        | S::CopySlice(..)
+        | S::Reslice(..)
+        | S::SliceFromCall(..)
+        | S::CopyRange { .. } => {}
     }
 }
 
@@ -2943,7 +3010,7 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::Install(_) | S::CopySlice(..) | S::SliceFromCall(..) => false,
+        S::Install(_) | S::CopySlice(..) | S::SliceFromCall(..) | S::CopyRange { .. } => false,
     }
 }
 
@@ -3434,6 +3501,9 @@ fn the_generator_covers_what_it_claims() {
                 S::SliceFromCall(..) => {
                     s.stmts.insert("slice-from-call");
                 }
+                S::CopyRange { .. } => {
+                    s.stmts.insert("array-copy");
+                }
             }
         }
     }
@@ -3459,7 +3529,15 @@ fn the_generator_covers_what_it_claims() {
     for c in CMPS {
         assert!(seen.cmps.contains(c.sym()), "never emitted `{}`", c.sym());
     }
-    for k in ["assign", "if", "if-else", "for", "while", "install"] {
+    for k in [
+        "assign",
+        "if",
+        "if-else",
+        "for",
+        "while",
+        "install",
+        "array-copy",
+    ] {
         assert!(seen.stmts.contains(k), "never emitted a `{k}` statement");
     }
     for k in ["&&", "||", "!"] {
@@ -3711,11 +3789,6 @@ mod coverage {
     /// Keep these to the *reason*: "structs are not generated" tells the reader
     /// nothing the count has not already told them.
     const REASONS: &[(&str, &str)] = &[
-        // --- Items -----------------------------------------------------------
-        (
-            "Item::Import",
-            "programs are single-file; the import graph is covered by tests/e2e/imports.rs",
-        ),
         // --- Statements ------------------------------------------------------
         (
             "Stmt::ForEach",
@@ -3770,7 +3843,6 @@ mod coverage {
             "UnaryOp::BitNot",
             "would widen the oracle for no new codegen path — `^ -1` covers the same lowering",
         ),
-        ("UnaryOp::AddrOf", "pointers are not generated"),
         ("UnaryOp::Deref", "pointers are not generated"),
         // --- Patterns --------------------------------------------------------
         (
@@ -3806,6 +3878,19 @@ mod coverage {
     /// table overstates its case: `Div` appearing in most programs says nothing
     /// about division by zero, which never occurs.
     const CAVEATS: &[(&str, &str)] = &[
+        (
+            "Item::Import",
+            "one import of one name — `memcpy` from `std/mem.wr`, and only in a program \
+             that copies a run of bytes. Programs are otherwise single-file; the import \
+             graph itself is covered by tests/e2e/imports.rs",
+        ),
+        (
+            "UnaryOp::AddrOf",
+            "only `&arr[i]` and `&TBL[i]`, as the two source arguments of a `memcpy` — a \
+             local array in zero page and a `const` one reached by label, which are \
+             different address computations. The address is passed straight to the call \
+             and never held in a variable, because pointers are not generated",
+        ),
         (
             "Item::Enum",
             "the enum is unit-only: three variants, no payloads. A payload is a separate \

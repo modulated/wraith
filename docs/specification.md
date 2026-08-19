@@ -1624,24 +1624,71 @@ let pixel: u8 = screen[2 * 8 + 5];
 
 ### Array Assignment and Copying
 
-Arrays are value types - assignment copies all elements:
+An array is initialised once, from a literal, and is never assigned as a whole
+afterwards. Both of these are refused:
 
 ```rust
-let source: [u8; 3] = [1, 2, 3];
-let dest: [u8; 3] = source;  // Copies all 3 bytes
+let src: [u8; 3] = [1, 2, 3];
+let dst: [u8; 3] = [0; 3];
 
-source[0] = 10;  // dest is unchanged (independent copy)
+dst = src;         // ERROR: cannot assign a whole array to `dst`
+dst = [4, 5, 6];   // ERROR: same
 ```
 
-**For large arrays**, use `memcpy` for efficiency:
+The binding form is refused for the same reason, and says so at the
+declaration: `let dst: [u8; 3] = src;` is *a local array must be initialized
+with an array literal*.
 
-```rust
-let source: [u8; 100] = [0; 100];
-let dest: [u8; 100] = [0; 100];
-memcpy(&dest, &source, 100);
+The reason is cost. `dst = src` on a 6502 is a loop over the elements — no
+instruction moves more than one byte — so an assignment that looks like a
+register move would emit an unbounded copy whose length is the array's, and a
+`[u8; 256]` would silently cost 256 stores and a loop in a language whose whole
+point is that you can see what the code will do. Making the copy explicit puts
+that cost where the reader can count it. (Nothing about an array's
+*representation* changes here: it is still a block of elements, not a
+reference. What is refused is one *statement*, not one semantics.)
+
+There are two ways to copy. At these lengths the loop is the smaller of the
+two — `memcpy` is a call, and its body has to be linked in — so the choice is
+about what you have rather than about size:
+
+```rust,compile
+import { memcpy } from "std/mem.wr";
+
+#[reset]
+fn main() {
+    let src: [u8; 3] = [1, 2, 3];
+    let dst: [u8; 3] = [0; 3];
+
+    // Element-wise: no import, no call, and the compiler sees every store.
+    for i in 0..3 {
+        dst[i] = src[i];
+    }
+
+    // Or with an explicit copy: one call whatever the length, and the only
+    // form that takes a length decided at run time. `memcpy` counts *bytes*,
+    // so a `[u16; N]` passes `N * 2`.
+    memcpy(&dst[0], &src[0], 3);
+
+    loop {}
+}
 ```
 
-`&array` gives a pointer to its first element — see [Pointers](#pointers).
+`memcpy` copies bytes and does not overlap-check, so it is `memcpy` and not
+`memmove`: a destination inside the source range is the caller's problem. It
+lives in `std/mem.wr` alongside `memcpy16` for lengths past 255, `memset`, and
+`memcmp`.
+
+`&array[0]` is the address of the first element; `&array` is the same address —
+see [Pointers](#pointers). Both need the array's *name*: `&x.f[0]`, the address
+of an element of a struct field, is not supported, so an array field is copied
+element-wise.
+
+A **slice** is the one aggregate that *is* assigned as a whole, because a slice
+is two numbers rather than a block of elements: `sl = TBL[1..4]` rebinds the
+descriptor and copies nothing. That is the distinction the refusal draws — an
+assignment that costs two bytes is allowed; one that costs the array's length
+is spelled out.
 
 ### Completion Status
 

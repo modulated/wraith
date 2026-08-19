@@ -33,7 +33,7 @@ read against a current picture:
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
 | The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
 | Every parameter kind survives every call form — direct, inlined, recursive, indirect | `tests/e2e/aggregate_dispatch.rs` |
-| Every struct field kind round-trips; a whole-array store is refused where it cannot work | `tests/e2e/aggregate_dispatch.rs` |
+| Every struct field kind round-trips | `tests/e2e/aggregate_dispatch.rs` |
 | Every return kind survives every call form — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 | An interrupt arriving *mid-computation* leaves the interrupted work alone | `tests/e2e/interrupts_exec.rs` |
 | A function-pointer argument is sized and staged like the two bytes it is | `tests/e2e/vtable.rs` |
@@ -49,6 +49,8 @@ read against a current picture:
 | Divide-by-zero defined as the all-ones sentinel at every width and sign | `tests/e2e/operators.rs` |
 | A divisor the compiler can see is zero is refused | `tests/e2e/error_diagnostics.rs` |
 | A shift count at or past the width shifts every bit out, and warns when constant | `tests/e2e/operators.rs` |
+| A whole array is never assigned; the refusal names element-wise and `memcpy` | `tests/e2e/aggregate_dispatch.rs` |
+| The fuzzer copies a run of bytes with `memcpy`, through `&arr[i]` and `&TBL[i]` | `docs/fuzz-coverage.md` |
 
 ## What keeps going wrong
 
@@ -351,7 +353,8 @@ and an oracle that is merely *probably* right is worse than no oracle:
   counting only self-edges fails at seed 38.
 - **Pointers and enums.** A `&T` gives two names for one piece of storage,
   which the oracle would have to alias-model; enums are a separate lowering
-  again.
+  again. (An address is *taken* — as a `memcpy` argument — but never bound to a
+  variable or read through, so there is still nothing to alias.)
 
   *The slice half of this item is done*, and needed no alias modelling: a slice
   of the `const` table views ROM, nothing writes it, and the table is the
@@ -384,6 +387,19 @@ and an oracle that is merely *probably* right is worse than no oracle:
   Still open: a struct *returned* from a call, a struct behind a pointer, an
   array field inside a struct, enum payloads, and indexing a string rather than
   measuring it.
+- **Copying a run of bytes.** *Done.* `memcpy(&arr[d], &TBL[s], n)` is
+  generated wherever the program's type is `u8`, which is what a whole-array
+  assignment turned into once that statement was refused. It puts three things
+  in reach that nothing else did: an `import`, the address of a *local* array
+  element in zero page and of a `const` one reached by label — two different
+  computations with their own bug history — and a three-argument call to a
+  library function rather than a generated one. The oracle copies the same run,
+  so a copy that moves the wrong length or the wrong base shows up in the
+  array's output cells.
+
+  The gate is `u8` and not "eight bits wide": `memcpy` takes `&u8`, so an `i8`
+  array would need its address converted, and the generator produced exactly
+  that invalid program at seed 4 before the gate was narrowed.
 - **Constant expressions standing alone** — typed by their own literals, not by
   the program around them. Defined in the specification, not in the oracle.
 - **Shift counts at or past the width.** *Done.* A 6502 has no barrel shifter,
@@ -573,17 +589,28 @@ Also open:
   `array_of_struct_base` are narrow enough that their `None` has one meaning,
   and the `Option`-returning helpers outside `aggregate.rs` have not been
   audited against this distinction.
-- **Whole-array assignment means "repoint", and only a local can be
-  repointed.** A local array's slot holds a pointer to its data, so
-  `a = [4, 5, 6]` rebinds the slot. A `static` array and a struct field *are*
-  the data, at a fixed address, so there is nothing to repoint — and both used
-  to accept the assignment and store the literal's ROM address over the
-  elements. Refused now, naming the element-wise form.
 
-  The open question is a language one, not a bug: should assigning an array
-  *copy*? That would give the three forms one meaning, at the cost of changing
-  what the local form does today. Worth deciding before anything is built on
-  the current behaviour.
+  One more turned up while writing the array-copy refusal: `&x.f[0]` and
+  `&m[i][j]` reach `generate_addr_of_element` with no resolved symbol, and it
+  reported an *internal compiler error* — a compiler bug — for source the
+  compiler simply does not handle. It now names the shape. **Emitting** those
+  two addresses is still open, and it is why the field case of the whole-array
+  refusal names element-wise assignment and not `memcpy`: there is no way to
+  spell the destination.
+- **Whole-array assignment meant "repoint", and only a local could be
+  repointed.** *Done — the statement is refused at every storage class.* A
+  local array's slot held a pointer to its data, so `a = [4, 5, 6]` rebound the
+  slot and `a = b` left the two *aliased*; a `static` array and a struct field
+  *are* the data, so the same statement stored the literal's ROM address over
+  the elements. Three storage classes, three meanings, none of them a copy.
+
+  The language question behind it — should assigning an array copy? — is
+  answered the other way: it should not be a statement at all. A copy on the
+  6502 is a loop whose length is the array's, and an assignment that looks like
+  a register move must not emit one silently. The refusal names both ways out,
+  element-wise and `memcpy`, and the specification now says so under
+  [Array Assignment and Copying](specification.md#array-assignment-and-copying).
+  A slice is untouched: `sl = TBL[1..4]` moves two numbers and stays legal.
 
 - **Interrupts were only ever tested from the idle loop.** *Done.* A handler's
   zero-page frame may *share addresses* with `main`'s — a handler is not
