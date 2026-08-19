@@ -48,6 +48,7 @@ read against a current picture:
 | Operator precedence checked against the specification's table, metamorphically | `tests/fuzz_exec.rs` |
 | Divide-by-zero defined as the all-ones sentinel at every width and sign | `tests/e2e/operators.rs` |
 | A divisor the compiler can see is zero is refused | `tests/e2e/error_diagnostics.rs` |
+| A shift count at or past the width shifts every bit out, and warns when constant | `tests/e2e/operators.rs` |
 
 The recurring defect behind most of that list is written up under
 [Structure & maintainability](#structure--maintainability): a dispatch match
@@ -484,12 +485,23 @@ and an oracle that is merely *probably* right is worse than no oracle:
   than measuring it.
 - **Constant expressions standing alone** — typed by their own literals, not by
   the program around them. Defined in the specification, not in the oracle.
-- **Shift counts at or past the width.** This entry used to claim the behaviour
-  was defined. It is not: the specification says nothing about a count at or
-  past the type's width, and the compiler currently accepts `a << 9` on a `u8`
-  without comment. So this is the same shape as division by zero — a language
-  decision first, an oracle afterwards — and the precedence generator above
-  deliberately keeps its shift counts below the width for exactly that reason.
+- **Shift counts at or past the width.** *Done, and the same shape as division
+  by zero: the compiler already had an answer and the specification had not
+  caught up.* A 6502 has no barrel shifter, so a variable shift is a loop that
+  performs the count — every bit leaves and zeros arrive, or copies of the sign
+  bit for an arithmetic right shift. `200 << 9` was already `0` and
+  `-100 >> 9` already `-1`.
+
+  The specification now says so, and says the count is deliberately *not*
+  masked: masking would make `x << 8` on a `u8` mean `x << 0`, which is
+  surprising and useless, and would cost an `AND` on every variable shift to
+  produce. A count the compiler can see is at or past the width is a **warning**
+  rather than an error, since clearing a value by shifting it out is a real if
+  unusual idiom.
+
+  The generator still keeps its counts below the width — not because the wider
+  ones are undefined now, but because a shift that always yields a constant is
+  a poor test of a shift.
 
 ### Code-size benchmark
 

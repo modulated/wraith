@@ -517,3 +517,54 @@ fn u16_bitwise_ops_combine_both_bytes() {
         0xF0F0
     );
 }
+
+// ---------------------------------------------------------------------------
+// A shift count at or past the width shifts every bit out.
+// ---------------------------------------------------------------------------
+
+/// The count the compiler *cannot* see, which is why the behaviour is defined
+/// rather than left to chance.
+///
+/// A 6502 has no barrel shifter, so a variable shift is a loop: the count is
+/// simply performed, bits leave at one end and zeros arrive at the other. There
+/// is nothing to mask and no cost to defining it. An arithmetic right shift
+/// feeds the sign bit back in instead, so a negative value saturates at `-1`.
+///
+/// The alternative — masking the count to the width, as x86 and Java do — would
+/// make `x << 8` on a `u8` mean `x << 0`, which is both surprising and useless,
+/// and would cost an `AND` on every variable shift to produce it.
+#[test]
+fn a_runtime_shift_count_past_the_width_shifts_every_bit_out() {
+    for (n, want) in [(8u8, 0u8), (9, 0), (255, 0)] {
+        assert_eq!(
+            eval_u8(&format!("let a: u8 = 200; let n: u8 = {n}; OUT = a << n;")),
+            want,
+            "u8 200 << {n}"
+        );
+        assert_eq!(
+            eval_u8(&format!("let a: u8 = 200; let n: u8 = {n}; OUT = a >> n;")),
+            want,
+            "u8 200 >> {n}"
+        );
+    }
+    // Arithmetic right shift keeps the sign, so a negative value saturates.
+    assert_eq!(
+        eval_u8("let a: i8 = (-100); let n: u8 = 9; OUT = ((a >> n) as u8);"),
+        0xFF,
+        "i8 -100 >> 9 saturates to -1"
+    );
+    assert_eq!(
+        eval_u16(
+            "let a: u16 = 5000; let n: u8 = 17; let q: u16 = a << n; LO = q.low; HI = q.high;"
+        ),
+        0,
+        "u16 5000 << 17"
+    );
+}
+
+/// The boundary the warning is drawn at: one below the width still shifts.
+#[test]
+fn a_shift_one_below_the_width_still_keeps_a_bit() {
+    assert_eq!(eval_u8("let a: u8 = 1; let n: u8 = 7; OUT = a << n;"), 0x80);
+    assert_eq!(eval_u8("let a: u8 = 0x80; let n: u8 = 7; OUT = a >> n;"), 1);
+}

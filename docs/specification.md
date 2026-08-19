@@ -3827,6 +3827,35 @@ let i: i8 = 127 + 1;     // -128 (signed overflow wraps)
 let j: i8 = -128 - 1;    // 127 (signed underflow wraps)
 ```
 
+**Shifts:**
+
+`<<` and `>>` take a count in bits. A count **at or past the type's width**
+shifts every bit out: the result is `0`, or `-1` for `>>` on a negative signed
+value, since an arithmetic right shift feeds the sign bit back in.
+
+```rust
+let a: u8 = 200;
+let n: u8 = 9;
+let x: u8 = a << n;        // 0 — every bit shifted out
+let y: i8 = (-100) >> n;   // -1 — the sign bit is what comes in
+```
+
+The count is **not masked** to the width. A 6502 has no barrel shifter, so a
+variable shift is a loop that simply performs the count; there is nothing to
+mask and no cost to defining it this way. Masking (as x86 and Java do) would
+make `x << 8` on a `u8` mean `x << 0`, which is both surprising and useless,
+and would cost an `AND` on every variable shift to produce.
+
+A count the compiler can see is at or past the width is a **warning**, not an
+error — the behaviour is defined, and clearing a value by shifting it out is a
+real if unusual idiom:
+
+```rust
+let x: u8 = a << 8;        // warning: shifting a `u8` by 8 always yields 0
+let y: u8 = a << 7;        // fine
+let z: u8 = a << n;        // fine: `n` is only known at run time
+```
+
 **Division and Modulo:**
 
 Division truncates toward zero, and the remainder takes the dividend's sign:

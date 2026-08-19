@@ -807,6 +807,24 @@ pub enum Warning {
     /// Constant with non-uppercase name
     NonUppercaseConstant { name: String, span: Span },
 
+    /// A shift count the compiler can see is at or past the width of the value
+    /// being shifted. Defined — the bits shift out and zeros (or copies of the
+    /// sign bit, for an arithmetic right shift) come in, so the result is 0 or
+    /// -1 — but a count that can only ever produce a constant is a mistake far
+    /// more often than it is a choice.
+    ShiftCountAtOrPastWidth {
+        /// `<<` or `>>`, for the message.
+        op: &'static str,
+        count: i64,
+        /// The type being shifted, and so the width the count is measured
+        /// against.
+        ty: String,
+        width: u32,
+        /// What the shift is bound to produce, whatever the value.
+        result: &'static str,
+        span: Span,
+    },
+
     /// Function parameters exceed available zero-page space
     ParameterOverflow {
         function_name: String,
@@ -926,6 +944,22 @@ impl Warning {
                     span,
                 )
             }
+            Warning::ShiftCountAtOrPastWidth {
+                op,
+                count,
+                ty,
+                width,
+                result,
+                span,
+            } => (
+                format!(
+                    "shifting a `{ty}` by {count} always yields {result}: the count is at or \
+                     past the type's {width} bits\n  = help: `{op} {count}` moves every bit \
+                     out, so the value plays no part. Use a count below {width}, or write \
+                     {result} directly if that is what was meant"
+                ),
+                span,
+            ),
             Warning::NonUppercaseConstant { name, span } => (
                 format!(
                     "constant `{}` should have an uppercase name\n  = help: rename it to `{}`",
