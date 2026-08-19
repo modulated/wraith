@@ -1040,3 +1040,253 @@ fn a_nested_field_chain_resolves_through_every_form() {
         assert_eq!(e.mem(0x0900), want, "a nested chain, {what}");
     }
 }
+
+/// A struct returned by value comes back as its **address** in A:X.
+///
+/// `return s` used to fall through to the scalar return path: it loaded the
+/// struct's first byte into A and left X holding whatever the last instruction
+/// happened to leave there. The caller does the right thing — it dereferences
+/// A:X and copies the struct's bytes out — so a two-field struct came back as
+/// two bytes read from wherever that pair pointed. `mk(7)` returning
+/// `S { f0: 7, f1: 8 }` produced `(0, 0)`, read from zero page `$0007`.
+///
+/// Nothing diagnosed it: the program compiled, ran, and answered wrongly. The
+/// slice return had been given this treatment already; the struct one was
+/// simply missing, which is the "one rule, several implementations" shape.
+///
+/// Every way of naming the returned struct is here, because the address comes
+/// from a different place in each: a local's frame slot, a by-reference
+/// parameter's pointer, a `static`'s fixed address, and a literal that built
+/// itself into a temporary and already holds a pointer.
+#[test]
+fn a_struct_returned_by_value_comes_back_as_its_address() {
+    let cases: [(&str, &str, (u8, u8)); 5] = [
+        (
+            "a local, assigned field by field",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            fn mk(x: u8) -> S {
+                let s: S = S { f0: 0, f1: 0 };
+                s.f0 = x;
+                s.f1 = x + 1;
+                return s;
+            }
+            #[reset]
+            fn main() { let r: S = mk(7); O0 = r.f0; O1 = r.f1; loop {} }
+            "#,
+            (7, 8),
+        ),
+        (
+            "a by-reference parameter, passed straight back",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            fn id(p: S) -> S { return p; }
+            #[reset]
+            fn main() {
+                let s: S = S { f0: 3, f1: 4 };
+                let r: S = id(s);
+                O0 = r.f0; O1 = r.f1; loop {}
+            }
+            "#,
+            (3, 4),
+        ),
+        (
+            "a literal, which already holds a pointer",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            fn mk(x: u8) -> S { return S { f0: x, f1: 9 }; }
+            #[reset]
+            fn main() { let r: S = mk(5); O0 = r.f0; O1 = r.f1; loop {} }
+            "#,
+            (5, 9),
+        ),
+        (
+            "a `static`, at a fixed address and mutable",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            static G: S = S { f0: 1, f1: 2 };
+            fn get() -> S { return G; }
+            #[reset]
+            fn main() { G.f1 = 8; let r: S = get(); O0 = r.f0; O1 = r.f1; loop {} }
+            "#,
+            (1, 8),
+        ),
+        (
+            "one with an array field, whose elements travel with it",
+            r#"
+            struct S { f0: u8, a: [u8; 3] }
+            fn mk(x: u8) -> S {
+                let s: S = S { f0: x, a: [1, 2, 3] };
+                s.a[1] = x + 1;
+                return s;
+            }
+            #[reset]
+            fn main() { let r: S = mk(4); O0 = r.f0; O1 = r.a[1]; loop {} }
+            "#,
+            (4, 5),
+        ),
+    ];
+
+    for (what, body, want) in cases {
+        let mut e = run(&format!(
+            "const O0: addr = 0x0900;\nconst O1: addr = 0x0901;\n{body}"
+        ));
+        assert_eq!((e.mem(0x0900), e.mem(0x0901)), want, "returning {what}");
+    }
+}
+
+/// An array field is stored inline, and is reached the same way wherever the
+/// struct lives.
+///
+/// The field's elements are part of the struct's bytes, not a pointer to them,
+/// so the address arithmetic is the struct's base plus the field's offset plus
+/// the scaled index — three terms, and a 16-bit element scales the last one.
+#[test]
+fn an_array_field_is_stored_inline_at_either_width() {
+    // A local, both indices, with a scalar field on each side of the array so a
+    // wrong offset lands somewhere visible.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        struct S { f0: u8, a: [u8; 4], f1: u8 }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 11, a: [1, 2, 3, 4], f1: 22 };
+            s.a[2] = 99;
+            let i: u8 = 3;
+            s.a[i] = 77;
+            O0 = s.f0;
+            O1 = s.a[2];
+            O2 = s.a[i];
+            O3 = s.f1;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (11, 99, 77, 22),
+        "a local struct's array field, constant and run-time index"
+    );
+
+    // A `static`, which is a fixed address rather than a frame slot.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        struct S { f0: u8, a: [u8; 4] }
+        static G: S = S { f0: 11, a: [1, 2, 3, 4] };
+        #[reset]
+        fn main() { G.a[2] = 99; O0 = G.a[2]; O1 = G.a[1]; loop {} }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (99, 2),
+        "a static struct's array field"
+    );
+
+    // 16-bit elements: the index scales by two, and both bytes move.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O2: addr = 0x0902;
+        struct S { f0: u16, a: [u16; 4] }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 1111, a: [1000, 2000, 3000, 4000] };
+            let i: u8 = 3;
+            s.a[i] = 40000;
+            let x: u16 = s.a[i];
+            O0 = x.low; O2 = x.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0902)),
+        ((40000u16 & 0xFF) as u8, (40000u16 >> 8) as u8),
+        "a 16-bit array field carries both bytes"
+    );
+}
+
+/// A struct behind a pointer is *one* piece of storage, not a copy.
+///
+/// The callee writes a field through `&S` and the caller sees it, which is the
+/// whole reason the parameter is by reference.
+#[test]
+fn a_struct_behind_a_pointer_is_one_piece_of_storage() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        struct S { f0: u8, f1: u8 }
+        fn bump(p: &S) -> u8 {
+            p.f0 = p.f0 + 1;
+            return p.f1;
+        }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 5, f1: 9 };
+            O1 = bump(&s);
+            O0 = s.f0;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (6, 9),
+        "a write through &S is visible to the caller"
+    );
+}
+
+/// The same for a `&T` to a scalar: two names, one byte, in both directions.
+#[test]
+fn a_pointer_is_a_second_name_for_one_byte() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let x: u8 = 5;
+            let p: &u8 = &x;
+            *p = *p + 1;
+            O0 = x;          // the write through `p` is visible as `x`
+            x = 20;
+            O1 = *p;         // and the write to `x` is visible through `p`
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (6, 20));
+}
+
+/// Two shapes in this family are *refused*, and the tests say so rather than
+/// leaving it to be discovered.
+///
+/// Both are ordinary-looking source with no way to spell the same thing, so
+/// they are on the roadmap. What matters here is that they are refused rather
+/// than miscompiled — the failure mode this whole file exists for.
+#[test]
+fn a_field_of_a_call_and_an_indexed_field_of_a_pointer_are_refused() {
+    crate::common::assert_error_contains(
+        r#"
+        const O0: addr = 0x0900;
+        struct S { f0: u8, f1: u8 }
+        fn mk(x: u8) -> S { return S { f0: x, f1: 9 }; }
+        #[reset]
+        fn main() { O0 = mk(6).f1; loop {} }
+        "#,
+        "Field access only supported on variables",
+    );
+
+    crate::common::assert_error_contains(
+        r#"
+        const O0: addr = 0x0900;
+        struct S { f0: u8, a: [u8; 3] }
+        fn peek(p: &S, i: u8) -> u8 { return p.a[i]; }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 0, a: [7, 8, 9] };
+            O0 = peek(&s, 2);
+            loop {}
+        }
+        "#,
+        "only variable array indexing is currently supported",
+    );
+}
