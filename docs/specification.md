@@ -981,8 +981,26 @@ struct Entity {
 **Layout Characteristics:**
 - No padding or alignment (sequential bytes)
 - Nested structs inlined directly
+- Array fields inlined directly too — `len * element size` bytes, in place
 - Multi-byte fields stored little-endian
 - Total struct size = sum of field sizes
+
+An array field is part of the struct's bytes, not a pointer to them, so
+reaching an element is the struct's base plus the field's offset plus the
+scaled index:
+
+```rust,compile
+struct Row { tag: u8, cells: [u16; 3], flags: u8 }   // 1 + 6 + 1 = 8 bytes
+
+#[reset]
+fn main() {
+    let r: Row = Row { tag: 1, cells: [10, 20, 30], flags: 0 };
+    let i: u8 = 2;
+    r.cells[i] = 40;
+    let c: u16 = r.cells[1];
+    loop {}
+}
+```
 
 ### Nested Structs
 
@@ -1085,9 +1103,9 @@ copy.
 
 ### Returning Structs by Value
 
-A function may return a struct by value. The result is copied into the
-destination variable's storage, so returning and binding a struct is a true
-copy:
+A function may return a struct by value. What travels back is the struct's
+**address**, in `A:X`; the caller copies the bytes out of it immediately after
+the call, so returning and binding a struct is a true copy:
 
 ```rust,compile
 struct Point { x: u8, y: u8 }
@@ -1102,11 +1120,35 @@ fn main() {
 }
 ```
 
+Any way of naming the struct may be returned, and each yields its address
+differently — a local from its frame slot, a by-reference parameter from the
+pointer in its slot, a `static` from its fixed address, and a literal from the
+pointer it already produces:
+
+```rust,compile
+struct S { f: u8, a: [u8; 3] }
+static G: S = S { f: 1, a: [2, 3, 4] };
+
+fn from_local(x: u8) -> S { let s: S = S { f: x, a: [0; 3] }; return s; }
+fn from_param(p: S) -> S { return p; }
+fn from_static() -> S { return G; }
+fn from_literal(x: u8) -> S { return S { f: x, a: [5, 6, 7] }; }
+
+#[reset]
+fn main() { let s: S = from_local(1); s = from_static(); loop {} }
+```
+
+Because the address names storage inside the callee's frame, it is valid only
+until the caller has copied it — which is what the caller does with it, and the
+only thing it may do with it.
+
 #### Where a struct literal lives
 
 A struct literal whose fields are all constants is emitted as bytes in the
 `CODE` section, and the expression evaluates to a pointer at them. It costs no
-RAM and no cycles to build.
+RAM and no cycles to build. "Constant" means the field folds to a number, so
+`(-1)` and `2 * 3` qualify; an array field is laid out inline there like
+anywhere else, and a field the literal omits is zeroed for its whole width.
 
 A literal with a *computed* field has no bytes until the program runs, so it is
 assembled at run time into a block of RAM reserved for that literal. The block
@@ -1745,6 +1787,11 @@ struct Node { value: u8, next: &Node }   // 3 bytes
 
 `p[i]` has no bounds check: a pointer carries no length. When the length
 matters, use a slice (`&[T]`), which carries one.
+
+`p[i]` and `p.field` do not compose: `p.cells[i]`, an *indexed array field*
+through a pointer, is not supported, and neither is `&x.cells[0]`. An array
+field is reached through the struct's own name — copy such a field element by
+element rather than through a pointer to the struct.
 
 Two pointers of the same type compare for equality with `==` / `!=` — the null
 check a linked list needs. Ordering (`<`, `>`, …) and arithmetic do not apply:

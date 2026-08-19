@@ -51,6 +51,12 @@ read against a current picture:
 | A shift count at or past the width shifts every bit out, and warns when constant | `tests/e2e/operators.rs` |
 | A whole array is never assigned; the refusal names element-wise and `memcpy` | `tests/e2e/aggregate_dispatch.rs` |
 | The fuzzer copies a run of bytes with `memcpy`, through `&arr[i]` and `&TBL[i]` | `docs/fuzz-coverage.md` |
+| A struct returned by value comes back as its address, not its first byte | `tests/e2e/aggregate_dispatch.rs` |
+| A constant struct lays out an array field inline, and folds its fields | `tests/e2e/aggregate_dispatch.rs` |
+| `*p` on a pointer-to-pointer keeps its high byte; one indirect load serves both | `tests/e2e/aggregate_dispatch.rs` |
+| The fuzzer aliases a variable through a pointer, and moves the alias | `docs/fuzz-coverage.md` |
+| The fuzzer returns a struct from a call, binds it, assigns it, and pokes one through `&S` | `docs/fuzz-coverage.md` |
+| The shrinker keeps a rejection's *reason*, so a reduction cannot drift to another | `tests/fuzz_exec.rs` |
 
 ## What keeps going wrong
 
@@ -66,12 +72,25 @@ cost several bugs before it was named.
   matched where `CallIndirect` was not. The three sites that decide an
   aggregate's fate now *refuse* what they cannot carry.
 
+  Ten, now: `return s` from a `-> S` function fell through to the scalar return
+  path, which loaded the struct's first byte into A. The slice return had been
+  given its case; the struct one had not, and there was no `_ =>` to blame —
+  just an `if` chain whose last arm was "an ordinary value".
+
 - **One rule with several implementations.** The same question answered in more
   than one place drifts. A function pointer is two bytes with its high byte in
   Y — neither the number convention's reason nor the address convention's — so
   it fell off three separate hand-written lists of "the wide types", each
   omission a different wrong answer. The authoritative table already existed
   and already knew. Ask it; do not re-list the variants.
+
+  Three more since: a *constant* struct decided constant-ness by matching
+  `Expr::Literal` where sema decides it by folding, so `S { f: (-1) }` was
+  constant to one and not the other; `*p` re-listed the two-byte types and left
+  out the ones that are addresses, which the *store* side had already been
+  fixed for; and the by-reference field load kept its own copy of the
+  indirect-load sequence `emit_deref_load` exists to be — which is precisely
+  how the two could disagree.
 
 - **`None` meaning two different things.** "This form has no address, and never
   could" and "this form has one and nobody wrote the case" read identically to
@@ -87,6 +106,14 @@ cost several bugs before it was named.
   reference — in the first case the reference contradicted its own stdlib
   section. When the hardware sequence already yields a sensible answer for
   free, document it rather than inventing a different one.
+
+- **A tool that reduces has to preserve what it is reducing.** The shrinker
+  kept only "wrong answer" versus "rejected", so reducing a rejection was free
+  to walk to an unrelated one — and did, twice in one afternoon, to an `i8`/
+  `i16` mismatch and to `% 0` folded out of two literals. Both times the
+  reported program no longer contained the failure, and the time lost re-deriving
+  it was more than the reduction saved. The rejection's *reason* is part of the
+  kind now.
 
 - **Verify against the bug, not against the fix.** Every correctness change
   here is checked by putting the defect back and watching a named test fail.
@@ -215,9 +242,10 @@ What it generates is a small imperative language: `u8`/`u16`/`i8`/`i16`, ten
 binary operators, casts, comparisons and boolean connectives, assignment,
 `if`/`else`, counted `for` and condition-driven `while`, functions with one to
 three parameters and a return value, self-recursion bounded by a decreasing
-budget, and a local array, a `const` table and a two-field struct — all nested.
-Every cell's final value is written out, so one program checks up to ten
-results.
+budget, a local array, a `const` table and a struct with an array field, and a
+pointer that names one of the program's own variables and can be moved to
+another — all nested. Every cell's final value is written out, so one program
+checks a dozen or more results.
 
 **What it reaches is documented, not asserted**: [`fuzz-coverage.md`](fuzz-coverage.md)
 lists every construct in the language's AST with how many of a fixed sample of
@@ -234,7 +262,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Fourteen real bugs so far, most of them silent:
+Sixteen real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -297,6 +325,25 @@ Fourteen real bugs so far, most of them silent:
     held from an unrelated instruction and the same program could answer
     differently depending on the statement before it. All six now share one
     `emit_widen_a_into_y`.
+13. A struct returned by value came back as its *first byte* in A, with X
+    holding whatever the last instruction left. The caller was right — it
+    dereferences A:X and copies the bytes out — so `mk(7)` returning
+    `S { f0: 7, f1: 8 }` answered `(0, 0)`, read from zero page `$0007`. The
+    slice return had this case and the struct one was simply missing.
+14. A *constant* struct refused an array field, and decided "constant" by
+    matching `Expr::Literal` where sema decides it by *folding* — so a struct
+    compiled only when every field happened to be a non-negative number, and
+    `return S { a: [1, 2] }` failed where the same struct bound to a local
+    compiled.
+15. `*p` on a `&&u8` loaded **one byte**: it decided "two bytes" by re-listing
+    `u16`/`i16`/`b16`, which leaves out the two-byte values that are addresses.
+    The binding then stored whatever X held as the high half, so the pointer
+    came out `$0000` where it should have been `$0400` and both the read and
+    the write through it landed in zero page. The store side had already been
+    fixed the same way.
+16. The by-reference field load kept its own copy of the indirect-load
+    sequence that `emit_deref_load` exists to be — which is how 15 could
+    happen on one side and not the other. Both go through it now.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
@@ -351,10 +398,29 @@ and an oracle that is merely *probably* right is worse than no oracle:
   deliberately overlapping two members' frames survives 600 seeds, because the
   per-edge save covers it. What does carry it is the recursive-edge set:
   counting only self-edges fails at seed 38.
-- **Pointers and enums.** A `&T` gives two names for one piece of storage,
-  which the oracle would have to alias-model; enums are a separate lowering
-  again. (An address is *taken* — as a `memcpy` argument — but never bound to a
-  variable or read through, so there is still nothing to alias.)
+- **Pointers and enums.** *The pointer half is done.* `main` declares
+  `let p: &T = &v{k};` over one of its own variables; `*p` reads, `*p = e`
+  writes, and `p = &v{j}` moves the alias, so which storage a read reaches is
+  program state rather than a fact about the declaration.
+
+  The alias modelling turned out to be cheap, because the *generator* chooses
+  the targets: every one has the pointer's own type, so a store through it is
+  never a widening, and the oracle carries one index. A store is followed
+  immediately by a read of a variable it may have landed in — the alias has to
+  hold at the very next statement, whatever the compiler believes about its
+  registers in between.
+
+  Checked against reintroduced defects: reading a 16-bit pointee as one byte,
+  and storing one as one byte, each fail inside the default 120 seeds. Dropping
+  the register invalidation after an indirect store does *not* — it survives
+  120 and fails 1 of 2000, because the register cache rarely spans the store
+  even when nothing tells it not to. That thinness is recorded rather than
+  papered over.
+
+  Still open here: a pointer to an element, a field or another pointer, and a
+  pointer passed to a function. The pointer-to-pointer case is where the live
+  bug was — see the `emit_deref_load` entry below — and it is covered by
+  `tests/e2e/aggregate_dispatch.rs` rather than by the generator.
 
   *The slice half of this item is done*, and needed no alias modelling: a slice
   of the `const` table views ROM, nothing writes it, and the table is the
@@ -384,9 +450,26 @@ and an oracle that is merely *probably* right is worse than no oracle:
   read once per call rather than freely: at 12% of expressions it put 790 of
   6000 seeds over that pool.
 
-  Still open: a struct *returned* from a call, a struct behind a pointer, an
-  array field inside a struct, enum payloads, and indexing a string rather than
-  measuring it.
+  *The return, the array field and the pointer are done too.* `mks(k) -> S`
+  returns a constant literal on one branch and a local on the other — ROM data
+  reached by label, frame storage reached by its address — and `main` binds it,
+  assigns it and passes it on, because binding and assignment are separate
+  copies in the compiler and only generating one leaves the other's length free
+  to be wrong. The struct gained an array field between its two scalars, three
+  elements where the local array has four, so an offset computed from the wrong
+  array lands on a cell the program reports. And `pk(pp: &S, w)` writes one
+  field through a pointer and returns another, so the callee's storage and the
+  caller's are the same bytes.
+
+  Four defects came out of it: a returned struct came back as its *first byte*
+  in A rather than its address in A:X; a constant struct refused an array field
+  and decided "constant" by matching `Expr::Literal` where sema decides it by
+  folding; the by-reference field load kept its own copy of the indirect-load
+  sequence; and `*p` on a `&&u8` read one byte.
+
+  Still open: enum payloads, indexing a string rather than measuring it, a
+  struct nested inside a struct, and a struct returned *through a function
+  pointer* in the generator (that one has an e2e test).
 - **Copying a run of bytes.** *Done.* `memcpy(&arr[d], &TBL[s], n)` is
   generated wherever the program's type is `u8`, which is what a whole-array
   assignment turned into once that statement was refused. It puts three things

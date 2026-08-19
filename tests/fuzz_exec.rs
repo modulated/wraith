@@ -23,9 +23,10 @@
 //! binary operators, casts, comparisons and boolean connectives, assignment,
 //! `if`/`else`, counted `for` and condition-driven `while`, functions with one
 //! to three parameters and a return value, self-recursion bounded by a
-//! decreasing budget, and a local array, a `const` table and a two-field struct
-//! — all nested. Every cell's final value is written out, so one program checks
-//! up to ten results rather than one.
+//! decreasing budget, a local array, a `const` table and a struct with an array
+//! field, and a pointer that names one of the program's own variables and can
+//! be moved to another — all nested. Every cell's final value is written out,
+//! so one program checks a dozen or more results rather than one.
 //!
 //! Runs are deterministic. Each iteration is seeded from its index, so a
 //! failure reports a seed that reproduces it, and CI sees the same programs
