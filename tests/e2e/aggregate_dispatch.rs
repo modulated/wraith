@@ -1290,3 +1290,34 @@ fn a_field_of_a_call_and_an_indexed_field_of_a_pointer_are_refused() {
         "only variable array indexing is currently supported",
     );
 }
+
+#[test]
+fn probe_ptr_repoint() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        #[reset]
+        fn main() {
+            let x: u8 = 5;
+            let y: u8 = 60;
+            let p: &u8 = &x;
+            *p = *p + 1;
+            O0 = x;
+            p = &y;
+            *p = *p * 2;
+            O1 = y;
+            O2 = *p;
+            let w: u16 = 1000;
+            let q: &u16 = &w;
+            *q = *q + 5;
+            O3 = w.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (6, 120, 120, ((1005u16) & 0xff) as u8)
+    );
+}

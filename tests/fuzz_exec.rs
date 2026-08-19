@@ -348,6 +348,15 @@ enum E {
     Konst(Ix),
     /// `s.f{i}`, in `main` only.
     Field(usize),
+    /// `s.a[<index>]` — an element of the struct's *array field*, whose bytes
+    /// live inline in the struct rather than behind a pointer. The address is
+    /// three terms (the struct's base, the field's offset, the scaled index)
+    /// where a plain array's is two, and a 16-bit element scales the last one.
+    ///
+    /// `main` only: reaching it through the by-reference parameter — `xp.a[i]`
+    /// — is refused by the compiler, so generating it there would be a
+    /// generator bug rather than a test.
+    AField(Ix),
     /// `VTBL[<sel>](<arg>)` — a call through a table of function pointers,
     /// indexed at run time. The callee is not known until then, so this is the
     /// path where the compiler stages arguments at a fixed address and where
@@ -407,14 +416,21 @@ enum Place {
     Var(usize),
     Elem(Ix),
     Field(usize),
+    AField(Ix),
 }
 
 /// Elements in the generated array, and the largest `for` count, so a loop
 /// variable is always a valid index.
 const ALEN: usize = 4;
 
-/// Fields in the generated struct.
+/// Scalar fields in the generated struct.
 const SFIELDS: usize = 2;
+/// Elements in the struct's array field.
+///
+/// Three, not four: a length that differs from [`ALEN`] is what catches an
+/// offset computed from the wrong array, and the two scalar fields sit either
+/// side of it so a base that is off by a field lands somewhere visible.
+const AFLEN: usize = 3;
 /// Variants of the generated unit enum. Three is enough for the tag to be a
 /// value rather than a flag, and few enough that the whole range is reachable.
 const EVARIANTS: usize = 3;
@@ -735,10 +751,11 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // An element or a field is storage of the program's type, so it anchors
         // an expression exactly as a variable does.
         if g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
-            return match g.rng.below(3) {
+            return match g.rng.below(4) {
                 0 => E::Elem(gen_index(g)),
                 1 => E::Konst(gen_index(g)),
-                _ => E::Field(g.rng.below(SFIELDS as u64) as usize),
+                2 => E::Field(g.rng.below(SFIELDS as u64) as usize),
+                _ => E::AField(gen_afield_index(g)),
             };
         }
         // Inside the struct-taking function the array and the table are out of
@@ -953,6 +970,20 @@ fn gen_index(g: &mut Gen) -> Ix {
     }
 }
 
+/// An index into the struct's array field, which is [`AFLEN`] long rather than
+/// [`ALEN`].
+///
+/// No loop variable: a `for` bound may be as large as `ALEN`, which is past the
+/// end of this one, and an out-of-range write would be the generator's fault
+/// rather than the compiler's.
+fn gen_afield_index(g: &mut Gen) -> Ix {
+    if g.rng.below(2) == 0 {
+        Ix::Lit(g.rng.below(AFLEN as u64) as usize)
+    } else {
+        Ix::Wrapped(g.rng.below(VARS as u64) as usize)
+    }
+}
+
 /// An index into a slice, which is in range whatever the slice currently
 /// views.
 ///
@@ -984,10 +1015,10 @@ fn gen_range(g: &mut Gen) -> (usize, usize) {
 /// whether the value assigned to it may widen.
 fn gen_place(g: &mut Gen) -> (Place, Ty) {
     if g.allow_aggregates && g.rng.below(100) < 40 {
-        let p = if g.rng.below(2) == 0 {
-            Place::Elem(gen_index(g))
-        } else {
-            Place::Field(g.rng.below(SFIELDS as u64) as usize)
+        let p = match g.rng.below(3) {
+            0 => Place::Elem(gen_index(g)),
+            1 => Place::Field(g.rng.below(SFIELDS as u64) as usize),
+            _ => Place::AField(gen_afield_index(g)),
         };
         return (p, g.base);
     }
@@ -1123,6 +1154,9 @@ struct Prog {
     aggregates: bool,
     arr_init: [i64; ALEN],
     field_init: [i64; SFIELDS],
+    /// The struct's array field, initialised with the struct and written by
+    /// `Place::AField`.
+    afield_init: [i64; AFLEN],
     /// Which variant `main`'s enum local holds, or `None` when the program
     /// declares no enum.
     enum_init: Option<usize>,
@@ -1529,6 +1563,10 @@ fn gen_program(seed: u64) -> Prog {
     for v in field_init.iter_mut() {
         *v = g.lit(base);
     }
+    let mut afield_init = [0i64; AFLEN];
+    for v in afield_init.iter_mut() {
+        *v = g.lit(base);
+    }
     let mut konst = [0i64; ALEN];
     for v in konst.iter_mut() {
         *v = g.lit(base);
@@ -1622,6 +1660,7 @@ fn gen_program(seed: u64) -> Prog {
         aggregates,
         arr_init,
         field_init,
+        afield_init,
         enum_init,
         str_init,
         konst,
@@ -1643,6 +1682,10 @@ struct St<'a> {
     /// them, and in a program that declares neither.
     arr: Vec<i64>,
     fields: Vec<i64>,
+    /// The struct's array field. `main`'s, like `arr` — a function reaches the
+    /// struct through a by-reference parameter, and indexing the field there
+    /// is not something the compiler emits.
+    afield: Vec<i64>,
     /// The variant `main`'s enum holds, or the one handed to a callee. `None`
     /// where no enum is in scope, which is what makes naming one there a bug
     /// in the generator rather than a silent zero.
@@ -1699,6 +1742,9 @@ fn call_fn(
         // of the values rather than an aliasing model.
         arr: Vec::new(),
         fields: fields.to_vec(),
+        // Nor the array field: `xp.a[i]` is not something the compiler emits,
+        // so nothing in a function body can name it.
+        afield: Vec::new(),
         // The tag, when this function takes the enum. A unit enum's value is
         // its variant index, so nothing else has to travel.
         tag,
@@ -1838,6 +1884,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         }
         E::SliceLen(i) => narrow(st.slices[*i].1 as i64, ty),
         E::Field(i) => st.fields[*i],
+        E::AField(ix) => st.afield[eval_index_mod(ix, st, ty, AFLEN)],
         // `(e as T)` is the variant index at `T`. Reaching this with no tag
         // would mean the generator named an enum no scope has.
         E::EnumVal => narrow(
@@ -1939,6 +1986,10 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                         st.arr[k] = value;
                     }
                     Place::Field(f) => st.fields[*f] = value,
+                    Place::AField(ix) => {
+                        let k = eval_index_mod(ix, st, ty, AFLEN);
+                        st.afield[k] = value;
+                    }
                 }
             }
             S::Install(id) => st.dev = *id,
@@ -1996,6 +2047,11 @@ fn expected(p: &Prog) -> Vec<u32> {
         } else {
             Vec::new()
         },
+        afield: if p.aggregates {
+            at_base(&p.afield_init)
+        } else {
+            Vec::new()
+        },
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
         current: None,
@@ -2017,6 +2073,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         .iter()
         .chain(st.arr.iter())
         .chain(st.fields.iter())
+        .chain(st.afield.iter())
         .chain(descriptors.iter())
         .zip(cell_types(p))
         .map(|(v, t)| raw(*v, t))
@@ -2027,7 +2084,7 @@ fn expected(p: &Prog) -> Vec<u32> {
 fn cell_types(p: &Prog) -> Vec<Ty> {
     let mut out: Vec<Ty> = p.var_types.to_vec();
     if p.aggregates {
-        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS));
+        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN));
     }
     out.extend(std::iter::repeat_n(p.base, 2 * p.slices.len()));
     out
@@ -2048,10 +2105,17 @@ fn loop_var(id: usize) -> String {
 }
 
 fn render_index(ix: &Ix) -> String {
+    render_index_mod(ix, ALEN)
+}
+
+/// As [`render_index`], against a length that is not the local array's. The
+/// struct's array field is shorter, and an index reduced modulo the wrong one
+/// runs off its end.
+fn render_index_mod(ix: &Ix, len: usize) -> String {
     match ix {
         Ix::Lit(k) => format!("{k}"),
         Ix::Loop(id) => loop_var(*id),
-        Ix::Wrapped(i) => format!("((v{i} as u8) % {ALEN})"),
+        Ix::Wrapped(i) => format!("((v{i} as u8) % {len})"),
     }
 }
 
@@ -2060,6 +2124,7 @@ fn render_place(p: &Place, sc: Scope) -> String {
         Place::Var(v) => sc.var(*v),
         Place::Elem(ix) => format!("arr[{}]", render_index(ix)),
         Place::Field(f) => format!("s.f{f}"),
+        Place::AField(ix) => format!("s.a[{}]", render_index_mod(ix, AFLEN)),
     }
 }
 
@@ -2136,6 +2201,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
+        E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_index_mod(ix, AFLEN)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
         E::StrLen => format!("({}.len as {})", str_name(sc), ty.name()),
         E::Dispatch { sel, arg } => {
@@ -2424,7 +2490,12 @@ fn render_program(p: &Prog, form: Form) -> String {
         String::new()
     };
     let struct_decl = if p.aggregates {
-        let fields: Vec<String> = (0..SFIELDS).map(|i| format!("f{i}: {tn}")).collect();
+        // The array field sits *between* the two scalars, so a base that is
+        // off by a field or an offset computed from the wrong array lands on a
+        // cell this program reports rather than off the end of the struct.
+        let mut fields: Vec<String> = vec![format!("f0: {tn}")];
+        fields.push(format!("a: [{tn}; {AFLEN}]"));
+        fields.extend((1..SFIELDS).map(|i| format!("f{i}: {tn}")));
         let table: Vec<String> = p.konst.iter().map(lit).collect();
         format!(
             "struct S {{ {} }}\nconst TBL: [{tn}; {ALEN}] = [{}];\n",
@@ -2498,12 +2569,17 @@ static DEV: VT = VT {{ call: {} }};\n",
             "    let arr: [{tn}; {ALEN}] = [{}];\n",
             elems.join(", ")
         ));
-        let fields: Vec<String> = p
-            .field_init
-            .iter()
-            .enumerate()
-            .map(|(i, v)| format!("f{i}: {}", lit(v)))
-            .collect();
+        // Same order as the declaration.
+        let elems: Vec<String> = p.afield_init.iter().map(lit).collect();
+        let mut fields: Vec<String> = vec![format!("f0: {}", lit(&p.field_init[0]))];
+        fields.push(format!("a: [{}]", elems.join(", ")));
+        fields.extend(
+            p.field_init
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, v)| format!("f{i}: {}", lit(v))),
+        );
         decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", ")));
     }
     if let Some(k) = p.enum_init {
@@ -2524,6 +2600,7 @@ static DEV: VT = VT {{ call: {} }};\n",
     if p.aggregates {
         cells.extend((0..ALEN).map(|i| format!("arr[{i}]")));
         cells.extend((0..SFIELDS).map(|i| format!("s.f{i}")));
+        cells.extend((0..AFLEN).map(|i| format!("s.a[{i}]")));
     }
     for i in 0..p.slices.len() {
         cells.push(format!("sl{i}[0]"));
@@ -2791,6 +2868,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::Elem(_)
             | E::Konst(_)
             | E::Field(_)
+            | E::AField(_)
             | E::EnumVal
             | E::StrLen
             | E::SliceElem(..)
@@ -2868,6 +2946,7 @@ fn strip_self_calls(e: &mut E) {
         | E::Elem(_)
         | E::Konst(_)
         | E::Field(_)
+        | E::AField(_)
         | E::EnumVal
         | E::StrLen
         | E::SliceElem(..)
@@ -3055,7 +3134,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_index(ix, target, seen)
         }
-        E::Field(_) | E::EnumVal | E::StrLen => {
+        E::Field(_) | E::AField(_) | E::EnumVal | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -3371,6 +3450,7 @@ fn the_generator_covers_what_it_claims() {
         slice_lens: usize,
         struct_args: usize,
         field_reads: usize,
+        afield_reads: usize,
         enum_args: usize,
         enum_reads: usize,
         str_args: usize,
@@ -3438,6 +3518,7 @@ fn the_generator_covers_what_it_claims() {
             E::SliceElem(_, _) => s.slice_reads += 1,
             E::SliceLen(_) => s.slice_lens += 1,
             E::Field(_) => s.field_reads += 1,
+            E::AField(_) => s.afield_reads += 1,
             E::EnumVal => s.enum_reads += 1,
             E::StrLen => s.str_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
@@ -3577,6 +3658,12 @@ fn the_generator_covers_what_it_claims() {
     assert!(seen.slice_lens > 0, "never read a slice length");
     assert!(seen.field_reads > 0, "never read a struct field");
     assert!(
+        seen.afield_reads > 0,
+        "never read an element of the struct's array field — the address is three terms \
+         (the struct's base, the field's offset, the scaled index) where a plain array's \
+         is two"
+    );
+    assert!(
         seen.enum_args > 0,
         "never passed an enum to a function — two bytes with the high byte in X, spelled \
          `Named` like a struct, so only the type registry tells the two apart"
@@ -3711,6 +3798,7 @@ fn the_oracle_matches_the_documented_semantics() {
         aggregates: false,
         arr_init: [0; ALEN],
         field_init: [0; SFIELDS],
+        afield_init: [0; AFLEN],
         enum_init: None,
         str_init: None,
         konst: [0; ALEN],
@@ -3726,6 +3814,7 @@ fn the_oracle_matches_the_documented_semantics() {
         vars: vec![0; VARS],
         arr: Vec::new(),
         fields: Vec::new(),
+        afield: Vec::new(),
         counters: Vec::new(),
         loops: Vec::new(),
         current: None,
@@ -4034,7 +4123,9 @@ mod coverage {
         ),
         (
             "Expr::Field",
-            "two fields of the program's type; no nested struct and no array field",
+            "two scalar fields of the program's type and one array field, all reached \
+             through the struct's own name. No nested struct, and no field reached through \
+             a pointer with an index — `xp.a[i]` is refused by the compiler",
         ),
         (
             "Item::Static",
@@ -4044,19 +4135,22 @@ mod coverage {
         ),
         (
             "Item::Struct",
-            "one struct per program, two scalar fields, used as a local — never passed, \
-             returned, or pointed at",
+            "one struct per program: two scalar fields with an array field between them, so \
+             a base off by a field lands on a cell the program reports. Used as a local and \
+             passed to a function by address; never returned or pointed at",
         ),
         (
             "Literal::Array",
-            "two arrays per program — a local in zero page and a `const` in ROM, which reach \
-             their elements through different bases — four elements each, initialised from \
-             literals",
+            "three arrays per program — a local in zero page, a `const` in ROM, and a field \
+             inside the struct, which reach their elements through three different bases — \
+             initialised from literals",
         ),
         (
             "TypeExpr::Array",
-            "a fixed length of 4, which is also the largest `for` count, so a loop variable \
-             indexes it safely",
+            "fixed lengths: 4 for the local and the `const` table, which is also the largest \
+             `for` count so a loop variable indexes them safely, and 3 for the struct's \
+             array field, which differs deliberately — an offset computed from the wrong \
+             array runs off the end of the shorter one",
         ),
         (
             "TypeExpr::Named",
