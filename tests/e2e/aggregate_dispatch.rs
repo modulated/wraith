@@ -1355,3 +1355,34 @@ fn a_constant_struct_lays_out_its_array_field_inline() {
         "a 16-bit array field fills two bytes per element, so the field after it lands right"
     );
 }
+
+/// Dereferencing a pointer *to a pointer* loads both bytes.
+///
+/// `*pp` decided "two bytes" by re-listing `u16`/`i16`/`b16`, which leaves out
+/// the two-byte values that are addresses — a `&T` and a function pointer. So
+/// `let q: &u8 = *pp;` loaded one byte into A and the binding stored whatever
+/// X happened to hold as the high half: `q` came out as `$0000` where `p`
+/// named `$0400`, and both the read and the write through it landed in zero
+/// page instead. The store side had already been fixed this way; this is the
+/// other half.
+#[test]
+fn a_pointer_read_through_a_pointer_keeps_its_high_byte() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        // A `static`, so the address has a non-zero high byte — the half that
+        // was being dropped. A zero-page local would hide the bug.
+        static G: u8 = 7;
+        #[reset]
+        fn main() {
+            let p: &u8 = &G;
+            let pp: &&u8 = &p;
+            let q: &u8 = *pp;
+            O0 = *q;      // reads G through two levels
+            *q = 9;       // and writes it
+            O1 = G;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (7, 9));
+}

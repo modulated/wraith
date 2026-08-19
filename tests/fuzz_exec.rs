@@ -346,6 +346,13 @@ enum E {
     /// through an assembler label rather than a zero-page base. A different
     /// lowering from the local array, and the one with the bug history.
     Konst(Ix),
+    /// `*p` — a read through `main`'s pointer, which is a *second name* for
+    /// one of its variables. Which one is program state: `S::Repoint` moves
+    /// it, so the value this reads is not a property of the declaration.
+    ///
+    /// `main` only, and pure: the alias is what makes this interesting, and
+    /// reading through it changes nothing.
+    PtrLoad,
     /// `s.f{i}`, in `main` only.
     Field(usize),
     /// `s.a[<index>]` — an element of the struct's *array field*, whose bytes
@@ -484,6 +491,29 @@ enum S {
     /// returns a pointer to it in A:X rather than the four bytes themselves.
     /// A different path again from either of the two above.
     SliceFromCall(usize, usize),
+    /// `*p = <expr>;` — a store through the pointer, which lands in whichever
+    /// variable it currently names. The other half of the alias: a value
+    /// written under one name has to be visible under the other, and a
+    /// compiler that kept the variable in a register across the store would
+    /// answer with the stale one.
+    PtrStore(Ty, E),
+    /// `p = &v{k};` — the alias moved to another variable of the same type.
+    /// What makes the pointer's target program state rather than a fact about
+    /// the declaration, so a read through it cannot be folded away.
+    Repoint(usize),
+    /// `v{dst} = pk(&s, <expr>);` — a call that takes `main`'s struct **by
+    /// pointer**, writes one of its fields, and returns another.
+    ///
+    /// This is the aggregate half of the alias: the callee's storage and the
+    /// caller's are the same bytes, so a write inside `pk` has to be visible
+    /// in `main` afterwards, and the value that comes back is read from those
+    /// same bytes. A `&S` parameter that copied instead of pointing would
+    /// answer both correctly *inside* the callee and leave `main`'s struct
+    /// untouched — which no expression-level check would notice.
+    ///
+    /// A statement rather than an expression because it has a side effect on
+    /// `main`'s state, and the oracle evaluates expressions without one.
+    PokeStruct(usize, E),
     /// `s = mks({k});` — the whole struct replaced by one that arrives from a
     /// *call*, which returns a pointer to its bytes in A:X and leaves the
     /// caller to copy them out.
@@ -697,6 +727,19 @@ struct Gen<'a> {
     /// program declares slices, and inside `f0` when it takes one — the same
     /// restriction as the other aggregates, for the same reason.
     allow_slices: bool,
+    /// The pointer `main` declares: its type, and which of `main`'s variables
+    /// it may name. Empty in a program without one, and inside every function
+    /// — `p` is `main`'s local, and nothing else can spell it.
+    ///
+    /// Every target has the pointer's own type, so a store through it is never
+    /// a widening: `&T` names a `T`, and the two ways of writing that storage
+    /// have to agree byte for byte.
+    ptr_targets: Vec<usize>,
+    ptr_ty: Ty,
+    /// Whether `pk` exists, and which of `main`'s variables can take its
+    /// result. Those are the ones at the aggregate type: `pk` returns a field,
+    /// so anything else would put a widening in the way of the answer.
+    poke_targets: Vec<usize>,
     /// How many `sl{i}` are in scope: `SLICES` in `main`, and 0 inside a
     /// function, where the only slice is the parameter. What separates the two
     /// is that a statement can *move* a named slice, and `sp` is not one.
@@ -737,7 +780,8 @@ impl Gen<'_> {
     /// be typed by its own literals and the oracle would evaluate it at the
     /// wrong width.
     fn anchorable(&self, ty: Ty) -> bool {
-        self.var_types.contains(&ty)
+        (!self.ptr_targets.is_empty() && self.ptr_ty == ty)
+            || self.var_types.contains(&ty)
             || (self.allow_aggregates && self.base == ty)
             || (self.allow_slices && self.base == ty)
     }
@@ -773,6 +817,12 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // scope but a field is not: it reads through the parameter.
         if g.allow_fields && !g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
             return E::Field(g.rng.below(SFIELDS as u64) as usize);
+        }
+        // A read through the pointer. Storage of its own type, so it anchors
+        // an expression exactly as a variable does — and unlike a variable,
+        // *which* storage is not known until the last `Repoint` has run.
+        if !g.ptr_targets.is_empty() && g.ptr_ty == ty && g.rng.below(100) < 18 {
+            return E::PtrLoad;
         }
         // The tag is a small number cast to the expression's type, so unlike a
         // field it fits any type and is not tied to the aggregate one.
@@ -1071,7 +1121,38 @@ fn gen_bool(g: &mut Gen, depth: u32) -> B {
 
 fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
     let n = 1 + g.rng.below(if depth == 0 { 2 } else { 3 }) as usize;
-    (0..n).map(|_| gen_stmt(g, depth)).collect()
+    (0..n).flat_map(|_| gen_stmt_seq(g, depth)).collect()
+}
+
+/// One statement, plus — after a store through the pointer — a read of a
+/// variable that store may have landed in.
+///
+/// The read comes *immediately* after because that is where the alias has to
+/// hold: a value written under one name must be visible under the other at the
+/// very next statement, with whatever the compiler believes about its
+/// registers in between. Left to chance, whether any read follows a pointer
+/// store at all is a coin toss.
+///
+/// It is not a complete guard on the invalidation that makes it true —
+/// dropping `invalidate_registers` after an indirect store still survives 120
+/// seeds and fails 1 of 2000, because the register cache rarely spans the
+/// store even when nothing tells it not to. That thinness is recorded rather
+/// than papered over.
+///
+/// The read is a plain copy between two variables of the pointer's own type,
+/// so there is no widening in it and nothing to compute: what it tests is
+/// where the value comes from.
+fn gen_stmt_seq(g: &mut Gen, depth: u32) -> Vec<S> {
+    let s = gen_stmt(g, depth);
+    if matches!(s, S::PtrStore(..)) && !g.ptr_targets.is_empty() {
+        let pick = |g: &mut Gen| -> usize {
+            let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
+            g.ptr_targets[k]
+        };
+        let (dst, src) = (pick(g), pick(g));
+        return vec![s, S::Assign(Place::Var(dst), g.ptr_ty, E::Var(src))];
+    }
+    vec![s]
 }
 
 fn gen_stmt(g: &mut Gen, depth: u32) -> S {
@@ -1095,11 +1176,29 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
             _ => S::SliceFromCall(i, g.rng.below(2) as usize),
         };
     }
+    // The two pointer statements: a store through the alias, and a move of
+    // the alias itself. Both before the type check below, like the other
+    // statements that carry no place of their own.
+    if !g.ptr_targets.is_empty() && g.rng.below(100) < 12 {
+        if g.rng.below(3) == 0 {
+            let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
+            return S::Repoint(g.ptr_targets[k]);
+        }
+        let ty = g.ptr_ty;
+        return S::PtrStore(ty, gen_expr(g, ty, 2, false));
+    }
+    // A field written through a `&S` inside a call, and another read back.
+    if !g.poke_targets.is_empty() && g.rng.below(100) < 10 {
+        let k = g.rng.below(g.poke_targets.len() as u64) as usize;
+        let dst = g.poke_targets[k];
+        let ty = g.base;
+        return S::PokeStruct(dst, gen_expr(g, ty, 2, false));
+    }
     // The whole struct replaced by one that arrives from a call. Beside the
     // slice moves above and for the same reason: the statement carries no
     // expression, and what it changes is what a later read reaches.
     if g.allow_aggregates && g.rng.below(100) < 8 {
-        return S::StructFromCall(g.rng.below(2) as u64 as usize);
+        return S::StructFromCall(g.rng.below(2) as usize);
     }
     // A byte run copied out of the `const` table. Needs the aggregates to
     // exist, and a `u8` element: `memcpy` takes `&u8`, so an `i8` array would
@@ -1196,6 +1295,12 @@ struct Prog {
     /// The two structs `mks` chooses between, as (scalar fields, array field).
     /// Present exactly when the program declares the struct.
     mks: Vec<([i64; SFIELDS], [i64; AFLEN])>,
+    /// The two fields `pk` writes and reads, or `None` in a program that has
+    /// no `pk`. Fixed per program because they are part of the function.
+    poke: Option<(usize, usize)>,
+    /// The pointer `main` declares, as (type, initial target). `None` in a
+    /// program without one.
+    ptr: Option<(Ty, usize)>,
     /// Which of them `main`'s struct is *bound* from, or `None` when it is
     /// declared from a literal.
     ///
@@ -1566,6 +1671,9 @@ fn gen_program(seed: u64) -> Prog {
         mutual_call: None,
         allow_loops: true,
         allow_aggregates: false,
+        ptr_targets: Vec::new(),
+        ptr_ty: base,
+        poke_targets: Vec::new(),
         allow_fields: false,
         allow_enum: false,
         allow_str: false,
@@ -1655,6 +1763,27 @@ fn gen_program(seed: u64) -> Prog {
     } else {
         Vec::new()
     };
+    // The pointer `main` declares. Its type is one half of the pair, so both
+    // widths get a turn; its targets are the variables of that type, which is
+    // never empty because both halves always appear among them.
+    //
+    // Half the programs, because a program without one still has to be
+    // generated: taking a local's address is what forces it into memory, and
+    // the shapes that never do have their own bugs.
+    let ptr: Option<(Ty, usize)> = (g.rng.below(100) < 50).then(|| {
+        let pt = g.pair.pick(g.rng);
+        let targets: Vec<usize> = (0..VARS).filter(|i| var_types[*i] == pt).collect();
+        let k = g.rng.below(targets.len() as u64) as usize;
+        (pt, targets[k])
+    });
+    // `pk` writes one field of `main`'s struct through a `&S` and returns
+    // another. Half the programs that have a struct at all.
+    let poke: Option<(usize, usize)> = (aggregates && g.rng.below(100) < 50).then(|| {
+        (
+            g.rng.below(SFIELDS as u64) as usize,
+            g.rng.below(SFIELDS as u64) as usize,
+        )
+    });
     let struct_init_from_call =
         (!mks.is_empty() && g.rng.below(100) < 30).then(|| g.rng.below(2) as usize);
     // Decided here too, and for the same reason: `f0` may take the struct as a
@@ -1686,6 +1815,17 @@ fn gen_program(seed: u64) -> Prog {
     g.callable = 0..count;
     g.allow_indirect = vtable > 0;
     g.allow_aggregates = aggregates;
+    // Set *after* the functions are generated, not before: `main` is the only
+    // scope that can name the pointer — it is `main`'s local, and a function
+    // body has no way to spell it — so a function generated while this was set
+    // produced `*p` with no `p` in scope.
+    if let Some((pt, _)) = ptr {
+        g.ptr_ty = pt;
+        g.ptr_targets = (0..VARS).filter(|i| var_types[*i] == pt).collect();
+    }
+    if poke.is_some() {
+        g.poke_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
+    }
     g.main_slices = slices.len();
     // `f0` is the only function that can take a slice, and only when it exists
     // and is not one of the table's candidates.
@@ -1696,7 +1836,7 @@ fn gen_program(seed: u64) -> Prog {
     g.str_taker = (str_init.is_some() && count > vtable && funcs[0].str_param).then_some(0);
 
     let n = 2 + g.rng.below(3) as usize;
-    let stmts = (0..n).map(|_| gen_stmt(&mut g, 2)).collect();
+    let stmts = (0..n).flat_map(|_| gen_stmt_seq(&mut g, 2)).collect();
     let (counters, loops) = (g.counters, g.loops);
     Prog {
         pair,
@@ -1718,6 +1858,8 @@ fn gen_program(seed: u64) -> Prog {
         slices,
         mk_ranges,
         mks,
+        poke,
+        ptr,
         struct_init_from_call,
         mutual,
     }
@@ -1753,6 +1895,10 @@ struct St<'a> {
     /// written by `S::Install` — the whole point of dispatching through a
     /// pointer is that this is not a property of the source.
     dev: usize,
+    /// Which of `main`'s variables the pointer currently names. `None` where
+    /// there is no pointer in scope, which is what makes naming one there a
+    /// generator bug rather than a silent zero.
+    ptr: Option<usize>,
     /// Each slice's current `(start, len)` into `TBL`. Program state too:
     /// `Reslice` and `CopySlice` move it. Empty inside a function, which names
     /// no slice.
@@ -1809,6 +1955,8 @@ fn call_fn(
         current: Some((id, budget)),
         // A function body contains no indirect call, so this is never read.
         dev: 0,
+        // No pointer either: it is `main`'s local, like the array.
+        ptr: None,
         // The parameter, when this function takes one — the only slice its
         // body can name, and the one `sp` resolves to.
         slices: slice.into_iter().collect(),
@@ -1935,6 +2083,11 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             narrow(st.prog.konst[start + eval_index_mod(ix, st, ty, len)], ty)
         }
         E::SliceLen(i) => narrow(st.slices[*i].1 as i64, ty),
+        // The pointer names one of `main`'s variables; which one is whatever
+        // the last `Repoint` left. A read is at the *pointee's* type, which is
+        // the pointer's own, and then narrowed to the context like any other
+        // storage read.
+        E::PtrLoad => narrow(st.vars[st.ptr.expect("a pointer read needs a pointer")], ty),
         E::Field(i) => st.fields[*i],
         E::AField(ix) => st.afield[eval_index_mod(ix, st, ty, AFLEN)],
         // `(e as T)` is the variant index at `T`. Reaching this with no tag
@@ -2053,6 +2206,26 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             }
             S::Reslice(i, start, len) => st.slices[*i] = (*start, *len),
             S::SliceFromCall(i, k) => st.slices[*i] = st.prog.mk_ranges[*k],
+            // Both halves of the alias. The store lands in whichever variable
+            // the pointer names *now*, and at the pointer's own type — every
+            // target has it, so there is no widening to get wrong.
+            S::PtrStore(t, e) => {
+                let v = narrow(eval(e, st, *t), *t);
+                let k = st.ptr.expect("a pointer store needs a target");
+                st.vars[k] = v;
+            }
+            S::Repoint(k) => st.ptr = Some(*k),
+            // The argument is evaluated before the call, so the field it may
+            // read is the one from *before* the write — which is the order the
+            // machine runs it in too.
+            S::PokeStruct(dst, e) => {
+                let (w, r) = st.prog.poke.expect("a poke needs a `pk`");
+                let base = st.prog.base;
+                let v = narrow(eval(e, st, base), base);
+                let back = st.fields[r];
+                st.fields[w] = v;
+                st.vars[*dst] = narrow(back, st.prog.var_types[*dst]);
+            }
             S::StructFromCall(k) => {
                 let (fs, a) = &st.prog.mks[*k];
                 st.fields = fs.iter().map(|v| narrow(*v, ty)).collect();
@@ -2114,6 +2287,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         current: None,
         // The declaration installs the table's first entry.
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
+        ptr: p.ptr.map(|(_, k)| k),
         slices: p.slices.clone(),
     };
     exec(&p.stmts, &mut st, p.base);
@@ -2257,6 +2431,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::MutualCall(partner, arg) => format!("f{partner}(d - 1, {})", render(arg, ty, sc)),
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
+        E::PtrLoad => "*p".to_string(),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
         E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_index_mod(ix, AFLEN)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
@@ -2394,6 +2569,11 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 out.push_str(&format!("{pad}sl{i} = TBL[{start}..{}];\n", start + len))
             }
             S::SliceFromCall(i, k) => out.push_str(&format!("{pad}sl{i} = mk({k});\n")),
+            S::PtrStore(t, e) => out.push_str(&format!("{pad}*p = {};\n", render(e, *t, sc))),
+            S::Repoint(k) => out.push_str(&format!("{pad}p = &v{k};\n")),
+            S::PokeStruct(dst, e) => {
+                out.push_str(&format!("{pad}v{dst} = pk(&s, {});\n", render(e, ty, sc)))
+            }
             S::StructFromCall(k) => out.push_str(&format!("{pad}s = mks({k});\n")),
         }
     }
@@ -2515,7 +2695,10 @@ fn uses_memcpy(stmts: &[S]) -> bool {
         | S::CopySlice(..)
         | S::Reslice(..)
         | S::SliceFromCall(..)
-        | S::StructFromCall(_) => false,
+        | S::StructFromCall(_)
+        | S::PtrStore(..)
+        | S::Repoint(_)
+        | S::PokeStruct(..) => false,
     })
 }
 
@@ -2606,6 +2789,17 @@ fn render_program(p: &Prog, form: Form) -> String {
         ));
     }
 
+    // `pk` takes `main`'s struct by *pointer*, writes one field and returns
+    // another. The parameter is `&S` rather than `S`, so the callee's storage
+    // and the caller's are the same bytes and the write has to show up in
+    // `main` — a copy would answer correctly inside the callee and leave the
+    // caller's struct alone.
+    if let Some((w, r)) = p.poke {
+        funcs.push_str(&format!(
+            "fn pk(pp: &S, pw: {tn}) -> {tn} {{\n    let old: {tn} = pp.f{r};\n    pp.f{w} = pw;\n    return old;\n}}\n"
+        ));
+    }
+
     // The function-pointer table, and the struct field a driver is installed
     // in. Both name the same candidates, and both have to come after the
     // functions they name. Taking their addresses is what makes those
@@ -2671,6 +2865,12 @@ static DEV: VT = VT {{ call: {} }};\n",
             Some(k) => decls.push_str(&format!("    let s: S = mks({k});\n")),
             None => decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", "))),
         }
+    }
+    // Declared after the variables it may name, and before the statements
+    // that move it. Taking a local's address is also what forces that local
+    // into memory rather than a register, which is half of what this tests.
+    if let Some((pt, k)) = p.ptr {
+        decls.push_str(&format!("    let p: &{} = &v{k};\n", pt.name()));
     }
     if let Some(k) = p.enum_init {
         decls.push_str(&format!("    let e: C = C::C{k};\n"));
@@ -2802,12 +3002,32 @@ fn iterations() -> u64 {
 /// Why a program failed. Shrinking has to preserve the *kind*: a reduction
 /// that turns a wrong answer into a rejected program has found a different bug
 /// and would report the wrong one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum Kind {
-    /// Ran, and produced values the oracle disagrees with.
+    /// Ran, and produced values the oracle disagrees with. One wrong answer is
+    /// as good as another to reduce towards, so this carries nothing.
     WrongAnswer,
-    /// Never ran — rejected by the compiler, the assembler, or the emulator.
-    Rejected,
+    /// Never ran — rejected by the compiler, the assembler, or the emulator —
+    /// and *why*, because one rejection is not another.
+    ///
+    /// This used to be a bare variant, and the shrinker walked from a real
+    /// rejection to an unrelated one twice in one afternoon: once to an
+    /// `i8`/`i16` mismatch made by lifting a cast's operand out, and once to
+    /// `% 0` made by folding two literals into a zero divisor. Both times the
+    /// reduced program in the report was an artifact of the reduction and the
+    /// actual failure had been reduced away, which cost more time than the
+    /// shrinking saved.
+    Rejected(String),
+}
+
+/// The identity of a rejection: everything before the span rendering, which is
+/// the sentence naming what is wrong. Line and column would make every step
+/// look like a different failure, so they are cut.
+fn rejection_signature(why: &str) -> String {
+    why.split_once(" |")
+        .map_or(why, |(head, _)| head)
+        .trim()
+        .to_string()
 }
 
 /// How this program disagrees with the oracle in one surface form, if it does.
@@ -2819,7 +3039,10 @@ fn disagrees_as(p: &Prog, form: Form) -> Option<(Kind, String)> {
             Kind::WrongAnswer,
             format!("gave {got:?}, expected {want:?}"),
         )),
-        Err(why) => Some((Kind::Rejected, format!("failed to run: {why}"))),
+        Err(why) => Some((
+            Kind::Rejected(rejection_signature(&why)),
+            format!("failed to run: {why}"),
+        )),
     }
 }
 
@@ -2959,6 +3182,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::Konst(_)
             | E::Field(_)
             | E::AField(_)
+            | E::PtrLoad
             | E::EnumVal
             | E::StrLen
             | E::SliceElem(..)
@@ -2991,11 +3215,13 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
                 // Carry no expression, and no budget to drop.
+                S::PtrStore(_, e) | S::PokeStruct(_, e) => in_expr(e, id),
                 S::Install(_)
                 | S::CopySlice(..)
                 | S::Reslice(..)
                 | S::SliceFromCall(..)
                 | S::StructFromCall(_)
+                | S::Repoint(_)
                 | S::CopyRange { .. } => {}
             }
         }
@@ -3038,6 +3264,7 @@ fn strip_self_calls(e: &mut E) {
         | E::Konst(_)
         | E::Field(_)
         | E::AField(_)
+        | E::PtrLoad
         | E::EnumVal
         | E::StrLen
         | E::SliceElem(..)
@@ -3058,11 +3285,13 @@ fn strip_stmt_self_calls(s: &mut S) {
             }
         }
         S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
+        S::PtrStore(_, e) | S::PokeStruct(_, e) => strip_self_calls(e),
         S::Install(_)
         | S::CopySlice(..)
         | S::Reslice(..)
         | S::SliceFromCall(..)
         | S::StructFromCall(_)
+        | S::Repoint(_)
         | S::CopyRange { .. } => {}
     }
 }
@@ -3181,10 +3410,12 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
+        S::PtrStore(_, e) | S::PokeStruct(_, e) => mutate_expr(e, target, seen),
         S::Install(_)
         | S::CopySlice(..)
         | S::SliceFromCall(..)
         | S::StructFromCall(_)
+        | S::Repoint(_)
         | S::CopyRange { .. } => false,
     }
 }
@@ -3230,7 +3461,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_index(ix, target, seen)
         }
-        E::Field(_) | E::AField(_) | E::EnumVal | E::StrLen => {
+        E::Field(_) | E::AField(_) | E::PtrLoad | E::EnumVal | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -3369,7 +3600,7 @@ fn mutate_bool(b: &mut B, target: usize, seen: &mut usize) -> bool {
 /// The smallest program reachable by repeated one-step simplification that
 /// still fails in `form`. Bounded, because each candidate costs a compile and a
 /// run and a pathological case should not hang the suite.
-fn shrink(p: &Prog, form: Form, kind: Kind) -> Prog {
+fn shrink(p: &Prog, form: Form, kind: &Kind) -> Prog {
     const BUDGET: usize = 1500;
     let mut best = p.clone();
     let mut spent = 0usize;
@@ -3388,7 +3619,7 @@ fn shrink(p: &Prog, form: Form, kind: Kind) -> Prog {
                 continue;
             }
             spent += 1;
-            if disagrees_as(&cand, form).is_some_and(|(k, _)| k == kind) {
+            if disagrees_as(&cand, form).is_some_and(|(k, _)| k == *kind) {
                 best = cand;
                 improved = true;
                 break;
@@ -3442,7 +3673,7 @@ fn check_seed(seed: u64) -> Result<bool, String> {
         return Ok(true);
     }
 
-    let small = shrink(&p, form, kind);
+    let small = shrink(&p, form, &kind);
     let why = disagrees_as(&small, form)
         .map(|(_, why)| why)
         .unwrap_or_else(|| "no longer reproduces".into());
@@ -3547,6 +3778,7 @@ fn the_generator_covers_what_it_claims() {
         struct_args: usize,
         field_reads: usize,
         afield_reads: usize,
+        ptr_reads: usize,
         enum_args: usize,
         enum_reads: usize,
         str_args: usize,
@@ -3615,6 +3847,7 @@ fn the_generator_covers_what_it_claims() {
             E::SliceLen(_) => s.slice_lens += 1,
             E::Field(_) => s.field_reads += 1,
             E::AField(_) => s.afield_reads += 1,
+            E::PtrLoad => s.ptr_reads += 1,
             E::EnumVal => s.enum_reads += 1,
             E::StrLen => s.str_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
@@ -3684,6 +3917,17 @@ fn the_generator_covers_what_it_claims() {
                 S::StructFromCall(_) => {
                     s.stmts.insert("struct-from-call");
                 }
+                S::PtrStore(_, e) => {
+                    s.stmts.insert("pointer-store");
+                    walk_e(e, s, narrow_half);
+                }
+                S::Repoint(_) => {
+                    s.stmts.insert("repoint");
+                }
+                S::PokeStruct(_, e) => {
+                    s.stmts.insert("struct-poke");
+                    walk_e(e, s, narrow_half);
+                }
             }
         }
     }
@@ -3717,6 +3961,10 @@ fn the_generator_covers_what_it_claims() {
         "while",
         "install",
         "array-copy",
+        "struct-from-call",
+        "pointer-store",
+        "repoint",
+        "struct-poke",
     ] {
         assert!(seen.stmts.contains(k), "never emitted a `{k}` statement");
     }
@@ -3756,6 +4004,11 @@ fn the_generator_covers_what_it_claims() {
     assert!(seen.slice_reads > 0, "never read a slice element");
     assert!(seen.slice_lens > 0, "never read a slice length");
     assert!(seen.field_reads > 0, "never read a struct field");
+    assert!(
+        seen.ptr_reads > 0,
+        "never read through a pointer — the one expression whose storage is not decided \
+         until the last `p = &v` has run"
+    );
     assert!(
         seen.afield_reads > 0,
         "never read an element of the struct's array field — the address is three terms \
@@ -3905,6 +4158,8 @@ fn the_oracle_matches_the_documented_semantics() {
         slices: Vec::new(),
         mk_ranges: Vec::new(),
         mks: Vec::new(),
+        poke: None,
+        ptr: None,
         struct_init_from_call: None,
         mutual: None,
     };
@@ -3920,6 +4175,7 @@ fn the_oracle_matches_the_documented_semantics() {
         loops: Vec::new(),
         current: None,
         dev: 0,
+        ptr: None,
         slices: Vec::new(),
     };
     for (ty, a, op, b, want) in cases {
@@ -4033,7 +4289,6 @@ mod coverage {
             "UnaryOp::BitNot",
             "would widen the oracle for no new codegen path — `^ -1` covers the same lowering",
         ),
-        ("UnaryOp::Deref", "pointers are not generated"),
         // --- Patterns --------------------------------------------------------
         (
             "Pattern::Range",
@@ -4046,7 +4301,6 @@ mod coverage {
         ),
         // --- Types -----------------------------------------------------------
         ("TypeExpr::StringBuf", "strings are aggregates"),
-        ("TypeExpr::Pointer", "pointers are not generated"),
         (
             "PrimitiveType::Bool",
             "generated only as a condition, which is never spelled as a type",
@@ -4075,11 +4329,24 @@ mod coverage {
              graph itself is covered by tests/e2e/imports.rs",
         ),
         (
+            "UnaryOp::Deref",
+            "`*p` for a scalar `p`, read and written, in `main` only. The pointee is always \
+             one of `main`'s own variables of the pointer's type, so the alias the oracle \
+             models is a second name for storage it already tracks. No pointer to an \
+             element, a field or another pointer, and none passed to a function",
+        ),
+        (
+            "TypeExpr::Pointer",
+            "one `&T` local per program that has one, at either half of the pair. Never a \
+             parameter, a return type, a struct field, or a pointer to a pointer",
+        ),
+        (
             "UnaryOp::AddrOf",
-            "only `&arr[i]` and `&TBL[i]`, as the two source arguments of a `memcpy` — a \
-             local array in zero page and a `const` one reached by label, which are \
-             different address computations. The address is passed straight to the call \
-             and never held in a variable, because pointers are not generated",
+            "three shapes: `&arr[i]` and `&TBL[i]` as the two source arguments of a \
+             `memcpy` — a local array in zero page and a `const` one reached by label, \
+             which are different address computations — and `&v{i}`, the address of a \
+             plain local, which is what a pointer is bound to and re-bound to. Never the \
+             address of a field, of a struct, or of a function",
         ),
         (
             "Item::Enum",

@@ -64,19 +64,30 @@ pub(crate) fn check_runtime_index_range(
 
 /// Load a value through a zero-page pointer at `ptr`, `offset` bytes in.
 ///
-/// `LDY #offset / LDA (ptr),Y`, plus the `PHA/INY/LDA/TAY/PLA` dance for a
-/// 16-bit value so it ends up in the A:Y convention. This is the one sequence
-/// that had been written out three times — for the enum discriminant, for a
-/// struct parameter's field, and for the slice descriptor copy — and is now
-/// shared by `*p` and `p.field` too.
-pub(crate) fn emit_deref_load(emitter: &mut Emitter, ptr: u8, offset: u8, is_multibyte: bool) {
+/// `LDY #offset / LDA (ptr),Y`, plus the `PHA/INY/LDA/TA?/PLA` dance for a
+/// two-byte value so it ends up in the right register pair — A:Y for a 16-bit
+/// scalar, A:X for an address, which is what `high_in_x` selects.
+///
+/// This is the one sequence that had been written out four times: for the enum
+/// discriminant, for the slice descriptor copy, for `*p`, and for `p.field`
+/// through a by-reference parameter. The last of those kept its own copy long
+/// enough for the two to disagree — `*p` decided "two bytes" by re-listing
+/// `u16`/`i16`/`b16` and so read one byte of a `&&u8`, which is the same
+/// omission that had already been fixed on the store side.
+pub(crate) fn emit_deref_load(
+    emitter: &mut Emitter,
+    ptr: u8,
+    offset: u8,
+    is_multibyte: bool,
+    high_in_x: bool,
+) {
     emitter.emit_inst("LDY", &format!("#${:02X}", offset));
     emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
     if is_multibyte {
         emitter.emit_inst("PHA", "");
         emitter.emit_inst("INY", "");
         emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr));
-        emitter.emit_inst("TAY", "");
+        emitter.emit_inst(if high_in_x { "TAX" } else { "TAY" }, "");
         emitter.emit_inst("PLA", "");
     }
     emitter.reg_state.modify_a();
@@ -1602,24 +1613,13 @@ pub(super) fn generate_field_access(
             if is_parameter {
                 // The struct pointer lives directly in this parameter's frame slot;
                 // frame coloring guarantees nested calls cannot clobber it.
-                let ptr_addr = base_addr as u8;
-
-                // Use indirect indexed addressing: LDA ($ptr),Y
-                let offset = field_info.offset;
-                emitter.emit_inst("LDY", &format!("#${:02X}", offset));
-                emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
-                if is_multibyte {
-                    emitter.emit_inst("PHA", ""); // stash low byte
-                    emitter.emit_inst("INY", ""); // next field byte
-                    emitter.emit_inst("LDA", &format!("(${:02X}),Y", ptr_addr));
-                    let hi = if high_byte_in_x(&field_info.ty) {
-                        "TAX"
-                    } else {
-                        "TAY"
-                    };
-                    emitter.emit_inst(hi, ""); // high byte to its register
-                    emitter.emit_inst("PLA", ""); // A = low byte
-                }
+                emit_deref_load(
+                    emitter,
+                    base_addr as u8,
+                    field_info.offset as u8,
+                    is_multibyte,
+                    high_byte_in_x(&field_info.ty),
+                );
             } else {
                 // Local struct - direct access
                 let field_addr = base_addr + field_info.offset as u16;

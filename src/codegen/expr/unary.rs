@@ -185,20 +185,23 @@ fn generate_deref(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    use crate::ast::{Expr, PrimitiveType};
+    use crate::ast::Expr;
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
-    let pointee_is_multibyte = matches!(
-        info.resolved_types.get(&operand.span),
-        Some(Type::Pointer(inner))
-            if matches!(
-                **inner,
-                Type::Primitive(PrimitiveType::U16)
-                    | Type::Primitive(PrimitiveType::I16)
-                    | Type::Primitive(PrimitiveType::B16)
-            )
-    );
+    // What comes back through the pointer, and in which register pair. Asked
+    // of the shared predicates rather than by re-listing the two-byte types
+    // here: that list left out `&T` and a function pointer, so `*pp` on a
+    // `&&u8` loaded *one* byte and the binding then stored whatever X held as
+    // the address's high half — `q` pointed at $0000 instead of $0400, and
+    // both the read and the write through it landed in zero page. The store
+    // side had already been fixed the same way; this is the other half of it.
+    let pointee = match info.resolved_types.get(&operand.span) {
+        Some(Type::Pointer(inner)) => Some(inner.as_ref()),
+        _ => None,
+    };
+    let pointee_is_multibyte = pointee.is_some_and(crate::codegen::expr::is_two_byte_value);
+    let high_in_x = pointee.is_some_and(crate::codegen::expr::high_byte_in_x);
 
     // Fast path: the pointer is a zero-page variable, so `(zp),Y` can read
     // through it directly.
@@ -207,7 +210,13 @@ fn generate_deref(
         && let SymbolLocation::ZeroPage(addr) = sym.location
     {
         emitter.emit_comment("Dereference pointer");
-        crate::codegen::expr::aggregate::emit_deref_load(emitter, addr, 0, pointee_is_multibyte);
+        crate::codegen::expr::aggregate::emit_deref_load(
+            emitter,
+            addr,
+            0,
+            pointee_is_multibyte,
+            high_in_x,
+        );
         return Ok(());
     }
 
@@ -218,7 +227,13 @@ fn generate_deref(
     emitter.emit_comment("Dereference pointer (staged)");
     emitter.emit_inst("STA", &format!("${:02X}", ptr));
     emitter.emit_inst("STX", &format!("${:02X}", ptr + 1));
-    crate::codegen::expr::aggregate::emit_deref_load(emitter, ptr, 0, pointee_is_multibyte);
+    crate::codegen::expr::aggregate::emit_deref_load(
+        emitter,
+        ptr,
+        0,
+        pointee_is_multibyte,
+        high_in_x,
+    );
     Ok(())
 }
 
