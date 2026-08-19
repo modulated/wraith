@@ -50,23 +50,48 @@ read against a current picture:
 | A divisor the compiler can see is zero is refused | `tests/e2e/error_diagnostics.rs` |
 | A shift count at or past the width shifts every bit out, and warns when constant | `tests/e2e/operators.rs` |
 
-The recurring defect behind most of that list is written up under
-[Structure & maintainability](#structure--maintainability): a dispatch match
-whose fallback is *another strategy* rather than a failure. The three sites
-that decide an aggregate's fate refuse what they cannot carry, and the
-resolvers under them now distinguish "not this shape" from "unhandled" rather
-than saying `None` to both.
+## What keeps going wrong
 
-Its sibling — **one rule with several implementations** — keeps producing
-findings after the fallbacks were closed. A function pointer is two bytes with
-its high byte in Y, which is neither the number convention's reason nor the
-address convention's; three separate hand-written lists of "the wide types"
-omitted it, and each omission was a different silent wrong answer. The table
-(`param_byte_width`, `is_two_byte_value`, `high_byte_in_x`) already existed and
-already knew. The sweep through every codegen site that re-listed the wide
-types found five in total, and the four call forms that each staged arguments
-their own way are now one routine over one classification. Both are written up
-under [Structure & maintainability](#structure--maintainability).
+Nearly every silent miscompile found so far has had one of these shapes. They
+are worth reading before adding a case to any of the matches involved — each
+cost several bugs before it was named.
+
+- **A fallback that is another strategy, not a failure.** A dispatch match
+  whose default is the scalar path. A form nobody enumerated does not fail; it
+  gets loaded as though it were a `u8`. Nine bugs: struct copy from a place,
+  struct arguments, `.low`/`.high` assignment, indirect calls, frame colouring,
+  double evaluation in `arr[i] = f()`, slice binding, `g(mk())`, and `Call`
+  matched where `CallIndirect` was not. The three sites that decide an
+  aggregate's fate now *refuse* what they cannot carry.
+
+- **One rule with several implementations.** The same question answered in more
+  than one place drifts. A function pointer is two bytes with its high byte in
+  Y — neither the number convention's reason nor the address convention's — so
+  it fell off three separate hand-written lists of "the wide types", each
+  omission a different wrong answer. The authoritative table already existed
+  and already knew. Ask it; do not re-list the variants.
+
+- **`None` meaning two different things.** "This form has no address, and never
+  could" and "this form has one and nobody wrote the case" read identically to
+  a caller. `Denotes` separates them and is exhaustive with no catch-all.
+
+- **Generating a construct is not observing it.** A fuzzer that passes a struct
+  and reads a field into a local the return never uses cannot tell a correct
+  staging from a broken one. Every value a test introduces has to reach an
+  output cell; with two wide parameters, *each* needs its own term.
+
+- **The specification drifting behind the compiler.** Divide-by-zero and
+  over-width shifts were both defined in code and called "undefined" in the
+  reference — in the first case the reference contradicted its own stdlib
+  section. When the hardware sequence already yields a sensible answer for
+  free, document it rather than inventing a different one.
+
+- **Verify against the bug, not against the fix.** Every correctness change
+  here is checked by putting the defect back and watching a named test fail.
+  For a table copied from the specification, break the *reference* instead —
+  agreeing with a reference you derived from the code proves nothing. And
+  beware a test that passes by luck of layout: the `str` page-crossing bug was
+  invisible until two literals landed in different pages.
 
 ---
 
@@ -116,69 +141,37 @@ Two instructions in the WDC set have no codegen site yet:
 ### Branch optimization intelligence
 
 *Partly done, and the entry as originally written pointed at the wrong
-redundancy.* It proposed tracking status flags across statements so a repeated
-`if x > 5` would not re-emit the `CMP`. That case barely occurs: an `if` ends
-in a label and usually contains a call, and both invalidate flags, so a tracker
-would find almost nothing to elide.
+redundancy.* It proposed tracking status flags across statements; that case
+barely occurs, because an `if` ends in a label and usually contains a call, and
+both invalidate flags.
 
-The waste was elsewhere and larger. A comparison feeding an `if` or `while`
-built a 0/1 in `A` and then compared *that* against zero to branch — eleven
-instructions to decide one branch. `collapse_boolean_compares` in the peephole
-already fused the common case, but it matched a *one-branch* comparison tail,
-and only four of the six comparisons end in one. Unsigned `<=` and `>` have no
-single 6502 branch (`A > m` is `!Z && C`), so they ended in two, missed the
-window, and materialised the boolean. Both shapes are now matched — they differ
-from each other as well: `>` sends its branches to different labels, `<=` sends
-both to the same one. A comparison-heavy program drops from 89 instructions to
-74.
+The waste was elsewhere. A comparison feeding an `if` built a 0/1 in `A` and
+then compared *that* against zero — eleven instructions for one branch.
+`collapse_boolean_compares` matched only a one-branch comparison tail, and
+unsigned `<=` and `>` have no single 6502 branch so they end in two. Both
+shapes are matched now, and the guard no longer requires V dead, which it never
+affected: together that removes 115 instructions across the example corpus.
 
-**The guard was refusing for a property the rewrite cannot affect.** Everything
-the collapse deletes — a `CMP #$00`, two `LDA`s and a `JMP` — writes N, Z and C
-and never V, so V holds the same bit before and after. Requiring it dead anyway
-refused 48 of the 225 candidate sites in the example corpus. Excluding V from
-the guard removes **115 instructions** across the corpus, 60 of them from
-`monitor_standalone`.
+Finding it took an instrumented run reporting every guard's value per site.
+Two earlier guesses were measured and both were wrong — worth remembering
+before optimising against intuition.
 
-Finding that took an instrumented run reporting every guard's value per site,
-which is what should have been done first: two earlier guesses (that `RTS` was
-being treated as reading every flag; that the shapes simply did not match) were
-both measured, both wrong, and one of those measurements was itself wrong —
-see the benchmark note below. The remaining refusals are now known rather than
-guessed at: 30 sites with A genuinely live, and 44 whose labels have other
-entrants.
-
-**The benchmark could not see any of this.** `tests/code_size.rs` measured the
-section allocator's reservations, which are made at *placement* — before the
-peephole runs. Every "code size unchanged" it reported for a peephole change
-was measuring something that could not move, including the ones in this
-branch's earlier commits. It now records the emitted instruction count
-alongside the section bytes; the sections still matter, since they are what has
-to fit the memory map, but they are not the whole picture.
-
-**Where the ceiling is.** Fusing in the peephole means recognising a shape
-codegen just finished emitting. Emitting the branch directly — a
-`generate_condition_branch` path threaded through comparisons, `&&`, `||` and
-`!` — would need no pattern matching, would cover the compound conditions the
-peephole cannot see through, and is the version worth building if this area is
-returned to.
+**Still open:** the remaining materialised booleans are the ones feeding
+something other than a branch (an assignment, an argument), where the 0/1 is
+genuinely wanted. No estimate of what that is worth yet.
 
 ### Smaller code
 
-- **Reclaim BSS from dropped statics.** *Done.* Registration hands out BSS
-  addresses in declaration order, long before liveness is known — an
-  initializer's `&OTHER` has to resolve to a number as it is flattened — so a
-  dropped static used to keep its bytes. Rather than defer allocation, the
-  layout is repacked between `reachable_symbols` and `finalize_frames`: live
-  statics keep their relative order and the gaps close. Sizes come from the
-  gaps between consecutive addresses, so nothing re-derives a type's width.
+- **Reclaim BSS from dropped statics.** *Done.* The layout is repacked between
+  `reachable_symbols` and `finalize_frames`, so live statics keep their order
+  and the gaps close.
 
-  The lesson worth keeping is where an address lives by that point. There are
+  The lesson worth keeping is where an address lives by that point: there are
   *three* copies — the symbol table, the per-use snapshots in
   `resolved_symbols`, and `inline_param_symbols`, which despite its name holds
-  every symbol a function's body resolved and is merged back over
-  `resolved_symbols` at each inline call site. Moving a static in fewer than
-  all three silently puts it back. `rewrite_frame_offsets` already had to keep
-  the same three in step; the fuzzer caught both halves of getting it wrong.
+  every symbol a function's body resolved. Moving a static in fewer than all
+  three silently puts it back. The fuzzer caught both halves of getting it
+  wrong.
 
 ---
 
@@ -311,52 +304,21 @@ Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
 
-- **Division by zero.** *Done — the decision was made and the generator
-  followed.* The specification said the result was *undefined*; the compiler
-  had not been undefined for some time, because the 8-bit path already checked
-  the divisor and yielded `0xFF`, and `div16`/`mod16` already yielded `0xFFFF`.
-  The specification was simply out of date.
-
-  It now says what the code does: `x / 0` and `x % 0` are the **all-ones value
-  of the type**, at every width and signedness, with no runtime check and no
-  trap. That is not a value chosen for its own sake — shift-and-subtract with a
-  zero divisor succeeds at every trial subtraction, so the quotient fills with
-  ones, and the check costs three instructions that were already being emitted.
-  RISC-V's M extension defines the same value for the same reason; it differs
-  only in making the *remainder* the dividend, where one value for both is
-  simpler to state.
-
-  Two things had to change to make that true. The **signed paths did not
-  produce the sentinel**: they `abs` both operands, run the unsigned core, and
-  negate, so `-100 / 0` answered `1` while `100 / 0` answered `-1`. They now
-  answer before the wrapper starts. And a **constant zero divisor is a compile
-  error** — it has a defined answer, but that answer says nothing about the
-  dividend, so writing one is a mistake rather than a choice. Nothing was
-  catching it, not even `10 / 0`.
-
-  The generator takes arbitrary divisors now, and **670 of 2000 programs
-  divide by zero at run time**, so the sentinel is exercised rather than merely
-  permitted. `i8::MIN / -1` came along with it and needed nothing: it overflows,
-  every arithmetic operator wraps, and `-128` is what both the compiler and the
-  oracle produce.
-- **Precedence.** *Done.* Expressions from the main generator are still fully
-  parenthesised, on purpose — a precedence disagreement there would masquerade
-  as a codegen bug, and the two are fixed in different places. A separate
-  generator now covers the table: one random operator chain written as a flat
-  sequence and as the tree the specification says that sequence means, both
-  compiled and run, both required to agree. No oracle is involved; nothing has
-  to know the right *answer*, only that the two groupings are the same one.
-
-  Six levels mix freely there — `* / %`, `+ -`, `<< >>`, `&`, `^`, `|` — since
-  each takes and returns the same integer type. The relational and logical
-  levels cannot join them: `a & b == c` groups as `a & (b == c)` by the table,
-  which does not type-check, so no program can tell that grouping from the
-  other one.
-
-  Checked by breaking the *reference* rather than the compiler, which is the
-  only direction that proves anything here: `+` above `*`, a shift above `*`,
-  `&` given `|`'s level, `%` given `^`'s, and right- instead of
-  left-associativity are all detected.
+- **Division by zero.** *Done.* The specification said undefined; the compiler
+  had not been undefined for some time, and its own stdlib section documented
+  `div16` returning `0xFFFF`. `x / 0` and `x % 0` are now specified as the
+  all-ones value at every width and sign — what shift-and-subtract already
+  produces, and what RISC-V defines for the same reason. The signed paths were
+  fixed to preserve it (they gave `+1` for a negative dividend), and a divisor
+  the compiler can see is zero is a compile error. The generator takes
+  arbitrary divisors: 670 of 2000 programs divide by zero at run time.
+- **Precedence.** *Done.* Expressions from the main generator stay fully
+  parenthesised on purpose — a precedence disagreement there would masquerade
+  as a codegen bug. A separate generator writes one operator chain twice, flat
+  and as the tree the specification's table says it means, and requires both to
+  agree; no oracle is involved. Six levels mix freely (`* / %`, `+ -`, `<< >>`,
+  `&`, `^`, `|`); the relational and logical levels cannot, since `a & b == c`
+  groups as `a & (b == c)` and does not type-check.
 - **Mixing across signedness families**, and narrowing. *The widening half is
   done.* A program now picks one family and mixes its two widths — `u8`/`u16`
   or `i8`/`i16` — because those are the two the language widens between without
@@ -373,38 +335,20 @@ and an oracle that is merely *probably* right is worse than no oracle:
   It found the widening was zero-extending everywhere the language did it
   implicitly — five of the six sites. See the note under
   [Correctness & diagnostics](#correctness--diagnostics).
-- **Cycles of three or more.** *Done for two.* Self-recursion only ever reaches
-  the trivial strongly-connected component; a pair that call each other is the
-  case frame colouring solves with Tarjan, and the generator now builds one —
-  each member calling the other at `d - 1`, with a base case at `d == 0`, so
-  the cycle terminates by the same construction a self-call does.
+- **Cycles of three or more.** *Done for two.* A pair that call each other is
+  the case frame colouring solves with Tarjan; the generator builds one, each
+  member calling the other at `d - 1` with a base case at `d == 0`.
 
-  Two constraints are what make that safe to generate, and both are worth
-  keeping in mind for a longer cycle. A pair member may not reach its partner
-  by an *ordinary* call: that passes a fresh literal budget, which resets the
-  cycle's own depth every second edge and never terminates. And a pair member
-  takes no slice, since its partner would have to pass one on every mutual
-  edge, and the two are shaped alike so the cycle can close.
+  Two constraints make that safe and would apply to a longer cycle: a pair
+  member may not reach its partner by an *ordinary* call (a fresh literal
+  budget resets the cycle's depth every second edge and never terminates), and
+  a pair member takes no wide parameter, since its partner would have to pass
+  one on every mutual edge.
 
-  **The disjoint frame layout inside an SCC is not what carries this.**
-  Deliberately overlapping two members' frames survives 600 seeds: the per-edge
-  save and restore covers the case already, because it saves the *callee's*
-  frame, which under a shared base is the caller's. What does carry it is the
-  recursive-edge set — counting only self-edges as recursive fails at seed 38,
-  reduced to two six-line functions with a local surviving into the outer
-  frame.
-
-  *The indirect-call half of this item is done.* The generator installs one of
-  several same-signature functions in a table and dispatches through it two
-  ways: `VTBL[sel](x)` indexed by a constant or by a runtime value, and
-  `DEV.call(x)` through a struct field that an `Install` statement rebinds —
-  the shape where *which* function runs is program state rather than a
-  syntactic fact, which is all the oracle has to track. That gap had already
-  cost something: an indirect call contributes no call-graph edge, so frame
-  colouring laid a driver's frame over its caller's locals and
-  `examples/device_drivers.wr` found it by hand. What is still uncovered
-  inside it is pointer and aggregate *arguments* to an indirect call; those
-  staging paths are pinned by `tests/e2e/indirect_args.rs` alone.
+  **The disjoint frame layout inside an SCC is not what carries this** —
+  deliberately overlapping two members' frames survives 600 seeds, because the
+  per-edge save covers it. What does carry it is the recursive-edge set:
+  counting only self-edges fails at seed 38.
 - **Pointers and enums.** A `&T` gives two names for one piece of storage,
   which the oracle would have to alias-model; enums are a separate lowering
   again.
@@ -424,84 +368,31 @@ and an oracle that is merely *probably* right is worse than no oracle:
   bytes fails seed 119, and copying two bytes of a returned descriptor fails
   three of the first hundred and twenty. It also found a fourth on its way in:
   `s = mk();` had no codegen path where `let s: &[u8] = mk();` did.
-- **Aggregates across a call.** *The struct-argument half is done.* `f0` may now
-  take a leading `xp: S` beside its slice parameter, `main` hands over its own
-  struct, and the callee reads fields through it. No aliasing model was needed,
-  for the same reason the slice needed none: the callee only *reads*, so the
-  field values carry in unchanged.
+- **Aggregates across a call.** *The argument half is done, all four kinds.*
+  `f0` may take a struct, an enum and a `str` beside its slice — at most two at
+  once, since a descriptor and three addresses are ten of the argument pool's
+  eleven bytes before a single value parameter. Each is folded into the
+  callee's result so that passing it can be told from staging it wrongly; see
+  [What keeps going wrong](#what-keeps-going-wrong) for why that is not
+  optional. Each is verified by giving it the wrong convention and watching the
+  default 120 seeds fail.
 
-  **Generating the shape was not enough, and that is the lesson.** The first
-  version passed a struct in 11 of 120 programs and read a field in 5 — and
-  still caught nothing, because the read landed in a local the return never
-  used. A field read that reaches no output cell cannot distinguish a correct
-  staging from a wrong one. So the struct-taker's *result* is now a function of
-  a field: its return type is the aggregate type and both its return and its
-  base case carry a field term. With that, misclassifying a struct as an
-  ordinary two-byte value fails 3 seeds in the default 120.
+  A `str`'s `.len` stages its pointer through the four-byte high pool, so it is
+  read once per call rather than freely: at 12% of expressions it put 790 of
+  6000 seeds over that pool.
 
-  Building that term needs care about which level it sits at. A return operand
-  may be generated at the *narrow* half of the pair and rendered with no cast —
-  that is what `E::At` records — so pairing it with a field of the wide half
-  under one operator is a type error rather than a widening. Both operands are
-  generated strictly at the function's own type instead.
-
-  **Enums followed, and were cheaper.** A unit enum's value *is* its variant
-  index, so the oracle carries one number and no block model. `f0` may take an
-  `ep: C` alongside the other two, chosen independently — which is what keeps
-  the three wide parameters from loading the staging block in every program
-  while still reaching the case where they do. Its tag is folded into the
-  return on the same rule as the field, and it fits any expression type, since
-  `(ep as T)` is a cast rather than storage of the aggregate type.
-
-  Checked the same way: giving an enum the *number* convention — A:Y, where it
-  is really A:X, the difference only the type registry knows because both are
-  spelled `Named` — fails seed 30 of the default 120.
-
-  **`str` closed the set.** All four kinds that made the argument-staging
-  findings need hand probing — function pointer, struct, enum, `str` — now
-  reach a call from the generator. The oracle carries one literal's length; a
-  `.len` read goes through the pointer, so it is wrong exactly when the pointer
-  is.
-
-  Two things had to give. `.len` stages its pointer through the four-byte high
-  pool, so generating it freely inside expressions put **790 of 6000 seeds**
-  over the limit; only the term folded into the return is kept, which is what
-  tests the staging anyway. And a callee may take at most **two** of the four:
-  a descriptor and three addresses are ten of the argument pool's eleven bytes
-  before a single value parameter, so all four is a shape that cannot be staged
-  at all. Two still reaches several wide arguments side by side, which is where
-  an offset assuming one byte each goes wrong. 30 of 6000 seeds skip, against a
-  cap of 5%.
-
-  **The observability rule needed strengthening, and the same hole nearly
-  reappeared.** Folding *one* term into the return is not enough once a callee
-  takes two wide parameters: the second is passed and never read, so staging it
-  wrongly changes no answer. With one term, giving `str` the number convention
-  went uncaught. With a term per parameter, all three of struct, enum and `str`
-  are caught within the default 120 seeds.
-
-  Still open here: a struct *returned* from a call, a struct behind a pointer,
-  an array field inside a struct, enum payloads, and indexing a string rather
-  than measuring it.
+  Still open: a struct *returned* from a call, a struct behind a pointer, an
+  array field inside a struct, enum payloads, and indexing a string rather than
+  measuring it.
 - **Constant expressions standing alone** — typed by their own literals, not by
   the program around them. Defined in the specification, not in the oracle.
-- **Shift counts at or past the width.** *Done, and the same shape as division
-  by zero: the compiler already had an answer and the specification had not
-  caught up.* A 6502 has no barrel shifter, so a variable shift is a loop that
-  performs the count — every bit leaves and zeros arrive, or copies of the sign
-  bit for an arithmetic right shift. `200 << 9` was already `0` and
-  `-100 >> 9` already `-1`.
-
-  The specification now says so, and says the count is deliberately *not*
-  masked: masking would make `x << 8` on a `u8` mean `x << 0`, which is
-  surprising and useless, and would cost an `AND` on every variable shift to
-  produce. A count the compiler can see is at or past the width is a **warning**
-  rather than an error, since clearing a value by shifting it out is a real if
-  unusual idiom.
-
-  The generator still keeps its counts below the width — not because the wider
-  ones are undefined now, but because a shift that always yields a constant is
-  a poor test of a shift.
+- **Shift counts at or past the width.** *Done.* A 6502 has no barrel shifter,
+  so a variable shift is a loop and the count is simply performed: every bit
+  leaves, zeros arrive, and an arithmetic right shift saturates to the sign.
+  Specified as such, deliberately *not* masked — masking would make `x << 8` on
+  a `u8` mean `x << 0` and would cost an `AND` on every variable shift. A
+  constant count at or past the width is a warning, since clearing a value by
+  shifting it out is a real if unusual idiom.
 
 ### Code-size benchmark
 
@@ -671,58 +562,14 @@ Also open:
   it; the import-merge half is already done, and `contains_call` /
   `expr_contains_call` are exhaustive.
 - **Make codegen's per-form dispatch exhaustive, or make its fallback loud.**
-  *Done for the sites and for the resolvers under them.* The defect was the walker one a layer down, and the
-  more common of the two. Where a walker asks "is there a call in here", these
-  matches ask "which strategy does this form need" — and their fallback is not
-  `false`, it is *another strategy*, usually the scalar one. A form nobody
-  enumerated did not fail; it got loaded as though it were a `u8`.
+  *Done for the sites and for the resolvers under them.* See
+  [What keeps going wrong](#what-keeps-going-wrong) for the shape and the count.
+  Binding, assignment and argument staging classify what they are about to
+  store and refuse a slot wider than the registers carry; the loop-unrolling
+  estimate enumerates every expression form rather than charging a flat `_`;
+  and `Denotes` separates "no address" from "nobody wrote the case".
 
-  Six bugs in a row had this shape. Struct copy handled a literal and a call
-  and fell through to the scalar path for every *place*, so `let q: P = PS[1]`
-  bound one byte. Struct arguments matched a zero-page local and nothing else.
-  `.low`/`.high` had no assignment arm. Indirect calls took scalars only.
-  Frame colouring had no edge for an indirect call. Assignment evaluated its
-  value generically *and* again per target, so `arr[i] = f()` called `f` twice.
-  Each compiled silently and produced a wrong answer.
-
-  **What changed.** Binding, assignment and argument staging all end in a store
-  of a register. Each now classifies what it is about to store first: a slot
-  wider than the registers carry (a struct, a four-byte slice descriptor) that
-  reaches the store has been declined by every copy path above it, and errors
-  naming the type and its width. The estimate that bounds loop unrolling was
-  the third kind — a flat `_ => 12` for ten expression forms, a match
-  expression costed as a variable — and now enumerates every variant, so a new
-  form is a compile error rather than an under-charge.
-
-  **Three more bugs, found by asking the question.** `let b: &[u8] = a;` and
-  `b = a;` had no case at all, so a slice binding copied one byte of the
-  descriptor: `b[i]` read through a half-written pointer and `b.len` was never
-  written. `g(mk())` staged one byte of a *pointer to* a descriptor as though
-  it were the base. And the four sites asking "did this return an aggregate in
-  A:X" matched `Call` but not `CallIndirect`, though the two return
-  identically, so nothing claimed a struct or slice from `DEV.get()`. All three
-  are fixed and pinned in `tests/e2e/aggregate_dispatch.rs`.
-
-  **The resolvers can now tell a caller which it means.** That was the other
-  half: `resolve_static_addr`, `resolve_static_struct_lvalue` and
-  `emit_struct_place_address` said `None` both for "this form has no address,
-  and never could" and for "this form has one and nobody wrote the case", and a
-  caller reads both as "use the ordinary path".
-
-  `Denotes` supplies the missing question — does this form *name storage* — and
-  is exhaustive over `Expr` with no catch-all, so a construct added to the
-  language has to be placed on one side rather than defaulting to "value". A
-  `Call` has no address because a call produces its result, which is a fact
-  about the form; a *place* no case claimed is a gap, and
-  `emit_struct_place_address` errors on it. That is stronger than the three
-  guards above, which catch the consequence at the call site: this catches it
-  at the resolver, so a fourth caller inherits the check.
-
-  It is deliberately conservative — a form that *might* name storage counts as
-  a place, because over-reporting costs a false alarm and under-reporting lets
-  the original defect back in.
-
-  What is left in this area is smaller and known: `array_field_base` and
+  What is left is smaller and known: `array_field_base` and
   `array_of_struct_base` are narrow enough that their `None` has one meaning,
   and the `Option`-returning helpers outside `aggregate.rs` have not been
   audited against this distinction.
@@ -738,109 +585,35 @@ Also open:
   what the local form does today. Worth deciding before anything is built on
   the current behaviour.
 
-- **Interrupts were only ever tested from the idle loop.** `pulse_irq` waits
-  for `main` to park in `loop {}` before asserting the line — where `main` has
-  stored everything it computed and there is nothing live to corrupt. But a
-  handler's zero-page frame may *share addresses* with `main`'s, because a
-  handler is not `main`'s callee and colouring cannot separate them; the whole
-  design rests on the handler saving that span and restoring it, and nothing
-  exercised that.
+- **Interrupts were only ever tested from the idle loop.** *Done.* A handler's
+  zero-page frame may *share addresses* with `main`'s — a handler is not
+  `main`'s callee, so colouring cannot separate them — and the whole design
+  rests on the handler saving that span. Every existing test fired through
+  `pulse_irq`, which waits for the idle loop first, where nothing is live.
 
   `run_interrupted` asserts the line every *n* instructions while `main` works,
-  so the handler is entered between the halves of a 16-bit add, inside a
-  multiply, across a `JSR` with the argument pool staged. The saves hold — a
-  negative result — and the test is worth its weight because of what it can
-  see: with the math working storage dropped from the save list (leaving the
-  push/pop balance intact, so nothing else breaks), the new test fails and
-  every existing interrupt test still passes.
+  so the handler is entered between the halves of a 16-bit add and across a
+  `JSR` with the argument pool staged. **The saves hold** — a negative result,
+  kept because dropping the math working storage from the save list (keeping
+  the push/pop balance, so nothing else breaks) fails the new test and no
+  existing one.
 
-  The storm has to be bounded, which is worth knowing before writing another
-  one: an interrupt pulls the CPU out of `loop {}` as readily as out of
-  anything else, and the harness detects termination by the program counter
-  standing still, so an unbounded storm never halts.
+  The storm has to be bounded: an interrupt pulls the CPU out of `loop {}` as
+  readily as out of anything else, and the harness detects termination by the
+  program counter standing still, so an unbounded storm never halts.
 
 - **One rule, four implementations.** *Done.* A call's arguments were staged in
-  four separate pieces of code — a direct `JSR`, an inlined body, a recursive
-  call that saves the callee's frame, and an indirect call through a fixed
-  block — and each decided a parameter's width and register convention for
-  itself. Three chances to differ, and they did: a struct reached an inlined
-  callee as the first two bytes of its *contents*, and a `str` and an enum
-  reached a tail-recursive one from the wrong register.
+  four separate pieces of code, each deciding a parameter's width and register
+  convention for itself, and every chance to differ had been taken.
+  `ParamClass` answers the classification once — exhaustive over `Type`, no
+  catch-all — and `stage_argument` is the one routine all four call forms use.
+  What is left per site is only where the bytes wait and how the site names
+  itself in a diagnostic. 214 lines shorter, byte-identical output, verified by
+  putting eight known miscompiles back one at a time.
 
-  What made those findable was asking every kind through every form, which is
-  now `every_parameter_kind_survives_every_call_form`.
-
-  **The merge.** `ParamClass` answers the classification once — exhaustive over
-  `Type` with no catch-all, so a type added to the language has to say how it
-  is passed rather than defaulting to a byte — and `stage_argument` is the one
-  routine that writes an argument where the callee will look for it. All four
-  forms call it. What is left at each site is only what genuinely differs:
-  where the bytes wait (a staging pool, the fixed block, the parameter's own
-  slot), what has to be sheltered across a nested call, and how the site names
-  itself in a diagnostic.
-
-  Two invariants that used to be spread across the four now hold by
-  construction. The bytes written are always `ParamClass::width()`, which is
-  also what the caller reserved — the copies could disagree, and one did, so
-  `apply(bump, 7)` reserved a byte for a function pointer and wrote two. And a
-  parameter class no path can supply is a *refusal*, not a fallback to the
-  scalar store.
-
-  It is 214 lines shorter and emits byte-identical code: the size baseline did
-  not move. Verified by putting each of eight known miscompiles back one at a
-  time — a function pointer sized as a byte, a `str` and an enum on the number
-  convention, a truncated descriptor, an array staged as a byte, a struct from
-  its slot rather than its address, the widening always zero-extending, and a
-  two-byte value storing only its low half. All eight are caught, by named
-  tests, and none merely fails to compile.
-
-  The eighth was found *by* the exercise: the descriptor paths hard-coded `4`
-  where the reservation asked `width()`, so the two could still drift. Every
-  staged width now derives from the one classification.
-
-  Widening the matrix by one kind found two more. A **function pointer** is the
-  awkward case: two bytes, high byte in Y, and neither a number nor an address,
-  so it falls off any list written by enumerating "the 16-bit primitives, plus
-  the things reached by a pointer". A direct call reserved one staging byte for
-  it and shifted every later parameter down; the inlined path did the same. The
-  authoritative widths were already in `param_byte_width`, so the fix was to
-  ask rather than re-list.
-
-  **The sweep, done.** `PrimitiveType::U16` appears in thirteen codegen files,
-  each a site that decided the width question for itself. Most are legitimately
-  about *numbers* — a 16-bit add, a `u16` comparison, a match scrutinee — and no
-  address can reach them. The ones asking "how wide is this *value*" were
-  audited against `is_two_byte_value` / `high_byte_in_x`, and found three more:
-
-  * **A `str` local re-pointed.** Binding and assignment keep separate copies of
-    the width match, and the assignment copy had `str` on neither list, so
-    `s = "xy"` wrote the new pointer's low byte over the old and kept the old
-    high byte. String literals are laid out consecutively, so two of them
-    almost always share a page and the stale byte was accidentally right; the
-    test forces the crossing that makes it wrong.
-  * **A match expression's arm.** The last site still writing `LDY #$00` by
-    hand, so an `i8` arm of an `i16` match lost its sign. A match *statement*
-    widens through the assignment inside it and was already right, which is
-    why the earlier six-site sweep did not reach this one.
-  * **A for-loop bound of the wrong sign.** Not a width question but the same
-    shape: the runtime-bound check was a list of rejected *pairs*, about width
-    only, so an `i8` bound on a `u8` counter passed and the loop compared 254
-    against 2. Restated as range containment.
-
-  The pattern worth keeping from this: the authoritative table already existed
-  and already had the right answer in every one of these cases. Nothing needed
-  to be *decided*, only asked. A site that re-lists the variants is the defect,
-  independent of which variant it forgets.
-
-  **Two seams came back clean**, which is worth as much as the findings. A
-  `static` of every two-byte kind stores both bytes when reassigned — the
-  `Absolute` branch is a separate copy of the same decision and it agrees. So
-  do the fields of a `static` struct, which resolve through a different address
-  path from a local's. Both are pinned.
-
-  What is still open is the underlying merge — one staging routine, one width
-  question — rather than more sites converted one at a time.
-
+  The matrices that found them are kept: `every_parameter_kind_survives_every_
+  call_form` and its tail-call twin. Widening one by a single row is what found
+  the last two.
 - **A `static` struct can only initialise some of its field kinds.** A `u16`
   field and a `fn` field are accepted; a `str`, an enum and a `&T` are refused
   at the initialiser as *not a compile-time constant*. That is inconsistent
