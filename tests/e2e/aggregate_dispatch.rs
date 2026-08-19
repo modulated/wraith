@@ -1291,33 +1291,67 @@ fn a_field_of_a_call_and_an_indexed_field_of_a_pointer_are_refused() {
     );
 }
 
+/// A constant struct with an array field becomes ROM data, elements and all.
+///
+/// The constant path handled integer and bool fields and refused everything
+/// else with "only integer and bool literals supported" — which named the
+/// wrong thing, since an array literal *is* a literal. The effect was that
+/// `return S { a: [1, 2, 3] }` failed where the same struct bound to a local
+/// compiled, so whether an array field was allowed depended on where the
+/// literal stood.
 #[test]
-fn probe_ptr_repoint() {
+fn a_constant_struct_lays_out_its_array_field_inline() {
     let mut e = run(r#"
         const O0: addr = 0x0900;
         const O1: addr = 0x0901;
         const O2: addr = 0x0902;
         const O3: addr = 0x0903;
+        struct S { f0: u8, a: [u8; 3], f1: u8 }
+        fn mks(k: u8) -> S {
+            // A constant literal: ROM data, reached by label.
+            if k == 0 { return S { f0: 1, a: [2, 3, 4], f1: 5 }; }
+            // A local: frame storage, reached by its address.
+            let t: S = S { f0: 6, a: [7, 8, 9], f1: 10 };
+            return t;
+        }
         #[reset]
         fn main() {
-            let x: u8 = 5;
-            let y: u8 = 60;
-            let p: &u8 = &x;
-            *p = *p + 1;
-            O0 = x;
-            p = &y;
-            *p = *p * 2;
-            O1 = y;
-            O2 = *p;
-            let w: u16 = 1000;
-            let q: &u16 = &w;
-            *q = *q + 5;
-            O3 = w.low;
+            let s: S = S { f0: 0, a: [0, 0, 0], f1: 0 };
+            s = mks(0);
+            O0 = s.f1; O1 = s.a[2];
+            s = mks(1);
+            O2 = s.f1; O3 = s.a[2];
             loop {}
         }
     "#);
     assert_eq!(
         (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
-        (6, 120, 120, ((1005u16) & 0xff) as u8)
+        (5, 4, 10, 9),
+        "the scalar after the array field is at the right offset, both ways in"
+    );
+
+    // The fill form, a 16-bit element, and a field the literal omits — which
+    // is zeroed for its whole length rather than for one element.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O2: addr = 0x0902;
+        const O4: addr = 0x0904;
+        struct S { a: [u16; 3], f: u16 }
+        fn mks() -> S { return S { a: [513; 3], f: 40000 }; }
+        #[reset]
+        fn main() {
+            let s: S = S { a: [0; 3], f: 0 };
+            s = mks();
+            let x: u16 = s.a[2];
+            O0 = x.low; O2 = x.high;
+            let y: u16 = s.f;
+            O4 = y.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0902), e.mem(0x0904)),
+        (1, 2, (40000u16 & 0xFF) as u8),
+        "a 16-bit array field fills two bytes per element, so the field after it lands right"
     );
 }

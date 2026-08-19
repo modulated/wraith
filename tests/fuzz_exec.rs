@@ -484,6 +484,17 @@ enum S {
     /// returns a pointer to it in A:X rather than the four bytes themselves.
     /// A different path again from either of the two above.
     SliceFromCall(usize, usize),
+    /// `s = mks({k});` — the whole struct replaced by one that arrives from a
+    /// *call*, which returns a pointer to its bytes in A:X and leaves the
+    /// caller to copy them out.
+    ///
+    /// Two shapes behind the one statement, chosen by `k`: `mks(0)` returns a
+    /// constant literal, which is ROM data reached by label, and `mks(1)`
+    /// returns a local, which is frame storage reached by its address. Those
+    /// are different code in the callee — and returning the local is what used
+    /// to load the struct's *first byte* into A and leave X holding whatever
+    /// the last instruction did.
+    StructFromCall(usize),
     /// `memcpy(&arr[{dst}], &TBL[{src}], {len});` — a run of bytes moved from
     /// the `const` table into the local array.
     ///
@@ -1084,6 +1095,12 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
             _ => S::SliceFromCall(i, g.rng.below(2) as usize),
         };
     }
+    // The whole struct replaced by one that arrives from a call. Beside the
+    // slice moves above and for the same reason: the statement carries no
+    // expression, and what it changes is what a later read reaches.
+    if g.allow_aggregates && g.rng.below(100) < 8 {
+        return S::StructFromCall(g.rng.below(2) as u64 as usize);
+    }
     // A byte run copied out of the `const` table. Needs the aggregates to
     // exist, and a `u8` element: `memcpy` takes `&u8`, so an `i8` array would
     // need its address converted, and a byte count is an element count only at
@@ -1176,6 +1193,18 @@ struct Prog {
     /// The two ranges `mk` chooses between. Present exactly when `slices` is
     /// non-empty; `mk` is what makes a slice arrive from a call.
     mk_ranges: Vec<(usize, usize)>,
+    /// The two structs `mks` chooses between, as (scalar fields, array field).
+    /// Present exactly when the program declares the struct.
+    mks: Vec<([i64; SFIELDS], [i64; AFLEN])>,
+    /// Which of them `main`'s struct is *bound* from, or `None` when it is
+    /// declared from a literal.
+    ///
+    /// Binding and assignment are separate code — `let s: S = mks(0);` copies
+    /// the returned bytes out in `generate_var_decl`, `s = mks(0);` does it
+    /// again in `generate_assign` — so generating only one leaves the other's
+    /// length free to be wrong. Truncating the binding copy to two bytes
+    /// survives 120 seeds when only the assignment form is generated.
+    struct_init_from_call: Option<usize>,
     /// The mutually recursive pair, low id first, or `None`. Both members carry
     /// a budget and call each other at `d - 1`, so the cycle terminates by the
     /// same construction a self-call does.
@@ -1607,6 +1636,27 @@ fn gen_program(seed: u64) -> Prog {
         (0..2).map(|_| gen_range(&mut g)).collect()
     };
     g.allow_slices = !slices.is_empty();
+    // The two structs `mks` chooses between, so a struct can arrive from a
+    // call as well as from a declaration.
+    let mks: Vec<([i64; SFIELDS], [i64; AFLEN])> = if aggregates {
+        (0..2)
+            .map(|_| {
+                let mut fs = [0i64; SFIELDS];
+                for v in fs.iter_mut() {
+                    *v = g.lit(base);
+                }
+                let mut a = [0i64; AFLEN];
+                for v in a.iter_mut() {
+                    *v = g.lit(base);
+                }
+                (fs, a)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let struct_init_from_call =
+        (!mks.is_empty() && g.rng.below(100) < 30).then(|| g.rng.below(2) as usize);
     // Decided here too, and for the same reason: `f0` may take the struct as a
     // parameter, so the functions have to be generated knowing whether there
     // is one. The per-function loop saves and restores this, so it still reads
@@ -1667,6 +1717,8 @@ fn gen_program(seed: u64) -> Prog {
         vtable,
         slices,
         mk_ranges,
+        mks,
+        struct_init_from_call,
         mutual,
     }
 }
@@ -2001,6 +2053,11 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             }
             S::Reslice(i, start, len) => st.slices[*i] = (*start, *len),
             S::SliceFromCall(i, k) => st.slices[*i] = st.prog.mk_ranges[*k],
+            S::StructFromCall(k) => {
+                let (fs, a) = &st.prog.mks[*k];
+                st.fields = fs.iter().map(|v| narrow(*v, ty)).collect();
+                st.afield = a.iter().map(|v| narrow(*v, ty)).collect();
+            }
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st) {
                     exec(then, st, ty);
@@ -2042,15 +2099,15 @@ fn expected(p: &Prog) -> Vec<u32> {
         } else {
             Vec::new()
         },
-        fields: if p.aggregates {
-            at_base(&p.field_init)
-        } else {
-            Vec::new()
+        fields: match (p.aggregates, p.struct_init_from_call) {
+            (false, _) => Vec::new(),
+            (true, Some(k)) => at_base(&p.mks[k].0),
+            (true, None) => at_base(&p.field_init),
         },
-        afield: if p.aggregates {
-            at_base(&p.afield_init)
-        } else {
-            Vec::new()
+        afield: match (p.aggregates, p.struct_init_from_call) {
+            (false, _) => Vec::new(),
+            (true, Some(k)) => at_base(&p.mks[k].1),
+            (true, None) => at_base(&p.afield_init),
         },
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
@@ -2337,6 +2394,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 out.push_str(&format!("{pad}sl{i} = TBL[{start}..{}];\n", start + len))
             }
             S::SliceFromCall(i, k) => out.push_str(&format!("{pad}sl{i} = mk({k});\n")),
+            S::StructFromCall(k) => out.push_str(&format!("{pad}s = mks({k});\n")),
         }
     }
     out
@@ -2442,9 +2500,9 @@ fn out_bytes(p: &Prog) -> usize {
 
 /// Whether any statement calls `memcpy`, so the program imports it.
 ///
-/// The import is conditional because an unused one warns, and a warning is a
-/// failure here: the run asserts the compiler is silent on a program the
-/// generator believes is clean.
+/// The import is conditional so that what a program declares is what it uses:
+/// an unused import is noise in a reduced failure, and it would make every
+/// program pull in `std/mem.wr` whether or not the case under test needs it.
 fn uses_memcpy(stmts: &[S]) -> bool {
     stmts.iter().any(|s| match s {
         S::CopyRange { .. } => true,
@@ -2456,7 +2514,8 @@ fn uses_memcpy(stmts: &[S]) -> bool {
         | S::Install(_)
         | S::CopySlice(..)
         | S::Reslice(..)
-        | S::SliceFromCall(..) => false,
+        | S::SliceFromCall(..)
+        | S::StructFromCall(_) => false,
     })
 }
 
@@ -2522,6 +2581,31 @@ fn render_program(p: &Prog, form: Form) -> String {
         ));
     }
 
+    // `mks` is where a *struct* arrives from a call: a pointer to its bytes in
+    // A:X, and the caller copies them out. The two branches are different code
+    // in the callee — a constant literal is ROM data reached by label, a local
+    // is frame storage reached by its address — and it is the local one that
+    // used to come back as the struct's first byte in A.
+    if let [(f0, a0), (f1, a1)] = &p.mks[..] {
+        let init = |fs: &[i64; SFIELDS], a: &[i64; AFLEN]| -> String {
+            let elems: Vec<String> = a.iter().map(lit).collect();
+            let mut parts: Vec<String> = vec![format!("f0: {}", lit(&fs[0]))];
+            parts.push(format!("a: [{}]", elems.join(", ")));
+            parts.extend(
+                fs.iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(i, v)| format!("f{i}: {}", lit(v))),
+            );
+            format!("S {{ {} }}", parts.join(", "))
+        };
+        funcs.push_str(&format!(
+            "fn mks(k: u8) -> S {{\n    if k == 0 {{ return {}; }}\n    let ms: S = {};\n    return ms;\n}}\n",
+            init(f0, a0),
+            init(f1, a1),
+        ));
+    }
+
     // The function-pointer table, and the struct field a driver is installed
     // in. Both name the same candidates, and both have to come after the
     // functions they name. Taking their addresses is what makes those
@@ -2580,7 +2664,13 @@ static DEV: VT = VT {{ call: {} }};\n",
                 .skip(1)
                 .map(|(i, v)| format!("f{i}: {}", lit(v))),
         );
-        decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", ")));
+        // Bound from a call, or from a literal. The two are separate code —
+        // one copies the returned bytes out at a declaration, the other at an
+        // assignment — so the generator has to reach both.
+        match p.struct_init_from_call {
+            Some(k) => decls.push_str(&format!("    let s: S = mks({k});\n")),
+            None => decls.push_str(&format!("    let s: S = S {{ {} }};\n", fields.join(", "))),
+        }
     }
     if let Some(k) = p.enum_init {
         decls.push_str(&format!("    let e: C = C::C{k};\n"));
@@ -2905,6 +2995,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 | S::CopySlice(..)
                 | S::Reslice(..)
                 | S::SliceFromCall(..)
+                | S::StructFromCall(_)
                 | S::CopyRange { .. } => {}
             }
         }
@@ -2971,6 +3062,7 @@ fn strip_stmt_self_calls(s: &mut S) {
         | S::CopySlice(..)
         | S::Reslice(..)
         | S::SliceFromCall(..)
+        | S::StructFromCall(_)
         | S::CopyRange { .. } => {}
     }
 }
@@ -3089,7 +3181,11 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::Install(_) | S::CopySlice(..) | S::SliceFromCall(..) | S::CopyRange { .. } => false,
+        S::Install(_)
+        | S::CopySlice(..)
+        | S::SliceFromCall(..)
+        | S::StructFromCall(_)
+        | S::CopyRange { .. } => false,
     }
 }
 
@@ -3585,6 +3681,9 @@ fn the_generator_covers_what_it_claims() {
                 S::CopyRange { .. } => {
                     s.stmts.insert("array-copy");
                 }
+                S::StructFromCall(_) => {
+                    s.stmts.insert("struct-from-call");
+                }
             }
         }
     }
@@ -3805,6 +3904,8 @@ fn the_oracle_matches_the_documented_semantics() {
         vtable: 0,
         slices: Vec::new(),
         mk_ranges: Vec::new(),
+        mks: Vec::new(),
+        struct_init_from_call: None,
         mutual: None,
     };
     let st = St {
@@ -4136,8 +4237,10 @@ mod coverage {
         (
             "Item::Struct",
             "one struct per program: two scalar fields with an array field between them, so \
-             a base off by a field lands on a cell the program reports. Used as a local and \
-             passed to a function by address; never returned or pointed at",
+             a base off by a field lands on a cell the program reports. It is declared as a \
+             local, passed to a function by address, and returned from one — bound and \
+             assigned from that call, which are separate copies in the compiler. Never \
+             pointed at, and never nested inside another struct",
         ),
         (
             "Literal::Array",

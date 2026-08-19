@@ -397,6 +397,87 @@ pub(super) fn generate_index(
 /// literal site (`ProgramInfo::struct_temps`) and the fields are assembled into
 /// it at run time. Either way the result is the same pointer convention: low
 /// byte in A, high byte in X.
+/// Emit one field of a *constant* struct as ROM data.
+///
+/// Split out of `generate_struct_init` because a field is not always a scalar:
+/// an array field holds its elements inline, so it contributes `len * size`
+/// bytes rather than `size`, and it is the one field kind that recurses. The
+/// runtime path has always handled arrays; this one refused them with "only
+/// integer and bool literals supported", which named the wrong thing — an
+/// array literal *is* a literal — and made `return S { a: [1, 2, 3] }` fail
+/// where the same struct bound to a local compiled.
+fn emit_const_field(
+    ty: &crate::sema::types::Type,
+    value: &Spanned<Expr>,
+    field_name: &str,
+    emitter: &mut Emitter,
+) -> Result<(), CodegenError> {
+    use crate::ast::Literal;
+    use crate::sema::types::Type;
+
+    // An array field: its elements, then zero for any the literal leaves out.
+    // Only the literal *forms* are read here, because the elements are what
+    // has to be walked; each element is then a constant expression like any
+    // scalar field.
+    if let Type::Array(elem, len) = ty {
+        let elems: Vec<&Spanned<Expr>> = match &value.node {
+            Expr::Literal(Literal::Array(es)) => es.iter().collect(),
+            Expr::Literal(Literal::ArrayFill { value, count }) => vec![&**value; *count],
+            _ => {
+                return Err(CodegenError::UnsupportedOperation(format!(
+                    "field `{field_name}` is an array, so it needs an array literal"
+                )));
+            }
+        };
+        if elems.len() > *len {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "field `{field_name}` holds {len} elements but {} were given",
+                elems.len()
+            )));
+        }
+        for e in &elems {
+            emit_const_field(elem, e, field_name, emitter)?;
+        }
+        for _ in elems.len()..*len {
+            for _ in 0..elem.size() {
+                emitter.emit_byte(0);
+            }
+        }
+        return Ok(());
+    }
+
+    // A scalar field is whatever the constant evaluator can fold, not only a
+    // bare literal token. Matching on `Expr::Literal` here made this path
+    // disagree with sema's: sema decides a struct literal is *constant* — and
+    // so gets no run-time block — by folding it, so `f0: (-1)` is constant
+    // there and a unary minus here, and the struct compiled only when every
+    // field happened to be a non-negative number.
+    let val = crate::sema::const_eval::eval_const_expr(value)
+        .ok()
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| {
+            CodegenError::UnsupportedOperation(format!(
+                "field `{field_name}` of a constant struct must be a constant expression: it \
+                 becomes ROM data, so there is nothing to compute it with"
+            ))
+        })?;
+
+    match ty.size() {
+        1 => emitter.emit_byte(val as u8),
+        2 => {
+            emitter.emit_byte((val & 0xFF) as u8);
+            emitter.emit_byte(((val >> 8) & 0xFF) as u8);
+        }
+        n => {
+            return Err(CodegenError::UnsupportedOperation(format!(
+                "field `{field_name}` is {n} bytes wide, which a constant struct cannot \
+                 initialise from a number"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn generate_struct_init(
     name: &Spanned<String>,
     fields: &[crate::ast::FieldInit],
@@ -444,48 +525,17 @@ pub(super) fn generate_struct_init(
         .map(|f| (f.name.node.clone(), &f.value))
         .collect();
 
-    // Initialize each field in order (respecting struct layout)
+    // Initialize each field in order (respecting struct layout).
     for field_info in &struct_def.fields {
-        if let Some(value_expr) = field_values.get(&field_info.name) {
-            // Evaluate the field value expression and emit as data
-            // For now, we only support constant expressions
-            if let crate::ast::Expr::Literal(lit) = &value_expr.node {
-                match lit {
-                    crate::ast::Literal::Integer(val) => {
-                        // Emit the appropriate number of bytes based on field type
-                        let size = field_info.ty.size();
-                        if size == 1 {
-                            emitter.emit_byte(*val as u8);
-                        } else if size == 2 {
-                            // Emit as little-endian u16
-                            emitter.emit_byte((*val & 0xFF) as u8);
-                            emitter.emit_byte(((*val >> 8) & 0xFF) as u8);
-                        } else {
-                            return Err(CodegenError::UnsupportedOperation(format!(
-                                "struct field type with size {} not yet supported",
-                                size
-                            )));
-                        }
-                    }
-                    crate::ast::Literal::Bool(b) => {
-                        emitter.emit_byte(if *b { 1 } else { 0 });
-                    }
-                    _ => {
-                        return Err(CodegenError::UnsupportedOperation(
-                            "only integer and bool literals supported in struct initialization"
-                                .to_string(),
-                        ));
-                    }
-                }
-            } else {
-                return Err(CodegenError::UnsupportedOperation(
-                    "only constant expressions supported in struct initialization".to_string(),
-                ));
+        match field_values.get(&field_info.name) {
+            Some(value_expr) => {
+                emit_const_field(&field_info.ty, value_expr, &field_info.name, emitter)?;
             }
-        } else {
-            // Field not provided - initialize to zero
-            for _ in 0..field_info.ty.size() {
-                emitter.emit_byte(0);
+            // Field not provided - initialize to zero.
+            None => {
+                for _ in 0..field_info.ty.size() {
+                    emitter.emit_byte(0);
+                }
             }
         }
     }
