@@ -241,6 +241,23 @@ fn emit_element_address(
         }
         _ => 1,
     };
+    // A constant index needs neither a temp nor a run-time add: the offset is
+    // known, so it joins the field offsets already being folded into the base.
+    // That is smaller code, and it keeps the four-byte high pool free for the
+    // expressions around it — a `p.a[0]` inside a function that already holds
+    // a descriptor and an address used to be enough to exhaust it.
+    if let Some(idx) = const_index(index, info) {
+        let base = emit_aggregate_base(object, emitter, info, string_collector)?;
+        let elem = match base {
+            Some(Type::Array(elem, _)) | Some(Type::Slice(elem)) | Some(Type::Pointer(elem)) => {
+                (*elem).clone()
+            }
+            _ => return Ok(None),
+        };
+        emit_add_const_to_ax(emitter, (idx * esize) as u16);
+        return Ok(Some(elem));
+    }
+
     let parked = emitter.temp_alloc.alloc_high(1).ok_or_else(|| {
         CodegenError::Internal("temporary storage exhausted in an element address".into())
     })?;

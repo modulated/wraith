@@ -606,7 +606,16 @@ cumulative pressure, not any one construct.
 
 Like its sibling it is a **compile error and never a wrong answer** — 6000
 seeds produced no miscompile — so the harness skips it under `is_known_limit`
-and it is recorded here rather than reported as a bug on every run. Removing it
+and it is recorded here rather than reported as a bug on every run.
+
+The skip rate is a measure worth watching: it was 0.65% of 6000 seeds before
+`xp.a[i]` was generated and 2.4% after, because an element address at a
+*computed* index parks a byte while the index runs, inside a function that may
+already hold a descriptor and an address. Giving a *constant* index its own
+path — the offset folds into the base, with no temp and no run-time add —
+brought it back to about 1.7%, and made the emitted code smaller besides. The
+harness caps the rate at 5% so this cannot quietly degrade into a suite that
+mostly tests the pool limit. Removing it
 means the same restructuring the argument-pool item describes: values pushed
 straight from the registers they are produced in, rather than through a
 zero-page slot with a fixed budget.
