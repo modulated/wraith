@@ -94,6 +94,38 @@ pub(super) fn generate_index_assignment(
     // wrongly elide the index load below, indexing by the *value* instead.
     emitter.invalidate_registers();
 
+    // Step 3b: an array whose base is only known at run time — `p.a[i]`
+    // through a pointer, an element of a nested array. Taken *before* the
+    // index is evaluated below, because that path computes the element's
+    // address itself and evaluating the index here as well would run it twice
+    // — which is invisible for arithmetic and two calls for `p.a[f()] = v`.
+    //
+    // A string buffer is excluded: its data starts a byte past the length
+    // prefix, which the `INY` below applies and this path does not.
+    if !is_string
+        && !matches!(object.node, Expr::Variable(_))
+        && crate::codegen::expr::array_field_base(object, info).is_none()
+        && let Some((ptr, _elem)) = crate::codegen::expr::emit_element_address_into_ptr(
+            object,
+            index,
+            emitter,
+            info,
+            string_collector,
+        )?
+    {
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+        emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        if is_multibyte {
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        }
+        emitter.invalidate_registers();
+        emitter.temp_alloc.free_high(save, 2);
+        return Ok(());
+    }
+
     // Step 4: Evaluate index expression
     emitter.emit_comment("Evaluate index");
     generate_expr(index, emitter, info, string_collector)?;
@@ -911,10 +943,74 @@ pub(super) fn generate_field_assignment(
 
         Ok(())
     } else {
-        Err(CodegenError::UnsupportedOperation(
-            "Field assignment only supported on variables (not expressions)".to_string(),
-        ))
+        // The object is not a name: a chain through a pointer, an element of a
+        // nested array. Its address is only known at run time, so compute it
+        // and store through it.
+        //
+        // The address is computed *before* the value, and parked, because the
+        // value is arbitrary code that would clobber the pointer otherwise.
+        let Some(obj_ty) =
+            crate::codegen::expr::emit_aggregate_base(object, emitter, info, string_collector)?
+        else {
+            return Err(CodegenError::UnsupportedOperation(
+                "a field can be assigned through a name, a place, or a pointer — not through \
+                 this expression, which names no storage"
+                    .to_string(),
+            ));
+        };
+        let sname = match obj_ty {
+            Type::Named(n) => n,
+            Type::Pointer(inner) => match *inner {
+                Type::Named(n) => n,
+                _ => return Err(field_target_error(field)),
+            },
+            _ => return Err(field_target_error(field)),
+        };
+        let sdef = info.type_registry.get_struct(&sname).ok_or_else(|| {
+            CodegenError::UnsupportedOperation(format!("struct '{sname}' not found"))
+        })?;
+        let finfo = sdef
+            .get_field(&field.node)
+            .ok_or_else(|| field_target_error(field))?
+            .clone();
+
+        let ptr = emitter.memory_layout.deref_ptr();
+        emitter.emit_inst("STA", &format!("${:02X}", ptr));
+        emitter.emit_inst("STX", &format!("${:02X}", ptr + 1));
+
+        let is_multibyte = crate::codegen::expr::is_two_byte_value(&finfo.ty);
+        let park = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+            CodegenError::Internal("temporary storage exhausted in a field store".to_string())
+        })?;
+        generate_expr(value, emitter, info, string_collector)?;
+        store_value_pair(
+            emitter,
+            &finfo.ty,
+            info.resolved_types.get(&value.span),
+            &format!("${:02X}", park),
+            &format!("${:02X}", park + 1),
+        );
+
+        emitter.emit_inst("LDY", &format!("#${:02X}", finfo.offset));
+        emitter.emit_inst("LDA", &format!("${:02X}", park));
+        emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        if is_multibyte {
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", park + 1));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        }
+        emitter.temp_alloc.free_high(park, 2);
+        emitter.invalidate_registers();
+        Ok(())
     }
+}
+
+/// The field named is not one this struct has, or the object is not a struct.
+fn field_target_error(field: &Spanned<String>) -> CodegenError {
+    CodegenError::UnsupportedOperation(format!(
+        "cannot assign to field `{}`: the expression it is read from is not a struct",
+        field.node
+    ))
 }
 
 /// The declared type of `object.field`, when the object's struct is known.

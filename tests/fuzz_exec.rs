@@ -817,6 +817,12 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // Inside the struct-taking function the array and the table are out of
         // scope but a field is not: it reads through the parameter.
         if g.allow_fields && !g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
+            // Including its *array* field, indexed through the by-reference
+            // parameter — `xp.a[i]`, which the compiler refused until the
+            // element address became a run-time computation.
+            if g.rng.below(3) == 0 {
+                return E::AField(gen_afield_index(g));
+            }
             return E::Field(g.rng.below(SFIELDS as u64) as usize);
         }
         // A read through the pointer. Storage of its own type, so it anchors
@@ -1040,9 +1046,15 @@ fn gen_index(g: &mut Gen) -> Ix {
 /// rather than the compiler's.
 fn gen_afield_index(g: &mut Gen) -> Ix {
     if g.rng.below(2) == 0 {
-        Ix::Lit(g.rng.below(AFLEN as u64) as usize)
+        // Never zero: a zero index adds nothing, so an index that is scaled by
+        // the wrong width — or not scaled at all — reads the right byte anyway.
+        // Index zero is still reached, by the wrapped form below landing on it.
+        Ix::Lit(1 + g.rng.below(AFLEN as u64 - 1) as usize)
     } else {
-        Ix::Wrapped(g.rng.below(VARS as u64) as usize)
+        // The *enclosing* scope's variables, not `main`'s: inside the
+        // struct-taking function there may be fewer, and they are named
+        // differently.
+        Ix::Wrapped(g.rng.below(g.vars as u64) as usize)
     }
 }
 
@@ -1524,7 +1536,15 @@ fn gen_funcs(g: &mut Gen, count: usize, mutual: Option<(usize, usize)>) -> Vec<F
         let observable_terms = |g: &mut Gen| -> Vec<E> {
             let mut ts = Vec::new();
             if takes_struct {
-                ts.push(E::Field(g.rng.below(SFIELDS as u64) as usize));
+                // Either kind of field, because both have to *reach the
+                // result*: a read left in a local the return never uses proves
+                // nothing, and the array field's index arithmetic is the half
+                // with no other way in.
+                ts.push(if g.rng.below(2) == 0 {
+                    E::AField(gen_afield_index(g))
+                } else {
+                    E::Field(g.rng.below(SFIELDS as u64) as usize)
+                });
             }
             if takes_enum {
                 ts.push(E::EnumVal);
@@ -1917,6 +1937,7 @@ fn call_fn(
     args: &[i64],
     slice: Option<(usize, usize)>,
     fields: &[i64],
+    afield: &[i64],
     tag: Option<usize>,
     strlen: Option<usize>,
     ty: Ty,
@@ -1941,9 +1962,9 @@ fn call_fn(
         // of the values rather than an aliasing model.
         arr: Vec::new(),
         fields: fields.to_vec(),
-        // Nor the array field: `xp.a[i]` is not something the compiler emits,
-        // so nothing in a function body can name it.
-        afield: Vec::new(),
+        // The array field travels with them: it is part of the same bytes, and
+        // `xp.a[i]` reads it through the same pointer.
+        afield: afield.to_vec(),
         // The tag, when this function takes the enum. A unit enum's value is
         // its variant index, so nothing else has to travel.
         tag,
@@ -1998,6 +2019,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                 .collect();
             let sl = slice_arg.map(|k| st.slices[k]);
             let fl: &[i64] = if *struct_arg { &st.fields } else { &[] };
+            let af: &[i64] = if *struct_arg { &st.afield } else { &[] };
             let tg = if *enum_arg { st.tag } else { None };
             let sn = if *str_arg { st.strlen } else { None };
             narrow(
@@ -2008,6 +2030,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                     &vals,
                     sl,
                     fl,
+                    af,
                     tg,
                     sn,
                     ty,
@@ -2031,6 +2054,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                     &[v],
                     sl,
                     &st.fields,
+                    &st.afield,
                     st.tag,
                     st.strlen,
                     ty,
@@ -2051,6 +2075,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                     &[v],
                     None,
                     &[],
+                    &[],
                     None,
                     None,
                     ty,
@@ -2066,14 +2091,14 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let callee = st.prog.candidate(k);
             let v = eval(arg, st, st.prog.funcs[callee].var_types[0]);
             narrow(
-                call_fn(st.prog, callee, 0, &[v], None, &[], None, None, ty),
+                call_fn(st.prog, callee, 0, &[v], None, &[], &[], None, None, ty),
                 ty,
             )
         }
         E::DevCall(arg) => {
             let v = eval(arg, st, st.prog.funcs[st.dev].var_types[0]);
             narrow(
-                call_fn(st.prog, st.dev, 0, &[v], None, &[], None, None, ty),
+                call_fn(st.prog, st.dev, 0, &[v], None, &[], &[], None, None, ty),
                 ty,
             )
         }
@@ -2337,17 +2362,24 @@ fn loop_var(id: usize) -> String {
 }
 
 fn render_index(ix: &Ix) -> String {
-    render_index_mod(ix, ALEN)
-}
-
-/// As [`render_index`], against a length that is not the local array's. The
-/// struct's array field is shorter, and an index reduced modulo the wrong one
-/// runs off its end.
-fn render_index_mod(ix: &Ix, len: usize) -> String {
     match ix {
         Ix::Lit(k) => format!("{k}"),
         Ix::Loop(id) => loop_var(*id),
-        Ix::Wrapped(i) => format!("((v{i} as u8) % {len})"),
+        Ix::Wrapped(i) => format!("((v{i} as u8) % {ALEN})"),
+    }
+}
+
+/// The index into the struct's array field, named through the scope: inside
+/// the struct-taking function a variable is a parameter or a local, not one of
+/// `main`'s.
+///
+/// The modulus is the field's own length, which differs from the local array's
+/// — an index reduced modulo the wrong one runs off the shorter field's end.
+fn render_afield_index(ix: &Ix, sc: Scope) -> String {
+    match ix {
+        Ix::Lit(k) => format!("{k}"),
+        Ix::Loop(id) => loop_var(*id),
+        Ix::Wrapped(i) => format!("(({} as u8) % {AFLEN})", sc.var(*i)),
     }
 }
 
@@ -2356,7 +2388,7 @@ fn render_place(p: &Place, sc: Scope) -> String {
         Place::Var(v) => sc.var(*v),
         Place::Elem(ix) => format!("arr[{}]", render_index(ix)),
         Place::Field(f) => format!("s.f{f}"),
-        Place::AField(ix) => format!("s.a[{}]", render_index_mod(ix, AFLEN)),
+        Place::AField(ix) => format!("s.a[{}]", render_afield_index(ix, sc)),
     }
 }
 
@@ -2434,7 +2466,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::PtrLoad => "*p".to_string(),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
-        E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_index_mod(ix, AFLEN)),
+        E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_afield_index(ix, sc)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
         E::StrLen => format!("({}.len as {})", str_name(sc), ty.name()),
         E::Dispatch { sel, arg } => {
@@ -4492,9 +4524,10 @@ mod coverage {
         ),
         (
             "Expr::Field",
-            "two scalar fields of the program's type and one array field, all reached \
-             through the struct's own name. No nested struct, and no field reached through \
-             a pointer with an index — `xp.a[i]` is refused by the compiler",
+            "two scalar fields of the program's type and one array field, reached through \
+             the struct's own name in `main` and through the by-reference parameter inside \
+             the function that takes it — `xp.a[i]` included, which indexes an array field \
+             through a pointer. No struct nested inside another",
         ),
         (
             "Item::Static",
@@ -4506,9 +4539,9 @@ mod coverage {
             "Item::Struct",
             "one struct per program: two scalar fields with an array field between them, so \
              a base off by a field lands on a cell the program reports. It is declared as a \
-             local, passed to a function by address, and returned from one — bound and \
-             assigned from that call, which are separate copies in the compiler. Never \
-             pointed at, and never nested inside another struct",
+             local, passed to a function by address, returned from one — bound and assigned \
+             from that call, which are separate copies in the compiler — and written through \
+             a `&S`. Never nested inside another struct",
         ),
         (
             "Literal::Array",

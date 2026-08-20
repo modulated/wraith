@@ -436,23 +436,30 @@ fn a_pointer_to_a_u16_array_element_is_scaled_by_the_element_size() {
 }
 
 #[test]
-fn a_runtime_index_into_address_of_is_rejected_for_now() {
-    // Pointer arithmetic on a computed index is what `p[i]` will provide;
-    // until then this must say so rather than emit something wrong.
-    let err = expect_error(
-        r#"
-        const OUT: addr = 0x0900;
+fn the_address_of_an_element_at_a_run_time_index() {
+    // This used to be refused — the address of an element needed a constant
+    // index, because the offset was folded into the base at compile time.
+    // It is the general chain now: the base is computed, the scaled index is
+    // added to it, and a constant chain still folds to two immediate loads.
+    let mut e = run(r#"
+        const R0: addr = 0x0900;
+        const R1: addr = 0x0901;
         #[reset]
         fn main() {
             let buf: [u8; 4] = [0; 4];
             let i: u8 = 2;
             let p: &u8 = &buf[i];
-            *p = 1;
+            *p = 7;
+            R0 = buf[1];
+            R1 = buf[2];
             loop {}
         }
-    "#,
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (0, 7),
+        "the write lands on the element the index named, and nowhere else"
     );
-    assert!(err.contains("constant index"), "{err}");
 }
 
 // ============================================================================
@@ -696,23 +703,33 @@ fn taking_the_address_of_a_field_through_a_pointer_still_works() {
 }
 
 #[test]
-fn a_chained_field_access_through_a_pointer_is_rejected() {
-    // One level of auto-deref only. `resolve_static_struct_lvalue` computes a
-    // compile-time address, and there is no compile-time address behind a
-    // pointer — so this has to name the pointer and say what to do instead,
-    // rather than fall through to the generic "only supported on variables".
-    let err = expect_error(
-        r#"
+fn a_field_chain_follows_through_a_pointer() {
+    // This was refused, and the refusal named the pointer and told you to bind
+    // an intermediate: `resolve_static_struct_lvalue` computes a compile-time
+    // address and there is none behind a pointer. The chain is computed at run
+    // time now — the base of what the object names, plus the offsets along the
+    // way — so one level of auto-deref is no longer the limit.
+    let mut e = run(r#"
         const R0: addr = 0x0900;
-        struct Inner { v: u8 }
-        struct Outer { inner: Inner }
+        const R1: addr = 0x0901;
+        struct Inner { pad: u8, v: u8 }
+        struct Outer { tag: u8, inner: Inner }
         fn peek(p: &Outer) -> u8 { return p.inner.v; }
+        fn poke(p: &Outer, x: u8) { p.inner.v = x; }
         #[reset]
-        fn main() { let o: Outer = Outer { inner: Inner { v: 1 } }; R0 = peek(&o); loop {} }
-    "#,
+        fn main() {
+            let o: Outer = Outer { tag: 9, inner: Inner { pad: 0, v: 1 } };
+            R0 = peek(&o);
+            poke(&o, 42);
+            R1 = o.inner.v;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (1, 42),
+        "two levels deep, read and written, with the offsets summed"
     );
-    assert!(err.contains("'p'"), "the pointer should be named: {err}");
-    assert!(err.contains("bind an intermediate"), "{err}");
 }
 
 // ============================================================================

@@ -744,26 +744,60 @@ fn a_whole_array_is_never_assigned_at_any_storage_class() {
     );
 }
 
-/// The field case names element-wise and *not* `memcpy`, because `&d.f[0]` is
-/// not something the compiler can emit — and it says which, rather than
-/// reporting an internal error for source it simply does not handle.
+/// The address of an element of a *field*, and of a nested array's element.
+///
+/// Both were refused: the address of an element folded the index into the base
+/// at compile time, so it needed the array to be named directly and the index
+/// to be constant. They are one chain now — the base of whatever the
+/// expression names, plus the offsets along the way — which is what lets
+/// `memcpy` name an array field as its destination.
 #[test]
-fn the_address_of_an_element_of_a_field_is_refused_by_name() {
-    crate::common::assert_error_contains(
-        r#"
+fn the_address_of_an_element_of_a_field_can_be_taken() {
+    let mut e = run(r#"
         import { memcpy } from "std/mem.wr";
-        const OUT: addr = 0x0900;
-        struct D { f: [u8; 3] }
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        // A scalar after the array field, so a copy that overruns is visible.
+        struct D { f: [u8; 3], t: u8 }
         #[reset]
         fn main() {
-            let d: D = D { f: [1, 2, 3] };
+            let d: D = D { f: [1, 2, 3], t: 9 };
             let s: [u8; 3] = [7, 8, 9];
             memcpy(&d.f[0], &s[0], 3);
-            OUT = d.f[1];
+            O0 = d.f[0];
+            O1 = d.f[2];
+            O2 = d.t;
             loop {}
         }
-    "#,
-        "can only be taken through the array's name",
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (7, 9, 9),
+        "the copy lands in the field and stops at its end"
+    );
+
+    // Into the middle of the field, at a run-time index, through a pointer
+    // bound to the element rather than passed straight to a call.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        struct D { f: [u8; 3], t: u8 }
+        #[reset]
+        fn main() {
+            let d: D = D { f: [1, 2, 3], t: 9 };
+            let i: u8 = 1;
+            let p: &u8 = &d.f[i];
+            *p = 42;
+            O0 = d.f[1];
+            O1 = d.t;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (42, 9),
+        "a run-time index into a field's array"
     );
 }
 
@@ -1256,39 +1290,29 @@ fn a_pointer_is_a_second_name_for_one_byte() {
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (6, 20));
 }
 
-/// Two shapes in this family are *refused*, and the tests say so rather than
-/// leaving it to be discovered.
+/// A field read straight off a call's result.
 ///
-/// Both are ordinary-looking source with no way to spell the same thing, so
-/// they are on the roadmap. What matters here is that they are refused rather
-/// than miscompiled — the failure mode this whole file exists for.
+/// A struct-returning call already hands back a pointer in A:X, so this only
+/// ever needed staging that pointer and reading the field through it — but the
+/// field path resolved a *compile-time* address and refused anything else.
 #[test]
-fn a_field_of_a_call_and_an_indexed_field_of_a_pointer_are_refused() {
-    crate::common::assert_error_contains(
-        r#"
+fn a_field_can_be_read_off_a_calls_result() {
+    let mut e = run(r#"
         const O0: addr = 0x0900;
-        struct S { f0: u8, f1: u8 }
-        fn mk(x: u8) -> S { return S { f0: x, f1: 9 }; }
-        #[reset]
-        fn main() { O0 = mk(6).f1; loop {} }
-        "#,
-        "Field access only supported on variables",
-    );
-
-    crate::common::assert_error_contains(
-        r#"
-        const O0: addr = 0x0900;
-        struct S { f0: u8, a: [u8; 3] }
-        fn peek(p: &S, i: u8) -> u8 { return p.a[i]; }
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        struct S { f0: u8, a: [u8; 3], f1: u16 }
+        fn mk(x: u8) -> S { return S { f0: x, a: [1, 2, 3], f1: 9 }; }
         #[reset]
         fn main() {
-            let s: S = S { f0: 0, a: [7, 8, 9] };
-            O0 = peek(&s, 2);
+            O0 = mk(6).f0;        // the first field, at offset 0
+            O1 = mk(6).a[2];      // through the array field
+            let w: u16 = mk(6).f1;
+            O2 = w.low;           // and a two-byte field past it
             loop {}
         }
-        "#,
-        "only variable array indexing is currently supported",
-    );
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (6, 3, 9));
 }
 
 /// A constant struct with an array field becomes ROM data, elements and all.
@@ -1385,4 +1409,87 @@ fn a_pointer_read_through_a_pointer_keeps_its_high_byte() {
         }
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (7, 9));
+}
+
+/// An array field indexed *through a pointer*, read and written.
+///
+/// `p.a[i]` was refused on both sides — "only variable array indexing" on the
+/// read, "can only assign to array variables" on the write — because an array
+/// field's base was resolved at compile time and a pointer's is not known
+/// until the program runs.
+#[test]
+fn an_array_field_is_indexed_through_a_pointer() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        // Scalars either side, so a base off by a field is visible.
+        struct S { f0: u8, a: [u8; 3], f1: u8 }
+        fn peek(p: &S, i: u8) -> u8 { return p.a[i]; }
+        fn poke(p: &S, i: u8, v: u8) { p.a[i] = v; }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 4, a: [7, 8, 9], f1: 5 };
+            O0 = peek(&s, 2);
+            poke(&s, 1, 42);
+            O1 = s.a[1];       // the write is the caller's storage
+            O2 = s.f0;         // and stopped at the field's edges
+            O3 = s.f1;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (9, 42, 4, 5)
+    );
+
+    // A 16-bit element, where the index scales by two and both bytes move.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O2: addr = 0x0902;
+        struct W { a: [u16; 3], t: u16 }
+        fn poke(p: &W, i: u8, v: u16) { p.a[i] = v; }
+        #[reset]
+        fn main() {
+            let w: W = W { a: [1, 2, 3], t: 777 };
+            poke(&w, 2, 40000);
+            let x: u16 = w.a[2];
+            O0 = x.low;
+            let t: u16 = w.t;
+            O2 = t.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0902)),
+        ((40000u16 & 0xFF) as u8, (777u16 & 0xFF) as u8),
+        "a 16-bit element scales the index and leaves the next field alone"
+    );
+}
+
+/// The index is evaluated once, on the path that computes the address itself.
+///
+/// The store used to evaluate the index into `Y` before it knew whether it
+/// could reach the base — so a run-time base would have evaluated it a second
+/// time, which is invisible for arithmetic and two calls for `p.a[f()] = v`.
+#[test]
+fn a_run_time_base_evaluates_its_index_once() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        static CALLS: u8 = 0;
+        struct S { a: [u8; 3] }
+        fn next_index() -> u8 { CALLS = CALLS + 1; return 1; }
+        fn poke(p: &S, v: u8) { p.a[next_index()] = v; }
+        #[reset]
+        fn main() {
+            let s: S = S { a: [0, 0, 0] };
+            poke(&s, 6);
+            O0 = s.a[1];
+            O1 = CALLS;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (6, 1));
 }
