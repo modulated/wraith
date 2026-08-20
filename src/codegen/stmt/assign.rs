@@ -879,6 +879,48 @@ pub(super) fn generate_field_assignment(
         // Check if this is a parameter (pass-by-reference) via the explicit flag.
         let is_parameter = sym_is_param;
 
+        // An enum field holds its bytes inline, so assigning one is a copy of
+        // `size_of(enum)` bytes rather than a store of a value. Constructing a
+        // variant yields a pointer to those bytes.
+        //
+        // The scalar path below stored the pointer's low byte into the field;
+        // reading it back then dereferenced that byte as an address. Init and
+        // read are inline now, so this is the third site that has to agree.
+        if let Type::Named(inner) = &field_info.ty
+            && info.type_registry.get_enum(inner).is_some()
+        {
+            let size = crate::codegen::expr::type_byte_size(&field_info.ty, info) as u8;
+            if is_parameter {
+                // The destination is the caller's storage: the pointer in this
+                // parameter's slot, plus the field's offset.
+                let dest = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+                    CodegenError::Internal(
+                        "temporary storage exhausted in an enum field store".to_string(),
+                    )
+                })?;
+                let slot = base_addr as u8;
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("LDA", &format!("${:02X}", slot));
+                emitter.emit_inst("ADC", &format!("#${:02X}", field_info.offset as u8));
+                emitter.emit_inst("STA", &format!("${:02X}", dest));
+                emitter.emit_inst("LDA", &format!("${:02X}", slot + 1));
+                emitter.emit_inst("ADC", "#$00");
+                emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
+                generate_expr(value, emitter, info, string_collector)?;
+                emit_copy_through_pointer(emitter, dest, size);
+                emitter.temp_alloc.free_high(dest, 2);
+            } else {
+                generate_expr(value, emitter, info, string_collector)?;
+                crate::codegen::stmt::emit_return_by_value_copy(
+                    emitter,
+                    base_addr + field_info.offset as u16,
+                    size,
+                );
+            }
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+
         // Generate value expression (result in A, or A/Y for u16)
         generate_expr(value, emitter, info, string_collector)?;
 
@@ -2243,4 +2285,24 @@ pub(super) fn generate_assign(
         }
     }
     Ok(())
+}
+
+/// Copy `size` bytes from the pointer in A:X to the pointer already parked at
+/// `dest` in zero page.
+///
+/// The sibling of `emit_return_by_value_copy`, for a destination that is only
+/// known at run time — a field of the struct a by-reference parameter names.
+fn emit_copy_through_pointer(emitter: &mut Emitter, dest: u8, size: u8) {
+    let src = emitter.memory_layout.deref_ptr();
+    emitter.emit_inst("STA", &format!("${:02X}", src));
+    emitter.emit_inst("STX", &format!("${:02X}", src + 1));
+    let label = emitter.next_label("epcp");
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_label(&label);
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", src));
+    emitter.emit_inst("STA", &format!("(${:02X}),Y", dest));
+    emitter.emit_inst("INY", "");
+    emitter.emit_inst("CPY", &format!("#${:02X}", size));
+    emitter.emit_inst("BNE", &label);
+    emitter.invalidate_registers();
 }

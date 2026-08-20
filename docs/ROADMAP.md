@@ -57,6 +57,10 @@ read against a current picture:
 | The fuzzer aliases a variable through a pointer, and moves the alias | `docs/fuzz-coverage.md` |
 | The fuzzer returns a struct from a call, binds it, assigns it, and pokes one through `&S` | `docs/fuzz-coverage.md` |
 | The shrinker keeps a rejection's *reason*, so a reduction cannot drift to another | `tests/fuzz_exec.rs` |
+| An aggregate is reachable through a pointer, a call's result or a run-time index | `tests/e2e/aggregate_dispatch.rs` |
+| An enum field of a struct is stored inline, so a `match` on it picks the right arm | `tests/e2e/aggregate_dispatch.rs` |
+| A `static` struct initialises every field kind, `str` and enum included | `tests/e2e/aggregate_dispatch.rs` |
+| The fuzzer indexes an array field through the by-reference parameter | `docs/fuzz-coverage.md` |
 
 ## What keeps going wrong
 
@@ -262,7 +266,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Sixteen real bugs so far, most of them silent:
+Seventeen real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -344,6 +348,14 @@ Sixteen real bugs so far, most of them silent:
 16. The by-reference field load kept its own copy of the indirect-load
     sequence that `emit_deref_load` exists to be — which is how 15 could
     happen on one side and not the other. Both go through it now.
+17. An **enum field of a struct** was stored as a pointer's low byte and read
+    back by dereferencing that byte as an address, though the struct's layout
+    gives the field `size_of(enum)` bytes inline. A `match` on such a field
+    took whichever arm the garbage selected. The field matrix passed the whole
+    time: the store and the load were wrong in the same direction, so the
+    round trip agreed with itself. Found by asking why a `static` struct could
+    not name an enum variant — the answer was that the value it would have
+    written was not what the reader expected.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
@@ -466,6 +478,20 @@ and an oracle that is merely *probably* right is worse than no oracle:
   and decided "constant" by matching `Expr::Literal` where sema decides it by
   folding; the by-reference field load kept its own copy of the indirect-load
   sequence; and `*p` on a `&&u8` read one byte.
+
+  *And an array field indexed through the by-reference parameter* — `xp.a[i]`,
+  which the compiler refused until an element's address became a run-time
+  computation. The struct term folded into that function's result is now either
+  kind of field, because a read left in a dead local proves nothing and the
+  index arithmetic has no other way into an output cell. Dropping the field
+  offset, and dropping the index add, each fail inside the default 120 seeds.
+
+  Two thin spots recorded rather than papered over. Failing to *scale* the
+  index needs a 16-bit aggregate type and a struct-taking function at once, so
+  it survives 120 seeds and fails at 2000; the e2e matrix covers that case
+  directly. And no program declares a mutable `static` *struct*, so
+  `emit_static_field_load`'s offset is unverified by the generator — dropping it
+  survives any number of seeds.
 
   Still open: enum payloads, indexing a string rather than measuring it, a
   struct nested inside a struct, and a struct returned *through a function
@@ -653,6 +679,44 @@ Also open:
 
 ---
 
+## An aggregate reached through something that is not its name
+
+*Done.* Four refusals with one cause, and one miscompile behind them.
+
+`&x.f[0]` and `&m[i][j]`, `p.a[i]` on either side, `p.inner.v`, `mk(6).f1` and
+`&buf[i]` were each refused with their own message, and the reason in every
+case was the same: the compiler could resolve an address only at *compile*
+time. A pointer's target is not known then; nor is a call's result; nor is an
+element at a run-time index.
+
+`emit_aggregate_base` is the run-time counterpart of `resolve_static_addr` —
+the address of what an expression denotes, in A:X, with a pointer dereferenced
+on the way through because that is what `p.field` means. It tries the constant
+answer first, so a place that has one still gets the two immediate loads it
+always did, and the code-size benchmark did not move. Its three answers follow
+the contract the address resolvers already use: `Some` is the address, `None`
+is "no storage at all", `Err` is "storage nobody can address".
+
+It subsumed `generate_addr_of_element` and `generate_addr_of_field`, which are
+deleted rather than left as a second implementation.
+
+Two things worth keeping from doing it:
+
+- **The store path had to compute the address before the value.** It used to
+  evaluate the index into `Y` first, so reaching a run-time base after that
+  would have evaluated the index a second time — invisible for arithmetic, two
+  calls for `p.a[f()] = v`.
+- **An enum field was a miscompile, not a gap** — see the `static` struct entry
+  below. Pursuing "which field kinds can a `static` initialise" is what found
+  it, which is the argument for closing feature gaps rather than working around
+  them: the workaround (assign in `main`) hit the same broken path.
+
+Still open in this family: a struct nested inside another struct is laid out
+inline and reachable, but the fuzzer does not generate one, and enum *payloads*
+are neither generated nor exercised beyond the tag.
+
+---
+
 ## Structure & maintainability
 
 - **Shared exhaustive Stmt/Expr walker.** Hand-enumerated per-form walkers and
@@ -674,12 +738,13 @@ Also open:
   audited against this distinction.
 
   One more turned up while writing the array-copy refusal: `&x.f[0]` and
-  `&m[i][j]` reach `generate_addr_of_element` with no resolved symbol, and it
+  `&m[i][j]` reached `generate_addr_of_element` with no resolved symbol, and it
   reported an *internal compiler error* — a compiler bug — for source the
-  compiler simply does not handle. It now names the shape. **Emitting** those
-  two addresses is still open, and it is why the field case of the whole-array
-  refusal names element-wise assignment and not `memcpy`: there is no way to
-  spell the destination.
+  compiler simply did not handle. *Both are emitted now*, along with `p.a[i]`,
+  `p.inner.v`, `mk(6).f1` and `&buf[i]`: they were all the same refusal, which
+  was that an address could only be resolved at *compile* time. See
+  [An aggregate reached through something that is not its
+  name](#an-aggregate-reached-through-something-that-is-not-its-name).
 - **Whole-array assignment meant "repoint", and only a local could be
   repointed.** *Done — the statement is refused at every storage class.* A
   local array's slot held a pointer to its data, so `a = [4, 5, 6]` rebound the
@@ -724,18 +789,24 @@ Also open:
   The matrices that found them are kept: `every_parameter_kind_survives_every_
   call_form` and its tail-call twin. Widening one by a single row is what found
   the last two.
-- **A `static` struct can only initialise some of its field kinds.** A `u16`
-  field and a `fn` field are accepted; a `str`, an enum and a `&T` are refused
-  at the initialiser as *not a compile-time constant*. That is inconsistent
-  rather than wrong: a `fn` field is two bytes of address resolved by the
-  assembler, and a `str` field is the same shape — a label reference to the
-  literal's data — so `const` evaluation could accept it on the same terms. A
-  `&T` pointing at another `static` is the same again once BSS addresses are
-  assigned.
+- **A `static` struct can only initialise some of its field kinds.** *Done —
+  every kind is accepted now.* A `u16` and a `fn` field already were; a `&T`
+  turned out to be too, which the entry had wrong. A `str` field is the same
+  shape as a `fn` field — two bytes the assembler fills in — and differs only in
+  *who* names the label: the string collector does, at codegen, and
+  deduplicates identical literals, so the content travels out of sema and is
+  resolved before anything is emitted.
 
-  The diagnostic is clear and the workaround (assign in `main`) is one line, so
-  this is a feature gap rather than a defect. Worth closing when static device
-  tables want a name beside their function pointers.
+  The enum field was not a missing case but a **miscompile**, and it was live
+  for a local struct as much as a `static` one. An enum's layout says it is
+  stored inline — the tag and its payload, `size_of` bytes — but constructing a
+  variant yields a *pointer* to those bytes, and the struct paths stored that
+  pointer's low byte into the field and dereferenced it again on the way out. A
+  `match` on such a field took whichever arm the garbage selected;
+  `every_kind_of_struct_field_round_trips` passed the whole time, because the
+  store and the load were wrong in the same direction. Initialising, assigning
+  and reading now all treat an enum field as inline bytes, which is what the
+  layout always said.
 
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,

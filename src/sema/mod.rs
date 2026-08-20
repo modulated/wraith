@@ -1185,6 +1185,12 @@ pub enum InitByte {
     FnLow(String),
     /// High byte of a function's address.
     FnHigh(String),
+    /// Low byte of a string literal's address, carrying the literal's
+    /// *content*: the label is assigned by codegen's string collector, which
+    /// deduplicates identical literals, and sema has no way to know it.
+    StrLow(String),
+    /// High byte of the same.
+    StrHigh(String),
 }
 
 /// A mutable global's RAM address and the startup image its declaration gives

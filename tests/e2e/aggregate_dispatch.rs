@@ -1493,3 +1493,82 @@ fn a_run_time_base_evaluates_its_index_once() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (6, 1));
 }
+
+/// A `static` struct may name an enum variant for an enum field.
+///
+/// A `fn` field was accepted as two bytes the assembler resolves, and an
+/// integer field as its bytes; an enum field was refused as *not a
+/// compile-time constant*, because a variant is spelled `C::Z` and nothing
+/// folded that to its discriminant. An enum is stored inline like a struct —
+/// the tag then the payload — so it lays out the same way.
+#[test]
+fn a_static_struct_initialises_an_enum_field() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        enum C { A, B, Z }
+        // A scalar either side, so a tag written at the wrong width shows.
+        struct D { lead: u8, tag: C, n: u8 }
+        static DEV: D = D { lead: 5, tag: C::Z, n: 3 };
+        #[reset]
+        fn main() {
+            O0 = DEV.lead;
+            O2 = DEV.n;
+            match DEV.tag {
+                C::Z => { O1 = 42; }
+                _ => { O1 = 1; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (5, 42, 3));
+}
+
+/// And a `&T` field, which was already accepted — kept so it stays that way.
+#[test]
+fn a_static_struct_initialises_a_pointer_field() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        struct D { p: &u8, n: u8 }
+        static G: u8 = 7;
+        static DEV: D = D { p: &G, n: 3 };
+        #[reset]
+        fn main() {
+            G = 21;
+            O0 = *DEV.p;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 21, "the field holds G's address, not a copy");
+}
+
+/// A `static` struct may name a string literal for a `str` field.
+///
+/// A `str` field is a pointer at the literal's data — the same shape as a `fn`
+/// field, which was already accepted as two bytes the assembler fills in. What
+/// differed is only who names the label: the string collector does, at
+/// codegen, and deduplicates identical literals, so sema cannot know it. The
+/// content travels out of sema and is resolved to a label before anything is
+/// emitted.
+#[test]
+fn a_static_struct_initialises_a_str_field() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        struct D { lead: u8, name: str, n: u8 }
+        static DEV: D = D { lead: 5, name: "hi!", n: 3 };
+        // The same literal again, to check the two share one copy rather than
+        // one of them getting a stale label.
+        static OTHER: D = D { lead: 6, name: "hi!", n: 4 };
+        #[reset]
+        fn main() {
+            O0 = DEV.lead;
+            O1 = (DEV.name.len as u8);
+            O2 = (OTHER.name.len as u8);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (5, 3, 3));
+}

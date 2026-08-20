@@ -304,6 +304,21 @@ program: local variables are allocated in per-function frames that the compiler
   undefined at power-on (large all-zero blocks use a compact fill loop)
 - Arrays and structs are supported; arrays are indexed with absolute-indexed
   addressing
+- A struct's initialiser may name any field kind: a number, a `bool`, an array,
+  a nested struct, a function, a `str`, an enum variant, and `&OTHER` for
+  another `static`. The last four are two bytes or a tag the assembler or the
+  linker fills in, which is why they are initialisers rather than assignments:
+
+  ```rust,compile
+  enum Mode { Idle, Busy }
+  struct Dev { name: str, mode: Mode, handler: fn(u8) -> u8, buf: &u8 }
+  static SPARE: u8 = 0;
+  fn echo(x: u8) -> u8 { return x; }
+  static DEV: Dev = Dev { name: "uart", mode: Mode::Idle, handler: echo, buf: &SPARE };
+
+  #[reset]
+  fn main() { loop {} }
+  ```
 - `addr` may not be declared `static` — an `addr` names a fixed hardware
   location, so it stays `const`
 - Statics shared with interrupt handlers are **not** protected: guard multi-byte
@@ -1722,9 +1737,21 @@ lives in `std/mem.wr` alongside `memcpy16` for lengths past 255, `memset`, and
 `memcmp`.
 
 `&array[0]` is the address of the first element; `&array` is the same address —
-see [Pointers](#pointers). Both need the array's *name*: `&x.f[0]`, the address
-of an element of a struct field, is not supported, so an array field is copied
-element-wise.
+see [Pointers](#pointers). An array *field* works the same way, so `memcpy` can
+name one as its destination:
+
+```rust,compile
+import { memcpy } from "std/mem.wr";
+struct D { f: [u8; 3], t: u8 }
+
+#[reset]
+fn main() {
+    let d: D = D { f: [0; 3], t: 9 };
+    let src: [u8; 3] = [1, 2, 3];
+    memcpy(&d.f[0], &src[0], 3);
+    loop {}
+}
+```
 
 A **slice** is the one aggregate that *is* assigned as a whole, because a slice
 is two numbers rather than a block of elements: `sl = TBL[1..4]` rebinds the
@@ -1788,10 +1815,12 @@ struct Node { value: u8, next: &Node }   // 3 bytes
 `p[i]` has no bounds check: a pointer carries no length. When the length
 matters, use a slice (`&[T]`), which carries one.
 
-`p[i]` and `p.field` do not compose: `p.cells[i]`, an *indexed array field*
-through a pointer, is not supported, and neither is `&x.cells[0]`. An array
-field is reached through the struct's own name — copy such a field element by
-element rather than through a pointer to the struct.
+`p[i]` and `p.field` compose freely, and to any depth: `p.cells[i]` reaches an
+array field through a pointer, `p.inner.v` follows a chain two levels down, and
+`&x.cells[0]` takes the address of an element of a field. Where the whole chain
+is constant it folds to the address at compile time; where it is not — anything
+through a pointer, or an element at a run-time index — the base is computed and
+the offsets added to it.
 
 Two pointers of the same type compare for equality with `==` / `!=` — the null
 check a linked list needs. Ordering (`<`, `>`, …) and arithmetic do not apply:

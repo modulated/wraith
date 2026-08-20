@@ -774,6 +774,28 @@ pub fn generate_struct_init_runtime(
                 continue;
             }
 
+            // An enum field holds its bytes inline — the tag and whatever the
+            // variant carries — exactly as the struct's layout says: the field
+            // occupies `size_of(enum)` bytes, not two. Constructing a variant
+            // yields a *pointer* to those bytes, so they are copied in.
+            //
+            // Falling through to the scalar path stored the pointer's low byte
+            // in the field instead, and reading it back dereferenced that byte
+            // as an address — a `match` on the field took whichever arm the
+            // garbage happened to select.
+            if let crate::sema::types::Type::Named(inner) = &field_info.ty
+                && info.type_registry.get_enum(inner).is_some()
+            {
+                generate_expr(value_expr, emitter, info, string_collector)?;
+                crate::codegen::stmt::emit_return_by_value_copy(
+                    emitter,
+                    field_addr,
+                    field_size as u8,
+                );
+                emitter.invalidate_registers();
+                continue;
+            }
+
             // Generate the scalar field value expression.
             generate_expr(value_expr, emitter, info, string_collector)?;
 
@@ -1940,6 +1962,25 @@ pub(super) fn generate_field_access(
             // A function-pointer field holds a 2-byte code address, so it must be
             // loaded as a pair like u16 — reading only the low byte would call
             // through a half-formed vector.
+            // An enum field is stored inline — the tag and its payload — and
+            // an enum *value* is an address, so reading the field means the
+            // field's own address rather than its contents. Every consumer
+            // (`match`, `as u8`, passing it on) dereferences from there.
+            if let crate::sema::types::Type::Named(inner) = &field_info.ty
+                && info.type_registry.get_enum(inner).is_some()
+            {
+                if is_parameter {
+                    let ptr = base_addr as u8;
+                    emitter.emit_inst("LDA", &format!("${:02X}", ptr));
+                    emitter.emit_inst("LDX", &format!("${:02X}", ptr + 1));
+                    emit_add_const_to_ax(emitter, field_info.offset as u16);
+                } else {
+                    StaticBase::Addr(base_addr + field_info.offset as u16).emit_as_pointer(emitter);
+                }
+                emitter.invalidate_registers();
+                return Ok(());
+            }
+
             let is_multibyte = is_two_byte_value(&field_info.ty);
 
             if is_parameter {

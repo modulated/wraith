@@ -491,6 +491,12 @@ fn emit_static_inits(emitter: &mut Emitter, info: &ProgramInfo) {
                     emitter.emit_inst("LDA", &format!("#>{}", f));
                     last = None;
                 }
+                // Rewritten to a label pair by `resolve_string_inits` before
+                // anything is emitted. Reaching one here means that pass was
+                // skipped, which would otherwise put a byte of nothing in RAM.
+                InitByte::StrLow(t) | InitByte::StrHigh(t) => {
+                    unreachable!("unresolved string initializer for {t:?}")
+                }
             }
             emitter.emit_inst("STA", &addr);
         }
@@ -751,6 +757,9 @@ fn emit_init_bytes(bytes: &[crate::sema::InitByte], emitter: &mut Emitter) {
                 } else {
                     1
                 };
+            }
+            InitByte::StrLow(t) | InitByte::StrHigh(t) => {
+                unreachable!("unresolved string initializer for {t:?}")
             }
             InitByte::FnHigh(f) => {
                 // Only reachable if a pair was split, which the flattener never
