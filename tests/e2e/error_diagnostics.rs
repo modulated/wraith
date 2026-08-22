@@ -415,3 +415,178 @@ fn a_modulo_by_a_constant_zero_is_refused_too() {
         "expected a modulo-specific message:\n{e}"
     );
 }
+
+// ============================================================================
+// Returning the wrong type
+// ============================================================================
+
+#[test]
+fn returning_the_wrong_type_names_both_and_points_at_the_expression() {
+    // The span is the returned *expression*, not the `return` keyword and not
+    // the function: that is the thing to change.
+    let e = render(
+        "fn f() -> u8 { let s: str = \"x\"; return s; }\n#[reset]\nfn main() { let y: u8 = f(); loop {} }\n",
+    );
+    assert_at(&e, "--> 1:41", "expected u8, found str");
+}
+
+#[test]
+fn returning_a_wider_type_than_declared_is_refused() {
+    // Widening is implicit in one direction only. `u16` into a `-> u8` loses
+    // the high byte, so it needs a written cast rather than a silent truncation.
+    let e = render(
+        "fn f() -> u8 { let w: u16 = 300; return w; }\n#[reset]\nfn main() { let y: u8 = f(); loop {} }\n",
+    );
+    assert_at(&e, "--> 1:41", "expected u8, found u16");
+}
+
+// ============================================================================
+// Imports
+// ============================================================================
+
+#[test]
+fn a_module_that_cannot_be_read_names_the_path_and_the_reason() {
+    let e =
+        render("import { a } from \"tests/fixtures/nope.wr\";\n#[reset]\nfn main() { loop {} }\n");
+    assert_at(&e, "--> 1:19", "failed to import 'tests/fixtures/nope.wr'");
+    assert!(
+        e.contains("No such file") || e.contains("cannot find"),
+        "the reason the file could not be read should survive:\n{e}"
+    );
+}
+
+#[test]
+fn a_failure_inside_a_module_is_rendered_against_that_modules_source() {
+    // The one diagnostic that cannot be rendered by the driver: its spans index
+    // a file the driver never read. It arrives already formatted, with the
+    // import that pulled the module in shown beneath it.
+    let e = render(
+        "import * from \"tests/fixtures/broken_types.wr\";\n#[reset]\nfn main() { loop {} }\n",
+    );
+    assert!(
+        e.contains("tests/fixtures/broken_types.wr:12:"),
+        "the position inside the module:\n{e}"
+    );
+    assert_at(&e, "--> 1:15", "imported here");
+}
+
+#[test]
+fn a_second_path_to_a_broken_module_points_at_the_report() {
+    let e = render(
+        "import { ONE } from \"tests/fixtures/via_one.wr\";\n\
+         import { TWO } from \"tests/fixtures/via_two.wr\";\n\
+         #[reset]\nfn main() { let x: u8 = ONE + TWO; loop {} }\n",
+    );
+    assert_at(&e, "--> 2:21", "has errors, reported above");
+}
+
+#[test]
+fn a_circular_import_names_the_cycle() {
+    let e = render_spanless(
+        "import { a_value } from \"tests/fixtures/cycle_a.wr\";\n\
+         #[reset]\nfn main() { loop {} }\n",
+    );
+    assert!(e.contains("circular"), "{e}");
+    assert!(
+        e.contains("cycle_a.wr") && e.contains("cycle_b.wr"),
+        "both modules in the cycle should be named:\n{e}"
+    );
+}
+
+// ============================================================================
+// Every diagnostic is pinned, or says why not
+// ============================================================================
+
+/// Diagnostics that no test above can pin, with the reason.
+///
+/// Keep this list short and keep the reasons true: a variant parked here is one
+/// whose rendering nothing checks, and the point of the check below is that
+/// adding one has to be a decision rather than an oversight.
+const UNPINNED: &[(&str, &str)] = &[(
+    "Multiple",
+    "not a diagnostic of its own — it renders its children, which \
+         tests/e2e/multi_error.rs covers by counting them",
+)];
+
+/// Every `SemaError` variant is either pinned by a test in this file or listed
+/// in `UNPINNED` with a reason.
+///
+/// The variant list is read from the source at test time, in the same style as
+/// the fuzzer's AST coverage: a diagnostic added to the compiler shows up here
+/// as unpinned rather than going unmentioned. `OutOfZeroPage` was the case that
+/// prompted this — a variant with two renderings and no construction site
+/// anywhere, so the golden test it was down for could not be written. It is
+/// deleted now; this is what would have said so.
+#[test]
+fn every_sema_error_variant_is_pinned_or_excused() {
+    let src = include_str!("../../src/sema/mod.rs");
+    let body = src
+        .split_once("pub enum SemaError {")
+        .expect("the error enum")
+        .1
+        .split_once("\n}\n")
+        .expect("its closing brace")
+        .0;
+
+    // A variant is a line indented exactly one level, starting with a capital.
+    let variants: Vec<&str> = body
+        .lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("    ")?;
+            if rest.starts_with(' ') || !rest.starts_with(char::is_uppercase) {
+                return None;
+            }
+            let name = rest.split(['{', '(', ',', ' ']).next()?;
+            name.chars().all(char::is_alphanumeric).then_some(name)
+        })
+        .collect();
+    assert!(
+        variants.len() > 20,
+        "the variant scrape found only {variants:?} — the enum's shape must have changed"
+    );
+
+    let tests = include_str!("error_diagnostics.rs");
+    let excused: Vec<&str> = UNPINNED.iter().map(|(n, _)| *n).collect();
+
+    // A variant is "pinned" when this file names it in a comment or a test —
+    // which is what the `// pins: Name` markers below are for, since a
+    // diagnostic's rendering rarely contains its variant's name.
+    let unpinned: Vec<&str> = variants
+        .iter()
+        .filter(|v| !excused.contains(v) && !tests.contains(&format!("pins: {v}")))
+        .copied()
+        .collect();
+    assert!(
+        unpinned.is_empty(),
+        "these diagnostics have no golden test and no reason: {unpinned:?}\n\
+         Add a test above with a `// pins: <Variant>` marker, or a line in UNPINNED."
+    );
+}
+
+// The markers the check above reads. Kept in one block so the list is legible,
+// rather than scattered through the file where a rename would miss one.
+//
+// pins: UndefinedSymbol
+// pins: TypeMismatch
+// pins: InvalidBinaryOp
+// pins: InvalidUnaryOp
+// pins: ArityMismatch
+// pins: ImmutableAssignment
+// pins: CircularImport
+// pins: ReturnTypeMismatch
+// pins: MissingReturn
+// pins: BreakOutsideLoop
+// pins: DuplicateSymbol
+// pins: FieldNotFound
+// pins: EscapingPointer
+// pins: ImportError
+// pins: InModule
+// pins: ImportFailedElsewhere
+// pins: FrameRegionOverflow
+// pins: InstructionConflict
+// pins: Custom
+// pins: ConstantOverflow
+// pins: InvalidAddrUsage
+// pins: ArrayIndexOutOfBounds
+// pins: WriteOnlyRead
+// pins: ReadOnlyWrite

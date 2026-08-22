@@ -78,9 +78,6 @@ pub enum SemaError {
         span: Span,
     },
 
-    /// Return outside of function
-    ReturnOutsideFunction { span: Span },
-
     /// Break/continue outside of loop
     BreakOutsideLoop { span: Span },
 
@@ -129,9 +126,6 @@ pub enum SemaError {
     /// the import graph. This says the import failed and points at where the
     /// errors are.
     ImportFailedElsewhere { path: String, span: Span },
-
-    /// Out of zero page memory
-    OutOfZeroPage { span: Span },
 
     /// The colored per-function frames do not fit in the zero-page frame region.
     /// `chain` describes the deepest call chain and its cumulative frame usage.
@@ -188,14 +182,12 @@ impl SemaError {
             | ImmutableAssignment { span, .. }
             | ReturnTypeMismatch { span, .. }
             | MissingReturn { span, .. }
-            | ReturnOutsideFunction { span }
             | BreakOutsideLoop { span }
             | DuplicateSymbol { span, .. }
             | FieldNotFound { span, .. }
             | EscapingPointer { span, .. }
             | ImportError { span, .. }
             | ImportFailedElsewhere { span, .. }
-            | OutOfZeroPage { span }
             | InstructionConflict { span, .. }
             | Custom { span, .. }
             | ConstantOverflow { span, .. }
@@ -365,14 +357,6 @@ impl SemaError {
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
-            SemaError::ReturnOutsideFunction { span } => {
-                let msg = "return statement outside function".to_string();
-                format!(
-                    "error: {}\n{}",
-                    msg,
-                    span.format_error_context_of(source, filename, &msg, file)
-                )
-            }
             SemaError::BreakOutsideLoop { span } => {
                 let msg = "break/continue outside loop".to_string();
                 format!(
@@ -457,13 +441,6 @@ impl SemaError {
                     import_span.format_error_context_of(source, filename, "", file)
                 ));
                 out
-            }
-            SemaError::OutOfZeroPage { span } => {
-                let msg = "no more zero page addresses available".to_string();
-                format!(
-                    "error: out of zero page memory\n{}",
-                    span.format_error_context_of(source, filename, &msg, file)
-                )
             }
             SemaError::FrameRegionOverflow { chain, needed } => {
                 format!(
@@ -656,13 +633,6 @@ impl std::fmt::Display for SemaError {
                     function, span.start, span.end, expected
                 )
             }
-            SemaError::ReturnOutsideFunction { span } => {
-                write!(
-                    f,
-                    "return statement outside function at {}..{}",
-                    span.start, span.end
-                )
-            }
             SemaError::BreakOutsideLoop { span } => {
                 write!(
                     f,
@@ -722,13 +692,6 @@ impl std::fmt::Display for SemaError {
                     f,
                     "import failed at {}..{}: '{}' has errors, reported above",
                     span.start, span.end, path
-                )
-            }
-            SemaError::OutOfZeroPage { span } => {
-                write!(
-                    f,
-                    "out of zero page memory at {}..{}: no more zero page addresses available",
-                    span.start, span.end
                 )
             }
             SemaError::FrameRegionOverflow { chain, needed } => {
