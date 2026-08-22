@@ -66,6 +66,14 @@ pub struct SemanticAnalyzer {
     /// stopping at the first, mirroring the parser's `errors` field. Analysis
     /// still fails if this is non-empty — nothing partial reaches codegen.
     pub errors: Vec<SemaError>,
+    /// Names whose *declaration* failed to register, so nothing by that name is
+    /// in scope for the bodies below.
+    ///
+    /// Every use of one would report "cannot find …" on top of the real error —
+    /// symptoms burying the cause — so exactly those follow-ons are dropped in
+    /// `record`. Per name rather than per pass: an unrelated typo in a body
+    /// still reports, which is the whole point of crossing this boundary.
+    pub(super) failed_declarations: std::collections::HashSet<String>,
     pub(super) current_return_type: Option<Type>,
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
     pub(super) function_metadata: HashMap<String, FunctionMetadata>,
@@ -202,6 +210,7 @@ impl SemanticAnalyzer {
             table: SymbolTable::new(),
             warnings: Vec::with_capacity(16),
             errors: Vec::new(),
+            failed_declarations: std::collections::HashSet::new(),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
@@ -344,24 +353,40 @@ impl SemanticAnalyzer {
         // are reported together.
         for item in &source.items {
             if let Err(e) = self.register_item(item) {
+                self.failed_declarations.extend(declared_names(&item.node));
                 self.record(e);
             }
         }
 
-        // But stop before the bodies. A declaration that failed to register left
-        // its symbol missing, so every use of it below would report "cannot find
-        // ..." on top of the real error — symptoms burying the cause. Getting
-        // both passes in one run would need per-name suppression of exactly
-        // those follow-ons; reporting every declaration problem at once, and
-        // bodies once the declarations are sound, buys most of the benefit with
-        // none of the risk.
-        if let Some(e) = self.take_errors() {
-            return Err(e);
-        }
+        // Every named type used in a declaration must exist. This cannot be
+        // checked while registering: types are registered in source order, so
+        // `struct A { next: &B }` with `B` declared below would fail on a
+        // forward reference that is perfectly legal. Checking once the registry
+        // is complete asks the question at the only point it has an answer.
+        //
+        // Without it an unknown field type was not reported at all. It reached
+        // the use site as `expected NoSuchType, found u8` — a mismatch against
+        // a type that does not exist, which sends the reader to the wrong line.
+        self.check_declared_type_names(source);
 
-        // Second pass: Analyze function bodies
+        // Second pass: the bodies — even when a declaration failed.
+        //
+        // A declaration that failed left its symbol missing, so every use of it
+        // would report "cannot find …" on top of the real error. That is why
+        // this used to stop here. The suppression is per *name* now: the names
+        // that failed to register are remembered above and their
+        // `UndefinedSymbol`s dropped in `record`, so a body's own mistakes
+        // still report while the follow-ons stay quiet.
+        //
+        // A body's failure is recorded rather than propagated. Propagating
+        // discarded everything collected so far, which with declaration errors
+        // now in the list would lose the causes to report a symptom; and one
+        // function's body is independent of the next's, which is the condition
+        // `record` asks for.
         for item in &source.items {
-            self.analyze_item(item)?;
+            if let Err(e) = self.analyze_item(item) {
+                self.record(e);
+            }
         }
 
         // Surface whatever the two passes collected before going further. This
@@ -397,6 +422,15 @@ impl SemanticAnalyzer {
     /// failed — recovering into state the failure invalidated is how a
     /// diagnostics feature turns into a miscompile.
     pub(super) fn record(&mut self, error: SemaError) {
+        // A use of a name whose declaration already failed says nothing the
+        // declaration's own error did not. Dropping it here — the one place
+        // every collected error passes through — is what lets the body pass run
+        // at all after a failed declaration.
+        if let SemaError::UndefinedSymbol { name, .. } = &error
+            && self.failed_declarations.contains(name)
+        {
+            return;
+        }
         if self.errors.len() < Self::MAX_ERRORS {
             self.errors.push(error);
         }
@@ -516,6 +550,89 @@ impl SemanticAnalyzer {
     /// Release a loop-bound slot for reuse by later sibling loops.
     pub(super) fn loop_bound_release(&mut self, offset: u8, size: u8) {
         self.loop_bound_free.push((offset, size));
+    }
+
+    /// Report every named type in a *declaration* that no struct or enum
+    /// defines.
+    ///
+    /// Runs after registration, so a forward reference to a type declared
+    /// further down the file resolves. Each is reported where it is written,
+    /// and the name is remembered as a failed declaration so uses of the
+    /// *variable* it types do not cascade.
+    fn check_declared_type_names(&mut self, source: &SourceFile) {
+        let mut missing: Vec<(String, Span)> = Vec::new();
+        for item in &source.items {
+            match &item.node {
+                Item::Function(f) => {
+                    for p in &f.params {
+                        collect_unknown_type_names(&p.ty, &self.type_registry, &mut missing);
+                    }
+                    if let Some(r) = &f.return_type {
+                        collect_unknown_type_names(r, &self.type_registry, &mut missing);
+                    }
+                }
+                Item::Static(st) => {
+                    collect_unknown_type_names(&st.ty, &self.type_registry, &mut missing)
+                }
+                Item::Struct(sd) => {
+                    for f in &sd.fields {
+                        collect_unknown_type_names(&f.ty, &self.type_registry, &mut missing);
+                    }
+                }
+                Item::Enum(ed) => {
+                    for v in &ed.variants {
+                        match v {
+                            crate::ast::EnumVariant::Unit { .. } => {}
+                            crate::ast::EnumVariant::Tuple { fields, .. } => {
+                                for t in fields {
+                                    collect_unknown_type_names(
+                                        t,
+                                        &self.type_registry,
+                                        &mut missing,
+                                    );
+                                }
+                            }
+                            crate::ast::EnumVariant::Struct { fields, .. } => {
+                                for f in fields {
+                                    collect_unknown_type_names(
+                                        &f.ty,
+                                        &self.type_registry,
+                                        &mut missing,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // An `addr` is a primitive, and an import names no types.
+                Item::Address(_) | Item::Import(_) => {}
+            }
+        }
+        for (name, span) in missing {
+            let suggestion = self.closest_type_name(&name);
+            self.record(SemaError::UndefinedSymbol {
+                name,
+                span,
+                suggestion,
+            });
+        }
+    }
+
+    /// The declared type name closest to `target`, for a "did you mean" hint.
+    /// The symbol table's version looks at *values*, which are the wrong
+    /// candidates for a name written in type position.
+    fn closest_type_name(&self, target: &str) -> Option<String> {
+        let limit = if target.len() <= 3 { 1 } else { 2 };
+        self.type_registry
+            .structs
+            .keys()
+            .chain(self.type_registry.enums.keys())
+            .filter_map(|n| {
+                let d = crate::sema::table::levenshtein(target, n);
+                (d > 0 && d <= limit).then_some((d, n.clone()))
+            })
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, n)| n)
     }
 
     fn analyze_item(&mut self, item: &Spanned<Item>) -> Result<(), SemaError> {
@@ -816,5 +933,57 @@ impl SemanticAnalyzer {
         };
 
         Ok(Type::Function(param_types, Box::new(return_type)))
+    }
+}
+
+/// The names a top-level item brings into scope.
+///
+/// Used to remember what a *failed* declaration did not define. An import
+/// names several; a glob names none it can enumerate, so a failed one
+/// suppresses nothing and its uses report as usual — which is the honest
+/// answer, since nobody knows what it would have brought in.
+fn declared_names(item: &Item) -> Vec<String> {
+    match item {
+        Item::Function(f) => vec![f.name.node.clone()],
+        Item::Static(s) => vec![s.name.node.clone()],
+        Item::Address(a) => vec![a.name.node.clone()],
+        Item::Struct(s) => vec![s.name.node.clone()],
+        Item::Enum(e) => vec![e.name.node.clone()],
+        Item::Import(i) => i.symbols.iter().map(|s| s.node.clone()).collect(),
+    }
+}
+
+/// Every `Named` type inside `ty` that the registry does not know.
+///
+/// Walks the type *expression* rather than the resolved type, because only the
+/// expression carries the span to point at. `str` is a name in the grammar but
+/// a built-in, so it is never missing.
+fn collect_unknown_type_names(
+    ty: &Spanned<TypeExpr>,
+    registry: &crate::sema::type_defs::TypeRegistry,
+    out: &mut Vec<(String, Span)>,
+) {
+    match &ty.node {
+        TypeExpr::Named(name) => {
+            if name != "str"
+                && !registry.structs.contains_key(name)
+                && !registry.enums.contains_key(name)
+            {
+                out.push((name.clone(), ty.span));
+            }
+        }
+        TypeExpr::Array { element, .. } | TypeExpr::Slice { element } => {
+            collect_unknown_type_names(element, registry, out)
+        }
+        TypeExpr::Pointer { pointee } => collect_unknown_type_names(pointee, registry, out),
+        TypeExpr::Function { params, ret } => {
+            for p in params {
+                collect_unknown_type_names(p, registry, out);
+            }
+            if let Some(r) = ret {
+                collect_unknown_type_names(r, registry, out);
+            }
+        }
+        TypeExpr::Primitive(_) | TypeExpr::StringBuf { .. } => {}
     }
 }
