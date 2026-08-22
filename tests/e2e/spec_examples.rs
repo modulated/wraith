@@ -94,7 +94,7 @@ fn spec_compile_examples_build() {
     // A floor guards against the tags silently vanishing (a bulk spec edit that
     // drops them would otherwise make this test pass vacuously).
     assert!(
-        blocks.len() >= 75,
+        blocks.len() >= 130,
         "expected the spec to keep its ```rust,compile examples, found {}",
         blocks.len()
     );
@@ -163,4 +163,53 @@ fn fragments_do_not_declare_top_level_items() {
             );
         }
     }
+}
+
+/// How many fenced Rust blocks carry no compile tag.
+fn untagged_count(md: &str) -> usize {
+    let mut n = 0;
+    let mut lines = md.lines();
+    while let Some(line) = lines.next() {
+        if !line.trim().starts_with("```rust") {
+            continue;
+        }
+        if tag_of(line).is_none() {
+            n += 1;
+        }
+        for l in lines.by_ref() {
+            if l.trim_start().starts_with("```") {
+                break;
+            }
+        }
+    }
+    n
+}
+
+/// The untagged blocks are a shrinking, documented set — not a default.
+///
+/// A ceiling rather than an exact number, so tagging one more block does not
+/// need this line edited; but it cannot grow, so a new example arrives tagged
+/// or the author has to say why here.
+///
+/// What is left, and why each resists tagging:
+///
+/// * **~29 truncated signatures** — `fn read_line(buf: &u8, max: u8) -> u8 { ... }`
+///   and the stdlib reference's bodyless forms. The `...` is the point; giving
+///   them bodies would make the reference longer and no clearer.
+/// * **~20 deliberate error examples** — a constant that overflows, a duplicate
+///   name, `addr` where it is not allowed, a pointer that escapes. They are in
+///   the spec *because* they fail; `error_diagnostics.rs` pins the messages.
+/// * **9 import examples** naming modules that are illustrations rather than
+///   files in this tree.
+/// * The rest are prose fragments (bare `..` range syntax) and features the
+///   spec marks as not implemented, which cannot compile by definition.
+#[test]
+fn the_untagged_blocks_stay_a_short_list() {
+    let md = include_str!("../../docs/specification.md");
+    let n = untagged_count(md);
+    assert!(
+        n <= 92,
+        "{n} spec blocks carry no compile tag, up from 92. Tag the new example, \
+         or add its category to the list above this test."
+    );
 }
