@@ -304,6 +304,21 @@ program: local variables are allocated in per-function frames that the compiler
   undefined at power-on (large all-zero blocks use a compact fill loop)
 - Arrays and structs are supported; arrays are indexed with absolute-indexed
   addressing
+- A struct's initialiser may name any field kind: a number, a `bool`, an array,
+  a nested struct, a function, a `str`, an enum variant, and `&OTHER` for
+  another `static`. The last four are two bytes or a tag the assembler or the
+  linker fills in, which is why they are initialisers rather than assignments:
+
+  ```rust,compile
+  enum Mode { Idle, Busy }
+  struct Dev { name: str, mode: Mode, handler: fn(u8) -> u8, buf: &u8 }
+  static SPARE: u8 = 0;
+  fn echo(x: u8) -> u8 { return x; }
+  static DEV: Dev = Dev { name: "uart", mode: Mode::Idle, handler: echo, buf: &SPARE };
+
+  #[reset]
+  fn main() { loop {} }
+  ```
 - `addr` may not be declared `static` — an `addr` names a fixed hardware
   location, so it stays `const`
 - Statics shared with interrupt handlers are **not** protected: guard multi-byte
@@ -981,8 +996,26 @@ struct Entity {
 **Layout Characteristics:**
 - No padding or alignment (sequential bytes)
 - Nested structs inlined directly
+- Array fields inlined directly too — `len * element size` bytes, in place
 - Multi-byte fields stored little-endian
 - Total struct size = sum of field sizes
+
+An array field is part of the struct's bytes, not a pointer to them, so
+reaching an element is the struct's base plus the field's offset plus the
+scaled index:
+
+```rust,compile
+struct Row { tag: u8, cells: [u16; 3], flags: u8 }   // 1 + 6 + 1 = 8 bytes
+
+#[reset]
+fn main() {
+    let r: Row = Row { tag: 1, cells: [10, 20, 30], flags: 0 };
+    let i: u8 = 2;
+    r.cells[i] = 40;
+    let c: u16 = r.cells[1];
+    loop {}
+}
+```
 
 ### Nested Structs
 
@@ -1085,9 +1118,9 @@ copy.
 
 ### Returning Structs by Value
 
-A function may return a struct by value. The result is copied into the
-destination variable's storage, so returning and binding a struct is a true
-copy:
+A function may return a struct by value. What travels back is the struct's
+**address**, in `A:X`; the caller copies the bytes out of it immediately after
+the call, so returning and binding a struct is a true copy:
 
 ```rust,compile
 struct Point { x: u8, y: u8 }
@@ -1102,11 +1135,35 @@ fn main() {
 }
 ```
 
+Any way of naming the struct may be returned, and each yields its address
+differently — a local from its frame slot, a by-reference parameter from the
+pointer in its slot, a `static` from its fixed address, and a literal from the
+pointer it already produces:
+
+```rust,compile
+struct S { f: u8, a: [u8; 3] }
+static G: S = S { f: 1, a: [2, 3, 4] };
+
+fn from_local(x: u8) -> S { let s: S = S { f: x, a: [0; 3] }; return s; }
+fn from_param(p: S) -> S { return p; }
+fn from_static() -> S { return G; }
+fn from_literal(x: u8) -> S { return S { f: x, a: [5, 6, 7] }; }
+
+#[reset]
+fn main() { let s: S = from_local(1); s = from_static(); loop {} }
+```
+
+Because the address names storage inside the callee's frame, it is valid only
+until the caller has copied it — which is what the caller does with it, and the
+only thing it may do with it.
+
 #### Where a struct literal lives
 
 A struct literal whose fields are all constants is emitted as bytes in the
 `CODE` section, and the expression evaluates to a pointer at them. It costs no
-RAM and no cycles to build.
+RAM and no cycles to build. "Constant" means the field folds to a number, so
+`(-1)` and `2 * 3` qualify; an array field is laid out inline there like
+anywhere else, and a field the literal omits is zeroed for its whole width.
 
 A literal with a *computed* field has no bytes until the program runs, so it is
 assembled at run time into a block of RAM reserved for that literal. The block
@@ -1624,24 +1681,83 @@ let pixel: u8 = screen[2 * 8 + 5];
 
 ### Array Assignment and Copying
 
-Arrays are value types - assignment copies all elements:
+An array is initialised once, from a literal, and is never assigned as a whole
+afterwards. Both of these are refused:
 
 ```rust
-let source: [u8; 3] = [1, 2, 3];
-let dest: [u8; 3] = source;  // Copies all 3 bytes
+let src: [u8; 3] = [1, 2, 3];
+let dst: [u8; 3] = [0; 3];
 
-source[0] = 10;  // dest is unchanged (independent copy)
+dst = src;         // ERROR: cannot assign a whole array to `dst`
+dst = [4, 5, 6];   // ERROR: same
 ```
 
-**For large arrays**, use `memcpy` for efficiency:
+The binding form is refused for the same reason, and says so at the
+declaration: `let dst: [u8; 3] = src;` is *a local array must be initialized
+with an array literal*.
 
-```rust
-let source: [u8; 100] = [0; 100];
-let dest: [u8; 100] = [0; 100];
-memcpy(&dest, &source, 100);
+The reason is cost. `dst = src` on a 6502 is a loop over the elements — no
+instruction moves more than one byte — so an assignment that looks like a
+register move would emit an unbounded copy whose length is the array's, and a
+`[u8; 256]` would silently cost 256 stores and a loop in a language whose whole
+point is that you can see what the code will do. Making the copy explicit puts
+that cost where the reader can count it. (Nothing about an array's
+*representation* changes here: it is still a block of elements, not a
+reference. What is refused is one *statement*, not one semantics.)
+
+There are two ways to copy. At these lengths the loop is the smaller of the
+two — `memcpy` is a call, and its body has to be linked in — so the choice is
+about what you have rather than about size:
+
+```rust,compile
+import { memcpy } from "std/mem.wr";
+
+#[reset]
+fn main() {
+    let src: [u8; 3] = [1, 2, 3];
+    let dst: [u8; 3] = [0; 3];
+
+    // Element-wise: no import, no call, and the compiler sees every store.
+    for i in 0..3 {
+        dst[i] = src[i];
+    }
+
+    // Or with an explicit copy: one call whatever the length, and the only
+    // form that takes a length decided at run time. `memcpy` counts *bytes*,
+    // so a `[u16; N]` passes `N * 2`.
+    memcpy(&dst[0], &src[0], 3);
+
+    loop {}
+}
 ```
 
-`&array` gives a pointer to its first element — see [Pointers](#pointers).
+`memcpy` copies bytes and does not overlap-check, so it is `memcpy` and not
+`memmove`: a destination inside the source range is the caller's problem. It
+lives in `std/mem.wr` alongside `memcpy16` for lengths past 255, `memset`, and
+`memcmp`.
+
+`&array[0]` is the address of the first element; `&array` is the same address —
+see [Pointers](#pointers). An array *field* works the same way, so `memcpy` can
+name one as its destination:
+
+```rust,compile
+import { memcpy } from "std/mem.wr";
+struct D { f: [u8; 3], t: u8 }
+
+#[reset]
+fn main() {
+    let d: D = D { f: [0; 3], t: 9 };
+    let src: [u8; 3] = [1, 2, 3];
+    memcpy(&d.f[0], &src[0], 3);
+    loop {}
+}
+```
+
+A **slice** is the one aggregate that *is* assigned as a whole, because a slice
+is two numbers rather than a block of elements: `sl = TBL[1..4]` rebinds the
+descriptor and copies nothing. That is the distinction the refusal draws — an
+assignment that costs two bytes is allowed; one that costs the array's length
+is spelled out.
 
 ### Completion Status
 
@@ -1698,6 +1814,13 @@ struct Node { value: u8, next: &Node }   // 3 bytes
 
 `p[i]` has no bounds check: a pointer carries no length. When the length
 matters, use a slice (`&[T]`), which carries one.
+
+`p[i]` and `p.field` compose freely, and to any depth: `p.cells[i]` reaches an
+array field through a pointer, `p.inner.v` follows a chain two levels down, and
+`&x.cells[0]` takes the address of an element of a field. Where the whole chain
+is constant it folds to the address at compile time; where it is not — anything
+through a pointer, or an element at a run-time index — the base is computed and
+the offsets added to it.
 
 Two pointers of the same type compare for equality with `==` / `!=` — the null
 check a linked list needs. Ordering (`<`, `>`, …) and arithmetic do not apply:
@@ -3827,10 +3950,77 @@ let i: i8 = 127 + 1;     // -128 (signed overflow wraps)
 let j: i8 = -128 - 1;    // 127 (signed underflow wraps)
 ```
 
+**Shifts:**
+
+`<<` and `>>` take a count in bits. A count **at or past the type's width**
+shifts every bit out: the result is `0`, or `-1` for `>>` on a negative signed
+value, since an arithmetic right shift feeds the sign bit back in.
+
+```rust
+let a: u8 = 200;
+let n: u8 = 9;
+let x: u8 = a << n;        // 0 — every bit shifted out
+let y: i8 = (-100) >> n;   // -1 — the sign bit is what comes in
+```
+
+The count is **not masked** to the width. A 6502 has no barrel shifter, so a
+variable shift is a loop that simply performs the count; there is nothing to
+mask and no cost to defining it this way. Masking (as x86 and Java do) would
+make `x << 8` on a `u8` mean `x << 0`, which is both surprising and useless,
+and would cost an `AND` on every variable shift to produce.
+
+A count the compiler can see is at or past the width is a **warning**, not an
+error — the behaviour is defined, and clearing a value by shifting it out is a
+real if unusual idiom:
+
+```rust
+let x: u8 = a << 8;        // warning: shifting a `u8` by 8 always yields 0
+let y: u8 = a << 7;        // fine
+let z: u8 = a << n;        // fine: `n` is only known at run time
+```
+
 **Division and Modulo:**
-- Division by zero: Result is undefined (no runtime check)
-- Modulo by zero: Result is undefined (no runtime check)
-- Programmer responsibility to check divisor
+
+Division truncates toward zero, and the remainder takes the dividend's sign:
+`-23 / 5` is `-4` and `-23 % 5` is `-3`.
+
+Division and modulo **by zero are defined**, not undefined: both yield the
+all-ones value of the type.
+
+| Expression | Result |
+|---|---|
+| `u8 x / 0`, `u8 x % 0` | `0xFF` |
+| `u16 x / 0`, `u16 x % 0` | `0xFFFF` |
+| `i8 x / 0`, `i8 x % 0` | `-1` |
+| `i16 x / 0`, `i16 x % 0` | `-1` |
+
+This is what the hardware sequence already produces rather than a value chosen
+for its own sake: shift-and-subtract division with a zero divisor succeeds at
+every trial subtraction, so the quotient fills with ones. Defining it costs
+nothing — the check is three instructions and was already being emitted — and
+it means a program that divides by zero gets the same answer every time instead
+of whatever an uninitialized byte held.
+
+RISC-V's M extension defines the same value for the same reason. It differs in
+one detail: there the *remainder* of `x % 0` is the dividend, where here it is
+all-ones like the quotient. One value for both is simpler to state and to rely
+on.
+
+There is **no runtime check and no trap**. A zero divisor is not an error at
+run time; it produces the sentinel and execution continues.
+
+A divisor the compiler can see is zero is a *compile-time* error:
+
+```rust
+let x: u8 = a / 0;         // error: division by zero
+let y: u8 = a % (3 - 3);   // error: modulo by zero
+let z: u8 = a / b;         // fine: `b` is only known at run time
+```
+
+The sentinel exists for the second case — a divisor that is zero only
+sometimes, which no compiler can catch. A divisor that is *always* zero says
+nothing about the dividend and is a mistake rather than a choice, so it is
+refused where it can be seen.
 
 ### Short-Circuit Evaluation
 

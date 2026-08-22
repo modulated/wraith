@@ -33,7 +33,7 @@ read against a current picture:
 | Slice descriptors copy whole; a call through a function pointer returns like any call | `tests/e2e/aggregate_dispatch.rs` |
 | The address resolvers error on a place they cannot handle, instead of saying `None` | `tests/e2e/aggregate_dispatch.rs` |
 | Every parameter kind survives every call form — direct, inlined, recursive, indirect | `tests/e2e/aggregate_dispatch.rs` |
-| Every struct field kind round-trips; a whole-array store is refused where it cannot work | `tests/e2e/aggregate_dispatch.rs` |
+| Every struct field kind round-trips | `tests/e2e/aggregate_dispatch.rs` |
 | Every return kind survives every call form — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
 | An interrupt arriving *mid-computation* leaves the interrupted work alone | `tests/e2e/interrupts_exec.rs` |
 | A function-pointer argument is sized and staged like the two bytes it is | `tests/e2e/vtable.rs` |
@@ -41,23 +41,90 @@ read against a current picture:
 | A match expression's arm widens by the arm's sign, not by zero | `tests/e2e/int_conversions.rs` |
 | A for-loop bound the counter cannot represent is refused, sign as well as width | `tests/e2e/control_flow.rs` |
 | Two-byte `static`s and `static` struct fields store both bytes — a negative result, kept | `tests/e2e/aggregate_dispatch.rs` |
+| The four call forms share one argument-staging routine and one width table | `src/codegen/expr/call.rs` |
+| The fuzzer passes a struct across a call and makes its value observable | `docs/fuzz-coverage.md` |
+| The fuzzer passes an enum across a call, tag and register convention both | `docs/fuzz-coverage.md` |
+| The fuzzer passes a `str` across a call — the last of the four staging kinds | `docs/fuzz-coverage.md` |
+| Operator precedence checked against the specification's table, metamorphically | `tests/fuzz_exec.rs` |
+| Divide-by-zero defined as the all-ones sentinel at every width and sign | `tests/e2e/operators.rs` |
+| A divisor the compiler can see is zero is refused | `tests/e2e/error_diagnostics.rs` |
+| A shift count at or past the width shifts every bit out, and warns when constant | `tests/e2e/operators.rs` |
+| A whole array is never assigned; the refusal names element-wise and `memcpy` | `tests/e2e/aggregate_dispatch.rs` |
+| The fuzzer copies a run of bytes with `memcpy`, through `&arr[i]` and `&TBL[i]` | `docs/fuzz-coverage.md` |
+| A struct returned by value comes back as its address, not its first byte | `tests/e2e/aggregate_dispatch.rs` |
+| A constant struct lays out an array field inline, and folds its fields | `tests/e2e/aggregate_dispatch.rs` |
+| `*p` on a pointer-to-pointer keeps its high byte; one indirect load serves both | `tests/e2e/aggregate_dispatch.rs` |
+| The fuzzer aliases a variable through a pointer, and moves the alias | `docs/fuzz-coverage.md` |
+| The fuzzer returns a struct from a call, binds it, assigns it, and pokes one through `&S` | `docs/fuzz-coverage.md` |
+| The shrinker keeps a rejection's *reason*, so a reduction cannot drift to another | `tests/fuzz_exec.rs` |
+| An aggregate is reachable through a pointer, a call's result or a run-time index | `tests/e2e/aggregate_dispatch.rs` |
+| An enum field of a struct is stored inline, so a `match` on it picks the right arm | `tests/e2e/aggregate_dispatch.rs` |
+| A `static` struct initialises every field kind, `str` and enum included | `tests/e2e/aggregate_dispatch.rs` |
+| The fuzzer indexes an array field through the by-reference parameter | `docs/fuzz-coverage.md` |
 
-The recurring defect behind most of that list is written up under
-[Structure & maintainability](#structure--maintainability): a dispatch match
-whose fallback is *another strategy* rather than a failure. The three sites
-that decide an aggregate's fate refuse what they cannot carry, and the
-resolvers under them now distinguish "not this shape" from "unhandled" rather
-than saying `None` to both.
+## What keeps going wrong
 
-Its sibling — **one rule with several implementations** — keeps producing
-findings after the fallbacks were closed. A function pointer is two bytes with
-its high byte in Y, which is neither the number convention's reason nor the
-address convention's; three separate hand-written lists of "the wide types"
-omitted it, and each omission was a different silent wrong answer. The table
-(`param_byte_width`, `is_two_byte_value`, `high_byte_in_x`) already existed and
-already knew. The sweep through every codegen site that re-listed the wide
-types found five in total, and is written up under
-[Structure & maintainability](#structure--maintainability).
+Nearly every silent miscompile found so far has had one of these shapes. They
+are worth reading before adding a case to any of the matches involved — each
+cost several bugs before it was named.
+
+- **A fallback that is another strategy, not a failure.** A dispatch match
+  whose default is the scalar path. A form nobody enumerated does not fail; it
+  gets loaded as though it were a `u8`. Nine bugs: struct copy from a place,
+  struct arguments, `.low`/`.high` assignment, indirect calls, frame colouring,
+  double evaluation in `arr[i] = f()`, slice binding, `g(mk())`, and `Call`
+  matched where `CallIndirect` was not. The three sites that decide an
+  aggregate's fate now *refuse* what they cannot carry.
+
+  Ten, now: `return s` from a `-> S` function fell through to the scalar return
+  path, which loaded the struct's first byte into A. The slice return had been
+  given its case; the struct one had not, and there was no `_ =>` to blame —
+  just an `if` chain whose last arm was "an ordinary value".
+
+- **One rule with several implementations.** The same question answered in more
+  than one place drifts. A function pointer is two bytes with its high byte in
+  Y — neither the number convention's reason nor the address convention's — so
+  it fell off three separate hand-written lists of "the wide types", each
+  omission a different wrong answer. The authoritative table already existed
+  and already knew. Ask it; do not re-list the variants.
+
+  Three more since: a *constant* struct decided constant-ness by matching
+  `Expr::Literal` where sema decides it by folding, so `S { f: (-1) }` was
+  constant to one and not the other; `*p` re-listed the two-byte types and left
+  out the ones that are addresses, which the *store* side had already been
+  fixed for; and the by-reference field load kept its own copy of the
+  indirect-load sequence `emit_deref_load` exists to be — which is precisely
+  how the two could disagree.
+
+- **`None` meaning two different things.** "This form has no address, and never
+  could" and "this form has one and nobody wrote the case" read identically to
+  a caller. `Denotes` separates them and is exhaustive with no catch-all.
+
+- **Generating a construct is not observing it.** A fuzzer that passes a struct
+  and reads a field into a local the return never uses cannot tell a correct
+  staging from a broken one. Every value a test introduces has to reach an
+  output cell; with two wide parameters, *each* needs its own term.
+
+- **The specification drifting behind the compiler.** Divide-by-zero and
+  over-width shifts were both defined in code and called "undefined" in the
+  reference — in the first case the reference contradicted its own stdlib
+  section. When the hardware sequence already yields a sensible answer for
+  free, document it rather than inventing a different one.
+
+- **A tool that reduces has to preserve what it is reducing.** The shrinker
+  kept only "wrong answer" versus "rejected", so reducing a rejection was free
+  to walk to an unrelated one — and did, twice in one afternoon, to an `i8`/
+  `i16` mismatch and to `% 0` folded out of two literals. Both times the
+  reported program no longer contained the failure, and the time lost re-deriving
+  it was more than the reduction saved. The rejection's *reason* is part of the
+  kind now.
+
+- **Verify against the bug, not against the fix.** Every correctness change
+  here is checked by putting the defect back and watching a named test fail.
+  For a table copied from the specification, break the *reference* instead —
+  agreeing with a reference you derived from the code proves nothing. And
+  beware a test that passes by luck of layout: the `str` page-crossing bug was
+  invisible until two literals landed in different pages.
 
 ---
 
@@ -107,69 +174,37 @@ Two instructions in the WDC set have no codegen site yet:
 ### Branch optimization intelligence
 
 *Partly done, and the entry as originally written pointed at the wrong
-redundancy.* It proposed tracking status flags across statements so a repeated
-`if x > 5` would not re-emit the `CMP`. That case barely occurs: an `if` ends
-in a label and usually contains a call, and both invalidate flags, so a tracker
-would find almost nothing to elide.
+redundancy.* It proposed tracking status flags across statements; that case
+barely occurs, because an `if` ends in a label and usually contains a call, and
+both invalidate flags.
 
-The waste was elsewhere and larger. A comparison feeding an `if` or `while`
-built a 0/1 in `A` and then compared *that* against zero to branch — eleven
-instructions to decide one branch. `collapse_boolean_compares` in the peephole
-already fused the common case, but it matched a *one-branch* comparison tail,
-and only four of the six comparisons end in one. Unsigned `<=` and `>` have no
-single 6502 branch (`A > m` is `!Z && C`), so they ended in two, missed the
-window, and materialised the boolean. Both shapes are now matched — they differ
-from each other as well: `>` sends its branches to different labels, `<=` sends
-both to the same one. A comparison-heavy program drops from 89 instructions to
-74.
+The waste was elsewhere. A comparison feeding an `if` built a 0/1 in `A` and
+then compared *that* against zero — eleven instructions for one branch.
+`collapse_boolean_compares` matched only a one-branch comparison tail, and
+unsigned `<=` and `>` have no single 6502 branch so they end in two. Both
+shapes are matched now, and the guard no longer requires V dead, which it never
+affected: together that removes 115 instructions across the example corpus.
 
-**The guard was refusing for a property the rewrite cannot affect.** Everything
-the collapse deletes — a `CMP #$00`, two `LDA`s and a `JMP` — writes N, Z and C
-and never V, so V holds the same bit before and after. Requiring it dead anyway
-refused 48 of the 225 candidate sites in the example corpus. Excluding V from
-the guard removes **115 instructions** across the corpus, 60 of them from
-`monitor_standalone`.
+Finding it took an instrumented run reporting every guard's value per site.
+Two earlier guesses were measured and both were wrong — worth remembering
+before optimising against intuition.
 
-Finding that took an instrumented run reporting every guard's value per site,
-which is what should have been done first: two earlier guesses (that `RTS` was
-being treated as reading every flag; that the shapes simply did not match) were
-both measured, both wrong, and one of those measurements was itself wrong —
-see the benchmark note below. The remaining refusals are now known rather than
-guessed at: 30 sites with A genuinely live, and 44 whose labels have other
-entrants.
-
-**The benchmark could not see any of this.** `tests/code_size.rs` measured the
-section allocator's reservations, which are made at *placement* — before the
-peephole runs. Every "code size unchanged" it reported for a peephole change
-was measuring something that could not move, including the ones in this
-branch's earlier commits. It now records the emitted instruction count
-alongside the section bytes; the sections still matter, since they are what has
-to fit the memory map, but they are not the whole picture.
-
-**Where the ceiling is.** Fusing in the peephole means recognising a shape
-codegen just finished emitting. Emitting the branch directly — a
-`generate_condition_branch` path threaded through comparisons, `&&`, `||` and
-`!` — would need no pattern matching, would cover the compound conditions the
-peephole cannot see through, and is the version worth building if this area is
-returned to.
+**Still open:** the remaining materialised booleans are the ones feeding
+something other than a branch (an assignment, an argument), where the 0/1 is
+genuinely wanted. No estimate of what that is worth yet.
 
 ### Smaller code
 
-- **Reclaim BSS from dropped statics.** *Done.* Registration hands out BSS
-  addresses in declaration order, long before liveness is known — an
-  initializer's `&OTHER` has to resolve to a number as it is flattened — so a
-  dropped static used to keep its bytes. Rather than defer allocation, the
-  layout is repacked between `reachable_symbols` and `finalize_frames`: live
-  statics keep their relative order and the gaps close. Sizes come from the
-  gaps between consecutive addresses, so nothing re-derives a type's width.
+- **Reclaim BSS from dropped statics.** *Done.* The layout is repacked between
+  `reachable_symbols` and `finalize_frames`, so live statics keep their order
+  and the gaps close.
 
-  The lesson worth keeping is where an address lives by that point. There are
+  The lesson worth keeping is where an address lives by that point: there are
   *three* copies — the symbol table, the per-use snapshots in
   `resolved_symbols`, and `inline_param_symbols`, which despite its name holds
-  every symbol a function's body resolved and is merged back over
-  `resolved_symbols` at each inline call site. Moving a static in fewer than
-  all three silently puts it back. `rewrite_frame_offsets` already had to keep
-  the same three in step; the fuzzer caught both halves of getting it wrong.
+  every symbol a function's body resolved. Moving a static in fewer than all
+  three silently puts it back. The fuzzer caught both halves of getting it
+  wrong.
 
 ---
 
@@ -211,9 +246,10 @@ What it generates is a small imperative language: `u8`/`u16`/`i8`/`i16`, ten
 binary operators, casts, comparisons and boolean connectives, assignment,
 `if`/`else`, counted `for` and condition-driven `while`, functions with one to
 three parameters and a return value, self-recursion bounded by a decreasing
-budget, and a local array, a `const` table and a two-field struct — all nested.
-Every cell's final value is written out, so one program checks up to ten
-results.
+budget, a local array, a `const` table and a struct with an array field, and a
+pointer that names one of the program's own variables and can be moved to
+another — all nested. Every cell's final value is written out, so one program
+checks a dozen or more results.
 
 **What it reaches is documented, not asserted**: [`fuzz-coverage.md`](fuzz-coverage.md)
 lists every construct in the language's AST with how many of a fixed sample of
@@ -230,7 +266,7 @@ before it is reported — one-step simplifications, re-run each time, keeping th
 same *kind* of failure — so what lands in the output is a handful of lines
 rather than thirty of dense arithmetic.
 
-Fourteen real bugs so far, most of them silent:
+Seventeen real bugs so far, most of them silent:
 
 1. Constant folding evaluated in `i64` and truncated once, while generated code
    wraps at every step: `(94 << 6) >> 3` folded to 240 where the same expression
@@ -293,6 +329,33 @@ Fourteen real bugs so far, most of them silent:
     held from an unrelated instruction and the same program could answer
     differently depending on the statement before it. All six now share one
     `emit_widen_a_into_y`.
+13. A struct returned by value came back as its *first byte* in A, with X
+    holding whatever the last instruction left. The caller was right — it
+    dereferences A:X and copies the bytes out — so `mk(7)` returning
+    `S { f0: 7, f1: 8 }` answered `(0, 0)`, read from zero page `$0007`. The
+    slice return had this case and the struct one was simply missing.
+14. A *constant* struct refused an array field, and decided "constant" by
+    matching `Expr::Literal` where sema decides it by *folding* — so a struct
+    compiled only when every field happened to be a non-negative number, and
+    `return S { a: [1, 2] }` failed where the same struct bound to a local
+    compiled.
+15. `*p` on a `&&u8` loaded **one byte**: it decided "two bytes" by re-listing
+    `u16`/`i16`/`b16`, which leaves out the two-byte values that are addresses.
+    The binding then stored whatever X held as the high half, so the pointer
+    came out `$0000` where it should have been `$0400` and both the read and
+    the write through it landed in zero page. The store side had already been
+    fixed the same way.
+16. The by-reference field load kept its own copy of the indirect-load
+    sequence that `emit_deref_load` exists to be — which is how 15 could
+    happen on one side and not the other. Both go through it now.
+17. An **enum field of a struct** was stored as a pointer's low byte and read
+    back by dereferencing that byte as an address, though the struct's layout
+    gives the field `size_of(enum)` bytes inline. A `match` on such a field
+    took whichever arm the garbage selected. The field matrix passed the whole
+    time: the store and the load were wrong in the same direction, so the
+    round trip agreed with itself. Found by asking why a `static` struct could
+    not name an enum variant — the answer was that the value it would have
+    written was not what the reader expected.
 
 Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2e/int_conversions.rs`,
 `tests/e2e/short_circuit.rs`, `tests/e2e/nested_calls.rs`,
@@ -302,13 +365,21 @@ Regression tests: `tests/e2e/const_folding.rs`, `tests/e2e/consts.rs`, `tests/e2
 **To widen**, in rough order of value — each needs the oracle extended to match,
 and an oracle that is merely *probably* right is worse than no oracle:
 
-- **Division by zero.** Currently sidestepped with nonzero positive literal
-  divisors (positive also keeps `i8::MIN / -1` out). Pinning the behaviour first
-  would let the generator use arbitrary divisors.
-- **Precedence.** Expressions are fully parenthesised so a precedence
-  disagreement cannot masquerade as a codegen bug; a separate generator that
-  omits parentheses and compares against a parenthesised twin would test it
-  metamorphically.
+- **Division by zero.** *Done.* The specification said undefined; the compiler
+  had not been undefined for some time, and its own stdlib section documented
+  `div16` returning `0xFFFF`. `x / 0` and `x % 0` are now specified as the
+  all-ones value at every width and sign — what shift-and-subtract already
+  produces, and what RISC-V defines for the same reason. The signed paths were
+  fixed to preserve it (they gave `+1` for a negative dividend), and a divisor
+  the compiler can see is zero is a compile error. The generator takes
+  arbitrary divisors: 670 of 2000 programs divide by zero at run time.
+- **Precedence.** *Done.* Expressions from the main generator stay fully
+  parenthesised on purpose — a precedence disagreement there would masquerade
+  as a codegen bug. A separate generator writes one operator chain twice, flat
+  and as the tree the specification's table says it means, and requires both to
+  agree; no oracle is involved. Six levels mix freely (`* / %`, `+ -`, `<< >>`,
+  `&`, `^`, `|`); the relational and logical levels cannot, since `a & b == c`
+  groups as `a & (b == c)` and does not type-check.
 - **Mixing across signedness families**, and narrowing. *The widening half is
   done.* A program now picks one family and mixes its two widths — `u8`/`u16`
   or `i8`/`i16` — because those are the two the language widens between without
@@ -325,41 +396,43 @@ and an oracle that is merely *probably* right is worse than no oracle:
   It found the widening was zero-extending everywhere the language did it
   implicitly — five of the six sites. See the note under
   [Correctness & diagnostics](#correctness--diagnostics).
-- **Cycles of three or more.** *Done for two.* Self-recursion only ever reaches
-  the trivial strongly-connected component; a pair that call each other is the
-  case frame colouring solves with Tarjan, and the generator now builds one —
-  each member calling the other at `d - 1`, with a base case at `d == 0`, so
-  the cycle terminates by the same construction a self-call does.
+- **Cycles of three or more.** *Done for two.* A pair that call each other is
+  the case frame colouring solves with Tarjan; the generator builds one, each
+  member calling the other at `d - 1` with a base case at `d == 0`.
 
-  Two constraints are what make that safe to generate, and both are worth
-  keeping in mind for a longer cycle. A pair member may not reach its partner
-  by an *ordinary* call: that passes a fresh literal budget, which resets the
-  cycle's own depth every second edge and never terminates. And a pair member
-  takes no slice, since its partner would have to pass one on every mutual
-  edge, and the two are shaped alike so the cycle can close.
+  Two constraints make that safe and would apply to a longer cycle: a pair
+  member may not reach its partner by an *ordinary* call (a fresh literal
+  budget resets the cycle's depth every second edge and never terminates), and
+  a pair member takes no wide parameter, since its partner would have to pass
+  one on every mutual edge.
 
-  **The disjoint frame layout inside an SCC is not what carries this.**
-  Deliberately overlapping two members' frames survives 600 seeds: the per-edge
-  save and restore covers the case already, because it saves the *callee's*
-  frame, which under a shared base is the caller's. What does carry it is the
-  recursive-edge set — counting only self-edges as recursive fails at seed 38,
-  reduced to two six-line functions with a local surviving into the outer
-  frame.
+  **The disjoint frame layout inside an SCC is not what carries this** —
+  deliberately overlapping two members' frames survives 600 seeds, because the
+  per-edge save covers it. What does carry it is the recursive-edge set:
+  counting only self-edges fails at seed 38.
+- **Pointers and enums.** *The pointer half is done.* `main` declares
+  `let p: &T = &v{k};` over one of its own variables; `*p` reads, `*p = e`
+  writes, and `p = &v{j}` moves the alias, so which storage a read reaches is
+  program state rather than a fact about the declaration.
 
-  *The indirect-call half of this item is done.* The generator installs one of
-  several same-signature functions in a table and dispatches through it two
-  ways: `VTBL[sel](x)` indexed by a constant or by a runtime value, and
-  `DEV.call(x)` through a struct field that an `Install` statement rebinds —
-  the shape where *which* function runs is program state rather than a
-  syntactic fact, which is all the oracle has to track. That gap had already
-  cost something: an indirect call contributes no call-graph edge, so frame
-  colouring laid a driver's frame over its caller's locals and
-  `examples/device_drivers.wr` found it by hand. What is still uncovered
-  inside it is pointer and aggregate *arguments* to an indirect call; those
-  staging paths are pinned by `tests/e2e/indirect_args.rs` alone.
-- **Pointers and enums.** A `&T` gives two names for one piece of storage,
-  which the oracle would have to alias-model; enums are a separate lowering
-  again.
+  The alias modelling turned out to be cheap, because the *generator* chooses
+  the targets: every one has the pointer's own type, so a store through it is
+  never a widening, and the oracle carries one index. A store is followed
+  immediately by a read of a variable it may have landed in — the alias has to
+  hold at the very next statement, whatever the compiler believes about its
+  registers in between.
+
+  Checked against reintroduced defects: reading a 16-bit pointee as one byte,
+  and storing one as one byte, each fail inside the default 120 seeds. Dropping
+  the register invalidation after an indirect store does *not* — it survives
+  120 and fails 1 of 2000, because the register cache rarely spans the store
+  even when nothing tells it not to. That thinness is recorded rather than
+  papered over.
+
+  Still open here: a pointer to an element, a field or another pointer, and a
+  pointer passed to a function. The pointer-to-pointer case is where the live
+  bug was — see the `emit_deref_load` entry below — and it is covered by
+  `tests/e2e/aggregate_dispatch.rs` rather than by the generator.
 
   *The slice half of this item is done*, and needed no alias modelling: a slice
   of the `const` table views ROM, nothing writes it, and the table is the
@@ -376,12 +449,75 @@ and an oracle that is merely *probably* right is worse than no oracle:
   bytes fails seed 119, and copying two bytes of a returned descriptor fails
   three of the first hundred and twenty. It also found a fourth on its way in:
   `s = mk();` had no codegen path where `let s: &[u8] = mk();` did.
-- **Aggregates across a call.** A struct is a local today — never passed,
-  returned, or pointed at — and an array field inside a struct is not
-  generated. Both are shapes where a miscompile has already been found by hand.
-- **Shift counts at or past the width**, and constant expressions standing alone
-  (typed by their own literals, not by the program around them — see the
-  specification). Both are defined; neither is in the oracle.
+- **Aggregates across a call.** *The argument half is done, all four kinds.*
+  `f0` may take a struct, an enum and a `str` beside its slice — at most two at
+  once, since a descriptor and three addresses are ten of the argument pool's
+  eleven bytes before a single value parameter. Each is folded into the
+  callee's result so that passing it can be told from staging it wrongly; see
+  [What keeps going wrong](#what-keeps-going-wrong) for why that is not
+  optional. Each is verified by giving it the wrong convention and watching the
+  default 120 seeds fail.
+
+  A `str`'s `.len` stages its pointer through the four-byte high pool, so it is
+  read once per call rather than freely: at 12% of expressions it put 790 of
+  6000 seeds over that pool.
+
+  *The return, the array field and the pointer are done too.* `mks(k) -> S`
+  returns a constant literal on one branch and a local on the other — ROM data
+  reached by label, frame storage reached by its address — and `main` binds it,
+  assigns it and passes it on, because binding and assignment are separate
+  copies in the compiler and only generating one leaves the other's length free
+  to be wrong. The struct gained an array field between its two scalars, three
+  elements where the local array has four, so an offset computed from the wrong
+  array lands on a cell the program reports. And `pk(pp: &S, w)` writes one
+  field through a pointer and returns another, so the callee's storage and the
+  caller's are the same bytes.
+
+  Four defects came out of it: a returned struct came back as its *first byte*
+  in A rather than its address in A:X; a constant struct refused an array field
+  and decided "constant" by matching `Expr::Literal` where sema decides it by
+  folding; the by-reference field load kept its own copy of the indirect-load
+  sequence; and `*p` on a `&&u8` read one byte.
+
+  *And an array field indexed through the by-reference parameter* — `xp.a[i]`,
+  which the compiler refused until an element's address became a run-time
+  computation. The struct term folded into that function's result is now either
+  kind of field, because a read left in a dead local proves nothing and the
+  index arithmetic has no other way into an output cell. Dropping the field
+  offset, and dropping the index add, each fail inside the default 120 seeds.
+
+  Two thin spots recorded rather than papered over. Failing to *scale* the
+  index needs a 16-bit aggregate type and a struct-taking function at once, so
+  it survives 120 seeds and fails at 2000; the e2e matrix covers that case
+  directly. And no program declares a mutable `static` *struct*, so
+  `emit_static_field_load`'s offset is unverified by the generator — dropping it
+  survives any number of seeds.
+
+  Still open: enum payloads, indexing a string rather than measuring it, a
+  struct nested inside a struct, and a struct returned *through a function
+  pointer* in the generator (that one has an e2e test).
+- **Copying a run of bytes.** *Done.* `memcpy(&arr[d], &TBL[s], n)` is
+  generated wherever the program's type is `u8`, which is what a whole-array
+  assignment turned into once that statement was refused. It puts three things
+  in reach that nothing else did: an `import`, the address of a *local* array
+  element in zero page and of a `const` one reached by label — two different
+  computations with their own bug history — and a three-argument call to a
+  library function rather than a generated one. The oracle copies the same run,
+  so a copy that moves the wrong length or the wrong base shows up in the
+  array's output cells.
+
+  The gate is `u8` and not "eight bits wide": `memcpy` takes `&u8`, so an `i8`
+  array would need its address converted, and the generator produced exactly
+  that invalid program at seed 4 before the gate was narrowed.
+- **Constant expressions standing alone** — typed by their own literals, not by
+  the program around them. Defined in the specification, not in the oracle.
+- **Shift counts at or past the width.** *Done.* A 6502 has no barrel shifter,
+  so a variable shift is a loop and the count is simply performed: every bit
+  leaves, zeros arrive, and an arithmetic right shift saturates to the sign.
+  Specified as such, deliberately *not* masked — masking would make `x << 8` on
+  a `u8` mean `x << 0` and would cost an `AND` on every variable shift. A
+  constant count at or past the width is a warning, since clearing a value by
+  shifting it out is a real if unusual idiom.
 
 ### Code-size benchmark
 
@@ -454,6 +590,36 @@ The failure is still a compile error rather than a miscompile, and the fuzzer
 budgets one argument per level to match, skipping and counting anything that
 overruns anyway.
 
+### The expression temp pool runs out under combined pressure
+
+A second fixed zero-page pool, separate from the argument one above: the
+four-byte high pool (`$F0-$F3`) that a `u8` multiply, a pointer compare and a
+string index allocate their working storage from.
+
+It became reachable when the fuzzer started passing structs. A function taking
+a slice *and* a struct, recursing, with a multiply in the recursive call's
+argument holds four bytes of descriptor and two of address while the multiply
+asks for its own — and the compiler stops with *temporary storage exhausted in
+u8 multiply*. Seed 270 of the execution fuzzer is the repro; no shorter
+hand-written program reproduces it, which is itself the point: the trigger is
+cumulative pressure, not any one construct.
+
+Like its sibling it is a **compile error and never a wrong answer** — 6000
+seeds produced no miscompile — so the harness skips it under `is_known_limit`
+and it is recorded here rather than reported as a bug on every run.
+
+The skip rate is a measure worth watching: it was 0.65% of 6000 seeds before
+`xp.a[i]` was generated and 2.4% after, because an element address at a
+*computed* index parks a byte while the index runs, inside a function that may
+already hold a descriptor and an address. Giving a *constant* index its own
+path — the offset folds into the base, with no temp and no run-time add —
+brought it back to about 1.7%, and made the emitted code smaller besides. The
+harness caps the rate at 5% so this cannot quietly degrade into a suite that
+mostly tests the pool limit. Removing it
+means the same restructuring the argument-pool item describes: values pushed
+straight from the registers they are produced in, rather than through a
+zero-page slot with a fixed budget.
+
 ### A mutable slice type
 
 Slices are read-only views and now borrow from any storage — a local, a
@@ -522,6 +688,44 @@ Also open:
 
 ---
 
+## An aggregate reached through something that is not its name
+
+*Done.* Four refusals with one cause, and one miscompile behind them.
+
+`&x.f[0]` and `&m[i][j]`, `p.a[i]` on either side, `p.inner.v`, `mk(6).f1` and
+`&buf[i]` were each refused with their own message, and the reason in every
+case was the same: the compiler could resolve an address only at *compile*
+time. A pointer's target is not known then; nor is a call's result; nor is an
+element at a run-time index.
+
+`emit_aggregate_base` is the run-time counterpart of `resolve_static_addr` —
+the address of what an expression denotes, in A:X, with a pointer dereferenced
+on the way through because that is what `p.field` means. It tries the constant
+answer first, so a place that has one still gets the two immediate loads it
+always did, and the code-size benchmark did not move. Its three answers follow
+the contract the address resolvers already use: `Some` is the address, `None`
+is "no storage at all", `Err` is "storage nobody can address".
+
+It subsumed `generate_addr_of_element` and `generate_addr_of_field`, which are
+deleted rather than left as a second implementation.
+
+Two things worth keeping from doing it:
+
+- **The store path had to compute the address before the value.** It used to
+  evaluate the index into `Y` first, so reaching a run-time base after that
+  would have evaluated the index a second time — invisible for arithmetic, two
+  calls for `p.a[f()] = v`.
+- **An enum field was a miscompile, not a gap** — see the `static` struct entry
+  below. Pursuing "which field kinds can a `static` initialise" is what found
+  it, which is the argument for closing feature gaps rather than working around
+  them: the workaround (assign in `main`) hit the same broken path.
+
+Still open in this family: a struct nested inside another struct is laid out
+inline and reachable, but the fuzzer does not generate one, and enum *payloads*
+are neither generated nor exercised beyond the tag.
+
+---
+
 ## Structure & maintainability
 
 - **Shared exhaustive Stmt/Expr walker.** Hand-enumerated per-form walkers and
@@ -530,162 +734,88 @@ Also open:
   it; the import-merge half is already done, and `contains_call` /
   `expr_contains_call` are exhaustive.
 - **Make codegen's per-form dispatch exhaustive, or make its fallback loud.**
-  *Done for the sites and for the resolvers under them.* The defect was the walker one a layer down, and the
-  more common of the two. Where a walker asks "is there a call in here", these
-  matches ask "which strategy does this form need" — and their fallback is not
-  `false`, it is *another strategy*, usually the scalar one. A form nobody
-  enumerated did not fail; it got loaded as though it were a `u8`.
+  *Done for the sites and for the resolvers under them.* See
+  [What keeps going wrong](#what-keeps-going-wrong) for the shape and the count.
+  Binding, assignment and argument staging classify what they are about to
+  store and refuse a slot wider than the registers carry; the loop-unrolling
+  estimate enumerates every expression form rather than charging a flat `_`;
+  and `Denotes` separates "no address" from "nobody wrote the case".
 
-  Six bugs in a row had this shape. Struct copy handled a literal and a call
-  and fell through to the scalar path for every *place*, so `let q: P = PS[1]`
-  bound one byte. Struct arguments matched a zero-page local and nothing else.
-  `.low`/`.high` had no assignment arm. Indirect calls took scalars only.
-  Frame colouring had no edge for an indirect call. Assignment evaluated its
-  value generically *and* again per target, so `arr[i] = f()` called `f` twice.
-  Each compiled silently and produced a wrong answer.
-
-  **What changed.** Binding, assignment and argument staging all end in a store
-  of a register. Each now classifies what it is about to store first: a slot
-  wider than the registers carry (a struct, a four-byte slice descriptor) that
-  reaches the store has been declined by every copy path above it, and errors
-  naming the type and its width. The estimate that bounds loop unrolling was
-  the third kind — a flat `_ => 12` for ten expression forms, a match
-  expression costed as a variable — and now enumerates every variant, so a new
-  form is a compile error rather than an under-charge.
-
-  **Three more bugs, found by asking the question.** `let b: &[u8] = a;` and
-  `b = a;` had no case at all, so a slice binding copied one byte of the
-  descriptor: `b[i]` read through a half-written pointer and `b.len` was never
-  written. `g(mk())` staged one byte of a *pointer to* a descriptor as though
-  it were the base. And the four sites asking "did this return an aggregate in
-  A:X" matched `Call` but not `CallIndirect`, though the two return
-  identically, so nothing claimed a struct or slice from `DEV.get()`. All three
-  are fixed and pinned in `tests/e2e/aggregate_dispatch.rs`.
-
-  **The resolvers can now tell a caller which it means.** That was the other
-  half: `resolve_static_addr`, `resolve_static_struct_lvalue` and
-  `emit_struct_place_address` said `None` both for "this form has no address,
-  and never could" and for "this form has one and nobody wrote the case", and a
-  caller reads both as "use the ordinary path".
-
-  `Denotes` supplies the missing question — does this form *name storage* — and
-  is exhaustive over `Expr` with no catch-all, so a construct added to the
-  language has to be placed on one side rather than defaulting to "value". A
-  `Call` has no address because a call produces its result, which is a fact
-  about the form; a *place* no case claimed is a gap, and
-  `emit_struct_place_address` errors on it. That is stronger than the three
-  guards above, which catch the consequence at the call site: this catches it
-  at the resolver, so a fourth caller inherits the check.
-
-  It is deliberately conservative — a form that *might* name storage counts as
-  a place, because over-reporting costs a false alarm and under-reporting lets
-  the original defect back in.
-
-  What is left in this area is smaller and known: `array_field_base` and
+  What is left is smaller and known: `array_field_base` and
   `array_of_struct_base` are narrow enough that their `None` has one meaning,
   and the `Option`-returning helpers outside `aggregate.rs` have not been
   audited against this distinction.
-- **Whole-array assignment means "repoint", and only a local can be
-  repointed.** A local array's slot holds a pointer to its data, so
-  `a = [4, 5, 6]` rebinds the slot. A `static` array and a struct field *are*
-  the data, at a fixed address, so there is nothing to repoint — and both used
-  to accept the assignment and store the literal's ROM address over the
-  elements. Refused now, naming the element-wise form.
 
-  The open question is a language one, not a bug: should assigning an array
-  *copy*? That would give the three forms one meaning, at the cost of changing
-  what the local form does today. Worth deciding before anything is built on
-  the current behaviour.
+  One more turned up while writing the array-copy refusal: `&x.f[0]` and
+  `&m[i][j]` reached `generate_addr_of_element` with no resolved symbol, and it
+  reported an *internal compiler error* — a compiler bug — for source the
+  compiler simply did not handle. *Both are emitted now*, along with `p.a[i]`,
+  `p.inner.v`, `mk(6).f1` and `&buf[i]`: they were all the same refusal, which
+  was that an address could only be resolved at *compile* time. See
+  [An aggregate reached through something that is not its
+  name](#an-aggregate-reached-through-something-that-is-not-its-name).
+- **Whole-array assignment meant "repoint", and only a local could be
+  repointed.** *Done — the statement is refused at every storage class.* A
+  local array's slot held a pointer to its data, so `a = [4, 5, 6]` rebound the
+  slot and `a = b` left the two *aliased*; a `static` array and a struct field
+  *are* the data, so the same statement stored the literal's ROM address over
+  the elements. Three storage classes, three meanings, none of them a copy.
 
-- **Interrupts were only ever tested from the idle loop.** `pulse_irq` waits
-  for `main` to park in `loop {}` before asserting the line — where `main` has
-  stored everything it computed and there is nothing live to corrupt. But a
-  handler's zero-page frame may *share addresses* with `main`'s, because a
-  handler is not `main`'s callee and colouring cannot separate them; the whole
-  design rests on the handler saving that span and restoring it, and nothing
-  exercised that.
+  The language question behind it — should assigning an array copy? — is
+  answered the other way: it should not be a statement at all. A copy on the
+  6502 is a loop whose length is the array's, and an assignment that looks like
+  a register move must not emit one silently. The refusal names both ways out,
+  element-wise and `memcpy`, and the specification now says so under
+  [Array Assignment and Copying](specification.md#array-assignment-and-copying).
+  A slice is untouched: `sl = TBL[1..4]` moves two numbers and stays legal.
+
+- **Interrupts were only ever tested from the idle loop.** *Done.* A handler's
+  zero-page frame may *share addresses* with `main`'s — a handler is not
+  `main`'s callee, so colouring cannot separate them — and the whole design
+  rests on the handler saving that span. Every existing test fired through
+  `pulse_irq`, which waits for the idle loop first, where nothing is live.
 
   `run_interrupted` asserts the line every *n* instructions while `main` works,
-  so the handler is entered between the halves of a 16-bit add, inside a
-  multiply, across a `JSR` with the argument pool staged. The saves hold — a
-  negative result — and the test is worth its weight because of what it can
-  see: with the math working storage dropped from the save list (leaving the
-  push/pop balance intact, so nothing else breaks), the new test fails and
-  every existing interrupt test still passes.
+  so the handler is entered between the halves of a 16-bit add and across a
+  `JSR` with the argument pool staged. **The saves hold** — a negative result,
+  kept because dropping the math working storage from the save list (keeping
+  the push/pop balance, so nothing else breaks) fails the new test and no
+  existing one.
 
-  The storm has to be bounded, which is worth knowing before writing another
-  one: an interrupt pulls the CPU out of `loop {}` as readily as out of
-  anything else, and the harness detects termination by the program counter
-  standing still, so an unbounded storm never halts.
+  The storm has to be bounded: an interrupt pulls the CPU out of `loop {}` as
+  readily as out of anything else, and the harness detects termination by the
+  program counter standing still, so an unbounded storm never halts.
 
-- **One rule, four implementations.** A call's arguments are staged in four
-  separate pieces of code — a direct `JSR`, an inlined body, a recursive call
-  that saves the callee's frame, and an indirect call through a fixed block —
-  and each decides a parameter's width and register convention for itself.
-  Three chances to differ, and they did: a struct reached an inlined callee as
-  the first two bytes of its *contents*, and a `str` and an enum reached a
-  tail-recursive one from the wrong register.
+- **One rule, four implementations.** *Done.* A call's arguments were staged in
+  four separate pieces of code, each deciding a parameter's width and register
+  convention for itself, and every chance to differ had been taken.
+  `ParamClass` answers the classification once — exhaustive over `Type`, no
+  catch-all — and `stage_argument` is the one routine all four call forms use.
+  What is left per site is only where the bytes wait and how the site names
+  itself in a diagnostic. 214 lines shorter, byte-identical output, verified by
+  putting eight known miscompiles back one at a time.
 
-  What made those findable was asking every kind through every form, which is
-  now `every_parameter_kind_survives_every_call_form`. The deeper fix would be
-  one staging routine the four share; the matrix is the cheap version, and it
-  means a fifth form has to answer for every kind.
+  The matrices that found them are kept: `every_parameter_kind_survives_every_
+  call_form` and its tail-call twin. Widening one by a single row is what found
+  the last two.
+- **A `static` struct can only initialise some of its field kinds.** *Done —
+  every kind is accepted now.* A `u16` and a `fn` field already were; a `&T`
+  turned out to be too, which the entry had wrong. A `str` field is the same
+  shape as a `fn` field — two bytes the assembler fills in — and differs only in
+  *who* names the label: the string collector does, at codegen, and
+  deduplicates identical literals, so the content travels out of sema and is
+  resolved before anything is emitted.
 
-  Widening the matrix by one kind found two more. A **function pointer** is the
-  awkward case: two bytes, high byte in Y, and neither a number nor an address,
-  so it falls off any list written by enumerating "the 16-bit primitives, plus
-  the things reached by a pointer". A direct call reserved one staging byte for
-  it and shifted every later parameter down; the inlined path did the same. The
-  authoritative widths were already in `param_byte_width`, so the fix was to
-  ask rather than re-list.
-
-  **The sweep, done.** `PrimitiveType::U16` appears in thirteen codegen files,
-  each a site that decided the width question for itself. Most are legitimately
-  about *numbers* — a 16-bit add, a `u16` comparison, a match scrutinee — and no
-  address can reach them. The ones asking "how wide is this *value*" were
-  audited against `is_two_byte_value` / `high_byte_in_x`, and found three more:
-
-  * **A `str` local re-pointed.** Binding and assignment keep separate copies of
-    the width match, and the assignment copy had `str` on neither list, so
-    `s = "xy"` wrote the new pointer's low byte over the old and kept the old
-    high byte. String literals are laid out consecutively, so two of them
-    almost always share a page and the stale byte was accidentally right; the
-    test forces the crossing that makes it wrong.
-  * **A match expression's arm.** The last site still writing `LDY #$00` by
-    hand, so an `i8` arm of an `i16` match lost its sign. A match *statement*
-    widens through the assignment inside it and was already right, which is
-    why the earlier six-site sweep did not reach this one.
-  * **A for-loop bound of the wrong sign.** Not a width question but the same
-    shape: the runtime-bound check was a list of rejected *pairs*, about width
-    only, so an `i8` bound on a `u8` counter passed and the loop compared 254
-    against 2. Restated as range containment.
-
-  The pattern worth keeping from this: the authoritative table already existed
-  and already had the right answer in every one of these cases. Nothing needed
-  to be *decided*, only asked. A site that re-lists the variants is the defect,
-  independent of which variant it forgets.
-
-  **Two seams came back clean**, which is worth as much as the findings. A
-  `static` of every two-byte kind stores both bytes when reassigned — the
-  `Absolute` branch is a separate copy of the same decision and it agrees. So
-  do the fields of a `static` struct, which resolve through a different address
-  path from a local's. Both are pinned.
-
-  What is still open is the underlying merge — one staging routine, one width
-  question — rather than more sites converted one at a time.
-
-- **A `static` struct can only initialise some of its field kinds.** A `u16`
-  field and a `fn` field are accepted; a `str`, an enum and a `&T` are refused
-  at the initialiser as *not a compile-time constant*. That is inconsistent
-  rather than wrong: a `fn` field is two bytes of address resolved by the
-  assembler, and a `str` field is the same shape — a label reference to the
-  literal's data — so `const` evaluation could accept it on the same terms. A
-  `&T` pointing at another `static` is the same again once BSS addresses are
-  assigned.
-
-  The diagnostic is clear and the workaround (assign in `main`) is one line, so
-  this is a feature gap rather than a defect. Worth closing when static device
-  tables want a name beside their function pointers.
+  The enum field was not a missing case but a **miscompile**, and it was live
+  for a local struct as much as a `static` one. An enum's layout says it is
+  stored inline — the tag and its payload, `size_of` bytes — but constructing a
+  variant yields a *pointer* to those bytes, and the struct paths stored that
+  pointer's low byte into the field and dereferenced it again on the way out. A
+  `match` on such a field took whichever arm the garbage selected;
+  `every_kind_of_struct_field_round_trips` passed the whole time, because the
+  store and the load were wrong in the same direction. Initialising, assigning
+  and reading now all treat an enum field as inline bytes, which is what the
+  layout always said.
 
 - **Turn string-matching e2e pockets into behavioral assertions** where behavior
   is assertable. `cpu_flags.rs` and `frames.rs` are converted; `memory.rs`,

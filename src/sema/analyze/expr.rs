@@ -705,6 +705,18 @@ impl SemanticAnalyzer {
         Some(Type::Primitive(prim))
     }
 
+    /// The bit width a shift count is measured against, for the types a shift
+    /// applies to. `None` for anything else, which the operator check below
+    /// rejects on its own terms.
+    fn shift_width_bits(ty: &Type) -> Option<u32> {
+        use crate::ast::PrimitiveType as P;
+        match ty {
+            Type::Primitive(P::U8 | P::I8 | P::B8) => Some(8),
+            Type::Primitive(P::U16 | P::I16 | P::B16) => Some(16),
+            _ => None,
+        }
+    }
+
     fn check_binary(
         &mut self,
         left: &Spanned<Expr>,
@@ -769,6 +781,71 @@ impl SemanticAnalyzer {
         // a second diagnostic about an operator applied to `<unknown>`.
         if matches!(left_ty, Type::Error) || matches!(right_ty, Type::Error) {
             return Ok(Type::Error);
+        }
+
+        // A shift count the compiler can see is at or past the width of the
+        // value shifts every bit out. The result is then a constant — 0, or -1
+        // for an arithmetic right shift of a negative value — and the operand
+        // plays no part in it.
+        //
+        // A warning rather than an error, unlike the zero divisor: the
+        // behaviour is defined and useful (`x >> 15` is a sign test, and
+        // clearing a value by shifting it out is a real if unusual idiom), so
+        // this points at a probable mistake rather than forbidding one.
+        if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+            && let Some(width) = Self::shift_width_bits(&left_ty)
+            && let Ok(v) = eval_const_expr_with_env(right, &self.const_env)
+            && let Some(count) = v.as_integer()
+            && count >= i64::from(width)
+        {
+            // An arithmetic right shift keeps the sign bit, so a negative
+            // value saturates to -1 rather than 0.
+            let result = if matches!(op, BinaryOp::Shr) && left_ty.is_signed() {
+                "0 or -1"
+            } else {
+                "0"
+            };
+            self.warnings
+                .push(crate::sema::Warning::ShiftCountAtOrPastWidth {
+                    op: if matches!(op, BinaryOp::Shl) {
+                        "<<"
+                    } else {
+                        ">>"
+                    },
+                    count,
+                    ty: left_ty.display_name(),
+                    width,
+                    result,
+                    span: right.span,
+                });
+        }
+
+        // A divisor that is *known to be zero* is refused. `x / 0` has a
+        // defined answer — the all-ones sentinel, see the specification — but
+        // no program means it: the value carries no information about `x`, and
+        // writing it is always a mistake rather than a choice. Catching it
+        // costs nothing, because it is exactly the case the compiler can see.
+        //
+        // Only a constant divisor, which is the limit of what can be decided
+        // here. A variable that happens to hold zero at run time still gets the
+        // sentinel, which is why the sentinel is defined at all.
+        if matches!(op, BinaryOp::Div | BinaryOp::Mod)
+            && let Ok(v) = eval_const_expr_with_env(right, &self.const_env)
+            && v.as_integer() == Some(0)
+        {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "{} by zero: the divisor is always zero here. The result would be the \
+                     all-ones value this language defines for it, which says nothing about \
+                     the dividend — so this is a mistake rather than a choice",
+                    if matches!(op, BinaryOp::Div) {
+                        "division"
+                    } else {
+                        "modulo"
+                    }
+                ),
+                span: right.span,
+            });
         }
 
         // No binary operator applies to a pointer. This has to be said

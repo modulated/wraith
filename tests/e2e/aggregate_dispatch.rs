@@ -677,38 +677,51 @@ fn an_array_through_a_function_pointer_is_refused_with_a_way_out() {
     );
 }
 
-/// Assigning a *whole array* repoints a slot; only a local array has one.
+/// A whole array is never assigned, at any storage class.
 ///
-/// A local array's slot holds a pointer to its data, so `a = [4, 5, 6]` is a
-/// coherent rebind — the slot points at the new literal. A `static` array and
-/// a struct field are the data, at a fixed address, so there is nothing to
-/// repoint. Both accepted the assignment anyway and stored the literal's ROM
-/// address over the elements: the static came back as `128`, part of an
-/// address, and the field kept its old value with `d.f[0]` corrupted.
+/// The rule used to depend on where the array lived. A `static` array and a
+/// struct field *are* their elements at a fixed address, so there was no
+/// pointer to repoint and the store put two bytes of the literal's ROM address
+/// over the first two elements; both were refused. A *local* array does have a
+/// slot holding a pointer, so repointing it compiled — and meant two things
+/// nobody wrote:
 ///
-/// Refused now, with the element-wise form named. Whether whole-array
-/// assignment should *copy* — which would also change what the local form
-/// means — is a language question, and is on the roadmap rather than decided
-/// here.
+///   * `a = b` **aliased** `b`'s elements instead of copying them, so a later
+///     `b[1] = 99` was visible through `a`.
+///   * `a = [1, 2, 3]` pointed `a` at the literal **in ROM**, where every
+///     subsequent `a[i] = v` is a silent no-op on real hardware. The emulator
+///     harness catches the store; a program on a machine would not.
+///
+/// Binding already refuses everything but a literal, so refusing assignment
+/// outright leaves one rule at every storage class: an array is initialised
+/// once and copied explicitly thereafter. That is where the other native 6502
+/// languages ended up too — Prog8 forbids it and points at `sys.memcopy`, C
+/// forbids it and arrays decay to pointers, and Mad-Pascal dropped Pascal's
+/// value semantics to do the same.
 #[test]
-fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
-    // The local form keeps working: the slot is a pointer, and repointing it
-    // is what the assignment has always meant.
-    let mut e = run(r#"
-        const OUT0: addr = 0x0900;
-        const OUT1: addr = 0x0901;
-        #[reset]
-        fn main() {
-            let a: [u8; 3] = [1, 2, 3];
-            a = [4, 5, 6];
-            OUT0 = a[1];
-            let b: [u8; 3] = [7, 8, 9];
-            a = b;
-            OUT1 = a[1];
-            loop {}
-        }
-    "#);
-    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (5, 8));
+fn a_whole_array_is_never_assigned_at_any_storage_class() {
+    for (what, src) in [
+        (
+            "a local, from a literal",
+            "fn main() { let a: [u8; 3] = [1, 2, 3]; a = [4, 5, 6]; OUT = a[1]; loop {} }",
+        ),
+        (
+            "a local, from another local",
+            "fn main() { let a: [u8; 3] = [1, 2, 3]; let b: [u8; 3] = [7, 8, 9]; a = b; \
+             OUT = a[1]; loop {} }",
+        ),
+    ] {
+        crate::common::assert_error_contains(
+            &format!("const OUT: addr = 0x0900;\n#[reset]\n{src}\n"),
+            "an array is initialised once and never assigned as a whole",
+        );
+        // The way out is named, not just the refusal.
+        crate::common::assert_error_contains(
+            &format!("const OUT: addr = 0x0900;\n#[reset]\n{src}\n"),
+            "memcpy",
+        );
+        let _ = what;
+    }
 
     crate::common::assert_error_contains(
         r#"
@@ -717,7 +730,7 @@ fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
         #[reset]
         fn main() { A = [4, 5, 6]; OUT = A[1]; loop {} }
     "#,
-        "a `static` array is its elements",
+        "an array is initialised once and never assigned as a whole",
     );
 
     crate::common::assert_error_contains(
@@ -727,7 +740,98 @@ fn a_whole_array_can_only_be_assigned_where_a_pointer_exists() {
         #[reset]
         fn main() { let d: D = D { f: [1, 2, 3] }; d.f = [4, 5, 6]; OUT = d.f[1]; loop {} }
     "#,
-        "a field holds its elements inline",
+        "an array is initialised once and never assigned as a whole",
+    );
+}
+
+/// The address of an element of a *field*, and of a nested array's element.
+///
+/// Both were refused: the address of an element folded the index into the base
+/// at compile time, so it needed the array to be named directly and the index
+/// to be constant. They are one chain now — the base of whatever the
+/// expression names, plus the offsets along the way — which is what lets
+/// `memcpy` name an array field as its destination.
+#[test]
+fn the_address_of_an_element_of_a_field_can_be_taken() {
+    let mut e = run(r#"
+        import { memcpy } from "std/mem.wr";
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        // A scalar after the array field, so a copy that overruns is visible.
+        struct D { f: [u8; 3], t: u8 }
+        #[reset]
+        fn main() {
+            let d: D = D { f: [1, 2, 3], t: 9 };
+            let s: [u8; 3] = [7, 8, 9];
+            memcpy(&d.f[0], &s[0], 3);
+            O0 = d.f[0];
+            O1 = d.f[2];
+            O2 = d.t;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (7, 9, 9),
+        "the copy lands in the field and stops at its end"
+    );
+
+    // Into the middle of the field, at a run-time index, through a pointer
+    // bound to the element rather than passed straight to a call.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        struct D { f: [u8; 3], t: u8 }
+        #[reset]
+        fn main() {
+            let d: D = D { f: [1, 2, 3], t: 9 };
+            let i: u8 = 1;
+            let p: &u8 = &d.f[i];
+            *p = 42;
+            O0 = d.f[1];
+            O1 = d.t;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (42, 9),
+        "a run-time index into a field's array"
+    );
+}
+
+/// What replaces it: element-wise, or an explicit `memcpy`.
+///
+/// The copy has to be a real one — independent of its source afterwards —
+/// which is exactly what the repointing form was not.
+#[test]
+fn an_array_is_copied_element_wise_or_with_memcpy() {
+    let mut e = run(r#"
+        import { memcpy } from "std/mem.wr";
+        const OUT0: addr = 0x0900;
+        const OUT1: addr = 0x0901;
+        const OUT2: addr = 0x0902;
+        #[reset]
+        fn main() {
+            let a: [u8; 3] = [1, 2, 3];
+            let b: [u8; 3] = [4, 5, 6];
+            memcpy(&a[0], &b[0], 3);
+            OUT0 = a[0];
+            // Independent of its source: changing `b` must not move `a`.
+            b[1] = 99;
+            OUT1 = a[1];
+            // And the destination is still writable, which the ROM repoint
+            // silently was not.
+            a[2] = 42;
+            OUT2 = a[2];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)),
+        (4, 5, 42),
+        "memcpy copies, the copy is independent, and it stays writable"
     );
 }
 
@@ -969,4 +1073,502 @@ fn a_nested_field_chain_resolves_through_every_form() {
         let mut e = run(src);
         assert_eq!(e.mem(0x0900), want, "a nested chain, {what}");
     }
+}
+
+/// A struct returned by value comes back as its **address** in A:X.
+///
+/// `return s` used to fall through to the scalar return path: it loaded the
+/// struct's first byte into A and left X holding whatever the last instruction
+/// happened to leave there. The caller does the right thing — it dereferences
+/// A:X and copies the struct's bytes out — so a two-field struct came back as
+/// two bytes read from wherever that pair pointed. `mk(7)` returning
+/// `S { f0: 7, f1: 8 }` produced `(0, 0)`, read from zero page `$0007`.
+///
+/// Nothing diagnosed it: the program compiled, ran, and answered wrongly. The
+/// slice return had been given this treatment already; the struct one was
+/// simply missing, which is the "one rule, several implementations" shape.
+///
+/// Every way of naming the returned struct is here, because the address comes
+/// from a different place in each: a local's frame slot, a by-reference
+/// parameter's pointer, a `static`'s fixed address, and a literal that built
+/// itself into a temporary and already holds a pointer.
+#[test]
+fn a_struct_returned_by_value_comes_back_as_its_address() {
+    let cases: [(&str, &str, (u8, u8)); 5] = [
+        (
+            "a local, assigned field by field",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            fn mk(x: u8) -> S {
+                let s: S = S { f0: 0, f1: 0 };
+                s.f0 = x;
+                s.f1 = x + 1;
+                return s;
+            }
+            #[reset]
+            fn main() { let r: S = mk(7); O0 = r.f0; O1 = r.f1; loop {} }
+            "#,
+            (7, 8),
+        ),
+        (
+            "a by-reference parameter, passed straight back",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            fn id(p: S) -> S { return p; }
+            #[reset]
+            fn main() {
+                let s: S = S { f0: 3, f1: 4 };
+                let r: S = id(s);
+                O0 = r.f0; O1 = r.f1; loop {}
+            }
+            "#,
+            (3, 4),
+        ),
+        (
+            "a literal, which already holds a pointer",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            fn mk(x: u8) -> S { return S { f0: x, f1: 9 }; }
+            #[reset]
+            fn main() { let r: S = mk(5); O0 = r.f0; O1 = r.f1; loop {} }
+            "#,
+            (5, 9),
+        ),
+        (
+            "a `static`, at a fixed address and mutable",
+            r#"
+            struct S { f0: u8, f1: u8 }
+            static G: S = S { f0: 1, f1: 2 };
+            fn get() -> S { return G; }
+            #[reset]
+            fn main() { G.f1 = 8; let r: S = get(); O0 = r.f0; O1 = r.f1; loop {} }
+            "#,
+            (1, 8),
+        ),
+        (
+            "one with an array field, whose elements travel with it",
+            r#"
+            struct S { f0: u8, a: [u8; 3] }
+            fn mk(x: u8) -> S {
+                let s: S = S { f0: x, a: [1, 2, 3] };
+                s.a[1] = x + 1;
+                return s;
+            }
+            #[reset]
+            fn main() { let r: S = mk(4); O0 = r.f0; O1 = r.a[1]; loop {} }
+            "#,
+            (4, 5),
+        ),
+    ];
+
+    for (what, body, want) in cases {
+        let mut e = run(&format!(
+            "const O0: addr = 0x0900;\nconst O1: addr = 0x0901;\n{body}"
+        ));
+        assert_eq!((e.mem(0x0900), e.mem(0x0901)), want, "returning {what}");
+    }
+}
+
+/// An array field is stored inline, and is reached the same way wherever the
+/// struct lives.
+///
+/// The field's elements are part of the struct's bytes, not a pointer to them,
+/// so the address arithmetic is the struct's base plus the field's offset plus
+/// the scaled index — three terms, and a 16-bit element scales the last one.
+#[test]
+fn an_array_field_is_stored_inline_at_either_width() {
+    // A local, both indices, with a scalar field on each side of the array so a
+    // wrong offset lands somewhere visible.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        struct S { f0: u8, a: [u8; 4], f1: u8 }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 11, a: [1, 2, 3, 4], f1: 22 };
+            s.a[2] = 99;
+            let i: u8 = 3;
+            s.a[i] = 77;
+            O0 = s.f0;
+            O1 = s.a[2];
+            O2 = s.a[i];
+            O3 = s.f1;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (11, 99, 77, 22),
+        "a local struct's array field, constant and run-time index"
+    );
+
+    // A `static`, which is a fixed address rather than a frame slot.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        struct S { f0: u8, a: [u8; 4] }
+        static G: S = S { f0: 11, a: [1, 2, 3, 4] };
+        #[reset]
+        fn main() { G.a[2] = 99; O0 = G.a[2]; O1 = G.a[1]; loop {} }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (99, 2),
+        "a static struct's array field"
+    );
+
+    // 16-bit elements: the index scales by two, and both bytes move.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O2: addr = 0x0902;
+        struct S { f0: u16, a: [u16; 4] }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 1111, a: [1000, 2000, 3000, 4000] };
+            let i: u8 = 3;
+            s.a[i] = 40000;
+            let x: u16 = s.a[i];
+            O0 = x.low; O2 = x.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0902)),
+        ((40000u16 & 0xFF) as u8, (40000u16 >> 8) as u8),
+        "a 16-bit array field carries both bytes"
+    );
+}
+
+/// A struct behind a pointer is *one* piece of storage, not a copy.
+///
+/// The callee writes a field through `&S` and the caller sees it, which is the
+/// whole reason the parameter is by reference.
+#[test]
+fn a_struct_behind_a_pointer_is_one_piece_of_storage() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        struct S { f0: u8, f1: u8 }
+        fn bump(p: &S) -> u8 {
+            p.f0 = p.f0 + 1;
+            return p.f1;
+        }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 5, f1: 9 };
+            O1 = bump(&s);
+            O0 = s.f0;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901)),
+        (6, 9),
+        "a write through &S is visible to the caller"
+    );
+}
+
+/// The same for a `&T` to a scalar: two names, one byte, in both directions.
+#[test]
+fn a_pointer_is_a_second_name_for_one_byte() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let x: u8 = 5;
+            let p: &u8 = &x;
+            *p = *p + 1;
+            O0 = x;          // the write through `p` is visible as `x`
+            x = 20;
+            O1 = *p;         // and the write to `x` is visible through `p`
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (6, 20));
+}
+
+/// A field read straight off a call's result.
+///
+/// A struct-returning call already hands back a pointer in A:X, so this only
+/// ever needed staging that pointer and reading the field through it — but the
+/// field path resolved a *compile-time* address and refused anything else.
+#[test]
+fn a_field_can_be_read_off_a_calls_result() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        struct S { f0: u8, a: [u8; 3], f1: u16 }
+        fn mk(x: u8) -> S { return S { f0: x, a: [1, 2, 3], f1: 9 }; }
+        #[reset]
+        fn main() {
+            O0 = mk(6).f0;        // the first field, at offset 0
+            O1 = mk(6).a[2];      // through the array field
+            let w: u16 = mk(6).f1;
+            O2 = w.low;           // and a two-byte field past it
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (6, 3, 9));
+}
+
+/// A constant struct with an array field becomes ROM data, elements and all.
+///
+/// The constant path handled integer and bool fields and refused everything
+/// else with "only integer and bool literals supported" — which named the
+/// wrong thing, since an array literal *is* a literal. The effect was that
+/// `return S { a: [1, 2, 3] }` failed where the same struct bound to a local
+/// compiled, so whether an array field was allowed depended on where the
+/// literal stood.
+#[test]
+fn a_constant_struct_lays_out_its_array_field_inline() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        struct S { f0: u8, a: [u8; 3], f1: u8 }
+        fn mks(k: u8) -> S {
+            // A constant literal: ROM data, reached by label.
+            if k == 0 { return S { f0: 1, a: [2, 3, 4], f1: 5 }; }
+            // A local: frame storage, reached by its address.
+            let t: S = S { f0: 6, a: [7, 8, 9], f1: 10 };
+            return t;
+        }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 0, a: [0, 0, 0], f1: 0 };
+            s = mks(0);
+            O0 = s.f1; O1 = s.a[2];
+            s = mks(1);
+            O2 = s.f1; O3 = s.a[2];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (5, 4, 10, 9),
+        "the scalar after the array field is at the right offset, both ways in"
+    );
+
+    // The fill form, a 16-bit element, and a field the literal omits — which
+    // is zeroed for its whole length rather than for one element.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O2: addr = 0x0902;
+        const O4: addr = 0x0904;
+        struct S { a: [u16; 3], f: u16 }
+        fn mks() -> S { return S { a: [513; 3], f: 40000 }; }
+        #[reset]
+        fn main() {
+            let s: S = S { a: [0; 3], f: 0 };
+            s = mks();
+            let x: u16 = s.a[2];
+            O0 = x.low; O2 = x.high;
+            let y: u16 = s.f;
+            O4 = y.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0902), e.mem(0x0904)),
+        (1, 2, (40000u16 & 0xFF) as u8),
+        "a 16-bit array field fills two bytes per element, so the field after it lands right"
+    );
+}
+
+/// Dereferencing a pointer *to a pointer* loads both bytes.
+///
+/// `*pp` decided "two bytes" by re-listing `u16`/`i16`/`b16`, which leaves out
+/// the two-byte values that are addresses — a `&T` and a function pointer. So
+/// `let q: &u8 = *pp;` loaded one byte into A and the binding stored whatever
+/// X happened to hold as the high half: `q` came out as `$0000` where `p`
+/// named `$0400`, and both the read and the write through it landed in zero
+/// page instead. The store side had already been fixed this way; this is the
+/// other half.
+#[test]
+fn a_pointer_read_through_a_pointer_keeps_its_high_byte() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        // A `static`, so the address has a non-zero high byte — the half that
+        // was being dropped. A zero-page local would hide the bug.
+        static G: u8 = 7;
+        #[reset]
+        fn main() {
+            let p: &u8 = &G;
+            let pp: &&u8 = &p;
+            let q: &u8 = *pp;
+            O0 = *q;      // reads G through two levels
+            *q = 9;       // and writes it
+            O1 = G;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (7, 9));
+}
+
+/// An array field indexed *through a pointer*, read and written.
+///
+/// `p.a[i]` was refused on both sides — "only variable array indexing" on the
+/// read, "can only assign to array variables" on the write — because an array
+/// field's base was resolved at compile time and a pointer's is not known
+/// until the program runs.
+#[test]
+fn an_array_field_is_indexed_through_a_pointer() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        const O3: addr = 0x0903;
+        // Scalars either side, so a base off by a field is visible.
+        struct S { f0: u8, a: [u8; 3], f1: u8 }
+        fn peek(p: &S, i: u8) -> u8 { return p.a[i]; }
+        fn poke(p: &S, i: u8, v: u8) { p.a[i] = v; }
+        #[reset]
+        fn main() {
+            let s: S = S { f0: 4, a: [7, 8, 9], f1: 5 };
+            O0 = peek(&s, 2);
+            poke(&s, 1, 42);
+            O1 = s.a[1];       // the write is the caller's storage
+            O2 = s.f0;         // and stopped at the field's edges
+            O3 = s.f1;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (9, 42, 4, 5)
+    );
+
+    // A 16-bit element, where the index scales by two and both bytes move.
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O2: addr = 0x0902;
+        struct W { a: [u16; 3], t: u16 }
+        fn poke(p: &W, i: u8, v: u16) { p.a[i] = v; }
+        #[reset]
+        fn main() {
+            let w: W = W { a: [1, 2, 3], t: 777 };
+            poke(&w, 2, 40000);
+            let x: u16 = w.a[2];
+            O0 = x.low;
+            let t: u16 = w.t;
+            O2 = t.low;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0902)),
+        ((40000u16 & 0xFF) as u8, (777u16 & 0xFF) as u8),
+        "a 16-bit element scales the index and leaves the next field alone"
+    );
+}
+
+/// The index is evaluated once, on the path that computes the address itself.
+///
+/// The store used to evaluate the index into `Y` before it knew whether it
+/// could reach the base — so a run-time base would have evaluated it a second
+/// time, which is invisible for arithmetic and two calls for `p.a[f()] = v`.
+#[test]
+fn a_run_time_base_evaluates_its_index_once() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        static CALLS: u8 = 0;
+        struct S { a: [u8; 3] }
+        fn next_index() -> u8 { CALLS = CALLS + 1; return 1; }
+        fn poke(p: &S, v: u8) { p.a[next_index()] = v; }
+        #[reset]
+        fn main() {
+            let s: S = S { a: [0, 0, 0] };
+            poke(&s, 6);
+            O0 = s.a[1];
+            O1 = CALLS;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (6, 1));
+}
+
+/// A `static` struct may name an enum variant for an enum field.
+///
+/// A `fn` field was accepted as two bytes the assembler resolves, and an
+/// integer field as its bytes; an enum field was refused as *not a
+/// compile-time constant*, because a variant is spelled `C::Z` and nothing
+/// folded that to its discriminant. An enum is stored inline like a struct —
+/// the tag then the payload — so it lays out the same way.
+#[test]
+fn a_static_struct_initialises_an_enum_field() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        enum C { A, B, Z }
+        // A scalar either side, so a tag written at the wrong width shows.
+        struct D { lead: u8, tag: C, n: u8 }
+        static DEV: D = D { lead: 5, tag: C::Z, n: 3 };
+        #[reset]
+        fn main() {
+            O0 = DEV.lead;
+            O2 = DEV.n;
+            match DEV.tag {
+                C::Z => { O1 = 42; }
+                _ => { O1 = 1; }
+            }
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (5, 42, 3));
+}
+
+/// And a `&T` field, which was already accepted — kept so it stays that way.
+#[test]
+fn a_static_struct_initialises_a_pointer_field() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        struct D { p: &u8, n: u8 }
+        static G: u8 = 7;
+        static DEV: D = D { p: &G, n: 3 };
+        #[reset]
+        fn main() {
+            G = 21;
+            O0 = *DEV.p;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 21, "the field holds G's address, not a copy");
+}
+
+/// A `static` struct may name a string literal for a `str` field.
+///
+/// A `str` field is a pointer at the literal's data — the same shape as a `fn`
+/// field, which was already accepted as two bytes the assembler fills in. What
+/// differed is only who names the label: the string collector does, at
+/// codegen, and deduplicates identical literals, so sema cannot know it. The
+/// content travels out of sema and is resolved to a label before anything is
+/// emitted.
+#[test]
+fn a_static_struct_initialises_a_str_field() {
+    let mut e = run(r#"
+        const O0: addr = 0x0900;
+        const O1: addr = 0x0901;
+        const O2: addr = 0x0902;
+        struct D { lead: u8, name: str, n: u8 }
+        static DEV: D = D { lead: 5, name: "hi!", n: 3 };
+        // The same literal again, to check the two share one copy rather than
+        // one of them getting a stale label.
+        static OTHER: D = D { lead: 6, name: "hi!", n: 4 };
+        #[reset]
+        fn main() {
+            O0 = DEV.lead;
+            O1 = (DEV.name.len as u8);
+            O2 = (OTHER.name.len as u8);
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901), e.mem(0x0902)), (5, 3, 3));
 }

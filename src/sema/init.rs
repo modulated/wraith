@@ -147,7 +147,100 @@ fn flatten_inner(
         Type::Named(name) if ctx.registry().structs.contains_key(name) => {
             flatten_struct(out, expr, name, ctx)
         }
+        Type::Named(name) if ctx.registry().enums.contains_key(name) => {
+            flatten_enum(out, expr, name, ctx)
+        }
         _ => flatten_scalar(out, expr, ty, ctx),
+    }
+}
+
+/// An enum field: its tag byte, then whatever the variant carries.
+///
+/// An enum is stored inline like a struct — the tag and the payload, not a
+/// pointer to them — so the bytes are the same shape as a struct's. What made
+/// this the missing case is that a variant is spelled `C::B` rather than as a
+/// number, and nothing folded that to its discriminant.
+fn flatten_enum(
+    out: &mut Vec<InitByte>,
+    expr: &Spanned<Expr>,
+    name: &str,
+    ctx: &dyn InitContext,
+) -> Result<(), InitError> {
+    use crate::ast::VariantData;
+
+    let Expr::EnumVariant {
+        enum_name,
+        variant,
+        data,
+    } = &expr.node
+    else {
+        return Err(InitError::fatal(
+            format!("`{name}` is an enum, so it needs one of its variants here"),
+            expr.span,
+        ));
+    };
+    if enum_name.node != name {
+        return Err(InitError::fatal(
+            format!(
+                "`{}` is not a variant of `{name}`",
+                format_args!("{}::{}", enum_name.node, variant.node)
+            ),
+            expr.span,
+        ));
+    }
+    let def = ctx
+        .registry()
+        .enums
+        .get(name)
+        .expect("checked by the caller");
+    let info = def.get_variant(&variant.node).ok_or_else(|| {
+        InitError::fatal(
+            format!("`{name}` has no variant `{}`", variant.node),
+            expr.span,
+        )
+    })?;
+    let base = out.len();
+    out.push(InitByte::Byte(info.tag));
+
+    // The payload follows the tag, laid out by the *declaration's* field types
+    // rather than by the initializer's shape — the same rule as a struct.
+    match (&info.data, data) {
+        (crate::sema::type_defs::VariantData::Unit, VariantData::Unit) => Ok(()),
+        (crate::sema::type_defs::VariantData::Tuple(types), VariantData::Tuple(values)) => {
+            if values.len() != types.len() {
+                return Err(InitError::fatal(
+                    format!(
+                        "`{}::{}` carries {} value(s) but {} were given",
+                        name,
+                        variant.node,
+                        types.len(),
+                        values.len()
+                    ),
+                    expr.span,
+                ));
+            }
+            let mut at = base + 1;
+            for (t, v) in types.iter().zip(values) {
+                pad_to(out, at);
+                flatten_inner(out, v, t, ctx).map_err(InitError::required)?;
+                at += size_of(t, ctx.registry()).max(1);
+            }
+            Ok(())
+        }
+        (crate::sema::type_defs::VariantData::Struct(fields), VariantData::Struct(inits)) => {
+            for f in fields {
+                let Some(init) = inits.iter().find(|x| x.name.node == f.name) else {
+                    continue;
+                };
+                pad_to(out, base + 1 + f.offset);
+                flatten_inner(out, &init.value, &f.ty, ctx).map_err(InitError::required)?;
+            }
+            Ok(())
+        }
+        _ => Err(InitError::fatal(
+            format!("`{}::{}` is not written that way", name, variant.node),
+            expr.span,
+        )),
     }
 }
 
@@ -281,6 +374,18 @@ fn flatten_scalar(
     {
         let addr = ctx.address_of(operand)?;
         push_int(out, addr as i64, 2);
+        return Ok(());
+    }
+
+    // A `str` is a pointer at the literal's data, which is the same shape as a
+    // function field: two bytes the assembler fills in. What differs is only
+    // *who* names the label — the string collector does, at codegen — so the
+    // content travels and the label is resolved there.
+    if let Expr::Literal(Literal::String(text)) = &expr.node
+        && matches!(ty, Type::String)
+    {
+        out.push(InitByte::StrLow(text.clone()));
+        out.push(InitByte::StrHigh(text.clone()));
         return Ok(());
     }
 

@@ -94,6 +94,38 @@ pub(super) fn generate_index_assignment(
     // wrongly elide the index load below, indexing by the *value* instead.
     emitter.invalidate_registers();
 
+    // Step 3b: an array whose base is only known at run time — `p.a[i]`
+    // through a pointer, an element of a nested array. Taken *before* the
+    // index is evaluated below, because that path computes the element's
+    // address itself and evaluating the index here as well would run it twice
+    // — which is invisible for arithmetic and two calls for `p.a[f()] = v`.
+    //
+    // A string buffer is excluded: its data starts a byte past the length
+    // prefix, which the `INY` below applies and this path does not.
+    if !is_string
+        && !matches!(object.node, Expr::Variable(_))
+        && crate::codegen::expr::array_field_base(object, info).is_none()
+        && let Some((ptr, _elem)) = crate::codegen::expr::emit_element_address_into_ptr(
+            object,
+            index,
+            emitter,
+            info,
+            string_collector,
+        )?
+    {
+        emitter.emit_inst("LDY", "#$00");
+        emitter.emit_inst("LDA", &format!("${:02X}", save_lo));
+        emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        if is_multibyte {
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", save_hi));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        }
+        emitter.invalidate_registers();
+        emitter.temp_alloc.free_high(save, 2);
+        return Ok(());
+    }
+
     // Step 4: Evaluate index expression
     emitter.emit_comment("Evaluate index");
     generate_expr(index, emitter, info, string_collector)?;
@@ -702,16 +734,18 @@ pub(super) fn generate_field_assignment(
     use crate::sema::table::SymbolLocation;
     use crate::sema::types::Type;
 
-    // A whole array cannot be assigned to a *field*. Assigning one only ever
-    // meant repointing a slot at the data, which is how a local array is
-    // stored; a field is the data itself, and the store wrote two bytes of the
-    // literal's ROM address over the first two elements. `d.f = [4, 5, 6]`
-    // left `d.f[1]` at its old value and corrupted `d.f[0]`.
+    // A whole array is never assigned, here as anywhere else — see the local
+    // case in `generate_assign` for the rule and why it is one rule. This site
+    // used to store two bytes of the literal's ROM address over the first two
+    // elements: `d.f = [4, 5, 6]` left `d.f[1]` alone and corrupted `d.f[0]`.
+    //
+    // `memcpy` is deliberately *not* named as the way out here: it would need
+    // `&x.f[0]`, and the address of an element of a field is not supported.
     if let Some(Type::Array(..)) = field_type_of(object, field, info) {
         return Err(CodegenError::UnsupportedOperation(format!(
-            "cannot assign a whole array to field `{}`: a field holds its elements inline, so \
-             there is no pointer to repoint. Assign the elements — `x.{}[i] = v` — or rebuild \
-             the struct",
+            "cannot assign a whole array to field `{}`: an array is initialised once and never \
+             assigned as a whole, because the copy would be silent and proportional to its \
+             length. Assign the elements — `x.{}[i] = v` — or rebuild the struct",
             field.node, field.node
         )));
     }
@@ -845,6 +879,48 @@ pub(super) fn generate_field_assignment(
         // Check if this is a parameter (pass-by-reference) via the explicit flag.
         let is_parameter = sym_is_param;
 
+        // An enum field holds its bytes inline, so assigning one is a copy of
+        // `size_of(enum)` bytes rather than a store of a value. Constructing a
+        // variant yields a pointer to those bytes.
+        //
+        // The scalar path below stored the pointer's low byte into the field;
+        // reading it back then dereferenced that byte as an address. Init and
+        // read are inline now, so this is the third site that has to agree.
+        if let Type::Named(inner) = &field_info.ty
+            && info.type_registry.get_enum(inner).is_some()
+        {
+            let size = crate::codegen::expr::type_byte_size(&field_info.ty, info) as u8;
+            if is_parameter {
+                // The destination is the caller's storage: the pointer in this
+                // parameter's slot, plus the field's offset.
+                let dest = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+                    CodegenError::Internal(
+                        "temporary storage exhausted in an enum field store".to_string(),
+                    )
+                })?;
+                let slot = base_addr as u8;
+                emitter.emit_inst("CLC", "");
+                emitter.emit_inst("LDA", &format!("${:02X}", slot));
+                emitter.emit_inst("ADC", &format!("#${:02X}", field_info.offset as u8));
+                emitter.emit_inst("STA", &format!("${:02X}", dest));
+                emitter.emit_inst("LDA", &format!("${:02X}", slot + 1));
+                emitter.emit_inst("ADC", "#$00");
+                emitter.emit_inst("STA", &format!("${:02X}", dest + 1));
+                generate_expr(value, emitter, info, string_collector)?;
+                emit_copy_through_pointer(emitter, dest, size);
+                emitter.temp_alloc.free_high(dest, 2);
+            } else {
+                generate_expr(value, emitter, info, string_collector)?;
+                crate::codegen::stmt::emit_return_by_value_copy(
+                    emitter,
+                    base_addr + field_info.offset as u16,
+                    size,
+                );
+            }
+            emitter.invalidate_registers();
+            return Ok(());
+        }
+
         // Generate value expression (result in A, or A/Y for u16)
         generate_expr(value, emitter, info, string_collector)?;
 
@@ -909,10 +985,74 @@ pub(super) fn generate_field_assignment(
 
         Ok(())
     } else {
-        Err(CodegenError::UnsupportedOperation(
-            "Field assignment only supported on variables (not expressions)".to_string(),
-        ))
+        // The object is not a name: a chain through a pointer, an element of a
+        // nested array. Its address is only known at run time, so compute it
+        // and store through it.
+        //
+        // The address is computed *before* the value, and parked, because the
+        // value is arbitrary code that would clobber the pointer otherwise.
+        let Some(obj_ty) =
+            crate::codegen::expr::emit_aggregate_base(object, emitter, info, string_collector)?
+        else {
+            return Err(CodegenError::UnsupportedOperation(
+                "a field can be assigned through a name, a place, or a pointer — not through \
+                 this expression, which names no storage"
+                    .to_string(),
+            ));
+        };
+        let sname = match obj_ty {
+            Type::Named(n) => n,
+            Type::Pointer(inner) => match *inner {
+                Type::Named(n) => n,
+                _ => return Err(field_target_error(field)),
+            },
+            _ => return Err(field_target_error(field)),
+        };
+        let sdef = info.type_registry.get_struct(&sname).ok_or_else(|| {
+            CodegenError::UnsupportedOperation(format!("struct '{sname}' not found"))
+        })?;
+        let finfo = sdef
+            .get_field(&field.node)
+            .ok_or_else(|| field_target_error(field))?
+            .clone();
+
+        let ptr = emitter.memory_layout.deref_ptr();
+        emitter.emit_inst("STA", &format!("${:02X}", ptr));
+        emitter.emit_inst("STX", &format!("${:02X}", ptr + 1));
+
+        let is_multibyte = crate::codegen::expr::is_two_byte_value(&finfo.ty);
+        let park = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
+            CodegenError::Internal("temporary storage exhausted in a field store".to_string())
+        })?;
+        generate_expr(value, emitter, info, string_collector)?;
+        store_value_pair(
+            emitter,
+            &finfo.ty,
+            info.resolved_types.get(&value.span),
+            &format!("${:02X}", park),
+            &format!("${:02X}", park + 1),
+        );
+
+        emitter.emit_inst("LDY", &format!("#${:02X}", finfo.offset));
+        emitter.emit_inst("LDA", &format!("${:02X}", park));
+        emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        if is_multibyte {
+            emitter.emit_inst("INY", "");
+            emitter.emit_inst("LDA", &format!("${:02X}", park + 1));
+            emitter.emit_inst("STA", &format!("(${:02X}),Y", ptr));
+        }
+        emitter.temp_alloc.free_high(park, 2);
+        emitter.invalidate_registers();
+        Ok(())
     }
+}
+
+/// The field named is not one this struct has, or the object is not a struct.
+fn field_target_error(field: &Spanned<String>) -> CodegenError {
+    CodegenError::UnsupportedOperation(format!(
+        "cannot assign to field `{}`: the expression it is read from is not a struct",
+        field.node
+    ))
 }
 
 /// The declared type of `object.field`, when the object's struct is known.
@@ -1979,21 +2119,36 @@ pub(super) fn generate_assign(
                     return Err(unfilled_block_error(&sym.ty, bytes, "assign"));
                 }
 
-                // Assigning a whole array repoints a slot at the data, which
-                // only exists for a *local* array. A `static` array is the
-                // data, at a fixed address, so the store put two bytes of the
-                // literal's ROM address over the first two elements and every
-                // later read came back as part of an address.
-                if matches!(sym.ty, Type::Array(..))
-                    && !matches!(
-                        sym.location,
-                        crate::sema::table::SymbolLocation::ZeroPage(_)
-                    )
-                {
+                // A whole array is never assigned, at any storage class.
+                //
+                // A `static` array *is* its elements, at a fixed address, so
+                // there was never a pointer to repoint: the store put two bytes
+                // of the literal's ROM address over the first two elements. A
+                // *local* array does have a slot holding a pointer, and
+                // repointing it compiled — but it meant two things nobody
+                // wrote: `a = b` aliased `b`'s elements rather than copying
+                // them, so a later `b[i] = v` was visible through `a`; and
+                // `a = [1, 2, 3]` pointed `a` at the literal in ROM, where
+                // every subsequent `a[i] = v` is a silent no-op on hardware.
+                //
+                // Binding already refuses everything but a literal (`let b:
+                // [u8; 3] = a` is an error), so refusing assignment outright
+                // leaves one rule: an array is initialised once and copied
+                // explicitly thereafter. That is where every other native 6502
+                // language ended up — Prog8 forbids it and points at
+                // `sys.memcopy`, C forbids it and arrays decay to pointers,
+                // and Mad-Pascal dropped Pascal's value semantics to do the
+                // same. The reason is cost: a copy is two instructions per
+                // byte here, so a 256-byte array would be about 1.5 KB of a
+                // 16 KB ROM for one statement, and an assignment operator is
+                // the wrong place to hide that.
+                if matches!(sym.ty, Type::Array(..)) {
                     return Err(CodegenError::UnsupportedOperation(format!(
-                        "cannot assign a whole array to `{name}`: a `static` array is its \
-                         elements, at a fixed address, so there is no pointer to repoint. Assign \
-                         the elements — `{name}[i] = v` — or use a local"
+                        "cannot assign a whole array to `{name}`: an array is initialised once \
+                         and never assigned as a whole, because the copy would be silent and \
+                         proportional to its length. Assign the elements — `{name}[i] = v` — \
+                         or copy explicitly with `memcpy(&{name}[0], &src[0], len)` from \
+                         `std/mem.wr`"
                     )));
                 }
 
@@ -2130,4 +2285,24 @@ pub(super) fn generate_assign(
         }
     }
     Ok(())
+}
+
+/// Copy `size` bytes from the pointer in A:X to the pointer already parked at
+/// `dest` in zero page.
+///
+/// The sibling of `emit_return_by_value_copy`, for a destination that is only
+/// known at run time — a field of the struct a by-reference parameter names.
+fn emit_copy_through_pointer(emitter: &mut Emitter, dest: u8, size: u8) {
+    let src = emitter.memory_layout.deref_ptr();
+    emitter.emit_inst("STA", &format!("${:02X}", src));
+    emitter.emit_inst("STX", &format!("${:02X}", src + 1));
+    let label = emitter.next_label("epcp");
+    emitter.emit_inst("LDY", "#$00");
+    emitter.emit_label(&label);
+    emitter.emit_inst("LDA", &format!("(${:02X}),Y", src));
+    emitter.emit_inst("STA", &format!("(${:02X}),Y", dest));
+    emitter.emit_inst("INY", "");
+    emitter.emit_inst("CPY", &format!("#${:02X}", size));
+    emitter.emit_inst("BNE", &label);
+    emitter.invalidate_registers();
 }

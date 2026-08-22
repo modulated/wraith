@@ -878,6 +878,32 @@ fn select_auto_inline(
     Ok(())
 }
 
+/// Turn every `InitByte::StrLow`/`StrHigh` in a `static`'s startup image into
+/// the `FnLow`/`FnHigh` label pair the emitters already know how to write.
+///
+/// Sema knows the literal but not its label; the string collector assigns
+/// labels and deduplicates. Rather than teach both emitters about a third kind
+/// of address, the content is resolved once, here, and everything downstream
+/// sees the same two-bytes-the-assembler-fills-in it saw for a function.
+fn resolve_string_inits(program: &mut ProgramInfo, strings: &mut StringCollector) {
+    use crate::sema::InitByte;
+    for init in program.static_inits.iter_mut() {
+        for b in init.bytes.iter_mut() {
+            match b {
+                InitByte::StrLow(text) => {
+                    let label = strings.add_string(text.clone());
+                    *b = InitByte::FnLow(label);
+                }
+                InitByte::StrHigh(text) => {
+                    let label = strings.add_string(text.clone());
+                    *b = InitByte::FnHigh(label);
+                }
+                InitByte::Byte(_) | InitByte::FnLow(_) | InitByte::FnHigh(_) => {}
+            }
+        }
+    }
+}
+
 pub fn generate(
     ast: &SourceFile,
     program: &mut ProgramInfo,
@@ -896,6 +922,13 @@ pub fn generate(
     }
     let mut section_alloc = SectionAllocator::default();
     let mut string_collector = StringCollector::new();
+
+    // A `str` in a `static`'s startup image carries the literal's *content*
+    // out of sema, because the label belongs to the string collector, which
+    // deduplicates identical literals. Register them here — before anything is
+    // emitted, so the data lands in DATA with every other literal — and rewrite
+    // each pair to the label reference the assembler fills in.
+    resolve_string_inits(program, &mut string_collector);
 
     // Automatic inlining: promote auto-inline candidates whose expansion is a
     // size win to `is_inline`, before placement so the layout already excludes

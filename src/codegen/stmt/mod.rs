@@ -236,6 +236,36 @@ pub fn generate_stmt(
                         emitter.emit_inst("LDA", &format!("#${:02X}", addr));
                         emitter.emit_inst("LDX", "#$00");
                         emitter.mark_a_unknown();
+                    } else if returns_struct_by_pointer(emitter, info)
+                        && crate::codegen::expr::emit_struct_place_address(
+                            e,
+                            emitter,
+                            info,
+                            string_collector,
+                        )?
+                        .is_some()
+                    {
+                        // Struct return-by-value, the same contract as the
+                        // slice above: the callee's storage stays valid until
+                        // the caller copies it out right after the call, so
+                        // what goes back is its *address* in A:X.
+                        //
+                        // `return s` used to fall through to the scalar path
+                        // below, which loaded the struct's first byte into A
+                        // and left X holding whatever the last instruction
+                        // did. The caller dereferences A:X, so a two-field
+                        // struct came back as two bytes read from wherever
+                        // that pair happened to point — zero page $0007 for
+                        // `f0 == 7`, and no diagnostic anywhere.
+                        //
+                        // The three-way answer is what makes this safe to
+                        // write as a condition: `Some` means the address is
+                        // emitted and there is nothing left to do, `None`
+                        // means the expression is not a place — a literal or a
+                        // call, which hands back a pointer of its own through
+                        // the ordinary path below — and `Err` means it *is* a
+                        // struct place whose address nobody knows how to take.
+                        emitter.emit_comment("Returned struct pointer (A:X)");
                     } else {
                         // Normal return with value
                         generate_expr(e, emitter, info, string_collector)?;
@@ -609,4 +639,26 @@ pub(crate) fn emit_return_by_value_copy(emitter: &mut Emitter, dest: u16, size: 
         emitter.emit_inst("CPY", &format!("#${:02X}", size));
         emitter.emit_inst("BNE", &loop_label);
     }
+}
+
+/// Whether the function being emitted returns a struct, which travels as a
+/// pointer in A:X rather than as a value in A.
+///
+/// Asked of the *function's* declared return type rather than of the returned
+/// expression: `return s` and `return mk()` are both struct-typed, but only one
+/// of them already holds a pointer, and it is the signature that fixes what the
+/// caller will do with A:X.
+fn returns_struct_by_pointer(emitter: &Emitter, info: &ProgramInfo) -> bool {
+    use crate::sema::types::Type;
+    emitter
+        .current_function()
+        .and_then(|name| info.table.lookup(name))
+        .and_then(|sym| match &sym.ty {
+            Type::Function(_, ret) => Some((**ret).clone()),
+            _ => None,
+        })
+        .is_some_and(|ret| match ret {
+            Type::Named(n) => info.type_registry.get_struct(&n).is_some(),
+            _ => false,
+        })
 }

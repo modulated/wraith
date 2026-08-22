@@ -685,3 +685,92 @@ fn warn_multiple_overlapping_addresses() {
         _ => panic!("Expected successful compilation with warnings"),
     }
 }
+
+// ============================================================================
+// Shift count at or past the width
+// ============================================================================
+
+/// A count the compiler can see is at or past the width shifts every bit out,
+/// so the result is a constant and the operand plays no part in it.
+///
+/// A warning rather than an error: the behaviour is defined — zeros come in,
+/// or copies of the sign bit for an arithmetic right shift — and clearing a
+/// value by shifting it out is a real if unusual idiom.
+#[test]
+fn warn_shift_count_at_or_past_the_width() {
+    for (src, expect) in [
+        (
+            "let a: u8 = 200; let x: u8 = a << 8; OUT = x;",
+            "by 8 always yields 0",
+        ),
+        (
+            "let a: u8 = 200; let x: u8 = a >> 9; OUT = x;",
+            "by 9 always yields 0",
+        ),
+        (
+            "let a: u16 = 5000; let x: u16 = a << 16; OUT = x.low;",
+            "by 16 always yields 0",
+        ),
+        // Reached through a constant expression, not just a literal.
+        (
+            "let a: u8 = 200; let x: u8 = a << (4 + 4); OUT = x;",
+            "by 8 always yields 0",
+        ),
+    ] {
+        let result = compile(&format!(
+            "const OUT: addr = 0x0900;\n#[reset]\nfn main() {{ {src} loop {{}} }}\n"
+        ));
+        match result {
+            CompileResult::Success(warnings, _) => {
+                assert!(
+                    warnings.contains(expect),
+                    "expected `{expect}` for `{src}`, got:\n{warnings}"
+                );
+                assert!(
+                    warnings.contains("= help:"),
+                    "expected a help line naming the fix:\n{warnings}"
+                );
+            }
+            _ => panic!("expected `{src}` to compile with a warning"),
+        }
+    }
+}
+
+/// An arithmetic right shift of a signed value saturates to the sign bit, so
+/// the message says so rather than promising zero.
+#[test]
+fn warn_shift_names_the_signed_result() {
+    let result = compile(
+        "const OUT: addr = 0x0900;\n#[reset]\n\
+         fn main() { let a: i8 = (-100); let x: i8 = a >> 8; OUT = (x as u8); loop {} }\n",
+    );
+    match result {
+        CompileResult::Success(warnings, _) => assert!(
+            warnings.contains("always yields 0 or -1"),
+            "a negative value saturates to -1, not 0:\n{warnings}"
+        ),
+        _ => panic!("expected compilation with a warning"),
+    }
+}
+
+#[test]
+fn no_warn_for_a_shift_within_the_width_or_decided_at_run_time() {
+    for src in [
+        "let a: u8 = 200; let x: u8 = a << 7; OUT = x;",
+        "let a: u16 = 5000; let x: u16 = a << 15; OUT = x.low;",
+        // A run-time count is exactly the case this cannot decide, and the
+        // defined shift-in-zeros behaviour is what covers it.
+        "let a: u8 = 200; let n: u8 = 9; let x: u8 = a << n; OUT = x;",
+    ] {
+        let result = compile(&format!(
+            "const OUT: addr = 0x0900;\n#[reset]\nfn main() {{ {src} loop {{}} }}\n"
+        ));
+        match result {
+            CompileResult::Success(warnings, _) => assert!(
+                !warnings.contains("always yields"),
+                "no shift warning expected for `{src}`:\n{warnings}"
+            ),
+            _ => panic!("expected `{src}` to compile"),
+        }
+    }
+}

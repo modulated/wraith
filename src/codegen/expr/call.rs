@@ -174,13 +174,28 @@ pub(super) fn generate_call(
     // them: the whole block for pool staging, the widest single one for the
     // scratch slot stack staging reuses.
     //
-    // Sized by [`param_byte_width`], the one table, rather than by a private
-    // list of the wide types. This site used to keep its own and had left a
-    // function pointer off it: `apply(add_one, 7)` reserved one byte for
-    // `add_one`, staged its low byte alone, and every parameter after it
+    // Sized by [`ParamClass`], the one classification, rather than by a
+    // private list of the wide types. This site used to keep its own and had
+    // left a function pointer off it: `apply(add_one, 7)` reserved one byte
+    // for `add_one`, staged its low byte alone, and every parameter after it
     // landed a byte early.
-    let arg_sizes: Vec<u8> = (0..args.len())
-        .map(|i| param_types.get(i).map_or(1, param_byte_width))
+    //
+    // A signature that does not cover the arguments used to default each
+    // unknown to a byte, which is the same silent-fraction shape. Said out
+    // loud instead: sema type-checks every call against a signature, so
+    // getting here without one is a compiler bug and not a program's fault.
+    if param_types.len() < args.len() {
+        return Err(CodegenError::Internal(format!(
+            "no signature for '{}': {} arguments against {} parameters",
+            function.node,
+            args.len(),
+            param_types.len()
+        )));
+    }
+    let arg_sizes: Vec<u8> = param_types
+        .iter()
+        .take(args.len())
+        .map(|ty| ParamClass::of(ty, info).width())
         .collect();
     let total_bytes: u8 = arg_sizes.iter().sum();
     let widest_arg: u8 = arg_sizes.iter().copied().max().unwrap_or(0);
@@ -295,317 +310,24 @@ pub(super) fn generate_call(
             sheltered = temp_offset;
         }
 
-        // Check argument type
-        let arg_type = info.resolved_types.get(&arg.span);
-
-        // Check if this is a struct argument (pass by reference)
-        let is_struct = arg_type.is_some_and(|ty| matches!(ty, Type::Named(_)));
-
-        // Check for Enums specifically (passed as 2-byte value pointers)
-        let is_enum_arg = arg_type.is_some_and(|ty| {
-            if let Type::Named(name) = ty {
-                info.type_registry.enums.contains_key(name)
-            } else {
-                false
-            }
-        });
-
-        // Check if parameter is an enum
-        let param_is_enum = param_types.get(i).is_some_and(|ty| {
-            if let Type::Named(name) = ty {
-                info.type_registry.enums.contains_key(name)
-            } else {
-                false
-            }
-        });
-
-        // Handle enum passing (pass the 2-byte pointer value, stored in A:X)
-        if is_enum_arg && param_is_enum {
-            // Generate expression (returns pointer in A:X)
-            generate_expr(arg, emitter, info, string_collector)?;
-
-            // Store to TEMPORARY location
-            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-            // Store high byte from X (enums use A:X convention)
-            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
-
-            temp_offset += 2;
-            arg_info.push((temp_addr, 2));
-            continue;
-        }
-
-        // A pointer argument is a 2-byte address in A:X, like an enum or a
-        // string. It is a *value* produced by an expression, not a descriptor
-        // copied out of a slot, so it does not belong on the array/struct
-        // pass-by-reference paths further down.
-        let param_is_pointer = param_types
-            .get(i)
-            .is_some_and(|ty| matches!(ty, Type::Pointer(_)));
-        if param_is_pointer {
-            generate_expr(arg, emitter, info, string_collector)?;
-            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
-            temp_offset += 2;
-            arg_info.push((temp_addr, 2));
-            continue;
-        }
-
-        // Check if argument is a string (2-byte pointer, stored in A:X)
-        let is_string_arg = arg_type.is_some_and(|ty| matches!(ty, Type::String));
-        let param_is_string = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::String));
-
-        // Handle string passing (pass the 2-byte pointer, stored in A:X)
-        if is_string_arg && param_is_string {
-            // Generate expression (returns pointer in A:X)
-            generate_expr(arg, emitter, info, string_collector)?;
-
-            // Store to TEMPORARY location
-            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-            // Store high byte from X (strings use A:X convention like enums)
-            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
-
-            temp_offset += 2;
-            arg_info.push((temp_addr, 2));
-            continue;
-        }
-
-        // Check if argument is a slice (4-byte fat-pointer descriptor). Copy the
-        // descriptor by value from the slice variable's frame slot to the temp
-        // pool; the callee reads it inline from its parameter slot.
-        let is_slice_arg = arg_type.is_some_and(|ty| matches!(ty, Type::Slice(_)));
-        let param_is_slice = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Slice(_)));
-        if is_slice_arg && param_is_slice {
-            // A bound slice variable: copy its descriptor across.
-            if let crate::ast::Expr::Variable(var_name) = &arg.node
-                && let Some(sym) = info
-                    .resolved_symbols
-                    .get(&arg.span)
-                    .or_else(|| info.table.lookup(var_name))
-                && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
-            {
-                for k in 0..4u8 {
-                    emitter.emit_inst("LDA", &format!("${:02X}", addr + k));
-                    emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
-                }
-                temp_offset += 4;
-                arg_info.push((temp_addr, 4));
-                continue;
-            }
-
-            // A slice *expression* — `total(a[1..4])`. The staging slot is a
-            // zero-page address and the materializer writes a descriptor to
-            // exactly that, so it can build in place; there is no intermediate
-            // to allocate and nothing to copy afterwards.
-            if let crate::ast::Expr::Slice {
-                object,
-                start,
-                end,
-                inclusive,
-            } = &arg.node
-            {
-                let Some(Type::Slice(elem)) = arg_type else {
-                    return Err(CodegenError::Internal(
-                        "slice argument without a slice type".to_string(),
-                    ));
-                };
-                crate::codegen::stmt::assign::generate_slice_materialize(
-                    temp_addr,
-                    elem,
-                    object,
-                    start,
-                    end,
-                    *inclusive,
-                    emitter,
-                    info,
-                    string_collector,
-                )?;
-                temp_offset += 4;
-                arg_info.push((temp_addr, 4));
-                continue;
-            }
-
-            // A slice from a call — `total(mk())`, direct or through a
-            // function pointer. The callee left a *pointer* to its descriptor
-            // in A:X, so the four bytes have to be copied through it. Staging
-            // A alone handed the callee one byte of that pointer as though it
-            // were the base of the slice.
-            if crate::codegen::expr::is_call(arg) {
-                generate_expr(arg, emitter, info, string_collector)?;
-                crate::codegen::stmt::emit_return_by_value_copy(emitter, temp_addr as u16, 4);
-                emitter.invalidate_registers();
-                temp_offset += 4;
-                arg_info.push((temp_addr, 4));
-                continue;
-            }
-        }
-
-        // How wide this PARAMETER (not argument) is, from the same table that
-        // reserved its staging bytes above — so what is written here and what
-        // was reserved cannot disagree. That matters for a narrow argument
-        // reaching a wide parameter, and for a function pointer, which is two
-        // bytes without being a number.
-        let is_16bit = param_types.get(i).map_or(1, param_byte_width) == 2;
-
-        // Check if argument is an array (pass by reference as 2-byte pointer)
-        let is_array = arg_type.is_some_and(|ty| matches!(ty, Type::Array(_, _)));
-        let param_is_array = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Array(_, _)));
-
-        // For struct arguments, check if the parameter is also a struct (pass-by-reference)
-        let param_is_struct = param_types
-            .get(i)
-            .is_some_and(|param_ty| matches!(param_ty, Type::Named(_)));
-
-        // Handle array pass-by-reference (pass the 2-byte pointer stored in ZP variable)
-        if is_array
-            && param_is_array
-            && let crate::ast::Expr::Variable(var_name) = &arg.node
-            && let Some(sym) = info
-                .resolved_symbols
-                .get(&arg.span)
-                .or_else(|| info.table.lookup(var_name))
-            && let crate::sema::table::SymbolLocation::ZeroPage(addr) = sym.location
-        {
-            // Load the 2-byte pointer from the array variable's ZP location
-            emitter.emit_inst("LDA", &format!("${:02X}", addr)); // Low byte
-            emitter.emit_inst("LDY", &format!("${:02X}", addr + 1)); // High byte
-
-            // Store 2-byte pointer to temp
-            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-            emitter.emit_inst("STY", &format!("${:02X}", temp_addr + 1));
-            temp_offset += 2;
-            arg_info.push((temp_addr, 2)); // 2-byte pointer
-            continue;
-        }
-
-        if is_struct && param_is_struct {
-            // Struct pass-by-reference: pass the 2-byte address of the
-            // argument's storage, so the callee's field writes land on the
-            // caller's struct.
-            //
-            // Every place has such an address, not just a zero-page local:
-            // this used to match a `Variable` in the frame and nothing else,
-            // so a `static`, a nested field and an array element all fell
-            // through to the scalar path below and staged one byte of the
-            // struct's *contents* as though it were a pointer. `sum(PS[i])`
-            // read whatever that byte happened to address.
-            if let Some(_struct_name) = crate::codegen::expr::emit_struct_place_address(
-                arg,
-                emitter,
-                info,
-                string_collector,
-            )? {
-                emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-                emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
-                temp_offset += 2;
-                arg_info.push((temp_addr, 2)); // 2-byte pointer
-                continue;
-            }
-
-            // Any other struct-valued argument — a struct literal, or a call
-            // returning a struct — evaluates to a pointer to the bytes in A:X.
-            // This used to fall through to the scalar path, which staged only
-            // A: the callee then dereferenced an address whose high byte was
-            // whatever the staging temp already held. A constant literal
-            // (`sum(P { x: 6, y: 7 })`) points into ROM and so has a non-zero
-            // high byte, which is why dropping it was a silent miscompile
-            // rather than merely a zero-page assumption.
-            if crate::codegen::expr::is_call(arg)
-                || matches!(
-                    &arg.node,
-                    crate::ast::Expr::StructInit { .. } | crate::ast::Expr::AnonStructInit { .. }
-                )
-            {
-                generate_expr(arg, emitter, info, string_collector)?;
-                emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-                emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
-                temp_offset += 2;
-                arg_info.push((temp_addr, 2)); // 2-byte pointer
-                continue;
-            }
-        }
-
-        // A struct or slice parameter is staged by one of the paths above — a
-        // two-byte pointer for the first, four descriptor bytes for the second
-        // — and never by the register staging below, which writes A and at
-        // most one more byte. Reaching here means every one of those paths
-        // declined this argument, so say so rather than hand the callee a
-        // fraction of what it will read. (An enum is also `Named`, and does
-        // stage as a two-byte pointer through the register path.)
-        if let Some(param_ty) = param_types.get(i) {
-            let staged_by_copy = match param_ty {
-                Type::Slice(_) => true,
-                Type::Named(n) => info.type_registry.get_struct(n).is_some(),
-                _ => false,
-            };
-            if staged_by_copy {
-                return Err(CodegenError::UnsupportedOperation(format!(
-                    "cannot pass this expression as argument {} of '{}': a `{}` is passed by \
-                     address or by descriptor, and this expression provides neither. Bind it \
-                     to a `let` first and pass that",
-                    i + 1,
-                    function.node,
-                    param_ty.display_name()
-                )));
-            }
-        }
-
-        // Generate argument expression (result in A for 8-bit, A+Y for 16-bit)
-        generate_expr(arg, emitter, info, string_collector)?;
-
-        // Check if argument type is 8-bit but parameter is 16-bit (implicit cast)
-        let arg_is_8bit = arg_type.is_some_and(|ty| {
-            matches!(
-                ty,
-                crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U8)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I8)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B8)
-                    | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::Bool)
-            )
-        });
-
-        // A narrow argument reaching a wide parameter is widened by the
-        // language, and by the *source's* signedness: this zero-extended
-        // whatever arrived, so a negative `i8` passed to an `i16` parameter
-        // lost its sign on the way in.
-        //
-        // The widening has to happen before the low byte is stored, because
-        // sign-extending works through A and X.
-        if is_16bit
-            && let Some(signed) = param_types
-                .get(i)
-                .and_then(|pt| crate::codegen::expr::implicit_widening(arg_type, pt))
-        {
-            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
-        }
-
-        // Store to TEMPORARY location
-        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-        if is_16bit {
-            // An address arrives in A:X, a number or a function pointer in A:Y
-            // — the same choice the tail-recursive rebind makes, from the same
-            // predicate.
-            let high_in_x = param_types
-                .get(i)
-                .is_some_and(|pt| arg_high_byte_in_x(pt, info));
-            // A parameter whose argument's type sema did not resolve still
-            // needs a defined high byte.
-            if arg_is_8bit && arg_type.is_none() && !high_in_x {
-                emitter.emit_inst("LDY", "#$00");
-            }
-            let hi = if high_in_x { "STX" } else { "STY" };
-            emitter.emit_inst(hi, &format!("${:02X}", temp_addr + 1));
-            temp_offset += 2;
-        } else {
-            temp_offset += 1;
-        }
-
-        arg_info.push((temp_addr, if is_16bit { 2 } else { 1 }));
+        // Everything about *how* this argument reaches the callee is the same
+        // question the other three call forms ask, and is answered in one
+        // place. What is left here is this site's own business: where the
+        // bytes wait, and what has to be sheltered across a nested call.
+        let width = stage_argument(
+            arg,
+            &param_types[i],
+            temp_addr,
+            StagingSite::Direct {
+                callee: &function.node,
+                index: i,
+            },
+            emitter,
+            info,
+            string_collector,
+        )?;
+        temp_offset += width;
+        arg_info.push((temp_addr, width));
     }
 
     if sheltered > 0 {
@@ -673,14 +395,15 @@ pub(super) fn generate_call(
     // stashed too. Without this a recursive struct-returning function
     // dereferenced its own software-stack pointer as the result's high byte.
     if is_recursive_edge && let Some(frame) = callee_frame {
+        // Asked of the same classification the arguments use. A return value
+        // is not a parameter, but "which register holds the high byte of this
+        // type" is the same question, and this was one more hand-written list
+        // of the answer.
         let high_byte_in_x = info
             .table
             .lookup(&function.node)
             .and_then(|sym| match &sym.ty {
-                Type::Function(_, ret) => Some(matches!(
-                    ret.as_ref(),
-                    Type::Named(_) | Type::Pointer(_) | Type::String
-                )),
+                Type::Function(_, ret) => Some(ParamClass::of(ret, info).high_byte_in_x()),
                 _ => None,
             })
             .unwrap_or(false);
@@ -760,54 +483,354 @@ enum CalleeSource<'a> {
     Expr(&'a Spanned<Expr>),
 }
 
-/// How one argument of an indirect call reaches the staging block.
+/// How one argument reaches its parameter's slot.
 ///
-/// The callee is unknown, so every argument has to arrive in a fixed place
-/// rather than in the callee's own frame. That is what limits this list: each
-/// kind is one or two bytes with a settled register convention. An array or a
-/// slice is neither — an array parameter is a descriptor whose shape depends
-/// on the callee, and a slice is four bytes — so they stay out.
-#[derive(Clone, Copy)]
-enum IndirectArgKind {
-    /// One byte in A.
+/// The four call forms — a direct `JSR`, an inlined body, a tail-recursive
+/// rebind, and an indirect call through a fixed block — each used to answer
+/// this for itself by re-listing the types, which is three chances to differ
+/// from the first. They did: a struct reached an inlined callee as the first
+/// two bytes of its *contents*, a `str` and an enum reached a tail-recursive
+/// one from the wrong register, and two of the four sized a function pointer
+/// as a single byte.
+///
+/// So it is asked once, here. [`ParamClass::of`] is exhaustive over `Type`
+/// with no catch-all, so a type added to the language has to say how it is
+/// passed rather than defaulting to a byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ParamClass {
+    /// One byte, in A.
     Byte,
-    /// Two bytes, high in Y: `u16`, `i16`, `b16`, and function pointers.
+    /// Two bytes, high in Y — the 16-bit numbers, and a function pointer,
+    /// which is two bytes without being a number and is the case a list
+    /// written as "the wide primitives, plus the things reached by a pointer"
+    /// leaves out.
     Word,
-    /// Two bytes, high in X: the pointer convention. A `&T`, a `str`, an enum,
-    /// or the address of a struct passed by reference.
+    /// Two bytes, high in X: the pointer convention. A `&T`, a `str` or an
+    /// enum — values that *are* addresses, produced in those registers by
+    /// evaluating the expression.
     Address,
+    /// Two bytes, high in X, but obtained by resolving a *place* to its
+    /// address rather than by evaluating a value. A struct is passed by
+    /// reference, and a struct local's slot holds the struct itself — so
+    /// copying two bytes out of the slot hands the callee its contents.
+    StructRef,
+    /// Two bytes copied out of the slot that already holds them: an array's
+    /// slot holds a pointer to its data.
+    ArrayRef,
+    /// Four bytes copied as a block — a slice's base-and-length descriptor,
+    /// which no register pair can carry.
+    Descriptor,
 }
 
-impl IndirectArgKind {
-    fn of(ty: &Type) -> Result<Self, CodegenError> {
+impl ParamClass {
+    fn of(ty: &Type, info: &ProgramInfo) -> Self {
         use crate::ast::PrimitiveType;
-        Ok(match ty {
+        match ty {
             Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16) => {
                 Self::Word
             }
             Type::Primitive(_) => Self::Byte,
-            Type::Pointer(_) | Type::String => Self::Address,
-            // A struct goes by reference; an enum is already a 2-byte value in
-            // the same registers. Both are `Named`.
-            Type::Named(_) => Self::Address,
             // A function pointer is two bytes, high in Y, like a `u16`.
             Type::Function(..) => Self::Word,
-            _ => {
-                return Err(CodegenError::UnsupportedOperation(format!(
-                    "an indirect call cannot take a {} argument: it is staged at a fixed \
-                     address for a callee that is not known until run time, which suits a \
-                     scalar, a pointer, a string, an enum or a struct. Pass a `&T` to it \
-                     instead",
-                    ty.display_name()
-                )));
-            }
-        })
+            Type::Pointer(_) | Type::String => Self::Address,
+            // An enum's value is already a pointer to its data block and
+            // arrives in A:X; a struct's address has to be resolved from a
+            // place. Both are spelled `Named` and only the registry separates
+            // them. A `Named` the registry knows neither way cannot reach
+            // codegen — and if it somehow does, `StructRef` errors rather than
+            // staging one byte of it.
+            Type::Named(n) if info.type_registry.get_enum(n).is_some() => Self::Address,
+            Type::Named(_) => Self::StructRef,
+            Type::Array(_, _) => Self::ArrayRef,
+            Type::Slice(_) => Self::Descriptor,
+            // Neither can be a parameter's type: `Void` has no values, and
+            // `Error` is a poison that `analyze_module` stops before codegen.
+            // Classified rather than panicked, so a malformed signature stages
+            // one byte and the type error is what the user sees.
+            Type::Void | Type::Error => Self::Byte,
+        }
     }
 
-    fn size(self) -> u8 {
+    /// Bytes this parameter occupies, in the staging pool and in the frame.
+    fn width(self) -> u8 {
         match self {
             Self::Byte => 1,
-            Self::Word | Self::Address => 2,
+            Self::Word | Self::Address | Self::StructRef | Self::ArrayRef => 2,
+            Self::Descriptor => 4,
+        }
+    }
+
+    /// Which register holds the high byte, for the classes produced *in* a
+    /// register pair. [`Self::ArrayRef`] and [`Self::Descriptor`] are copied
+    /// slot to slot and never go through one.
+    fn high_byte_in_x(self) -> bool {
+        matches!(self, Self::Address | Self::StructRef)
+    }
+
+    /// Whether an indirect call can stage this class.
+    ///
+    /// The callee is unknown, so every argument has to arrive at a fixed
+    /// address rather than in the callee's own frame. That suits anything one
+    /// or two bytes wide with a settled register convention. An array
+    /// parameter is a descriptor whose shape depends on the callee, and a
+    /// slice is four bytes, so neither can.
+    fn fits_indirect_block(self) -> bool {
+        !matches!(self, Self::ArrayRef | Self::Descriptor)
+    }
+}
+
+/// Which of the four call forms is staging an argument.
+///
+/// Only what genuinely differs between them lives here: how the site names
+/// itself when an expression cannot be staged. Everything else — the width,
+/// the register convention, which expression forms can supply each class — is
+/// the same question at all four and is answered once in [`stage_argument`].
+#[derive(Clone, Copy)]
+enum StagingSite<'a> {
+    /// A direct `JSR` to a named function, staging argument `index` (0-based).
+    Direct { callee: &'a str, index: usize },
+    /// An inlined body, writing straight into the parameter's slot.
+    Inline,
+    /// A tail-recursive rebind of the function's own parameters.
+    TailCall,
+    /// Through the fixed indirect-arg block, for a callee that is not known
+    /// until run time.
+    Indirect,
+}
+
+impl StagingSite<'_> {
+    /// The error for an expression that cannot supply this parameter.
+    ///
+    /// Reaching it means every path for the parameter's class declined the
+    /// expression. That is a refusal, not a fallback: the alternative is
+    /// staging a fraction of what the callee will read, which is how a struct
+    /// argument came to be one byte of its own contents.
+    fn cannot_stage(self, param_ty: &Type) -> CodegenError {
+        let ty = param_ty.display_name();
+        CodegenError::UnsupportedOperation(match self {
+            Self::Direct { callee, index } => format!(
+                "cannot pass this expression as argument {} of '{callee}': a `{ty}` is passed \
+                 by address or by descriptor, and this expression provides neither. Bind it \
+                 to a `let` first and pass that",
+                index + 1
+            ),
+            Self::Inline => format!(
+                "cannot pass this expression to an inlined function's `{ty}` parameter: it is \
+                 passed by address or by descriptor, and this expression provides neither. \
+                 Bind it to a `let` first and pass that"
+            ),
+            Self::TailCall => format!(
+                "cannot rebind the `{ty}` parameter from this expression in a tail-recursive \
+                 call: it is passed by address or by descriptor, and this expression provides \
+                 neither. Bind it to a `let` first and pass that"
+            ),
+            Self::Indirect => format!(
+                "an indirect call cannot take a {ty} argument: it is staged at a fixed \
+                 address for a callee that is not known until run time, which suits a \
+                 scalar, a pointer, a string, an enum or a struct. Pass a `&T` to it instead"
+            ),
+        })
+    }
+}
+
+/// The zero-page slot a copied class reads its bytes out of.
+///
+/// A slice's four-byte descriptor and an array's two-byte data pointer are
+/// both *named* by a variable rather than produced by an expression, so both
+/// are found the same way. The class of the symbol's own type has to match
+/// what the parameter wants, which is what stops an array being copied into a
+/// slice parameter four bytes wide.
+fn copied_source_slot(expr: &Spanned<Expr>, info: &ProgramInfo, want: ParamClass) -> Option<u8> {
+    let mut cur = expr;
+    while let Expr::Paren(inner) = &cur.node {
+        cur = inner;
+    }
+    let Expr::Variable(name) = &cur.node else {
+        return None;
+    };
+    let sym = info
+        .resolved_symbols
+        .get(&cur.span)
+        .or_else(|| info.table.lookup(name))?;
+    let crate::sema::table::SymbolLocation::ZeroPage(slot) = sym.location else {
+        return None;
+    };
+    (ParamClass::of(&sym.ty, info) == want).then_some(slot)
+}
+
+/// Stage one argument at `dest`, and report how many bytes it wrote.
+///
+/// The one place a call's argument is put where the callee will look for it.
+/// `dest` is a zero-page address and means something different at each site —
+/// a staging-pool slot for a direct call, the fixed block's slot for an
+/// indirect one, the parameter's own slot for an inlined body — but the code
+/// that fills it does not care which, so it is written once.
+///
+/// The bytes written are always `ParamClass::of(param_ty).width()`, which is
+/// also what the caller reserved. That is the invariant the four separate
+/// copies of this used to break: one sized a function pointer as a single
+/// byte while writing two, and the parameter after it landed a byte early.
+fn stage_argument(
+    arg: &Spanned<Expr>,
+    param_ty: &Type,
+    dest: u8,
+    site: StagingSite<'_>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<u8, CodegenError> {
+    let class = ParamClass::of(param_ty, info);
+    let arg_ty = info.resolved_types.get(&arg.span);
+
+    match class {
+        // Four bytes of base and length. No register pair carries them, so
+        // every path here is a copy or an in-place build.
+        ParamClass::Descriptor => {
+            // A bound slice variable, or a slice parameter — both hold their
+            // descriptor inline.
+            if let Some(src) = copied_source_slot(arg, info, ParamClass::Descriptor) {
+                for k in 0..class.width() {
+                    emitter.emit_inst("LDA", &format!("${:02X}", src + k));
+                    emitter.emit_inst("STA", &format!("${:02X}", dest + k));
+                }
+                emitter.invalidate_registers();
+                return Ok(class.width());
+            }
+
+            // A slice *expression* — `total(a[1..4])`. The materializer writes
+            // a descriptor to a zero-page address, and `dest` is one, so it
+            // builds in place with nothing to copy afterwards.
+            if let Expr::Slice {
+                object,
+                start,
+                end,
+                inclusive,
+            } = &arg.node
+            {
+                let Some(Type::Slice(elem)) = arg_ty else {
+                    return Err(CodegenError::Internal(
+                        "slice argument without a slice type".to_string(),
+                    ));
+                };
+                crate::codegen::stmt::assign::generate_slice_materialize(
+                    dest,
+                    elem,
+                    object,
+                    start,
+                    end,
+                    *inclusive,
+                    emitter,
+                    info,
+                    string_collector,
+                )?;
+                emitter.invalidate_registers();
+                return Ok(class.width());
+            }
+
+            // A slice from a call — `total(mk())`, direct or through a
+            // function pointer. The callee leaves a *pointer* to its
+            // descriptor in A:X, so the four bytes are copied through it.
+            // Staging A alone handed the callee one byte of that pointer as
+            // though it were the base of the slice.
+            if crate::codegen::expr::is_call(arg) {
+                generate_expr(arg, emitter, info, string_collector)?;
+                crate::codegen::stmt::emit_return_by_value_copy(
+                    emitter,
+                    dest as u16,
+                    class.width(),
+                );
+                emitter.invalidate_registers();
+                return Ok(class.width());
+            }
+
+            Err(site.cannot_stage(param_ty))
+        }
+
+        // An array's slot holds a two-byte pointer to its data, so the
+        // parameter takes a copy of the slot.
+        ParamClass::ArrayRef => {
+            let Some(src) = copied_source_slot(arg, info, ParamClass::ArrayRef) else {
+                return Err(site.cannot_stage(param_ty));
+            };
+            emitter.emit_inst("LDA", &format!("${:02X}", src));
+            emitter.emit_inst("LDY", &format!("${:02X}", src + 1));
+            emitter.emit_inst("STA", &format!("${:02X}", dest));
+            emitter.emit_inst("STY", &format!("${:02X}", dest + 1));
+            emitter.invalidate_registers();
+            Ok(class.width())
+        }
+
+        // A struct is passed by *address*, and its slot is not where that
+        // address lives — a local holds the struct inline. Every place has an
+        // address, not just a zero-page local: a `static`, a nested field and
+        // an array element all do, and matching only `Variable` is how
+        // `sum(PS[i])` came to read whatever the first byte of the contents
+        // happened to address.
+        ParamClass::StructRef => {
+            if crate::codegen::expr::emit_struct_place_address(
+                arg,
+                emitter,
+                info,
+                string_collector,
+            )?
+            .is_some()
+            {
+                emitter.emit_inst("STA", &format!("${:02X}", dest));
+                emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
+                emitter.invalidate_registers();
+                return Ok(class.width());
+            }
+
+            // A struct literal, or a call returning one, evaluates to a
+            // pointer to its own bytes in A:X — the same convention, without
+            // a place to resolve. A constant literal points into ROM and so
+            // has a non-zero high byte, which is why dropping it was a silent
+            // miscompile rather than merely a zero-page assumption.
+            if crate::codegen::expr::is_call(arg)
+                || matches!(
+                    &arg.node,
+                    Expr::StructInit { .. } | Expr::AnonStructInit { .. }
+                )
+            {
+                generate_expr(arg, emitter, info, string_collector)?;
+                emitter.emit_inst("STA", &format!("${:02X}", dest));
+                emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
+                emitter.invalidate_registers();
+                return Ok(class.width());
+            }
+
+            Err(site.cannot_stage(param_ty))
+        }
+
+        // The classes a register pair carries. The expression produces the
+        // value; all that is left is which registers it arrived in.
+        ParamClass::Byte | ParamClass::Word | ParamClass::Address => {
+            generate_expr(arg, emitter, info, string_collector)?;
+
+            // A narrow argument reaching a wide parameter is widened by the
+            // language, and by the *source's* signedness — a negative `i8`
+            // passed to an `i16` parameter keeps its sign. Before the low byte
+            // is stored, because sign-extending works through A and X.
+            if class == ParamClass::Word
+                && let Some(signed) = crate::codegen::expr::implicit_widening(arg_ty, param_ty)
+            {
+                crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
+            }
+
+            emitter.emit_inst("STA", &format!("${:02X}", dest));
+            if class.width() == 2 {
+                if class.high_byte_in_x() {
+                    emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
+                } else {
+                    // A parameter whose argument's type sema did not resolve
+                    // still needs a defined high byte.
+                    if arg_ty.is_none() {
+                        emitter.emit_inst("LDY", "#$00");
+                    }
+                    emitter.emit_inst("STY", &format!("${:02X}", dest + 1));
+                }
+            }
+            Ok(class.width())
         }
     }
 }
@@ -823,30 +846,28 @@ fn generate_indirect_call(
     use crate::codegen::memory_layout::{INDIRECT_ARG_BASE, INDIRECT_ARG_MAX};
     use crate::sema::table::SymbolLocation;
 
-    let is_16 = |ty: Option<&Type>| {
-        matches!(
-            ty,
-            Some(Type::Primitive(
-                crate::ast::PrimitiveType::U16
-                    | crate::ast::PrimitiveType::I16
-                    | crate::ast::PrimitiveType::B16
-            ))
-        )
-    };
-
     emitter.emit_comment("Indirect call through function pointer");
 
     if !args.is_empty() {
-        // How each parameter reaches the callee. Everything here is one or two
-        // bytes in the staging block; the callee's prologue copies them into
-        // its frame by byte count, so what matters is producing the right two
-        // bytes in the right registers.
-        let kinds: Vec<IndirectArgKind> = param_types
+        // How each parameter reaches the callee, from the same classification
+        // the other three call forms use.
+        //
+        // The one restriction that belongs to *this* site rather than to the
+        // parameter: an argument here is staged at a fixed address, because
+        // the callee is not known until run time and every candidate reads
+        // from the same place. A whole array and a four-byte descriptor do not
+        // fit that, and are refused with a way out rather than staged wrong.
+        let classes: Vec<ParamClass> = param_types
             .iter()
-            .map(IndirectArgKind::of)
-            .collect::<Result<_, _>>()?;
+            .map(|ty| ParamClass::of(ty, info))
+            .collect();
+        for (class, pty) in classes.iter().zip(param_types.iter()) {
+            if !class.fits_indirect_block() {
+                return Err(StagingSite::Indirect.cannot_stage(pty));
+            }
+        }
 
-        let total: u8 = kinds.iter().map(|k| k.size()).sum();
+        let total: u8 = classes.iter().map(|c| c.width()).sum();
         if total > INDIRECT_ARG_MAX {
             return Err(CodegenError::UnsupportedOperation(format!(
                 "indirect call arguments exceed the {}-byte staging block",
@@ -862,53 +883,18 @@ fn generate_indirect_call(
         })?;
         let mut off = 0u8;
         let mut placed = Vec::new();
-        for ((arg, pty), kind) in args.iter().zip(param_types.iter()).zip(kinds.iter()) {
-            match kind {
-                IndirectArgKind::Byte | IndirectArgKind::Word => {
-                    let p16 = matches!(kind, IndirectArgKind::Word);
-                    let arg16 = is_16(info.resolved_types.get(&arg.span));
-                    generate_expr(arg, emitter, info, string_collector)?;
-                    // The same implicit widening as a direct call's, and by the
-                    // source's signedness rather than always by zero.
-                    if p16
-                        && let Some(signed) = crate::codegen::expr::implicit_widening(
-                            info.resolved_types.get(&arg.span),
-                            pty,
-                        )
-                    {
-                        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
-                    }
-                    emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
-                    if p16 {
-                        if !arg16 && !info.resolved_types.contains_key(&arg.span) {
-                            emitter.emit_inst("LDY", "#$00");
-                        }
-                        emitter.emit_inst("STY", &format!("${:02X}", temp_base + off + 1));
-                    }
-                }
-                // A two-byte address, high byte in X: a pointer, a string, an
-                // enum, or the address of a struct passed by reference. The
-                // struct case has to resolve a *place* to its address; a
-                // literal or a call already leaves a pointer to its own bytes.
-                IndirectArgKind::Address => {
-                    let is_struct_place = matches!(pty, Type::Named(n)
-                        if info.type_registry.get_struct(n).is_some())
-                        && super::aggregate::emit_struct_place_address(
-                            arg,
-                            emitter,
-                            info,
-                            string_collector,
-                        )?
-                        .is_some();
-                    if !is_struct_place {
-                        generate_expr(arg, emitter, info, string_collector)?;
-                    }
-                    emitter.emit_inst("STA", &format!("${:02X}", temp_base + off));
-                    emitter.emit_inst("STX", &format!("${:02X}", temp_base + off + 1));
-                }
-            }
-            placed.push((temp_base + off, kind.size() == 2));
-            off += kind.size();
+        for (arg, pty) in args.iter().zip(param_types.iter()) {
+            let width = stage_argument(
+                arg,
+                pty,
+                temp_base + off,
+                StagingSite::Indirect,
+                emitter,
+                info,
+                string_collector,
+            )?;
+            placed.push((temp_base + off, width == 2));
+            off += width;
         }
 
         // STEP 2: copy the staged args into the fixed staging block.
@@ -1231,9 +1217,10 @@ fn generate_inline_call(
 /// parameter — a two-byte pointer — was dereferenced through a half-written
 /// address. It compiled, and it silently did the wrong thing.
 ///
-/// The register conventions mirror `generate_call`: 16-bit scalars come back in
-/// A:Y, pointer-like values (enums, strings) in A:X, and aggregates are copied
-/// from the variable's own slot rather than evaluated into registers.
+/// The register conventions no longer *mirror* `generate_call` — the two share
+/// [`stage_argument`], which is the point. Mirroring is what let them drift: a
+/// struct arrived here as the first two bytes of its contents, and a function
+/// pointer as one byte of its address.
 fn store_inline_arg(
     arg: &Spanned<Expr>,
     param_ty: &Type,
@@ -1242,169 +1229,20 @@ fn store_inline_arg(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    let arg_ty = info.resolved_types.get(&arg.span);
-
-    // A struct is passed by *address*, and its slot is not where that address
-    // lives: a local holds the struct inline, so copying two bytes out of the
-    // slot hands the callee the first two bytes of the *contents*. `p.x` then
-    // dereferenced (4, 38) as though it were a pointer. Only a struct
-    // parameter's slot holds an address, which is the case that made this look
-    // right. `emit_struct_place_address` covers both, and a static, a nested
-    // field and an array element besides.
-    if let Type::Named(name) = param_ty
-        && info.type_registry.get_struct(name).is_some()
-    {
-        if super::aggregate::emit_struct_place_address(arg, emitter, info, string_collector)?
-            .is_none()
-        {
-            // A literal or a call leaves a pointer to its own bytes in A:X,
-            // which is the same convention; anything else has no address and
-            // the parameter cannot be filled.
-            generate_expr(arg, emitter, info, string_collector)?;
-        }
-        emitter.emit_inst("STA", &format!("${:02X}", dest));
-        emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
-        emitter.invalidate_registers();
-        return Ok(());
-    }
-
-    // The remaining aggregates really do keep a pointer or a descriptor in the
-    // argument variable's slot, so those bytes are copied across as they are.
-    // A slice is 4 (base + length); an array is a 2-byte pointer to its data.
-    let aggregate_bytes = match param_ty {
-        Type::Slice(_) => Some(4u8),
-        Type::Array(_, _) => Some(2),
-        _ => None,
-    };
-    if let Some(width) = aggregate_bytes {
-        if let Expr::Variable(var_name) = &arg.node
-            && let Some(sym) = info
-                .resolved_symbols
-                .get(&arg.span)
-                .or_else(|| info.table.lookup(var_name))
-            && let crate::sema::table::SymbolLocation::ZeroPage(src) = sym.location
-        {
-            for k in 0..width {
-                emitter.emit_inst("LDA", &format!("${:02X}", src + k));
-                emitter.emit_inst("STA", &format!("${:02X}", dest + k));
-            }
-            emitter.invalidate_registers();
-            return Ok(());
-        }
-        return Err(CodegenError::UnsupportedOperation(format!(
-            "passing this expression to an inline function's `{}` parameter is not supported;              use a variable",
-            format_type_name(param_ty)
-        )));
-    }
-
-    generate_expr(arg, emitter, info, string_collector)?;
-
-    // Enums, strings and `&T` are 2-byte pointers returned in A:X.
-    if arg_high_byte_in_x(param_ty, info) {
-        emitter.emit_inst("STA", &format!("${:02X}", dest));
-        emitter.emit_inst("STX", &format!("${:02X}", dest + 1));
-        return Ok(());
-    }
-
-    // Whatever is left that is two bytes comes back in A:Y. That is the 16-bit
-    // scalars and a function pointer — which this used to list by hand and
-    // omit, so an inlined `apply(add_one, v)` filled the parameter's low byte
-    // and left its high byte at whatever the slot held. An 8-bit argument
-    // widening to a 16-bit parameter has no high byte to store, so
-    // zero-extend it.
-    let is_16bit = param_byte_width(param_ty) == 2;
-    // An inlined call widens its arguments like any other, and by the source's
-    // signedness: this zero-extended, so a negative `i8` handed to an `i16`
-    // parameter lost its sign — and a *small* function is inlined by default,
-    // so this is the path most one-line callees actually take.
-    if let Some(signed) = crate::codegen::expr::implicit_widening(arg_ty, param_ty) {
-        crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
-    }
-    emitter.emit_inst("STA", &format!("${:02X}", dest));
-    if is_16bit {
-        let arg_is_8bit = arg_ty.is_none();
-        if arg_is_8bit {
-            emitter.emit_inst("LDY", "#$00");
-        }
-        emitter.emit_inst("STY", &format!("${:02X}", dest + 1));
-    }
+    // An inlined body writes into the parameter's slot directly — there is no
+    // pool to stage through, because there is no `JSR` for a nested call to
+    // arrive between. So `dest` is the destination itself, and the width is
+    // whatever the class says it is.
+    stage_argument(
+        arg,
+        param_ty,
+        dest,
+        StagingSite::Inline,
+        emitter,
+        info,
+        string_collector,
+    )?;
     Ok(())
-}
-
-/// A type's name for diagnostics.
-fn format_type_name(ty: &Type) -> String {
-    match ty {
-        Type::Slice(_) => "slice".to_string(),
-        Type::Pointer(p) => format!("&{}", p.display_name()),
-        Type::Array(_, _) => "array".to_string(),
-        Type::Named(n) => n.clone(),
-        other => format!("{:?}", other),
-    }
-}
-
-/// Generate parameter updates for tail recursive calls
-///
-/// This is similar to generate_call but WITHOUT the JSR instruction.
-/// It evaluates arguments and updates parameter locations in place,
-/// allowing a JMP back to the function start for tail call optimization.
-/// The bytes a parameter of this type occupies in a frame.
-///
-/// A slice is a four-byte descriptor; a 16-bit number, an address, a string, an
-/// enum and a struct (passed by reference) are two; everything else is one.
-/// The one place a parameter's width is decided, so a site cannot re-list the
-/// variants and forget one — which is exactly how the tail-call loop came to
-/// rebind a quarter of a slice and put the next parameter inside it.
-pub(crate) fn param_byte_width(ty: &crate::sema::types::Type) -> u8 {
-    use crate::sema::types::Type;
-    match ty {
-        Type::Slice(_) => 4,
-        Type::Primitive(
-            crate::ast::PrimitiveType::U16
-            | crate::ast::PrimitiveType::I16
-            | crate::ast::PrimitiveType::B16,
-        )
-        | Type::Pointer(_)
-        | Type::Function(_, _)
-        | Type::Array(_, _)
-        | Type::String
-        | Type::Named(_) => 2,
-        _ => 1,
-    }
-}
-
-/// Which register holds the high byte of a two-byte *argument*, by the
-/// parameter's type.
-///
-/// [`high_byte_in_x`](crate::codegen::expr::high_byte_in_x) answers this for
-/// the types whose convention the type alone settles. An enum cannot be one of
-/// those: its value is a two-byte pointer to its data block and arrives in A:X
-/// like any address, but the type is spelled `Named`, which also covers
-/// structs — and a struct *field* is stored inline rather than as a pointer.
-/// Only the registry can tell the two apart, so this is the variant that has
-/// it, and it is about parameters specifically.
-fn arg_high_byte_in_x(ty: &Type, info: &ProgramInfo) -> bool {
-    crate::codegen::expr::high_byte_in_x(ty)
-        || matches!(ty, Type::Named(n) if info.type_registry.get_enum(n).is_some())
-}
-
-/// The zero-page slot holding a slice descriptor named by `expr`, for the
-/// paths that move four bytes rather than produce a value in registers.
-fn slice_descriptor_slot(expr: &Spanned<Expr>, info: &ProgramInfo) -> Option<u8> {
-    let mut cur = expr;
-    while let Expr::Paren(inner) = &cur.node {
-        cur = inner;
-    }
-    let Expr::Variable(name) = &cur.node else {
-        return None;
-    };
-    let sym = info
-        .resolved_symbols
-        .get(&cur.span)
-        .or_else(|| info.table.lookup(name))?;
-    match (&sym.ty, &sym.location) {
-        (Type::Slice(_), crate::sema::table::SymbolLocation::ZeroPage(slot)) => Some(*slot),
-        _ => None,
-    }
 }
 
 pub fn generate_tail_recursive_update(
@@ -1457,8 +1295,23 @@ pub fn generate_tail_recursive_update(
         Some(crate::sema::types::Type::Function(params, _)) => params.clone(),
         _ => Vec::new(),
     };
-    let widths: Vec<u8> = (0..args.len())
-        .map(|i| param_types.get(i).map_or(1, param_byte_width))
+    // A tail call rebinds this function's own parameters, so its own signature
+    // says how wide each is. Missing an entry means the signature does not
+    // cover the arguments, which for a *self* call is a compiler bug — said
+    // out loud rather than defaulting each unknown to one byte, which is the
+    // shape that used to write a slice's first quarter and shift every
+    // parameter after it.
+    if param_types.len() < args.len() {
+        return Err(CodegenError::Internal(format!(
+            "tail-recursive call passes {} arguments to a signature of {}",
+            args.len(),
+            param_types.len()
+        )));
+    }
+    let widths: Vec<u8> = param_types
+        .iter()
+        .take(args.len())
+        .map(|ty| ParamClass::of(ty, info).width())
         .collect();
     let total_bytes: u8 = widths.iter().sum();
 
@@ -1478,79 +1331,17 @@ pub fn generate_tail_recursive_update(
     let mut temp_offset = 0u8;
     let mut arg_info: Vec<(u8, u8)> = Vec::new();
 
-    for (i, arg) in args.iter().enumerate() {
+    for (arg, pty) in args.iter().zip(param_types.iter()) {
         let temp_addr = temp_base + temp_offset;
-        let width = widths[i];
-        let pty = param_types.get(i);
-
-        // A four-byte descriptor is not produced in a register: it is copied
-        // out of the slot that already holds one.
-        if width == 4 {
-            let Some(src) = slice_descriptor_slot(arg, info) else {
-                return Err(CodegenError::UnsupportedOperation(
-                    "cannot rebind a slice parameter from this expression in a tail-recursive                      call: a slice comes from a variable or another parameter"
-                        .to_string(),
-                ));
-            };
-            for k in 0..4u8 {
-                emitter.emit_inst("LDA", &format!("${:02X}", src + k));
-                emitter.emit_inst("STA", &format!("${:02X}", temp_addr + k));
-            }
-            temp_offset += 4;
-            arg_info.push((temp_addr, 4));
-            continue;
-        }
-
-        // A struct is passed by *reference*, so what the parameter takes is the
-        // address of the argument's storage — which `generate_expr` does not
-        // produce for a place. It loaded the first byte of the struct's
-        // contents and left the high byte to whatever `Y` held, which happened
-        // to be right often enough to survive a single call.
-        if width == 2
-            && let Some(Type::Named(n)) = pty
-            && info.type_registry.get_struct(n).is_some()
-        {
-            if crate::codegen::expr::emit_struct_place_address(
-                arg,
-                emitter,
-                info,
-                string_collector,
-            )?
-            .is_none()
-            {
-                return Err(CodegenError::UnsupportedOperation(format!(
-                    "cannot rebind the `{n}` parameter from this expression in a                      tail-recursive call: a struct is passed by address, and this                      expression has none"
-                )));
-            }
-            emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-            emitter.emit_inst("STX", &format!("${:02X}", temp_addr + 1));
-            temp_offset += 2;
-            arg_info.push((temp_addr, 2));
-            continue;
-        }
-
-        generate_expr(arg, emitter, info, string_collector)?;
-
-        // As at every other call site, a narrow argument reaching a wide
-        // parameter is widened by the source's signedness.
-        if width == 2
-            && let Some(signed) = pty.and_then(|pt| {
-                crate::codegen::expr::implicit_widening(info.resolved_types.get(&arg.span), pt)
-            })
-        {
-            crate::codegen::expr::emit_widen_a_into_y(emitter, signed);
-        }
-
-        emitter.emit_inst("STA", &format!("${:02X}", temp_addr));
-        if width == 2 {
-            // An address arrives in A:X, a 16-bit number in A:Y.
-            let hi = if pty.is_some_and(|pt| arg_high_byte_in_x(pt, info)) {
-                "STX"
-            } else {
-                "STY"
-            };
-            emitter.emit_inst(hi, &format!("${:02X}", temp_addr + 1));
-        }
+        let width = stage_argument(
+            arg,
+            pty,
+            temp_addr,
+            StagingSite::TailCall,
+            emitter,
+            info,
+            string_collector,
+        )?;
         temp_offset += width;
         arg_info.push((temp_addr, width));
     }
