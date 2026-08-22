@@ -61,6 +61,11 @@ read against a current picture:
 | An enum field of a struct is stored inline, so a `match` on it picks the right arm | `tests/e2e/aggregate_dispatch.rs` |
 | A `static` struct initialises every field kind, `str` and enum included | `tests/e2e/aggregate_dispatch.rs` |
 | The fuzzer indexes an array field through the by-reference parameter | `docs/fuzz-coverage.md` |
+| A failed declaration no longer hides the bodies; only its own name is suppressed | `tests/e2e/multi_error.rs` |
+| An unknown type in a declaration is reported where it is written | `tests/e2e/multi_error.rs` |
+| A broken module reports every error, once, however many paths reach it | `tests/e2e/import_diagnostics.rs` |
+| Every `SemaError` variant is pinned by a golden test or excused with a reason | `tests/e2e/error_diagnostics.rs` |
+| 133 of the specification's 225 code blocks compile on every run | `tests/e2e/spec_examples.rs` |
 
 ## What keeps going wrong
 
@@ -641,20 +646,36 @@ explicit bounds.
 
 ## Correctness & diagnostics
 
-Multi-error reporting covers declarations, bodies, statements and independent
-subexpressions; two boundaries remain uncrossed because doing so safely needs
-work the rest did not:
+Multi-error reporting covers declarations, bodies, statements, independent
+subexpressions, and — since the two boundaries below were crossed — everything
+after a failed declaration and everything inside a failed module.
 
-- **Recover from a failed declaration into the bodies.** Today a declaration that
-  fails to register stops the walk, because its symbol is then missing and every
-  use would report a bogus "cannot find" on top of the real error. Crossing this
-  needs per-name suppression: remember which names failed to register and
-  silence exactly their `UndefinedSymbol`s in the body pass.
-- **Report several errors from one imported module.** `SemaError::InModule`
-  carries a diagnostic already rendered against the child's source (its spans
-  index a file the driver never read), so N child errors need N renders, each
-  with its own `trail` clone, merged under the existing `is_replay` guard in
-  `merge_imported` — or a diamond import reports the same module twice.
+- **Recover from a failed declaration into the bodies.** *Done.* A declaration
+  that failed to register left its symbol missing, so every use of it reported
+  "cannot find …" on top of the real error; analysis stopped before the bodies
+  to avoid that, and one broken declaration hid every mistake below it.
+
+  The suppression is per *name*: what a failed declaration would have defined is
+  remembered, and exactly those `UndefinedSymbol`s are dropped in `record` — the
+  one place every collected error passes through. The body loop records rather
+  than propagates, because propagating discarded the causes to report a symptom.
+
+  It also turned up a diagnostic that did not exist. An unknown named type in a
+  declaration was not reported at all: resolution accepts any name in type
+  position, as it must — `struct A { next: &B }` may name a `B` below it — and
+  nothing checked afterwards, so the first sign was a mismatch at the *use* site
+  against a type that does not exist. A pass after registration reports each one
+  where it is written.
+- **Report several errors from one imported module.** *Done.* The child's whole
+  set is rendered against its own source and carried up under one trail, which
+  followed from the recovery above: before it, a module's declaration errors hid
+  its body's.
+
+  The remaining half was the diamond. Only *successful* analyses were cached, so
+  a second import of a broken module re-analyzed it and rendered everything
+  again — two modules importing one broken third turned three mistakes into six.
+  Failed modules are remembered too, and a later import of one says the import
+  failed and points at the report instead of repeating it.
 
 Also open:
 
@@ -672,19 +693,39 @@ Also open:
   share `emit_widen_a_into_y` and `implicit_widening` now, so a seventh site
   asks rather than re-derives.
 
-- **Widen the spec-example harness further.** 82 of the spec's ~210 code blocks
-  are now compiled on every run (`tests/e2e/spec_examples.rs`), via
-  ` ```rust,compile ` for whole programs and ` ```rust,compile,fragment ` for
-  statement runs wrapped in a generated `main`. Most of what is still untagged
-  is untaggable by design — deliberate error examples, and the stdlib reference
-  section's bodyless signatures. The remainder needs a peripheral or helper
-  supplied to become self-contained, one block at a time.
-- **More error-message golden tests** as new diagnostics land, in the
-  exact-position style of `tests/e2e/error_diagnostics.rs` (33 cases).
-  `TypeMismatch`, `InvalidUnaryOp`, `BreakOutsideLoop`, `EscapingPointer`,
-  `InvalidAddrUsage`, `InstructionConflict`, `DuplicateSymbol` and
-  `FrameRegionOverflow` are pinned; `ReturnTypeMismatch`, `OutOfZeroPage` and
-  the import diagnostics are not.
+- **Widen the spec-example harness further.** *133 of the spec's 225 code
+  blocks* are compiled on every run (`tests/e2e/spec_examples.rs`), up from 94,
+  via ` ```rust,compile ` for whole programs and ` ```rust,compile,fragment `
+  for statement runs wrapped in a generated `main`.
+
+  Most of the gain was the stdlib reference, whose examples each called a
+  library function without importing it — so none of them compiled, and a
+  reader copying one got an undefined name. Compiling them also found four
+  examples that were simply wrong: two declared a `#[reset]` function *inside*
+  `main` and called `main()` from it.
+
+  The fix for a block that needs a helper is to put the helper *in the block*,
+  not to teach the harness a third shape: an example that cannot stand on its
+  own is one a reader cannot use either.
+
+  What is left is capped by a test, with each category written down beside it:
+  ~29 truncated `{ ... }` signatures where the ellipsis is the point, ~20
+  deliberate error examples, 9 imports of illustrative modules, and features
+  the spec marks as not implemented.
+- **Every diagnostic is pinned, or says why not.** *Done, and self-checking.*
+  The `SemaError` variant list is read from the source at test time, in the
+  style of the fuzzer's AST coverage, and each name must be pinned by a golden
+  test in `tests/e2e/error_diagnostics.rs` or listed with a reason.
+
+  Two variants turned out to have no construction site anywhere —
+  `OutOfZeroPage`, which this item asked for a test of, and
+  `ReturnOutsideFunction`, which cannot be built because a `return` outside a
+  function does not parse. Both are deleted: a variant nobody raises is a
+  message nobody reads and a case every `match` still has to carry.
+
+  Writing the exemption list caught two invented reasons on the first pass, for
+  variants that were already pinned forty lines above. An exemption list is only
+  worth as much as the willingness to check it.
 
 ---
 

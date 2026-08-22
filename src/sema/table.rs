@@ -140,7 +140,7 @@ impl Default for SymbolTable {
 
 /// Levenshtein edit distance between two identifiers, for typo suggestions.
 /// Small strings, so the straightforward two-row dynamic program is plenty.
-fn levenshtein(a: &str, b: &str) -> usize {
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut curr = vec![0usize; b.len() + 1];

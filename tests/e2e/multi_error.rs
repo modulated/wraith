@@ -231,8 +231,9 @@ fn broken_declarations_all_report() {
 
 #[test]
 fn a_failed_declaration_does_not_cascade_into_bodies() {
-    // `A` never registered, so analysis stops before the bodies rather than
-    // reporting "cannot find `A`" at each use on top of the real error.
+    // `A` never registered, so each use of it would report "cannot find `A`" on
+    // top of the real error. The suppression is by name, and the bodies are
+    // still walked.
     let e = errors_of(
         r#"
         const A: u8 = 300;
@@ -242,4 +243,145 @@ fn a_failed_declaration_does_not_cascade_into_bodies() {
     );
     assert_eq!(e.matches("error:").count(), 1, "cause only:\n{e}");
     assert!(!e.contains("cannot find"), "no follow-on symptoms:\n{e}");
+}
+
+#[test]
+fn a_failed_declaration_no_longer_hides_the_bodies() {
+    // The other half of the same rule: only the *failed name* is suppressed, so
+    // a body's own unrelated mistake still reports. Analysis used to stop after
+    // the declaration pass, so this file reported one error and the typo was
+    // found on the next run.
+    let e = errors_of(
+        r#"
+        const A: u8 = 300;
+        #[reset]
+        fn main() {
+            let x: u8 = A;          // suppressed: `A` never registered
+            let y: u8 = typo_here;  // reported: nothing to do with `A`
+            loop {}
+        }
+    "#,
+    );
+    assert_eq!(e.matches("error:").count(), 2, "cause and typo:\n{e}");
+    assert!(e.contains("typo_here"), "the body's own mistake:\n{e}");
+    assert!(
+        !e.contains("cannot find `A`"),
+        "and not the follow-ons from `A`:\n{e}"
+    );
+}
+
+#[test]
+fn a_failed_declaration_does_not_hide_a_later_declaration_or_body() {
+    // Three independent mistakes across both passes, in one run.
+    let e = errors_of(
+        r#"
+        const A: u8 = 300;
+        struct S { f: NoSuchType }
+        #[reset]
+        fn main() {
+            let a: u8 = A;
+            let b: u8 = also_missing;
+            loop {}
+        }
+    "#,
+    );
+    assert_eq!(
+        e.matches("error:").count(),
+        3,
+        "two declarations and a body:\n{e}"
+    );
+}
+
+/// A named type that no struct or enum defines is reported *where it is
+/// written*.
+///
+/// It was not reported at all. Resolution accepted any name in type position —
+/// it has to, since `struct A { next: &B }` may name a `B` declared further
+/// down — and nothing checked afterwards, so the first sign was a mismatch at
+/// the use site against a type that does not exist: `expected NoSuchType,
+/// found u8`, pointing at the wrong line entirely.
+#[test]
+fn an_unknown_type_in_a_declaration_is_reported_at_its_own_span() {
+    let e = errors_of(
+        r#"
+        struct Point { x: u8, y: u8 }
+        struct S { f: Pointt }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert_eq!(e.matches("error:").count(), 1, "{e}");
+    assert!(e.contains("cannot find `Pointt`"), "{e}");
+    assert!(
+        e.contains("a similar name is in scope: `Point`"),
+        "the candidates are the declared *types*, not the values:\n{e}"
+    );
+    assert!(
+        !e.contains("expected"),
+        "and not as a mismatch at some later use:\n{e}"
+    );
+}
+
+#[test]
+fn an_unknown_type_is_found_in_every_declaration_position() {
+    // One walk over the type expression, so a name nested in a pointer, an
+    // array, a slice or a function type is reached as readily as a bare one.
+    let cases: [(&str, &str); 6] = [
+        ("a struct field", "struct S { f: Missing }"),
+        ("behind a pointer", "struct S { f: &Missing }"),
+        ("an array element", "struct S { f: [Missing; 2] }"),
+        ("a function parameter", "fn f(p: Missing) { }"),
+        ("a return type", "fn f() -> Missing { loop {} }"),
+        ("a static's type", "static G: Missing = 0;"),
+    ];
+    for (what, decl) in cases {
+        let e = errors_of(&format!("{decl}\n#[reset]\nfn main() {{ loop {{}} }}\n"));
+        assert!(
+            e.contains("cannot find `Missing`"),
+            "{what} must report it:\n{e}"
+        );
+    }
+}
+
+#[test]
+fn a_forward_reference_to_a_type_declared_later_is_fine() {
+    // The reason the check cannot live in resolution: types register in source
+    // order, so this is only answerable once the registry is complete.
+    match compile(
+        r#"
+        struct Node { value: u8, next: &Later }
+        struct Later { v: u8 }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    ) {
+        CompileResult::Success(..) => {}
+        other => panic!("a forward reference must compile, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_kind_of_declaration_suppresses_its_own_name() {
+    // Each item kind has to contribute the name it failed to define, or its
+    // uses cascade. A duplicate is the case where the name *is* defined by the
+    // first declaration, so nothing needs suppressing and nothing is lost.
+    let cases: [(&str, &str); 4] = [
+        ("a const", "const A: u8 = 300;"),
+        ("a static", "static A: u8 = 300;"),
+        ("a function", "fn A() -> u8 { return 300; }"),
+        ("an address", "const A: addr = 0x10000;"),
+    ]
+    .map(|(what, decl)| (what, decl));
+    for (what, decl) in cases {
+        let e = errors_of(&format!(
+            "{decl}
+#[reset]
+fn main() {{ let x: u8 = other_typo; loop {{}} }}
+"
+        ));
+        assert!(
+            e.contains("other_typo"),
+            "{what}: the body's own mistake must still report:\n{e}"
+        );
+    }
 }

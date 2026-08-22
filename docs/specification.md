@@ -955,25 +955,36 @@ struct Entity {
 
 ### Usage
 
-```rust
-let p1: Point = { x: 10, y: 20 };
-let p2: Point = { x: 5, y: 5 };
-p2.x = 15;
+```rust,compile
+struct Point { x: u8, y: u8 }
 
-let x_coord: u8 = p1.x;
+#[reset]
+fn main() {
+    let p1: Point = { x: 10, y: 20 };
+    let p2: Point = { x: 5, y: 5 };
+    p2.x = 15;
+
+    let x_coord: u8 = p1.x;
+    loop {}
+}
 ```
 
 A field may be named `len`, `low` or `high`. On a struct-typed object the
 field wins over the built-in accessor (which applies only to slices, arrays
 and strings for `.len`, and to `u16`/`i16` for `.low`/`.high`):
 
-```rust
+```rust,compile
 struct Entry { len: u8, flags: u8 }
-let e: Entry = { len: 4, flags: 1 };
-let n: u8 = e.len;   // the field: 4
 
-let a: [u8; 4] = [1, 2, 3, 4];
-let m: u16 = a.len;  // the built-in: 4
+#[reset]
+fn main() {
+    let e: Entry = { len: 4, flags: 1 };
+    let n: u8 = e.len;   // the field: 4
+
+    let a: [u8; 4] = [1, 2, 3, 4];
+    let m: u16 = a.len;  // the built-in: 4
+    loop {}
+}
 ```
 
 ### Memory Layout
@@ -1021,7 +1032,7 @@ fn main() {
 
 Structs can contain other structs as fields:
 
-```rust
+```rust,compile
 struct Vector {
     x: i16,
     y: i16,
@@ -1042,6 +1053,9 @@ fn update_sprite(s: Sprite) {
     s.position.x = s.position.x + s.velocity.x;
     s.position.y = s.position.y + s.velocity.y;
 }
+
+#[reset]
+fn main() { loop {} }
 ```
 
 ### Structs in Arrays
@@ -1073,10 +1087,15 @@ All structs are passed **by reference**: the callee receives a 2-byte pointer
 to the caller's storage (see [Calling Convention](#appendix-c-calling-convention)).
 Field writes through a struct parameter modify the *caller's* struct:
 
-```rust
+```rust,compile
+struct Entity { health: u8 }
+
 fn update_entity(e: Entity) {
     e.health = e.health - 1;  // mutates the caller's Entity
 }
+
+#[reset]
+fn main() { let e: Entity = { health: 3 }; update_entity(e); loop {} }
 ```
 
 To work on a copy, bind the parameter to a local — binding copies (see
@@ -1197,7 +1216,7 @@ All items completed.
 
 ### Simple Enums
 
-```rust
+```rust,compile
 enum Direction {
     North = 0,
     South = 1,
@@ -1205,7 +1224,11 @@ enum Direction {
     West = 3,
 }
 
-let dir: Direction = Direction::North;
+#[reset]
+fn main() {
+    let dir: Direction = Direction::North;
+    loop {}
+}
 ```
 
 #### Discriminants
@@ -1253,7 +1276,7 @@ Wraith supports enum variants that carry data, allowing you to create tagged uni
 
 Tuple variants carry unnamed fields accessed by position:
 
-```rust
+```rust,compile
 enum Option {
     None,
     Some(u8),
@@ -1268,10 +1291,14 @@ enum Result {
     Err(u8),
 }
 
-// Creating tuple variant instances
-let value: Option = Option::Some(42);
-let red: Color = Color::RGB(255, 0, 0);
-let success: Result = Result::Ok(1000);
+#[reset]
+fn main() {
+    // Creating tuple variant instances
+    let value: Option = Option::Some(42);
+    let red: Color = Color::RGB(255, 0, 0);
+    let success: Result = Result::Ok(1000);
+    loop {}
+}
 ```
 
 **Pattern Matching with Tuple Variants** (⚠️ EXPERIMENTAL - Limited Testing):
@@ -1301,7 +1328,7 @@ fn unwrap_or_default(opt: Option) -> u8 {
 
 Struct variants carry named fields:
 
-```rust
+```rust,compile
 enum Message {
     Quit,
     Move { x: u8, y: u8 },
@@ -1309,9 +1336,13 @@ enum Message {
     ChangeColor { r: u8, g: u8, b: u8 },
 }
 
-// Creating struct variant instances
-let msg: Message = Message::Move { x: 10, y: 20 };
-let color: Message = Message::ChangeColor { r: 255, g: 128, b: 0 };
+#[reset]
+fn main() {
+    // Creating struct variant instances
+    let msg: Message = Message::Move { x: 10, y: 20 };
+    let color: Message = Message::ChangeColor { r: 255, g: 128, b: 0 };
+    loop {}
+}
 ```
 
 **Pattern Matching with Struct Variants**:
@@ -1363,16 +1394,20 @@ enum Color {
 
 You can mix unit, tuple, and struct variants in the same enum:
 
-```rust
+```rust,compile
 enum Input {
     None,                          // Unit variant (tag only)
     Key(u8),                       // Tuple variant (tag + 1 byte)
     MouseClick { x: u8, y: u8 },   // Struct variant (tag + 2 bytes)
 }
 
-let input1: Input = Input::None;
-let input2: Input = Input::Key(65);  // 'A' key
-let input3: Input = Input::MouseClick { x: 100, y: 50 };
+#[reset]
+fn main() {
+    let input1: Input = Input::None;
+    let input2: Input = Input::Key(65);  // 'A' key
+    let input3: Input = Input::MouseClick { x: 100, y: 50 };
+    loop {}
+}
 ```
 
 #### Current Limitations
@@ -1446,14 +1481,18 @@ if current_dir == Direction::North {
 
 Enums are stored as single bytes (u8):
 
-```rust
+```rust,compile
 enum State {
     Off = 0,
     On = 1,
 }
 
-let s: State = State::On;  // Stored as u8 value 1
-let raw: u8 = s as u8;     // Cast to u8: 1
+#[reset]
+fn main() {
+    let s: State = State::On;  // Stored as u8 value 1
+    let raw: u8 = s as u8;     // Cast to u8: 1
+    loop {}
+}
 ```
 
 **Characteristics:**
@@ -1515,7 +1554,9 @@ let x: u8 = data[i];      // NO bounds check - undefined if i >= 5
 - Use constants when possible for compile-time checking
 - Add manual checks for variable indices if needed
 
-```rust
+```rust,compile,fragment
+let data: [u8; 5] = [1, 2, 3, 4, 5];
+let i: u8 = 3;
 if i < 5 {
     let x: u8 = data[i];  // Safe
 }
@@ -2066,17 +2107,26 @@ const COMMA: str = FULL[5..7];        // ", "
 
 Iterate over characters in a string:
 
-```rust
-// Simple iteration
-for c in message {
-    // c is char (each character)
-    process_char(c);
-}
+```rust,compile
+fn process_char(c: char) { }
 
-// With index
-for (i, c) in message {
-    // i is u8 (index), c is char (character)
-    buffer[i] = c as u8;   // buffer is [u8; N], so cast the char to its byte
+#[reset]
+fn main() {
+    let message: str = "hi";
+    let buffer: [u8; 8] = [0; 8];
+
+    // Simple iteration
+    for c in message {
+        // c is char (each character)
+        process_char(c);
+    }
+
+    // With index
+    for (i, c) in message {
+        // i is u8 (index), c is char (character)
+        buffer[i] = c as u8;   // buffer is [u8; N], so cast the char to its byte
+    }
+    loop {}
 }
 ```
 
@@ -2131,7 +2181,8 @@ All items completed.
 
 ### If/Else
 
-```rust
+```rust,compile,fragment
+let x: u8 = 12;
 if x > 10 {
     // ...
 } else if x > 5 {
@@ -2143,11 +2194,13 @@ if x > 10 {
 
 ### While Loop
 
-```rust
+```rust,compile,fragment
+let condition: bool = false;
 while condition {
     // ...
 }
 
+let x: u8 = 0;
 while x < 100 {
     x = x + 1;
 }
@@ -2155,7 +2208,8 @@ while x < 100 {
 
 ### Loop (Infinite)
 
-```rust
+```rust,compile,fragment
+let done: bool = true;
 loop {
     if done {
         break;
@@ -2165,30 +2219,34 @@ loop {
 
 ### For Loop
 
-```rust
-// Range-based (type inferred from range bounds)
-for i in 0..10 {      // 0 to 9, i is inferred as u8
-    // ...
-}
-
-for i in 0..=255 {    // 0 to 255 (inclusive), i is u8
-    // ...
-}
-
-for i in 0..1000 {    // Larger range, i is inferred as u16
-    // ...
-}
-
-// Explicit type annotation
-for i: u8 in 0..10 {
-    // ...
-}
-
+```rust,compile
 // Over slices (type inferred from slice element type)
 fn process(data: &[u8]) {
     for item in data {  // item is inferred as u8
         // process item
     }
+}
+
+#[reset]
+fn main() {
+    // Range-based (type inferred from range bounds)
+    for i in 0..10 {      // 0 to 9, i is inferred as u8
+        // ...
+    }
+
+    for i in 0..=255 {    // 0 to 255 (inclusive), i is u8
+        // ...
+    }
+
+    for i in 0..1000 {    // Larger range, i is inferred as u16
+        // ...
+    }
+
+    // Explicit type annotation
+    for i: u8 in 0..10 {
+        // ...
+    }
+    loop {}
 }
 ```
 
@@ -3112,16 +3170,20 @@ fn enable_interrupts()
 **Use:** After calling, the CPU will respond to IRQ interrupts. NMI interrupts are always enabled.
 
 **Example:**
-```rust
+```rust,compile
+import { enable_interrupts } from "std/intrinsics.wr";
+
+fn setup_hardware() { }
+
 #[reset]
 fn reset_handler() {
     // Initialize hardware first
     setup_hardware();
 
-    // Enable interrupts before main loop
+    // Enable interrupts before the main loop
     enable_interrupts();
 
-    main();
+    loop {}
 }
 ```
 
@@ -3138,7 +3200,13 @@ fn disable_interrupts()
 **Use:** Create critical sections that must not be interrupted. NMI cannot be disabled.
 
 **Example:**
-```rust
+```rust,compile
+import { disable_interrupts, enable_interrupts } from "std/intrinsics.wr";
+
+static SHARED: u16 = 0;
+
+fn update_shared_data() { SHARED = SHARED + 1; }
+
 fn critical_update() {
     disable_interrupts();
 
@@ -3147,6 +3215,9 @@ fn critical_update() {
 
     enable_interrupts();
 }
+
+#[reset]
+fn main() { critical_update(); loop {} }
 ```
 
 #### Carry Flag Control
@@ -3204,13 +3275,18 @@ fn set_decimal()
 **Use:** In BCD mode, ADC and SBC treat values as packed BCD digits (0-9). Useful for decimal display calculations.
 
 **Example:**
-```rust
+```rust,compile
+import { clear_decimal, set_decimal } from "std/intrinsics.wr";
+
 fn bcd_add(a: u8, b: u8) -> u8 {
     set_decimal();
     let result: u8 = a + b;  // BCD addition
     clear_decimal();
     return result;
 }
+
+#[reset]
+fn main() { let s: u8 = bcd_add(0x19, 0x01); loop {} }
 ```
 
 **Note:** Wraith's `b8` and `b16` types automatically manage decimal mode.
@@ -3286,11 +3362,13 @@ fn set_stack_pointer(value: u8)
 **Note:** The 6502 stack lives in page 1 ($0100-$01FF). Common usage: `set_stack_pointer(0xFF)` to initialize SP to $01FF (top of stack).
 
 **Example:**
-```rust
+```rust,compile
+import { set_stack_pointer } from "std/intrinsics.wr";
+
 #[reset]
 fn reset_handler() {
     set_stack_pointer(0xFF);  // Initialize stack to top
-    main();
+    loop {}
 }
 ```
 
@@ -3349,9 +3427,15 @@ fn memset(dest: &u8, value: u8, len: u8)
 - Zero memory regions
 
 **Example:**
-```rust
-// Clear screen with spaces (0x20)
-memset(0x0400 as &u8, 0x20, 255);
+```rust,compile
+import { memset } from "std/mem.wr";
+
+#[reset]
+fn main() {
+    // Clear screen with spaces (0x20)
+    memset(0x0400 as &u8, 0x20, 255);
+    loop {}
+}
 ```
 
 Note that an `addr` declaration in rvalue position is a *load* from that
@@ -3399,8 +3483,14 @@ fn mem_read(address: u16) -> u8
 **Uses:** 6502 indirect indexed addressing mode `LDA (addr),Y`
 
 **Example:**
-```rust
-let value: u8 = mem_read(0x0400);  // Read from $0400
+```rust,compile
+import { mem_read } from "std/mem.wr";
+
+#[reset]
+fn main() {
+    let value: u8 = mem_read(0x0400);  // Read from $0400
+    loop {}
+}
 ```
 
 ##### `mem_write(address: u16, value: u8)`
@@ -3416,8 +3506,14 @@ fn mem_write(address: u16, value: u8)
 **Uses:** 6502 indirect indexed addressing mode `STA (addr),Y`
 
 **Example:**
-```rust
-mem_write(0x0400, 42);  // Write 42 to $0400
+```rust,compile
+import { mem_write } from "std/mem.wr";
+
+#[reset]
+fn main() {
+    mem_write(0x0400, 42);  // Write 42 to $0400
+    loop {}
+}
 ```
 
 ##### `mem_jump(address: u16)`
@@ -3433,10 +3529,16 @@ fn mem_jump(address: u16)
 **Warning:** Execution may not return unless the target code explicitly returns. Typically used for monitor/debugger "Go" commands.
 
 **Example:**
-```rust
-// Jump to code at $8000
-mem_jump(0x8000);
-// Execution continues at $8000
+```rust,compile
+import { mem_jump } from "std/mem.wr";
+
+#[reset]
+fn main() {
+    // Jump to code at $8000
+    mem_jump(0x8000);
+    // Execution continues at $8000
+    loop {}
+}
 ```
 
 ### Module: math.wr
@@ -3463,8 +3565,15 @@ fn min(a: u8, b: u8) -> u8
 **Optimization:** Uses CMP and BCC to avoid boolean intermediate
 
 **Example:**
-```rust
-let health: u8 = min(current_health, 100);  // Cap at 100
+```rust,compile
+import { min } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let current_health: u8 = 120;
+    let health: u8 = min(current_health, 100);  // Cap at 100
+    loop {}
+}
 ```
 
 ##### `max(a: u8, b: u8) -> u8`
@@ -3480,8 +3589,15 @@ fn max(a: u8, b: u8) -> u8
 **Optimization:** Uses CMP and BCS to avoid boolean intermediate
 
 **Example:**
-```rust
-let damage: u8 = max(base_damage, 1);  // Minimum 1 damage
+```rust,compile
+import { max } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let base_damage: u8 = 0;
+    let damage: u8 = max(base_damage, 1);  // Minimum 1 damage
+    loop {}
+}
 ```
 
 ##### `clamp(value: u8, min_val: u8, max_val: u8) -> u8`
@@ -3497,8 +3613,15 @@ fn clamp(value: u8, min_val: u8, max_val: u8) -> u8
 **Optimization:** Two comparisons with early exit
 
 **Example:**
-```rust
-let volume: u8 = clamp(user_input, 0, 15);  // Clamp to 0-15 range
+```rust,compile
+import { clamp } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let user_input: u8 = 20;
+    let volume: u8 = clamp(user_input, 0, 15);  // Clamp to 0-15 range
+    loop {}
+}
 ```
 
 #### Bit Manipulation (65C02)
@@ -3521,9 +3644,15 @@ fn set_bit(value: u8, bit: u8) -> u8
 **Temporary Storage:** Zero page $20
 
 **Example:**
-```rust
-let flags: u8 = 0b00000000;
-flags = set_bit(flags, 3);  // Set bit 3 -> 0b00001000
+```rust,compile
+import { set_bit } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let flags: u8 = 0b00000000;
+    flags = set_bit(flags, 3);  // Set bit 3 -> 0b00001000
+    loop {}
+}
 ```
 
 ##### `clear_bit(value: u8, bit: u8) -> u8`
@@ -3540,9 +3669,15 @@ fn clear_bit(value: u8, bit: u8) -> u8
 **Temporary Storage:** Zero page $20
 
 **Example:**
-```rust
-let flags: u8 = 0b11111111;
-flags = clear_bit(flags, 5);  // Clear bit 5 -> 0b11011111
+```rust,compile
+import { clear_bit } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let flags: u8 = 0b11111111;
+    flags = clear_bit(flags, 5);  // Clear bit 5 -> 0b11011111
+    loop {}
+}
 ```
 
 ##### `test_bit(value: u8, bit: u8) -> u8`
@@ -3560,10 +3695,16 @@ fn test_bit(value: u8, bit: u8) -> u8
 **Temporary Storage:** Zero page $20
 
 **Example:**
-```rust
-let status: u8 = 0b00010000;
-if test_bit(status, 4) == 1 {
-    // Bit 4 is set
+```rust,compile
+import { test_bit } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let status: u8 = 0b00010000;
+    if test_bit(status, 4) == 1 {
+        // Bit 4 is set
+    }
+    loop {}
 }
 ```
 
@@ -3582,9 +3723,15 @@ fn saturating_add(a: u8, b: u8) -> u8
 **Returns:** a + b, or 255 if overflow would occur
 
 **Example:**
-```rust
-let health: u8 = 250;
-health = saturating_add(health, 10);  // Result: 255, not wrap to 4
+```rust,compile
+import { saturating_add } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let health: u8 = 250;
+    health = saturating_add(health, 10);  // Result: 255, not wrap to 4
+    loop {}
+}
 ```
 
 ##### `saturating_sub(a: u8, b: u8) -> u8`
@@ -3600,9 +3747,15 @@ fn saturating_sub(a: u8, b: u8) -> u8
 **Returns:** a - b, or 0 if underflow would occur
 
 **Example:**
-```rust
-let ammo: u8 = 3;
-ammo = saturating_sub(ammo, 5);  // Result: 0, not wrap to 254
+```rust,compile
+import { saturating_sub } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let ammo: u8 = 3;
+    ammo = saturating_sub(ammo, 5);  // Result: 0, not wrap to 254
+    loop {}
+}
 ```
 
 #### Advanced Bit Operations
@@ -3620,8 +3773,14 @@ fn count_bits(value: u8) -> u8
 **Returns:** Number of 1 bits in the value (0-8)
 
 **Example:**
-```rust
-let bits: u8 = count_bits(0b10110101);  // Returns 5
+```rust,compile
+import { count_bits } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let bits: u8 = count_bits(0b10110101);  // Returns 5
+    loop {}
+}
 ```
 
 ##### `reverse_bits(value: u8) -> u8`
@@ -3638,9 +3797,15 @@ fn reverse_bits(value: u8) -> u8
 **Example:** `0b11010010` → `0b01001011`
 
 **Example:**
-```rust
-let reversed: u8 = reverse_bits(0xA5);  // 0xA5 -> 0xA5 (palindrome)
-let test: u8 = reverse_bits(0x01);      // 0x01 -> 0x80
+```rust,compile
+import { reverse_bits } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let reversed: u8 = reverse_bits(0xA5);  // 0xA5 -> 0xA5 (palindrome)
+    let test: u8 = reverse_bits(0x01);      // 0x01 -> 0x80
+    loop {}
+}
 ```
 
 ##### `swap_nibbles(value: u8) -> u8`
@@ -3656,9 +3821,15 @@ fn swap_nibbles(value: u8) -> u8
 **Example:** `0xAB` → `0xBA`
 
 **Example:**
-```rust
-let swapped: u8 = swap_nibbles(0x12);  // 0x12 -> 0x21
-let color: u8 = swap_nibbles(0xF0);    // 0xF0 -> 0x0F
+```rust,compile
+import { swap_nibbles } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let swapped: u8 = swap_nibbles(0x12);  // 0x12 -> 0x21
+    let color: u8 = swap_nibbles(0xF0);    // 0xF0 -> 0x0F
+    loop {}
+}
 ```
 
 #### 16-bit Arithmetic
@@ -3677,8 +3848,14 @@ fn mul16(a: u16, b: u16) -> u16
 **Temporary Storage:** Zero page $20-$27 (parameters `a`/`b` are read from their normal zero-page frame slots like any other function parameter - see [Zero Page Allocation](#zero-page-allocation))
 
 **Example:**
-```rust
-let area: u16 = mul16(320, 200);  // Screen area calculation
+```rust,compile
+import { mul16 } from "std/math.wr";
+
+#[reset]
+fn main() {
+    let area: u16 = mul16(320, 200);  // Screen area calculation
+    loop {}
+}
 ```
 
 ##### `div16(a: u16, b: u16) -> u16`
@@ -3695,13 +3872,21 @@ fn div16(a: u16, b: u16) -> u16
 **Temporary Storage:** Zero page $20-$27 (parameters `a`/`b` are read from their normal zero-page frame slots like any other function parameter - see [Zero Page Allocation](#zero-page-allocation))
 
 **Example:**
-```rust
-let average: u16 = div16(total_score, num_players);
+```rust,compile
+import { div16 } from "std/math.wr";
 
-// Division by zero handling
-let result: u16 = div16(100, 0);  // Returns 0xFFFF
-if result == 0xFFFF {
-    // Handle division by zero
+#[reset]
+fn main() {
+    let total_score: u16 = 4200;
+    let num_players: u16 = 7;
+    let average: u16 = div16(total_score, num_players);
+
+    // Division by zero handling
+    let result: u16 = div16(100, 0);  // Returns 0xFFFF
+    if result == 0xFFFF {
+        // Handle division by zero
+    }
+    loop {}
 }
 ```
 
@@ -3803,9 +3988,14 @@ let flag: bool = true;      // Boolean
 ```
 
 **Variable Declaration:**
-```rust
-let x: u8 = 42;             // Mutable variable (automatically zero-page allocated)
+```rust,compile
 const MAX: u8 = 100;        // Compile-time constant
+
+#[reset]
+fn main() {
+    let x: u8 = 42;         // Mutable variable (automatically zero-page allocated)
+    loop {}
+}
 ```
 
 **CPU Status Flags:**
@@ -3930,10 +4120,15 @@ Operators are listed from highest to lowest precedence:
 | 14 (lowest) | `=` `+=` `-=` etc. | Assignment operators | Right-to-left |
 
 **Examples:**
-```rust
+```rust,compile,fragment
+let p: bool = true;
+let q: bool = false;
+let a: u8 = 1;
+let b: u8 = 2;
+
 let x: u8 = 2 + 3 * 4;      // 14, not 20 (multiplication before addition)
 let y: u8 = (2 + 3) * 4;    // 20 (parentheses override)
-let z: bool = !a && b;      // (!a) && b (NOT before AND)
+let z: bool = !p && q;      // (!p) && q (NOT before AND)
 let w: u8 = a + b << 2;     // (a + b) << 2 (addition before shift)
 ```
 
@@ -3973,7 +4168,10 @@ A count the compiler can see is at or past the width is a **warning**, not an
 error — the behaviour is defined, and clearing a value by shifting it out is a
 real if unusual idiom:
 
-```rust
+```rust,compile,fragment
+let a: u8 = 1;
+let n: u8 = 3;
+
 let x: u8 = a << 8;        // warning: shifting a `u8` by 8 always yields 0
 let y: u8 = a << 7;        // fine
 let z: u8 = a << n;        // fine: `n` is only known at run time

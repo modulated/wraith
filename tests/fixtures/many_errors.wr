@@ -1,0 +1,13 @@
+// Fixture for the multi-error import tests: a module with several independent
+// mistakes, spread across both analysis passes.
+//
+// Two declarations that cannot register, and a body that names something that
+// does not exist. Reporting only the first, or only the declarations, is what
+// makes a broken module take three compiles to fix.
+pub const TOO_BIG: u8 = 300;
+
+pub const ALSO_TOO_BIG: u8 = 400;
+
+pub fn broken() -> u8 {
+    return not_a_name;
+}

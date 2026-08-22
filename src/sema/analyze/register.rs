@@ -789,6 +789,33 @@ impl SemanticAnalyzer {
         import_path: &PathBuf,
         import: &Import,
     ) -> Result<(Rc<SemanticAnalyzer>, Vec<Spanned<crate::ast::Item>>), SemaError> {
+        let result = self.analyze_module_file_inner(import_path, import);
+        if result.is_err() {
+            self.import_context
+                .borrow_mut()
+                .failed
+                .insert(import_path.clone());
+        }
+        result
+    }
+
+    /// The body of [`Self::analyze_module_file`], wrapped so that every failure
+    /// path marks the module as reported exactly once.
+    fn analyze_module_file_inner(
+        &mut self,
+        import_path: &PathBuf,
+        import: &Import,
+    ) -> Result<(Rc<SemanticAnalyzer>, Vec<Spanned<crate::ast::Item>>), SemaError> {
+        // A module that already failed has already been reported. Every other
+        // path that reaches it would otherwise render the same diagnostics
+        // again — a diamond turns three mistakes into six.
+        if self.import_context.borrow().failed.contains(import_path) {
+            return Err(SemaError::ImportFailedElsewhere {
+                path: import.path.node.clone(),
+                span: import.path.span,
+            });
+        }
+
         // Load and parse the imported file
         let source = std::fs::read_to_string(import_path).map_err(|e| SemaError::ImportError {
             path: import.path.node.clone(),

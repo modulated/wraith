@@ -1,0 +1,4 @@
+// One of the two paths a diamond reaches `many_errors.wr` by.
+import { TOO_BIG } from "many_errors.wr";
+
+pub const ONE: u8 = 1;
