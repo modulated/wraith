@@ -44,6 +44,15 @@ pub struct ImportContext {
     stack: Vec<PathBuf>,
     /// Global BSS high-water mark for mutable statics (see `bss_alloc`).
     bss_cursor: Option<u16>,
+    /// Modules whose analysis already failed, and whose diagnostics are already
+    /// in the report.
+    ///
+    /// Only *successful* analyses are cached in `modules`, so a second import
+    /// of a broken module re-analyzed it and rendered every one of its errors
+    /// again: a diamond — two modules importing one broken third — reported
+    /// three mistakes six times, with only the trail note telling the two
+    /// copies apart.
+    pub(super) failed: std::collections::HashSet<PathBuf>,
 }
 
 impl ImportContext {
@@ -52,6 +61,7 @@ impl ImportContext {
             modules: HashMap::default(),
             stack: Vec::new(),
             bss_cursor: None,
+            failed: std::collections::HashSet::new(),
         }))
     }
 }

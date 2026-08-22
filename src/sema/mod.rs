@@ -122,6 +122,14 @@ pub enum SemaError {
         import_span: Span,
     },
 
+    /// An import of a module that already failed, further up this compile.
+    ///
+    /// Its diagnostics are in the report once already; repeating them for every
+    /// path that reaches the module would multiply one mistake by the shape of
+    /// the import graph. This says the import failed and points at where the
+    /// errors are.
+    ImportFailedElsewhere { path: String, span: Span },
+
     /// Out of zero page memory
     OutOfZeroPage { span: Span },
 
@@ -186,6 +194,7 @@ impl SemaError {
             | FieldNotFound { span, .. }
             | EscapingPointer { span, .. }
             | ImportError { span, .. }
+            | ImportFailedElsewhere { span, .. }
             | OutOfZeroPage { span }
             | InstructionConflict { span, .. }
             | Custom { span, .. }
@@ -417,6 +426,13 @@ impl SemaError {
                 let msg = format!("failed to import '{}': {}", path, reason);
                 format!(
                     "error: import error\n{}",
+                    span.format_error_context_of(source, filename, &msg, file)
+                )
+            }
+            SemaError::ImportFailedElsewhere { path, span } => {
+                let msg = format!("'{}' has errors, reported above", path);
+                format!(
+                    "error: import failed\n{}",
                     span.format_error_context_of(source, filename, &msg, file)
                 )
             }
@@ -699,6 +715,13 @@ impl std::fmt::Display for SemaError {
                     f,
                     "import error at {}..{}: failed to import '{}': {}",
                     span.start, span.end, path, reason
+                )
+            }
+            SemaError::ImportFailedElsewhere { path, span } => {
+                write!(
+                    f,
+                    "import failed at {}..{}: '{}' has errors, reported above",
+                    span.start, span.end, path
                 )
             }
             SemaError::OutOfZeroPage { span } => {

@@ -156,3 +156,84 @@ fn a_missing_module_is_reported_once_against_the_importing_file() {
         "the reason should not be prefixed twice: {err}"
     );
 }
+
+// ============================================================================
+// Several errors from one module, and one module reached several ways
+// ============================================================================
+
+#[test]
+fn every_error_in_an_imported_module_is_reported() {
+    // A broken module used to yield whatever its analysis stopped at. Its two
+    // passes now collect independently, and the whole set is rendered against
+    // the module's own source before being carried up, so one compile shows
+    // everything there is to fix.
+    let err = expect_error(
+        r#"
+        import * from "tests/fixtures/many_errors.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { OUT = 1; loop {} }
+    "#,
+    );
+    assert_eq!(
+        err.matches("error:").count(),
+        3,
+        "two declarations and a body:\n{err}"
+    );
+    assert!(err.contains("300"), "the first declaration:\n{err}");
+    assert!(err.contains("400"), "the second:\n{err}");
+    assert!(
+        err.contains("not_a_name"),
+        "and the body, which the declarations used to hide:\n{err}"
+    );
+}
+
+#[test]
+fn every_error_in_an_imported_module_keeps_that_modules_position() {
+    let err = expect_error(
+        r#"
+        import * from "tests/fixtures/many_errors.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { OUT = 1; loop {} }
+    "#,
+    );
+    // Each is rendered against the module's text, not the importer's — three
+    // distinct lines of the fixture, quoted.
+    for line in ["TOO_BIG: u8 = 300", "ALSO_TOO_BIG: u8 = 400", "not_a_name"] {
+        assert!(err.contains(line), "`{line}` should be quoted:\n{err}");
+    }
+    assert_eq!(
+        err.matches("many_errors.wr:").count(),
+        3,
+        "one position per error, all in the failing module:\n{err}"
+    );
+}
+
+#[test]
+fn a_module_reached_two_ways_is_reported_once() {
+    // The diamond: two modules import one broken third. Only successful
+    // analyses were cached, so the second path re-analyzed the module and
+    // rendered every one of its errors again — three mistakes came out six
+    // times, distinguishable only by the trail note.
+    let err = expect_error(
+        r#"
+        import { ONE } from "tests/fixtures/via_one.wr";
+        import { TWO } from "tests/fixtures/via_two.wr";
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() { OUT = ONE + TWO; loop {} }
+    "#,
+    );
+    assert_eq!(
+        err.matches("constant value 300").count(),
+        1,
+        "the same mistake must not be reported once per path:\n{err}"
+    );
+    // The second path still says it failed — silence there would suggest the
+    // import was fine.
+    assert!(
+        err.contains("has errors, reported above"),
+        "the other path should point at the report rather than repeat it:\n{err}"
+    );
+}
