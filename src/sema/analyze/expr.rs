@@ -571,7 +571,6 @@ impl SemanticAnalyzer {
         }
     }
 
-
     /// Check and evaluate a generated table, `[|i| => <expr>]`.
     ///
     /// The length is not written: it comes from the array type this expression
@@ -650,7 +649,6 @@ impl SemanticAnalyzer {
         self.fold_array_gen(param, body, &elem, len, span)?;
         Ok(Type::Array(elem, len))
     }
-
 
     /// Fold every entry of a generated table and record it against `span`.
     ///

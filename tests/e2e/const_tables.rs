@@ -135,7 +135,7 @@ fn a_local_table_is_stored_into_the_frame() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0900), 0 + 3 + 6 + 9);
+    assert_eq!(e.mem(0x0900), 3 + 6 + 9);
 }
 
 // ============================================================================
@@ -146,16 +146,21 @@ fn a_local_table_is_stored_into_the_frame() {
 fn a_generated_table_matches_the_same_loop_at_run_time() {
     // The whole semantic claim: `i` is a `u8` and the body is the language's
     // ordinary arithmetic, so a table and a loop over the same expression
-    // cannot disagree. `i * 100` runs past 255 at i = 3, which is where a
-    // constant evaluator that quietly worked in wider integers would show up.
+    // cannot disagree.
+    //
+    // The body has to *use* an overflowed intermediate, not just end on one:
+    // `i * 100` alone proves nothing, because the last byte written is the low
+    // byte either way. Dividing afterwards is where an evaluator that quietly
+    // worked in wider integers shows up — at i = 3, `300 / 2` is 150 but
+    // `44 / 2` is 22, and the machine says 22.
     let mut e = run(r#"
-        const T: [u8; 8] = [|i| => i * 100];
+        const T: [u8; 8] = [|i| => (i * 100) / 2];
         const OUT: addr = 0x0900;
         #[reset]
         fn main() {
             let i: u8 = 0;
             while i < 8 {
-                let computed: u8 = i * 100;
+                let computed: u8 = (i * 100) / 2;
                 if computed != T[i] {
                     OUT = 0xFF;
                     loop {}
@@ -166,18 +171,23 @@ fn a_generated_table_matches_the_same_loop_at_run_time() {
             loop {}
         }
     "#);
-    assert_eq!(e.mem(0x0900), 1, "a generated table disagreed with the loop");
+    assert_eq!(
+        e.mem(0x0900),
+        1,
+        "a generated table disagreed with the loop"
+    );
 }
 
 #[test]
 fn a_wide_intermediate_needs_a_written_cast() {
-    // The other side of that rule: at `u8` the product wraps, so a table of
-    // 16-bit results says so. Both are folded, and they differ — which is the
-    // reader's call to make, not the compiler's.
+    // The other side of that rule: at `u8` the product wraps before the divide,
+    // so a table that wants the wide answer says so with a cast. Both are
+    // folded, and at i = 3 they differ — 22 against 150 — which is the reader's
+    // call to make, not the compiler's.
     let asm = compile_success(
         r#"
-        const NARROW: [u8; 4] = [|i| => i * 100];
-        const WIDE: [u16; 4] = [|i| => (i as u16) * 100];
+        const NARROW: [u8; 4] = [|i| => (i * 100) / 2];
+        const WIDE: [u16; 4] = [|i| => ((i as u16) * 100) / 2];
         const OUT: addr = 0x0900;
         #[reset]
         fn main() {
@@ -186,11 +196,8 @@ fn a_wide_intermediate_needs_a_written_cast() {
         }
     "#,
     );
-    assert_eq!(table_bytes(&asm, "NARROW"), vec![0, 100, 200, 44]);
-    assert_eq!(
-        table_bytes(&asm, "WIDE"),
-        vec![0, 0, 100, 0, 200, 0, 44, 1]
-    );
+    assert_eq!(table_bytes(&asm, "NARROW"), vec![0, 50, 100, 22]);
+    assert_eq!(table_bytes(&asm, "WIDE"), vec![0, 0, 50, 0, 100, 0, 150, 0]);
 }
 
 #[test]

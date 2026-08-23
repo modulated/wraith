@@ -298,8 +298,7 @@ fn flatten_array(
         Expr::Literal(Literal::ArrayGen { .. }) => {
             let Some(values) = ctx.generated_table(expr.span) else {
                 return Err(InitError::fatal(
-                    "this generated table was never folded, which is a compiler bug"
-                        .to_string(),
+                    "this generated table was never folded, which is a compiler bug".to_string(),
                     expr.span,
                 ));
             };
