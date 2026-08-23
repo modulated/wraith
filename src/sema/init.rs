@@ -472,12 +472,48 @@ pub fn flatten_top(
     ty: &Type,
     ctx: &dyn InitContext,
     tolerate_unknown: bool,
+    soa: Option<&crate::sema::SoaLayout>,
 ) -> Result<Vec<InitByte>, InitError> {
     let size = size_of(ty, ctx.registry());
     let mut out = Vec::with_capacity(size);
     match flatten(&mut out, expr, ty, ctx) {
-        Ok(()) => Ok(out),
+        Ok(()) => Ok(transpose(out, soa, ctx)),
         Err(e) if tolerate_unknown && !e.fatal => Ok(vec![InitByte::Byte(0); size]),
         Err(e) => Err(e),
     }
+}
+
+/// Rearrange a flattened array of structs into one column per field.
+///
+/// The initializer is written as records and flattened as records, then turned
+/// on its side here — once, at the only place a whole declaration's image is
+/// produced. Doing it this way means every initializer form that already works
+/// (a literal, a fill, a nested enum, a `&OTHER`) keeps working without knowing
+/// the layout exists; the alternative was a second flattener that had to agree
+/// with the first about every one of those forms.
+fn transpose(
+    bytes: Vec<InitByte>,
+    soa: Option<&crate::sema::SoaLayout>,
+    ctx: &dyn InitContext,
+) -> Vec<InitByte> {
+    let Some(layout) = soa else { return bytes };
+    let Some(sdef) = ctx.registry().get_struct(&layout.elem).cloned() else {
+        return bytes;
+    };
+    let elem_size = sdef.total_size;
+
+    let mut out = vec![InitByte::Byte(0); bytes.len()];
+    for i in 0..layout.len {
+        for f in &sdef.fields {
+            let width = size_of(&f.ty, ctx.registry()).max(1);
+            let from = i * elem_size + f.offset;
+            let to = layout.column(f.offset) + i * width;
+            for k in 0..width {
+                if from + k < bytes.len() && to + k < out.len() {
+                    out[to + k] = bytes[from + k].clone();
+                }
+            }
+        }
+    }
+    out
 }

@@ -1368,6 +1368,11 @@ pub(crate) fn resolve_static_struct_lvalue(
             }
         }
         Expr::Index { object, index } => {
+            // An element of an SoA array is spread across the columns and is
+            // not a struct sitting at an address, however constant the index.
+            if soa_of(object, info).is_some() {
+                return None;
+            }
             // Array element as struct: only a constant index is statically
             // addressable here (runtime indices need pointer arithmetic).
             let (base, elem_struct) = array_of_struct_base(object, info)?;
@@ -1570,14 +1575,24 @@ pub(crate) fn emit_array_struct_field_indexed(
             field.node, elem_struct
         ))
     })?;
-    let field = base.plus(finfo.offset as u16);
     let is_multibyte = is_two_byte_value(&finfo.ty);
+    // Interleaved, the field sits at its offset inside each record and the
+    // index scales by the whole element. In columns it sits at the head of its
+    // own column and the index scales by the field alone — which for the usual
+    // byte field is not at all, so the multiply disappears entirely.
+    let (field, stride) = match soa_of(array, info) {
+        Some(layout) => (
+            base.plus(layout.column(finfo.offset) as u16),
+            if is_multibyte { 2 } else { 1 },
+        ),
+        None => (base.plus(finfo.offset as u16), elem_size),
+    };
 
     match value {
         None => {
             emitter.emit_comment("Array-of-struct indexed field read");
             generate_expr(index, emitter, info, string_collector)?;
-            emit_scale_index(emitter, elem_size);
+            emit_scale_index(emitter, stride);
             emitter.emit_inst("TAY", "");
             emitter.emit_inst("LDA", &format!("{},Y", field.operand_abs(0)));
             if is_multibyte {
@@ -1626,7 +1641,7 @@ pub(crate) fn emit_array_struct_field_indexed(
             // tracking so the index load below isn't wrongly elided.
             emitter.mark_a_unknown();
             generate_expr(index, emitter, info, string_collector)?;
-            emit_scale_index(emitter, elem_size);
+            emit_scale_index(emitter, stride);
             emitter.emit_inst("TAY", "");
             emitter.emit_inst("LDA", &format!("${:02X}", park));
             emitter.emit_inst("STA", &format!("{},Y", field.operand_abs(0)));
@@ -1680,6 +1695,14 @@ pub(crate) fn resolve_static_addr(
             Some((StaticBase::Addr(addr), sym.ty.clone()))
         }
         Expr::Field { object, field } => {
+            // `arr[k].f` where `arr` is `#[soa]`: the field lives in its own
+            // column, at the column's base plus k scaled by the *field's* size.
+            // Handled here as one step rather than composed out of the index
+            // and field arms, because the element it would compose through has
+            // no address of its own.
+            if let Some(found) = soa_field_addr(object, field, info) {
+                return Some(found);
+            }
             let (base, ty) = resolve_static_addr(object, info)?;
             let Type::Named(sname) = ty else { return None };
             let sdef = info.type_registry.get_struct(&sname)?;
@@ -1687,6 +1710,13 @@ pub(crate) fn resolve_static_addr(
             Some((base.plus(finfo.offset as u16), finfo.ty.clone()))
         }
         Expr::Index { object, index } => {
+            // An element of an SoA array is spread across the columns, so it
+            // has no one address. The field arm above is the only way in; sema
+            // refuses every other use, and this says the same thing in the
+            // language this function speaks.
+            if soa_of(object, info).is_some() {
+                return None;
+            }
             let (base, ty) = resolve_static_addr(object, info)?;
             let Type::Array(elem, _) = ty else {
                 return None;
@@ -1727,6 +1757,21 @@ pub(crate) fn resolve_static_addr(
     }
 }
 
+/// The column layout of `expr`, if it names an array declared `#[soa]`.
+///
+/// `#[soa]` goes on a top-level `static` or `const`, so the array is always
+/// named outright — there is no nested place to walk down to.
+fn soa_of<'a>(
+    expr: &Spanned<crate::ast::Expr>,
+    info: &'a ProgramInfo,
+) -> Option<&'a crate::sema::SoaLayout> {
+    match &expr.node {
+        crate::ast::Expr::Variable(n) => info.soa_arrays.get(n),
+        crate::ast::Expr::Paren(inner) => soa_of(inner, info),
+        _ => None,
+    }
+}
+
 /// If `expr` is a statically-addressable array-of-struct lvalue (a variable or
 /// a nested field), return its base address and the element struct's name.
 fn array_of_struct_base(
@@ -1743,6 +1788,45 @@ fn array_of_struct_base(
         },
         _ => None,
     }
+}
+
+/// The address of `arr[k].f` when `arr` is `#[soa]` and `k` is a constant.
+///
+/// `object` is the `arr[k]` node. The element it names has no address — that
+/// is what the layout costs — so this is not the composition of an element
+/// address and a field offset the interleaved resolvers perform. It is one
+/// step: the field's column, plus `k` scaled by the field's own size.
+fn soa_field_addr(
+    object: &Spanned<crate::ast::Expr>,
+    field: &Spanned<String>,
+    info: &ProgramInfo,
+) -> Option<(StaticBase, crate::sema::types::Type)> {
+    use crate::ast::Expr;
+    let Expr::Index {
+        object: array,
+        index,
+    } = &object.node
+    else {
+        return None;
+    };
+    let layout = soa_of(array, info)?;
+    let (base, _) = resolve_static_addr(array, info)?;
+    let sdef = info.type_registry.get_struct(&layout.elem)?;
+    let finfo = sdef.get_field(&field.node)?;
+    let k = const_index(index, info)?;
+    let width = type_byte_size(&finfo.ty, info);
+    let at = layout.column(finfo.offset) + k * width;
+    Some((base.plus(at as u16), finfo.ty.clone()))
+}
+
+/// Load a scalar of `ty` from a fixed address into A (low) / X or Y (high).
+fn emit_scalar_load_from(at: StaticBase, ty: &crate::sema::types::Type, emitter: &mut Emitter) {
+    emitter.emit_inst("LDA", &at.operand(0));
+    if is_two_byte_value(ty) {
+        let hi = if high_byte_in_x(ty) { "LDX" } else { "LDY" };
+        emitter.emit_inst(hi, &at.operand(1));
+    }
+    emitter.mark_a_unknown();
 }
 
 /// Evaluate an index expression as a compile-time constant, if possible.
@@ -1837,6 +1921,13 @@ pub(super) fn generate_field_access(
     // Nested field access (a.b.c) or array-of-struct element (arr[i].f): the
     // object is not a plain variable. Resolve a static address for local chains.
     if !matches!(&object.node, Expr::Variable(_)) {
+        // `arr[k].f` on an SoA array with a constant index: one absolute load
+        // from the field's column.
+        if let Some((at, ty)) = soa_field_addr(object, field, info) {
+            emitter.emit_comment(&format!("SoA column read: .{}", field.node));
+            emit_scalar_load_from(at, &ty, emitter);
+            return Ok(());
+        }
         if let Some((base, struct_name)) = resolve_static_struct_lvalue(object, info) {
             emitter.emit_comment(&format!("Nested field access: .{}", field.node));
             return emit_static_field_load(base, &struct_name, field, emitter, info);

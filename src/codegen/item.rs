@@ -646,7 +646,14 @@ fn emit_const_array(
 
     // A const lives in ROM, so unlike a `static` there is no "undefined until
     // the reset handler runs" excuse for a value the compiler cannot work out.
-    let bytes = crate::sema::init::flatten_top(&stat.init, &ty, info, false).map_err(|e| {
+    let bytes = crate::sema::init::flatten_top(
+        &stat.init,
+        &ty,
+        info,
+        false,
+        info.soa_arrays.get(name.as_str()),
+    )
+    .map_err(|e| {
         CodegenError::UnsupportedOperation(format!("in const '{}': {}", name, e.message))
     })?;
 

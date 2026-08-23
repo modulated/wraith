@@ -1189,6 +1189,36 @@ pub struct StaticInit {
 }
 
 /// A local array's data block.
+/// How an array of structs marked `#[soa]` is stored: one column per field,
+/// each holding that field for every element, in field order.
+///
+/// The point is the addressing mode. Interleaved, `arr[i].x` has to multiply
+/// the index by the element size before it can index; in columns the index
+/// scales by the *field's* size, which for the usual byte field is not at all —
+/// `LDA col,Y`, one instruction.
+///
+/// The cost is that an element is no longer a contiguous object, so it has no
+/// address. That is not a limitation to work around quietly; it is the reason
+/// the layout is asked for by name rather than inferred.
+#[derive(Debug, Clone)]
+pub struct SoaLayout {
+    /// The element struct's name.
+    pub elem: String,
+    /// The array's declared length — how tall every column is.
+    pub len: usize,
+}
+
+impl SoaLayout {
+    /// Where a field's column begins, as a byte offset from the array's base.
+    ///
+    /// Column *k* sits after every earlier field's column, so it begins at
+    /// `len` times the sum of the earlier fields' sizes — which is exactly
+    /// `len * offset`, since that sum is what a field's offset already is.
+    pub fn column(&self, field_offset: usize) -> usize {
+        self.len * field_offset
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalArray {
     /// Offset within the declaring function's block during analysis; an
@@ -1211,6 +1241,9 @@ pub struct ProgramInfo {
     /// expression that produced them. Folded once, in sema, so every emission
     /// site writes the same bytes.
     pub generated_tables: HashMap<Span, Vec<i64>>,
+    /// Every array declared `#[soa]`, by the name of the static or const that
+    /// declares it. Absent means interleaved, which is the default.
+    pub soa_arrays: HashMap<String, SoaLayout>,
     /// Named compile-time constants, by name. Codegen flattens `const` array
     /// initializers itself, and those element expressions were never
     /// type-checked, so there is no `folded_constants` entry to look up — this

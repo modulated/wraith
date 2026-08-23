@@ -91,6 +91,8 @@ pub struct SemanticAnalyzer {
     /// or in a local array's block, and three sites folding it separately is
     /// three chances to disagree.
     pub(super) generated_tables: HashMap<Span, Vec<i64>>,
+    /// Every array declared `#[soa]`, by the name of its static or const.
+    pub(super) soa_arrays: HashMap<String, crate::sema::SoaLayout>,
     pub(super) current_return_type: Option<Type>,
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
     pub(super) function_metadata: HashMap<String, FunctionMetadata>,
@@ -229,6 +231,7 @@ impl SemanticAnalyzer {
             errors: Vec::new(),
             failed_declarations: std::collections::HashSet::new(),
             generated_tables: HashMap::default(),
+            soa_arrays: HashMap::default(),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
@@ -519,6 +522,7 @@ impl SemanticAnalyzer {
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
             generated_tables: self.generated_tables.clone(),
+            soa_arrays: self.soa_arrays.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
             slice_return_temps: self.slice_return_temps.clone(),
             local_arrays: self.local_arrays.clone(),
