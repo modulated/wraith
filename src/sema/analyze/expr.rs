@@ -2193,11 +2193,101 @@ impl SemanticAnalyzer {
         Some(field.ty.clone())
     }
 
+    /// The column layout of `expr`, if it names an array declared `#[soa]`.
+    ///
+    /// Cloned rather than borrowed so the caller can go on to check
+    /// subexpressions; the layout is a name and a length.
+    pub(super) fn soa_layout_of(&self, expr: &Spanned<Expr>) -> Option<crate::sema::SoaLayout> {
+        match &expr.node {
+            Expr::Variable(n) => self.soa_arrays.get(n).cloned(),
+            Expr::Paren(inner) => self.soa_layout_of(inner),
+            _ => None,
+        }
+    }
+
+    /// Refuse a use of an SoA element that would need it to be contiguous.
+    ///
+    /// This is the cost of the layout, stated where it is paid. Every legal
+    /// use — `arr[i].field`, read or written — is consumed by
+    /// [`Self::check_field_access`] before the index node is ever checked on
+    /// its own, so reaching the index arm at all *is* the error: a binding, a
+    /// `&`, an argument, a return, a whole-element assignment. One rule with
+    /// one implementation, rather than a list of forbidden shapes that a new
+    /// syntax could quietly slip past.
+    fn refuse_soa_element(
+        &self,
+        array: &Spanned<Expr>,
+        span: crate::ast::Span,
+    ) -> Option<SemaError> {
+        let layout = self.soa_layout_of(array)?;
+        let name = match &array.node {
+            Expr::Variable(n) => n.clone(),
+            _ => "this array".to_string(),
+        };
+        Some(SemaError::Custom {
+            message: format!(
+                "an element of `{name}` has no address of its own: `#[soa]` stores the array \
+                 as one column per field, so no `{}` is in one piece. Reach the \
+                 data a field at a time — `{name}[i].{}` — or remove `#[soa]` to store whole \
+                 records",
+                layout.elem,
+                self.type_registry
+                    .get_struct(&layout.elem)
+                    .and_then(|d| d.fields.first())
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "field".to_string()),
+            ),
+            span,
+        })
+    }
+
     fn check_field_access(
         &mut self,
         object: &Spanned<Expr>,
         field: &Spanned<String>,
     ) -> Result<Type, SemaError> {
+        // `arr[i].f` on an SoA array is a column entry. It is checked here, as
+        // one step, because the element it would otherwise be composed through
+        // does not exist — and checking the index node on its own is exactly
+        // what [`Self::refuse_soa_element`] rejects.
+        if let Expr::Index {
+            object: array,
+            index,
+        } = &object.node
+            && let Some(layout) = self.soa_layout_of(array)
+        {
+            self.check_expr(array)?;
+            let saved = self.expected_type.take();
+            let index_ty = self.check_expr(index);
+            self.expected_type = saved;
+            let index_ty = index_ty?;
+            if !matches!(
+                index_ty,
+                Type::Primitive(PrimitiveType::U8 | PrimitiveType::I8)
+            ) {
+                return Err(SemaError::TypeMismatch {
+                    expected: "u8".to_string(),
+                    found: index_ty.display_name(),
+                    span: index.span,
+                });
+            }
+            let sdef =
+                self.type_registry
+                    .get_struct(&layout.elem)
+                    .ok_or_else(|| SemaError::Custom {
+                        message: format!("struct '{}' not found", layout.elem),
+                        span: object.span,
+                    })?;
+            return sdef
+                .get_field(&field.node)
+                .map(|f| f.ty.clone())
+                .ok_or_else(|| SemaError::FieldNotFound {
+                    struct_name: layout.elem.clone(),
+                    field_name: field.node.clone(),
+                    span: field.span,
+                });
+        }
+
         // Get the type of the object
         let object_ty = self.check_expr(object)?;
 
@@ -2258,6 +2348,10 @@ impl SemanticAnalyzer {
         // variable index keeps its own declared type, so only constant indices
         // hit this.)
         let saved_expected = self.expected_type.take();
+
+        if let Some(e) = self.refuse_soa_element(object, _span) {
+            return Err(e);
+        }
 
         // Type check the index expression (should be integer)
         let index_ty = self.check_expr(index)?;
@@ -2474,6 +2568,14 @@ impl SemanticAnalyzer {
         inclusive: bool,
         span: crate::ast::Span,
     ) -> Result<Type, SemaError> {
+        // A slice is a base and a length over *contiguous* elements, which is
+        // exactly what an SoA array does not have. Refused here as well as at
+        // the index arm, because a slice reaches its elements without ever
+        // forming an index node for one.
+        if let Some(e) = self.refuse_soa_element(object, span) {
+            return Err(e);
+        }
+
         // Slice bounds are integers. u8/i8 cover the common case; u16/i16 are
         // accepted so slices longer than 255 elements can be formed (e.g. with
         // constant bounds). Runtime u16 bounds are rejected later in codegen.
