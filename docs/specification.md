@@ -1521,6 +1521,78 @@ buffer[5] = 42;
 let value: u16 = data[2];
 ```
 
+### Generated Tables
+
+A table whose entries are a function of their index can be written as
+`[|i| => <expression>]`. Every entry is computed at compile time, so the
+program starts with the numbers already in place.
+
+```rust,compile
+const SQR: [u8; 16] = [|i| => i * i];
+const ROW: [u16; 4] = [|i| => 0x0400 + (i as u16) * 40];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let k: u8 = 7;
+    OUT = SQR[k];
+    loop {}
+}
+```
+
+`SQR` above becomes sixteen bytes of ROM: `$00 $01 $04 $09 $10 …`. No code
+runs to build it.
+
+**The length comes from the type.** It is not written in the expression, so
+a table's count is stated once, in its declaration. A generated table
+therefore needs a declared array type — there is nowhere else for the length
+to come from.
+
+**The index is a `u8`.** It is named by the closure's parameter (`i` above,
+but any name will do) and takes the values `0` through `len - 1`. Because it
+is a `u8`, a generated table holds at most 256 entries.
+
+**The body is ordinary arithmetic at the element type.** It may name other
+constants, and it wraps exactly the way the same expression would at run
+time, so a table and a loop over the same expression cannot disagree:
+
+```rust,compile
+const NARROW: [u8; 4] = [|i| => (i * 100) / 2];
+const WIDE: [u16; 4] = [|i| => ((i as u16) * 100) / 2];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    OUT = NARROW[3] + WIDE[3].low;
+    loop {}
+}
+```
+
+`NARROW` is `0, 50, 100, 22` — at `i = 3` the product overflows a `u8` to 44
+before the divide, which is what the equivalent `u8` loop computes. `WIDE`
+is `0, 50, 100, 150`. A wider intermediate needs a written cast, and the
+cast is the reader's decision rather than the compiler's.
+
+**The body must be constant.** It becomes data before the program runs, so
+it cannot read a `static`, call a function, or index another array.
+
+A generated table may be declared as a `const` (ROM data), as a `static`
+(written to RAM at startup) or as a local array (stored into its frame on
+entry):
+
+```rust,compile
+const LOG2: [u8; 8] = [|i| => i / 2];      // ROM
+static COUNTS: [u8; 4] = [|i| => i + 1];   // RAM, written at startup
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let mask: [u8; 4] = [|i| => 1 << i];   // frame
+    OUT = LOG2[7] + COUNTS[2] + mask[3];
+    loop {}
+}
+```
+
 ### Slices
 
 ```rust
