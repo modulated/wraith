@@ -51,6 +51,7 @@ mod pointer_syntax;
 mod pointers;
 mod short_circuit;
 mod slices_readonly;
+mod soa;
 mod spec_examples;
 mod statics;
 mod stdlib;
