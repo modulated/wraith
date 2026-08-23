@@ -65,8 +65,9 @@ read against a current picture:
 | An unknown type in a declaration is reported where it is written | `tests/e2e/multi_error.rs` |
 | A broken module reports every error, once, however many paths reach it | `tests/e2e/import_diagnostics.rs` |
 | Every `SemaError` variant is pinned by a golden test or excused with a reason | `tests/e2e/error_diagnostics.rs` |
-| 136 of the specification's 228 code blocks compile on every run | `tests/e2e/spec_examples.rs` |
+| 137 of the specification's 230 code blocks compile on every run | `tests/e2e/spec_examples.rs` |
 | A table generated from its index, `[\|i\| => i * i]`, folded once and emitted three ways | `tests/e2e/const_tables.rs` |
+| An array of structs stored as columns under `#[soa]`, with every whole-element use refused | `tests/e2e/soa.rs` |
 
 ## What keeps going wrong
 
@@ -159,13 +160,9 @@ is the item to reach for when one turns up.
 
 These came out of a survey of what assembly programmers did on this machine
 that Wraith cannot say efficiently today. They are listed in the order their
-cost/benefit looked best; none is started.
-
-- **Structure-of-arrays layout.** A `[Sprite; 8]` on a 6502 wants to be eight
-  parallel arrays, not eight interleaved records: `LDA xs,X` is one
-  instruction, an interleaved field access needs a multiply. An attribute on
-  the array or the struct (`#[soa]`) would let the source keep the record and
-  the compiler keep the columns.
+cost/benefit looked best; none is started. (Structure-of-arrays layout was the
+first of them and is now `#[soa]`; the count of the spec's compiling examples
+above is the other half of the same survey being worked through.)
 
 - **Page alignment.** `LDA tbl,X` crosses a page boundary and costs an extra
   cycle; a table the programmer wants aligned has no way to say so.
@@ -190,6 +187,28 @@ cost/benefit looked best; none is started.
 
 - **Calling-convention control.** A leaf function that wants its argument in X
   rather than through the staging pool has no way to ask.
+
+### Columns for a local array, and for a nested field
+
+`#[soa]` applies to a top-level `static` or `const`, which is where an entity
+pool lives on this machine. Two shapes are outside it:
+
+- A local `let` array. `let` takes no attributes today, so this is a parser
+  change before it is a layout one. Frame arrays are small and short-lived, so
+  the multiply matters less; worth doing when something asks for it.
+- A field that is itself a struct or an array. Its parts would each want a
+  column, which is a nested scheme rather than the flat one — and the flat rule
+  ("every field is a scalar of one or two bytes") is what makes indexing a
+  column cost no multiply. Refused with a message that says so.
+
+Two smaller things the work exposed:
+
+- A constant index into a column still goes through the runtime-index path on
+  the *write* side: `E[1].hp = v` emits `LDA #1 / TAY / STA col,Y` where
+  `STA col+1` would do. Correct, three bytes larger.
+- `enum` and `import` declarations still drop attributes silently, the way
+  `static` did before this change. Nothing valid can be written there yet, so
+  nothing is currently mis-accepted, but the same silent-drop is waiting.
 
 ### Const attributes (consider later)
 

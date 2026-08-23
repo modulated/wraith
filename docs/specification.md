@@ -1081,6 +1081,99 @@ enemies[0].health = enemies[0].health - 10;
 let x_pos: u8 = enemies[3].x;
 ```
 
+### Columns Instead of Records (`#[soa]`)
+
+An array of structs is stored interleaved by default: each record's fields sit
+together, one record after the next. `#[soa]` on a `static` or `const` array
+stores it the other way up — one column per field, each holding that field for
+every element.
+
+```rust,compile
+struct Sprite { x: u8, y: u8, hp: u8 }
+
+#[soa]
+static SPRITES: [Sprite; 8] = [Sprite { x: 0, y: 0, hp: 0 }; 8];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let i: u8 = 3;
+    SPRITES[i].y = 40;
+    OUT = SPRITES[i].y;
+    loop {}
+}
+```
+
+Nothing about the *source* changes: it is still an array of records, indexed and
+read the same way. What changes is the addressing mode.
+
+**Interleaved**, `SPRITES[i].y` must multiply the index by the element size
+before it can index at all — on a three-byte record that is seven instructions
+and nineteen cycles for one byte, and the multiply is recomputed for every field
+read:
+
+```
+STA $22 / CLC / ADC $22 / CLC / ADC $22 / TAY / LDA base,Y
+```
+
+**In columns**, the index scales by the *field's* own size, which for a byte
+field is not at all:
+
+```
+TAY / LDA col,Y
+```
+
+A two-byte field costs one `ASL A` rather than a multiply, so columns still win
+wherever a field is narrower than the record.
+
+#### What it costs
+
+An element is no longer contiguous, so **it has no address**. Every use that
+would need one is a compile error:
+
+```rust
+let e: Sprite = SPRITES[1];    // error: no address of its own
+let p: &Sprite = &SPRITES[1];  // error
+draw(SPRITES[1]);              // error, if `draw` takes a Sprite
+SPRITES[1] = other;            // error
+let some: &[Sprite] = SPRITES[0..2];  // error: a slice needs contiguous elements
+```
+
+A single *field* still has an address — it is one entry in one column — so
+`&SPRITES[1].hp` is fine.
+
+This is why the layout is asked for by name rather than inferred. If the
+compiler chose it, adding one `&SPRITES[i]` would silently flip the whole array
+back and turn every access from an index into a multiply, with nothing in the
+source to show for it. Named, that same line is an error, and the decision stays
+where it was written.
+
+#### Restrictions
+
+- The attribute goes on a `static` or `const` array, not on the struct. Whether
+  columns pay is a property of how a *collection* is traversed, not of the
+  record type: the same `Sprite` may be a hardware register block in one place
+  and a pool in another.
+- Every field must be a scalar of one or two bytes — a primitive, a pointer, a
+  function pointer or a fieldless enum. A field that is itself a struct or an
+  array would need its own nested columns, which is a separate feature.
+
+#### The compiler will suggest it
+
+An array of structs that is only ever reached one field at a time, and whose
+fields would all take columns, is pointed out:
+
+```
+warning: `A` is only ever read one field at a time, so every access multiplies
+the index by 2; `#[soa]` would store it as one column per field and index
+directly. The cost is that an element would no longer have an address
+```
+
+The *recommendation* is inferred; the layout is not. The suggestion is
+deliberately quiet: a single mention that is not a field read — a `&`, a slice,
+a whole-element binding — and it says nothing, because a suggestion the reader
+has to dismiss is worse than one never made.
+
 ### Passing Structs to Functions
 
 All structs are passed **by reference**: the callee receives a 2-byte pointer
