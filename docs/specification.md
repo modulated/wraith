@@ -4884,11 +4884,52 @@ Because an interrupt can preempt main-line code at any point - including in the 
 
 ## Revision History
 
-- 2026-08-23: Compile-time generated tables (`[|i| => i * i]`, folded before the
-  program runs, length taken from the declared type) and structure-of-arrays
-  layout for an array of structs (`#[soa]`, one column per field), with every
-  whole-element use columns cannot support refused, and a warning that suggests
-  the attribute where it would pay.
+- 2026-08-23 (0.7.0):
+
+  *Language.* Compile-time generated tables, written
+  `const SQR: [u8; 16] = [|i| => i * i];` — folded before the program runs,
+  with the length taken from the declared type. Structure-of-arrays layout for an array of structs, `#[soa]`,
+  storing one column per field so an indexed field read costs an index rather
+  than a multiply; every whole-element use columns cannot support is refused,
+  and a warning suggests the attribute where it would pay. Whole-array
+  assignment is refused — copy element-wise or with `memcpy`, so a move the
+  length of an array is visible in the source. `static` struct initialisers
+  accept `str`, enum and `&T` fields. An attribute written on a declaration it
+  does not apply to is an error rather than being ignored.
+
+  *Defined behaviour.* Divide by zero yields the all-ones sentinel at every
+  width and sign, and a divisor the compiler can see is zero is refused. A
+  shift count at or past the width shifts every bit out, and warns when the
+  count is constant. A `for` bound whose sign or width the counter cannot hold
+  is refused.
+
+  *Miscompiles fixed*, each with a regression test. A struct returned by value
+  came back as its first byte; a struct passed to an inlined call came through
+  as its first two bytes; an enum field of a struct was stored as a pointer's
+  low byte and read by dereferencing it; `*p` on a pointer-to-pointer dropped
+  the high byte; two-byte `static`s and `static` struct fields stored one byte;
+  re-pointing a `str` local wrote one byte of two; implicit widening took the
+  sign from the destination rather than the source, at seven sites, and a match
+  arm widened by zero regardless of its sign; a tail call rebound its
+  parameters at the wrong widths; a function-pointer argument was sized as one
+  byte; `&x.f[0]`, `&m[i][j]`, `p.a[i]` and `mk(6).f1` computed the wrong
+  address or were rejected; and `arr[i] = f()` called `f` twice.
+
+  *Diagnostics.* Several errors are reported per run with rustc-style spans. A
+  failed declaration no longer hides the bodies below it — only its own name is
+  suppressed — an unknown type is reported where it is written, and a broken
+  module reports every error once however many import paths reach it. Every
+  `SemaError` variant is now pinned by a golden test or carries a written
+  reason for not being.
+
+  *Compiler.* Argument staging for the four call forms merged into one routine
+  and one width table. Frame colouring given an edge for indirect calls, and
+  arguments spill to the software stack when the pool will not hold them. BSS
+  is repacked so a dropped `static` gives its bytes back. Two-branch
+  comparisons fuse into their branch. The differential fuzzer gained pointers
+  with alias modelling, aggregates, slices, function-pointer dispatch, mixed
+  widths and cross-call arguments; 137 of this document's examples are compiled
+  on every run.
 - 2026-08-09 (0.6.0): Pointer equality (`==`/`!=` on the same pointer type);
   bit mutation through a pointer or a runtime index; 65C02 `BBR`/`BBS` fusion for
   `if x.bit(n)`; function-pointer dispatch tables (`handlers[i](x)`) fixed for
