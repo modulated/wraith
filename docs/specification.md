@@ -529,6 +529,11 @@ let widened: u16 = 3;      // a `-> u16` function may `return` a u8
 
 Function attributes control code generation, placement, and calling conventions. They are specified using `#[attribute]` syntax before the function declaration.
 
+Attributes are not only for functions: [`#[soa]`](#columns-instead-of-records-soa)
+goes on a `static` or `const` array and chooses how it is laid out. An attribute
+that does not apply to the declaration it is written on is an error, rather than
+being ignored.
+
 #### `#[inline]`
 
 Inlines the function body at each call site, eliminating JSR/RTS overhead:
@@ -1010,6 +1015,10 @@ struct Entity {
 - Array fields inlined directly too — `len * element size` bytes, in place
 - Multi-byte fields stored little-endian
 - Total struct size = sum of field sizes
+
+An *array* of structs is interleaved by default — each record's bytes together,
+one record after the next — but can be stored the other way up, one column per
+field, with [`#[soa]`](#columns-instead-of-records-soa).
 
 An array field is part of the struct's bytes, not a pointer to them, so
 reaching an element is the struct's base plus the field's offset plus the
@@ -4875,6 +4884,11 @@ Because an interrupt can preempt main-line code at any point - including in the 
 
 ## Revision History
 
+- 2026-08-23: Compile-time generated tables (`[|i| => i * i]`, folded before the
+  program runs, length taken from the declared type) and structure-of-arrays
+  layout for an array of structs (`#[soa]`, one column per field), with every
+  whole-element use columns cannot support refused, and a warning that suggests
+  the attribute where it would pay.
 - 2026-08-09 (0.6.0): Pointer equality (`==`/`!=` on the same pointer type);
   bit mutation through a pointer or a runtime index; 65C02 `BBR`/`BBS` fusion for
   `if x.bit(n)`; function-pointer dispatch tables (`handlers[i](x)`) fixed for
