@@ -1161,6 +1161,7 @@ fn generate_inline_call(
             resolved_symbols: merged_resolved,
             function_metadata: info.function_metadata.clone(),
             folded_constants: info.folded_constants.clone(),
+            generated_tables: info.generated_tables.clone(),
             const_env: info.const_env.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
             slice_return_temps: info.slice_return_temps.clone(),

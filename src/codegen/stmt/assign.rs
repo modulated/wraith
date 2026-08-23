@@ -1292,6 +1292,18 @@ pub(crate) fn generate_local_array_init(
                 }
             }
         }
+        // `[|i| => …]` — the entries were folded in sema, so this is the same
+        // element-by-element store with the values already in hand.
+        Expr::Literal(Literal::ArrayGen { .. }) => {
+            let Some(values) = info.generated_tables.get(&init.span) else {
+                return Err(CodegenError::Internal(
+                    "a generated table reached codegen unfolded".to_string(),
+                ));
+            };
+            for (i, v) in values.iter().enumerate() {
+                store_elem(emitter, addr, i as u16 * elem_size as u16, *v, elem_size);
+            }
+        }
         // `[a, b, c]` — element by element.
         Expr::Literal(Literal::Array(elements)) => {
             for (i, e) in elements.iter().enumerate() {

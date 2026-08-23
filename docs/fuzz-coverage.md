@@ -78,6 +78,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `String` | 197 | one of four literals, in `main`'s declaration only, and read only through `.len` — indexing a string is a second lowering the oracle would have to model, and `.len` is what a call has to carry the pointer correctly to answer |
 | `Array` | 313 | three arrays per program — a local in zero page, a `const` in ROM, and a field inside the struct, which reach their elements through three different bases — initialised from literals |
 | `ArrayFill` | — | not generated: the element-list form is generated, and lowers the same way |
+| `ArrayGen` | — | not generated: not generated: a table whose entries are a function of the index is folded before the program runs, so the oracle would be checking the constant evaluator rather than the generated code. tests/e2e/const_tables.rs covers it |
 
 ## Binary operators
 

@@ -4314,6 +4314,12 @@ mod coverage {
         ),
         ("Literal::Char", "no character arithmetic is generated"),
         (
+            "Literal::ArrayGen",
+            "not generated: a table whose entries are a function of the index is folded \
+             before the program runs, so the oracle would be checking the constant \
+             evaluator rather than the generated code. tests/e2e/const_tables.rs covers it",
+        ),
+        (
             "Literal::ArrayFill",
             "the element-list form is generated, and lowers the same way",
         ),
@@ -4867,6 +4873,10 @@ mod coverage {
                 for e in elems {
                     w_expr(&e.node, s);
                 }
+            }
+            Literal::ArrayGen { body, .. } => {
+                note(s, "Literal", "ArrayGen");
+                w_expr(&body.node, s);
             }
             Literal::ArrayFill { .. } => note(s, "Literal", "ArrayFill"),
         }

@@ -135,6 +135,16 @@ pub(super) fn generate_literal(
 
             Ok(())
         }
+        // A generated table is data, never a value in a register: the sites
+        // that lay one out (`init.rs` for ROM and startup images, the local
+        // array initialiser for a frame block) read its folded entries
+        // directly. Reaching here means one was used where a scalar was
+        // wanted, which the type checker should already have refused.
+        crate::ast::Literal::ArrayGen { .. } => {
+            Err(CodegenError::UnsupportedOperation(
+                "a generated table is array data and has no value of its own".to_string(),
+            ))?
+        }
         crate::ast::Literal::ArrayFill { value, count } => {
             // Generate array filled with repeated value
             let arr_label = emitter.next_label("af");

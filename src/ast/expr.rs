@@ -67,6 +67,20 @@ pub enum Literal {
         value: Box<Spanned<Expr>>,
         count: usize,
     },
+    /// Generated table: `[|i| => i * i]`.
+    ///
+    /// One entry per index, evaluated at compile time — the 6502's oldest
+    /// trade, ROM for cycles, said in the language instead of in a build
+    /// script. The length is not written: it comes from the array type the
+    /// expression is declared at, so the count is stated once.
+    ///
+    /// `i` is a `u8` and the body follows the language's ordinary arithmetic,
+    /// so a generated table holds exactly what the equivalent run-time loop
+    /// would have computed. A wider intermediate needs a written cast.
+    ArrayGen {
+        param: Spanned<String>,
+        body: Box<Spanned<Expr>>,
+    },
 }
 
 /// Field initializer for struct construction

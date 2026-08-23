@@ -84,6 +84,13 @@ pub struct SemanticAnalyzer {
     /// `record`. Per name rather than per pass: an unrelated typo in a body
     /// still reports, which is the whole point of crossing this boundary.
     pub(super) failed_declarations: std::collections::HashSet<String>,
+    /// The entries of every generated table, by the span of its `[|i| => …]`.
+    ///
+    /// Folded once during checking rather than at each emission site: a table
+    /// is the same bytes whether it lands in ROM, in a `static`'s startup image
+    /// or in a local array's block, and three sites folding it separately is
+    /// three chances to disagree.
+    pub(super) generated_tables: HashMap<Span, Vec<i64>>,
     pub(super) current_return_type: Option<Type>,
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
     pub(super) function_metadata: HashMap<String, FunctionMetadata>,
@@ -221,6 +228,7 @@ impl SemanticAnalyzer {
             warnings: Vec::with_capacity(16),
             errors: Vec::new(),
             failed_declarations: std::collections::HashSet::new(),
+            generated_tables: HashMap::default(),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
@@ -510,6 +518,7 @@ impl SemanticAnalyzer {
             resolved_symbols: self.resolved_symbols.clone(),
             function_metadata: self.function_metadata.clone(),
             folded_constants: self.folded_constants.clone(),
+            generated_tables: self.generated_tables.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
             slice_return_temps: self.slice_return_temps.clone(),
             local_arrays: self.local_arrays.clone(),

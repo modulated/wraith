@@ -89,6 +89,12 @@ pub trait InitContext {
 
     /// The address `&operand` denotes.
     fn address_of(&self, operand: &Spanned<Expr>) -> Result<u16, InitError>;
+
+    /// The folded entries of the generated table at `span`, if there is one.
+    ///
+    /// Supplied rather than recomputed: sema folds each table once, and two
+    /// sites folding it separately is two chances to disagree.
+    fn generated_table(&self, span: Span) -> Option<&[i64]>;
 }
 
 /// Flatten `expr` into exactly `size_of(ty)` bytes appended to `out`.
@@ -285,6 +291,30 @@ fn flatten_array(
             for i in 0..*count {
                 pad_to(out, base + i * elem_size);
                 flatten_inner(out, value, element, ctx).map_err(InitError::required)?;
+            }
+            Ok(())
+        }
+        // A generated table: one entry per index, already folded by sema.
+        Expr::Literal(Literal::ArrayGen { .. }) => {
+            let Some(values) = ctx.generated_table(expr.span) else {
+                return Err(InitError::fatal(
+                    "this generated table was never folded, which is a compiler bug"
+                        .to_string(),
+                    expr.span,
+                ));
+            };
+            if values.len() != len {
+                return Err(InitError::fatal(
+                    format!(
+                        "this generated table holds {} entries but the type holds {len}",
+                        values.len()
+                    ),
+                    expr.span,
+                ));
+            }
+            for (i, v) in values.iter().enumerate() {
+                pad_to(out, base + i * elem_size);
+                push_int(out, *v, elem_size);
             }
             Ok(())
         }

@@ -308,6 +308,35 @@ impl SemanticAnalyzer {
             });
         }
 
+        // A generated table is folded here, not in the type checker: a `const`
+        // or `static` array's initialiser is flattened during registration and
+        // never reaches `check_expr`, so the declaration this feature exists
+        // for — a table in ROM — would otherwise never be folded at all.
+        if let crate::ast::Expr::Literal(crate::ast::Literal::ArrayGen { param, body }) =
+            &stat.init.node
+        {
+            let Type::Array(elem, len) = &declared_ty else {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "a generated table needs an array type, not {}",
+                        declared_ty.display_name()
+                    ),
+                    span: stat.ty.span,
+                });
+            };
+            if *len > 256 {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "a generated table holds at most 256 entries, because its index is a \
+                         `u8`; this one declares {len}"
+                    ),
+                    span: stat.ty.span,
+                });
+            }
+            let (elem, len) = ((**elem).clone(), *len);
+            self.fold_array_gen(param, body, &elem, len, stat.init.span)?;
+        }
+
         // If it's a non-mutable static (const), evaluate it and add to const_env
         if !stat.mutable {
             match eval_const_expr_with_env(&stat.init, &self.const_env) {
@@ -1565,6 +1594,10 @@ impl SemanticAnalyzer {
 
 /// How semantic analysis resolves the names inside a static's initializer.
 impl crate::sema::init::InitContext for SemanticAnalyzer {
+    fn generated_table(&self, span: crate::ast::Span) -> Option<&[i64]> {
+        self.generated_tables.get(&span).map(|v| v.as_slice())
+    }
+
     fn registry(&self) -> &crate::sema::type_defs::TypeRegistry {
         &self.type_registry
     }
@@ -1616,6 +1649,10 @@ fn collect_variable_names(e: &Spanned<crate::ast::Expr>, out: &mut Vec<String>) 
             }
         }
         Expr::Literal(Literal::ArrayFill { value, .. }) => collect_variable_names(value, out),
+        // A generated table's body names constants like any other initializer;
+        // its index parameter comes along too, which is harmless because no
+        // declared symbol answers to it.
+        Expr::Literal(Literal::ArrayGen { body, .. }) => collect_variable_names(body, out),
         Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
             for f in fields {
                 collect_variable_names(&f.value, out);

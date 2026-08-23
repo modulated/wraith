@@ -2,7 +2,7 @@
 //!
 //! Type checking for all expression variants in the AST.
 
-use crate::ast::{BinaryOp, Expr, PrimitiveType, Spanned, Stmt};
+use crate::ast::{BinaryOp, Expr, PrimitiveType, Span, Spanned, Stmt};
 use crate::sema::SemaError;
 use crate::sema::const_eval::eval_const_expr_with_env;
 use crate::sema::table::SymbolKind;
@@ -552,6 +552,9 @@ impl SemanticAnalyzer {
 
                 Ok(Type::Array(Box::new(element_ty), elements.len()))
             }
+            crate::ast::Literal::ArrayGen { param, body } => {
+                self.check_array_gen(param, body, span)
+            }
             crate::ast::Literal::ArrayFill { value, count } => {
                 // `[0; 8]` for a `[u16; 8]` fills u16 elements, same rule.
                 let declared_elem = match &self.expected_type {
@@ -566,6 +569,168 @@ impl SemanticAnalyzer {
                 Ok(Type::Array(Box::new(element_ty), *count))
             }
         }
+    }
+
+
+    /// Check and evaluate a generated table, `[|i| => <expr>]`.
+    ///
+    /// The length is not written: it comes from the array type this expression
+    /// is declared at. That is the whole reason the form is worth having — a
+    /// table's length is already stated by its type, and repeating it is a
+    /// chance to disagree — but it does mean there has to *be* a declared type,
+    /// which is what the first error below says.
+    ///
+    /// Every entry is folded here, once, with the wrapping evaluator: `i` is a
+    /// `u8` and the body follows the language's ordinary arithmetic, so the
+    /// table holds exactly what the equivalent run-time loop would have
+    /// computed. Anything else would make a table and a loop over the same
+    /// expression disagree, which is the shape of a bug nobody finds.
+    fn check_array_gen(
+        &mut self,
+        param: &Spanned<String>,
+        body: &Spanned<Expr>,
+        span: Span,
+    ) -> Result<Type, SemaError> {
+        let Some(Type::Array(elem, len)) = self.expected_type.clone() else {
+            return Err(SemaError::Custom {
+                message: "a generated table takes its length from the array type it is \
+                          declared at, so it needs one: `const T: [u8; 16] = [|i| => …];`"
+                    .to_string(),
+                span,
+            });
+        };
+
+        // `i` is a `u8`, so it cannot reach past the 256th entry — and on this
+        // machine an index register cannot either.
+        if len > 256 {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "a generated table holds at most 256 entries, because its index is a \
+                     `u8`; this one declares {len}"
+                ),
+                span,
+            });
+        }
+
+        // The body is checked once, with `i` in scope, against the element
+        // type — so a mismatch is reported against the expression the reader
+        // wrote rather than against one of 256 copies of it.
+        let u8_ty = Type::Primitive(PrimitiveType::U8);
+        self.table.enter_scope();
+        self.table.insert(
+            param.node.clone(),
+            crate::sema::table::SymbolInfo {
+                name: param.node.clone(),
+                kind: crate::sema::table::SymbolKind::Constant,
+                ty: u8_ty.clone(),
+                location: crate::sema::table::SymbolLocation::None,
+                mutable: false,
+                access_mode: None,
+                is_pub: false,
+                containing_function: None,
+                is_param: false,
+                decl_span: Some(param.span),
+            },
+        );
+        let saved = self.expected_type.take();
+        self.expected_type = Some((*elem).clone());
+        let checked = self.check_expr(body);
+        self.expected_type = saved;
+        self.table.exit_scope();
+
+        let body_ty = checked?;
+        if !body_ty.is_implicitly_convertible_to(&elem) {
+            return Err(SemaError::TypeMismatch {
+                expected: elem.display_name(),
+                found: body_ty.display_name(),
+                span: body.span,
+            });
+        }
+
+        self.fold_array_gen(param, body, &elem, len, span)?;
+        Ok(Type::Array(elem, len))
+    }
+
+
+    /// Fold every entry of a generated table and record it against `span`.
+    ///
+    /// Shared by the two ways one is declared. A `const` or `static` array is
+    /// flattened during *registration* and its initialiser never reaches
+    /// `check_expr`, so folding only in the type checker left exactly the
+    /// declaration this feature exists for — a ROM table — unfolded.
+    ///
+    /// `i` enters the constant environment the way a `const` does, so the body
+    /// may also name other constants; the binding is removed afterwards so it
+    /// cannot leak into a later declaration.
+    pub(super) fn fold_array_gen(
+        &mut self,
+        param: &Spanned<String>,
+        body: &Spanned<Expr>,
+        elem: &Type,
+        len: usize,
+        span: Span,
+    ) -> Result<(), SemaError> {
+        let (bits, signed) = int_width_of(elem).ok_or_else(|| SemaError::Custom {
+            message: format!(
+                "a generated table's elements must be an integer type, not {}",
+                elem.display_name()
+            ),
+            span,
+        })?;
+
+        let mut values = Vec::with_capacity(len);
+        let saved_binding = self.const_env.remove(&param.node);
+        for i in 0..len {
+            self.const_env.insert(
+                param.node.clone(),
+                crate::sema::const_eval::ConstValue::Integer(i as i64),
+            );
+            let folded = crate::sema::const_eval::eval_const_expr_wrapping(
+                body,
+                &self.const_env,
+                bits,
+                signed,
+            );
+            let v = match folded {
+                Ok(v) => v,
+                Err(e) => {
+                    match saved_binding {
+                        Some(prev) => self.const_env.insert(param.node.clone(), prev),
+                        None => self.const_env.remove(&param.node),
+                    };
+                    // "constant 'x' not found" would name the one thing that
+                    // *is* bound, so say what the body has to be instead.
+                    return Err(match e {
+                        SemaError::Custom { .. } => SemaError::Custom {
+                            message: "a generated table's body must be a constant expression \
+                                      of its index: it becomes data before the program runs, \
+                                      so there is nothing to compute it with"
+                                .to_string(),
+                            span: body.span,
+                        },
+                        other => other,
+                    });
+                }
+            };
+            let Some(n) = v.as_integer() else {
+                match saved_binding {
+                    Some(prev) => self.const_env.insert(param.node.clone(), prev),
+                    None => self.const_env.remove(&param.node),
+                };
+                return Err(SemaError::Custom {
+                    message: "a generated table's body must produce a number".to_string(),
+                    span: body.span,
+                });
+            };
+            values.push(n);
+        }
+        match saved_binding {
+            Some(prev) => self.const_env.insert(param.node.clone(), prev),
+            None => self.const_env.remove(&param.node),
+        };
+
+        self.generated_tables.insert(span, values);
+        Ok(())
     }
 
     fn check_variable(&mut self, name: &str, expr: &Spanned<Expr>) -> Result<Type, SemaError> {

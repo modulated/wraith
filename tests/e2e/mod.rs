@@ -14,6 +14,7 @@ mod bss_reclaim;
 mod cmos;
 mod complex_features;
 mod const_folding;
+mod const_tables;
 mod consts;
 mod control_flow;
 mod cpu_flags;

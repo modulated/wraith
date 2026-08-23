@@ -1207,6 +1207,10 @@ pub struct ProgramInfo {
     pub function_metadata: HashMap<String, FunctionMetadata>,
     /// Map of expression spans to their constant-folded values
     pub folded_constants: HashMap<Span, const_eval::ConstValue>,
+    /// The entries of every generated table (`[|i| => …]`), by the span of the
+    /// expression that produced them. Folded once, in sema, so every emission
+    /// site writes the same bytes.
+    pub generated_tables: HashMap<Span, Vec<i64>>,
     /// Named compile-time constants, by name. Codegen flattens `const` array
     /// initializers itself, and those element expressions were never
     /// type-checked, so there is no `folded_constants` entry to look up — this

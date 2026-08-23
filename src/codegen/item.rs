@@ -659,6 +659,10 @@ fn emit_const_array(
 /// Semantic analysis folded every constant expression already and left the
 /// results keyed by span, so this is a lookup rather than an evaluation.
 impl crate::sema::init::InitContext for ProgramInfo {
+    fn generated_table(&self, span: crate::ast::Span) -> Option<&[i64]> {
+        self.generated_tables.get(&span).map(|v| v.as_slice())
+    }
+
     fn registry(&self) -> &crate::sema::type_defs::TypeRegistry {
         &self.type_registry
     }
