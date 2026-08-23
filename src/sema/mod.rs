@@ -793,6 +793,22 @@ pub enum Warning {
     /// Constant with non-uppercase name
     NonUppercaseConstant { name: String, span: Span },
 
+    /// An array of structs that is only ever reached one field at a time, and
+    /// so could be stored as columns.
+    ///
+    /// The recommendation is inferred; the layout is not. Flipping it silently
+    /// would mean one added `&arr[i]` quietly turned every access from an
+    /// index into a multiply — a three-fold slowdown with nothing in the source
+    /// to show for it. Said out loud, the same line is a compile error and the
+    /// decision stays where it was written.
+    CouldBeSoa {
+        name: String,
+        /// What each access pays now: the element's size, which is what the
+        /// index has to be multiplied by.
+        stride: usize,
+        span: Span,
+    },
+
     /// A shift count the compiler can see is at or past the width of the value
     /// being shifted. Defined — the bits shift out and zeros (or copies of the
     /// sign bit, for an arithmetic right shift) come in, so the result is 0 or
@@ -920,6 +936,15 @@ impl Warning {
             Warning::UnusedStatic { name, span } => {
                 (format!("unused constant or static: `{}`", name), span)
             }
+            Warning::CouldBeSoa { name, stride, span } => (
+                format!(
+                    "`{name}` is only ever read one field at a time, so every access \
+                     multiplies the index by {stride}; `#[soa]` would store it as one column \
+                     per field and index directly. The cost is that an element would no \
+                     longer have an address"
+                ),
+                span,
+            ),
             Warning::NonExhaustiveMatch {
                 missing_patterns,
                 span,

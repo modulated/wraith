@@ -732,6 +732,9 @@ impl SemanticAnalyzer {
     }
 
     fn check_variable(&mut self, name: &str, expr: &Spanned<Expr>) -> Result<Type, SemaError> {
+        // Every mention, counted here because every mention comes through here.
+        *self.name_mentions.entry(name.to_string()).or_insert(0) += 1;
+
         let info = if let Some(info) = self.table.lookup(name) {
             info.clone()
         } else {
@@ -2246,6 +2249,15 @@ impl SemanticAnalyzer {
         object: &Spanned<Expr>,
         field: &Spanned<String>,
     ) -> Result<Type, SemaError> {
+        // `arr[i].f` — the shape that makes columns worth suggesting. Counted
+        // for every array, not only the marked ones: an unmarked array whose
+        // every mention is this shape is what the suggestion looks for.
+        if let Expr::Index { object: array, .. } = &object.node
+            && let Expr::Variable(n) = &array.node
+        {
+            *self.indexed_field_reads.entry(n.clone()).or_insert(0) += 1;
+        }
+
         // `arr[i].f` on an SoA array is a column entry. It is checked here, as
         // one step, because the element it would otherwise be composed through
         // does not exist — and checking the index node on its own is exactly

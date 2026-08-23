@@ -528,6 +528,10 @@ impl SemanticAnalyzer {
         let mut names: Vec<String> = Vec::new();
         collect_variable_names(init, &mut names);
         for n in names {
+            // A name reached from an initializer never passes through the
+            // expression checker, so count it here or the SoA suggestion would
+            // not see `static P: &Ent = &A[0];` as a use of `A` at all.
+            *self.name_mentions.entry(n.clone()).or_insert(0) += 1;
             let is_function = self
                 .table
                 .lookup(&n)

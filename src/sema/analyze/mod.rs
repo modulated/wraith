@@ -93,6 +93,15 @@ pub struct SemanticAnalyzer {
     pub(super) generated_tables: HashMap<Span, Vec<i64>>,
     /// Every array declared `#[soa]`, by the name of its static or const.
     pub(super) soa_arrays: HashMap<String, crate::sema::SoaLayout>,
+    /// How many times each name is mentioned anywhere, and how many of those
+    /// mentions were the `arr[i].field` shape.
+    ///
+    /// Two counts rather than a walk of the finished tree: the checker already
+    /// visits every expression, so riding on it cannot miss a use the way a
+    /// second walker written to be exhaustive can drift out of being so. When
+    /// the two agree, every mention was a field read.
+    pub(super) name_mentions: HashMap<String, usize>,
+    pub(super) indexed_field_reads: HashMap<String, usize>,
     pub(super) current_return_type: Option<Type>,
     pub(super) resolved_symbols: HashMap<Span, SymbolInfo>,
     pub(super) function_metadata: HashMap<String, FunctionMetadata>,
@@ -232,6 +241,8 @@ impl SemanticAnalyzer {
             failed_declarations: std::collections::HashSet::new(),
             generated_tables: HashMap::default(),
             soa_arrays: HashMap::default(),
+            name_mentions: HashMap::default(),
+            indexed_field_reads: HashMap::default(),
             current_return_type: None,
             resolved_symbols: HashMap::default(),
             function_metadata: HashMap::default(),
@@ -428,8 +439,78 @@ impl SemanticAnalyzer {
         // program.
         self.check_unused_imports();
 
+        // Suggest columns where they would pay. Needs every body checked, so
+        // it sits with the other whole-program questions.
+        self.suggest_soa(source);
+
         // Analyze tail calls after all other analysis is complete
         Ok(self.analyze_tail_calls(source))
+    }
+
+    /// Point out an array of structs that is only ever reached one field at a
+    /// time, where `#[soa]` would replace a multiply with an index.
+    ///
+    /// The recommendation is inferred; the layout is not. Two conditions, both
+    /// conservative — a suggestion the reader has to think about is worth
+    /// having, one they have to dismiss is not:
+    ///
+    /// - Every mention of the name is an `arr[i].field`. Anything else — a
+    ///   `&`, a slice, a whole-element binding, even a `.len` — leaves the
+    ///   counts unequal and says nothing. Being quiet about an array that
+    ///   *could* take columns is cheap; suggesting one that cannot is not.
+    /// - The declaration is not `pub`. Whether an element is used whole is a
+    ///   whole-program question, and only for a private declaration does this
+    ///   module see the whole program.
+    fn suggest_soa(&mut self, source: &crate::ast::SourceFile) {
+        use crate::ast::Item;
+        use crate::sema::types::Type;
+
+        let mut found = Vec::new();
+        for item in &source.items {
+            let Item::Static(stat) = &item.node else {
+                continue;
+            };
+            if stat.soa.is_some() || stat.is_pub {
+                continue;
+            }
+            let name = &stat.name.node;
+            let Some(sym) = self.table.lookup(name) else {
+                continue;
+            };
+            let Type::Array(elem, len) = &sym.ty else {
+                continue;
+            };
+            let Type::Named(sname) = &**elem else {
+                continue;
+            };
+            let Some(sdef) = self.type_registry.get_struct(sname) else {
+                continue;
+            };
+            if *len < 2 || sdef.total_size < 2 {
+                continue; // nothing to interleave, so nothing to unpick
+            }
+            // Only worth saying if the layout would in fact be accepted.
+            let takes_columns = sdef.fields.iter().all(|f| {
+                let scalar = matches!(f.ty, Type::Primitive(_) | Type::Pointer(_))
+                    || matches!(&f.ty, Type::Named(n) if self.type_registry.get_enum(n).is_some());
+                let width = crate::sema::init::size_of(&f.ty, &self.type_registry);
+                scalar && (1..=2).contains(&width)
+            });
+            if !takes_columns {
+                continue;
+            }
+            let reads = self.indexed_field_reads.get(name).copied().unwrap_or(0);
+            let mentions = self.name_mentions.get(name).copied().unwrap_or(0);
+            if reads == 0 || reads != mentions {
+                continue;
+            }
+            found.push((name.clone(), sdef.total_size, stat.name.span));
+        }
+
+        for (name, stride, span) in found {
+            self.warnings
+                .push(crate::sema::Warning::CouldBeSoa { name, stride, span });
+        }
     }
 
     /// The most errors one analysis collects before it stops trying. Matches
