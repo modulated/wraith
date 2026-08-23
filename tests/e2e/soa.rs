@@ -283,24 +283,30 @@ fn a_two_byte_column_keeps_both_bytes() {
 
 #[test]
 fn a_constant_index_resolves_to_one_absolute_address() {
+    // The shape matters: for many combinations of length, field count and
+    // index the two layouts name the *same* byte by coincidence — with four
+    // elements of three bytes, `E[3].c` is base + 11 either way. Five elements
+    // pulls them apart, so this actually distinguishes a column address from a
+    // composed record address.
     let asm = compile_success(
         r#"
-        struct Ent { a: u8, b: u8 }
+        struct Ent { a: u8, b: u8, c: u8 }
         #[soa]
-        static E: [Ent; 4] = [Ent { a: 0, b: 0 }; 4];
+        static E: [Ent; 5] = [Ent { a: 0, b: 0, c: 0 }; 5];
         const OUT: addr = 0x0900;
         #[reset]
         fn main() {
-            OUT = E[3].b;
+            OUT = E[3].c;
             loop {}
         }
     "#,
     );
     let body = main_body(&asm);
-    // Column b starts after four `a`s, so E[3].b is base + 4 + 3.
+    // Column c starts after five `a`s and five `b`s, so E[3].c is base + 13.
     assert!(
-        body.contains(&"LDA $0407".to_string()),
-        "expected a direct load from the b column:\n{}",
+        body.contains(&"LDA $040D".to_string()),
+        "expected a direct load from the c column at base + 13, not the \
+         interleaved base + 11:\n{}",
         body.join("\n")
     );
 }
