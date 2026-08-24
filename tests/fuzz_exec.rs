@@ -3072,7 +3072,7 @@ fn render_program(p: &Prog, form: Form) -> String {
                     .skip(1)
                     .map(|(i, v)| format!("f{i}: {}", lit(v))),
             );
-            parts.push(nested_lit(n, &lit));
+            parts.push(nested_lit(n, lit));
             format!("S {{ {} }}", parts.join(", "))
         };
         funcs.push_str(&format!(
@@ -3151,7 +3151,7 @@ static DEV: VT = VT {{ call: {} }};\n",
                 .skip(1)
                 .map(|(i, v)| format!("f{i}: {}", lit(v))),
         );
-        fields.push(nested_lit(&p.nested_init, &lit));
+        fields.push(nested_lit(&p.nested_init, lit));
         // Bound from a call, or from a literal. The two are separate code —
         // one copies the returned bytes out at a declaration, the other at an
         // assignment — so the generator has to reach both.
