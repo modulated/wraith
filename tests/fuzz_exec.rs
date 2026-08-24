@@ -436,6 +436,44 @@ enum Place {
     AField(Ix),
 }
 
+/// What `main`'s pointer names. A `&T` used to be a second name for a
+/// *variable* only; it can equally name a struct field or an array element,
+/// and those are different addresses to take — `&s.f0` forces the struct into
+/// memory at a field offset, `&arr[k]` is the element-address computation the
+/// `memcpy` work had to get right — and different storage to alias. Which one
+/// it currently names is program state, moved by [`S::Repoint`], so a read
+/// through it is never a fact about the declaration.
+///
+/// A field or an element target is only ever at the aggregate type, so the
+/// pointer is at that type when it may name one; a variable target keeps the
+/// old freedom of any of the four types.
+#[derive(Clone, PartialEq)]
+enum PtrTarget {
+    Var(usize),
+    Field(usize),
+    Elem(usize),
+}
+
+impl PtrTarget {
+    /// The expression that reads the aliased place directly, under its own
+    /// name — for the invalidation follow-up after a store through the pointer.
+    fn read(&self) -> E {
+        match self {
+            PtrTarget::Var(k) => E::Var(*k),
+            PtrTarget::Field(k) => E::Field(*k),
+            PtrTarget::Elem(k) => E::Elem(Ix::Lit(*k)),
+        }
+    }
+    /// How `&<target>` is written.
+    fn addr(&self) -> String {
+        match self {
+            PtrTarget::Var(k) => format!("&v{k}"),
+            PtrTarget::Field(k) => format!("&s.f{k}"),
+            PtrTarget::Elem(k) => format!("&arr[{k}]"),
+        }
+    }
+}
+
 /// Elements in the generated array, and the largest `for` count, so a loop
 /// variable is always a valid index.
 const ALEN: usize = 4;
@@ -510,7 +548,7 @@ enum S {
     /// `p = &v{k};` — the alias moved to another variable of the same type.
     /// What makes the pointer's target program state rather than a fact about
     /// the declaration, so a read through it cannot be folded away.
-    Repoint(usize),
+    Repoint(PtrTarget),
     /// `v{dst} = pk(&s, <expr>);` — a call that takes `main`'s struct **by
     /// pointer**, writes one of its fields, and returns another.
     ///
@@ -748,7 +786,7 @@ struct Gen<'a> {
     /// Every target has the pointer's own type, so a store through it is never
     /// a widening: `&T` names a `T`, and the two ways of writing that storage
     /// have to agree byte for byte.
-    ptr_targets: Vec<usize>,
+    ptr_targets: Vec<PtrTarget>,
     ptr_ty: Ty,
     /// Whether `pk` exists, and which of `main`'s variables can take its
     /// result. Those are the ones at the aggregate type: `pk` returns a field,
@@ -1187,12 +1225,18 @@ fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
 fn gen_stmt_seq(g: &mut Gen, depth: u32) -> Vec<S> {
     let s = gen_stmt(g, depth);
     if matches!(s, S::PtrStore(..)) && !g.ptr_targets.is_empty() {
-        let pick = |g: &mut Gen| -> usize {
-            let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
-            g.ptr_targets[k]
-        };
-        let (dst, src) = (pick(g), pick(g));
-        return vec![s, S::Assign(Place::Var(dst), g.ptr_ty, E::Var(src))];
+        // Read one alias candidate straight back, under its own name, right
+        // after the store: a value written through `*p` has to be visible
+        // through the storage it aliases, and a compiler keeping that storage
+        // in a register across the store would answer with the stale one. The
+        // candidate may be a variable, a field, or an element, so the read is
+        // its direct access — the destination is any assignable variable of
+        // the pointer's (pointee's) type.
+        let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
+        let src = g.ptr_targets[k].read();
+        if let Some(dst) = (g.assignable.clone()).find(|i| g.var_types[*i] == g.ptr_ty) {
+            return vec![s, S::Assign(Place::Var(dst), g.ptr_ty, src)];
+        }
     }
     vec![s]
 }
@@ -1224,7 +1268,7 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     if !g.ptr_targets.is_empty() && g.rng.below(100) < 12 {
         if g.rng.below(3) == 0 {
             let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
-            return S::Repoint(g.ptr_targets[k]);
+            return S::Repoint(g.ptr_targets[k].clone());
         }
         let ty = g.ptr_ty;
         return S::PtrStore(ty, gen_expr(g, ty, 2, false));
@@ -1355,7 +1399,7 @@ struct Prog {
     poke: Option<(usize, usize)>,
     /// The pointer `main` declares, as (type, initial target). `None` in a
     /// program without one.
-    ptr: Option<(Ty, usize)>,
+    ptr: Option<(Ty, PtrTarget)>,
     /// Which of them `main`'s struct is *bound* from, or `None` when it is
     /// declared from a literal.
     ///
@@ -1834,11 +1878,23 @@ fn gen_program(seed: u64) -> Prog {
     // Half the programs, because a program without one still has to be
     // generated: taking a local's address is what forces it into memory, and
     // the shapes that never do have their own bugs.
-    let ptr: Option<(Ty, usize)> = (g.rng.below(100) < 50).then(|| {
+    let ptr: Option<(Ty, PtrTarget)> = (g.rng.below(100) < 50).then(|| {
         let pt = g.pair.pick(g.rng);
-        let targets: Vec<usize> = (0..VARS).filter(|i| var_types[*i] == pt).collect();
+        let mut targets: Vec<PtrTarget> = (0..VARS)
+            .filter(|i| var_types[*i] == pt)
+            .map(PtrTarget::Var)
+            .collect();
+        // At the aggregate type, `&s.f0` and `&arr[k]` are addresses the
+        // pointer can equally hold — the struct field forces the struct into
+        // memory at an offset, the element is the address computation with a
+        // bug history. Added to the candidate set so `*p` may name any of them
+        // and `Repoint` may move between kinds.
+        if pt == base && aggregates {
+            targets.extend((0..SFIELDS).map(PtrTarget::Field));
+            targets.extend((0..ALEN).map(PtrTarget::Elem));
+        }
         let k = g.rng.below(targets.len() as u64) as usize;
-        (pt, targets[k])
+        (pt, targets[k].clone())
     });
     // `pk` writes one field of `main`'s struct through a `&S` and returns
     // another. Half the programs that have a struct at all.
@@ -1884,9 +1940,16 @@ fn gen_program(seed: u64) -> Prog {
     // scope that can name the pointer — it is `main`'s local, and a function
     // body has no way to spell it — so a function generated while this was set
     // produced `*p` with no `p` in scope.
-    if let Some((pt, _)) = ptr {
-        g.ptr_ty = pt;
-        g.ptr_targets = (0..VARS).filter(|i| var_types[*i] == pt).collect();
+    if let Some((pt, _)) = &ptr {
+        g.ptr_ty = *pt;
+        g.ptr_targets = (0..VARS)
+            .filter(|i| var_types[*i] == *pt)
+            .map(PtrTarget::Var)
+            .collect();
+        if *pt == base && aggregates {
+            g.ptr_targets.extend((0..SFIELDS).map(PtrTarget::Field));
+            g.ptr_targets.extend((0..ALEN).map(PtrTarget::Elem));
+        }
     }
     if poke.is_some() {
         g.poke_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
@@ -1963,7 +2026,7 @@ struct St<'a> {
     /// Which of `main`'s variables the pointer currently names. `None` where
     /// there is no pointer in scope, which is what makes naming one there a
     /// generator bug rather than a silent zero.
-    ptr: Option<usize>,
+    ptr: Option<PtrTarget>,
     /// Each slice's current `(start, len)` into `TBL`. Program state too:
     /// `Reslice` and `CopySlice` move it. Empty inside a function, which names
     /// no slice.
@@ -2157,7 +2220,17 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         // the last `Repoint` left. A read is at the *pointee's* type, which is
         // the pointer's own, and then narrowed to the context like any other
         // storage read.
-        E::PtrLoad => narrow(st.vars[st.ptr.expect("a pointer read needs a pointer")], ty),
+        E::PtrLoad => {
+            let t = st.ptr.as_ref().expect("a pointer read needs a pointer");
+            narrow(
+                match t {
+                    PtrTarget::Var(k) => st.vars[*k],
+                    PtrTarget::Field(k) => st.fields[*k],
+                    PtrTarget::Elem(k) => st.arr[*k],
+                },
+                ty,
+            )
+        }
         E::Field(i) => st.fields[*i],
         E::AField(ix) => st.afield[eval_index_mod(ix, st, ty, AFLEN)],
         // `(e as T)` is the variant index at `T`. Reaching this with no tag
@@ -2295,10 +2368,13 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             // target has it, so there is no widening to get wrong.
             S::PtrStore(t, e) => {
                 let v = narrow(eval(e, st, *t), *t);
-                let k = st.ptr.expect("a pointer store needs a target");
-                st.vars[k] = v;
+                match st.ptr.clone().expect("a pointer store needs a target") {
+                    PtrTarget::Var(k) => st.vars[k] = v,
+                    PtrTarget::Field(k) => st.fields[k] = v,
+                    PtrTarget::Elem(k) => st.arr[k] = v,
+                }
             }
-            S::Repoint(k) => st.ptr = Some(*k),
+            S::Repoint(k) => st.ptr = Some(k.clone()),
             // The argument is evaluated before the call, so the field it may
             // read is the one from *before* the write — which is the order the
             // machine runs it in too.
@@ -2371,7 +2447,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         current: None,
         // The declaration installs the table's first entry.
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
-        ptr: p.ptr.map(|(_, k)| k),
+        ptr: p.ptr.as_ref().map(|(_, k)| k.clone()),
         slices: p.slices.clone(),
     };
     exec(&p.stmts, &mut st, p.base);
@@ -2532,7 +2608,12 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         // baked in. A `char` cast straight to the context type.
         E::StrIndex(ix) => {
             let n = str_name(sc);
-            format!("({}[{}] as {})", n, render_slice_index(&n, ix, sc), ty.name())
+            format!(
+                "({}[{}] as {})",
+                n,
+                render_slice_index(&n, ix, sc),
+                ty.name()
+            )
         }
         E::Dispatch { sel, arg } => {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
@@ -2668,7 +2749,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
             }
             S::SliceFromCall(i, k) => out.push_str(&format!("{pad}sl{i} = mk({k});\n")),
             S::PtrStore(t, e) => out.push_str(&format!("{pad}*p = {};\n", render(e, *t, sc))),
-            S::Repoint(k) => out.push_str(&format!("{pad}p = &v{k};\n")),
+            S::Repoint(k) => out.push_str(&format!("{pad}p = {};\n", k.addr())),
             S::PokeStruct(dst, e) => {
                 out.push_str(&format!("{pad}v{dst} = pk(&s, {});\n", render(e, ty, sc)))
             }
@@ -2967,8 +3048,8 @@ static DEV: VT = VT {{ call: {} }};\n",
     // Declared after the variables it may name, and before the statements
     // that move it. Taking a local's address is also what forces that local
     // into memory rather than a register, which is half of what this tests.
-    if let Some((pt, k)) = p.ptr {
-        decls.push_str(&format!("    let p: &{} = &v{k};\n", pt.name()));
+    if let Some((pt, k)) = &p.ptr {
+        decls.push_str(&format!("    let p: &{} = {};\n", pt.name(), k.addr()));
     }
     if let Some(k) = p.enum_init {
         decls.push_str(&format!("    let e: C = C::C{k};\n"));
@@ -3884,6 +3965,8 @@ fn the_generator_covers_what_it_claims() {
         str_args: usize,
         str_reads: usize,
         str_index_reads: usize,
+        ptr_field_targets: usize,
+        ptr_elem_targets: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -4023,8 +4106,13 @@ fn the_generator_covers_what_it_claims() {
                     s.stmts.insert("pointer-store");
                     walk_e(e, s, narrow_half);
                 }
-                S::Repoint(_) => {
+                S::Repoint(t) => {
                     s.stmts.insert("repoint");
+                    match t {
+                        PtrTarget::Field(_) => s.ptr_field_targets += 1,
+                        PtrTarget::Elem(_) => s.ptr_elem_targets += 1,
+                        PtrTarget::Var(_) => {}
+                    }
                 }
                 S::PokeStruct(_, e) => {
                     s.stmts.insert("struct-poke");
@@ -4042,6 +4130,13 @@ fn the_generator_covers_what_it_claims() {
             seen.types.insert(t.name());
         }
         walk_s(&p.stmts, &mut seen, p.pair.narrow);
+        if let Some((_, t)) = &p.ptr {
+            match t {
+                PtrTarget::Field(_) => seen.ptr_field_targets += 1,
+                PtrTarget::Elem(_) => seen.ptr_elem_targets += 1,
+                PtrTarget::Var(_) => {}
+            }
+        }
         for f in &p.funcs {
             walk_s(&f.body, &mut seen, p.pair.narrow);
             walk_e(&f.ret, &mut seen, p.pair.narrow);
@@ -4130,6 +4225,14 @@ fn the_generator_covers_what_it_claims() {
     );
     assert!(seen.str_reads > 0, "never read a string's length");
     assert!(seen.str_index_reads > 0, "never indexed a string");
+    assert!(
+        seen.ptr_field_targets > 0,
+        "a pointer never named a struct field"
+    );
+    assert!(
+        seen.ptr_elem_targets > 0,
+        "a pointer never named an array element"
+    );
 }
 
 /// No name the generator invents may be a reserved word.
@@ -4439,23 +4542,26 @@ mod coverage {
         ),
         (
             "UnaryOp::Deref",
-            "`*p` for a scalar `p`, read and written, in `main` only. The pointee is always \
-             one of `main`'s own variables of the pointer's type, so the alias the oracle \
-             models is a second name for storage it already tracks. No pointer to an \
-             element, a field or another pointer, and none passed to a function",
+            "`*p` for a scalar `p`, read and written, in `main` only. The pointee is a \
+             variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved \
+             between kinds by `Repoint`, so the alias the oracle models covers storage it \
+             already tracks under three names. No pointer to another pointer, and none \
+             passed to a function",
         ),
         (
             "TypeExpr::Pointer",
-            "one `&T` local per program that has one, at either half of the pair. Never a \
-             parameter, a return type, a struct field, or a pointer to a pointer",
+            "one `&T` local per program that has one — at either half of the pair when it \
+             names a variable, at the aggregate type when it names a field or element. \
+             Never a parameter, a return type, a struct field, or a pointer to a pointer",
         ),
         (
             "UnaryOp::AddrOf",
-            "three shapes: `&arr[i]` and `&TBL[i]` as the two source arguments of a \
-             `memcpy` — a local array in zero page and a `const` one reached by label, \
-             which are different address computations — and `&v{i}`, the address of a \
-             plain local, which is what a pointer is bound to and re-bound to. Never the \
-             address of a field, of a struct, or of a function",
+            "`&arr[i]` and `&TBL[i]` as the two source arguments of a `memcpy` — a local \
+             array in zero page and a `const` one reached by label, different address \
+             computations — and what a pointer is bound to and re-bound to: `&v{i}` (a \
+             plain local), `&s.f{i}` (a struct field, which forces the struct into memory \
+             at an offset), and `&arr[k]` (an element). Never the address of a whole \
+             struct or of a function",
         ),
         (
             "Item::Enum",
