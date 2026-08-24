@@ -96,6 +96,7 @@ impl Parser<'_> {
 
         match self.peek().cloned() {
             Some(Token::Import) => {
+                Self::reject_attributes(&attributes, &attr_spans, "an import")?;
                 let import = self.parse_import()?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Import(import), span))
@@ -108,12 +109,14 @@ impl Parser<'_> {
             }
 
             Some(Token::Struct) => {
+                Self::reject_attributes(&attributes, &attr_spans, "a struct")?;
                 let s = self.parse_struct(attributes, is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Struct(s), span))
             }
 
             Some(Token::Enum) => {
+                Self::reject_attributes(&attributes, &attr_spans, "an enum")?;
                 let e = self.parse_enum(is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Enum(e), span))
@@ -353,6 +356,26 @@ impl Parser<'_> {
             }
         }
         Ok(soa)
+    }
+
+    /// No attribute applies to this declaration kind, so reject any that appear.
+    ///
+    /// `enum`, `import` and `struct` used to discard their attributes the way
+    /// `static` did before the storage arms were fixed: `#[inline] enum E {…}`
+    /// compiled and did nothing. An attribute is a request, and a request the
+    /// compiler cannot honour is an error at the attribute, not a silence.
+    fn reject_attributes(
+        attributes: &[FnAttribute],
+        spans: &[Span],
+        what: &str,
+    ) -> ParseResult<()> {
+        if let Some((attr, span)) = attributes.iter().zip(spans).next() {
+            return Err(ParseError::custom(
+                *span,
+                format!("{} cannot take {}", what, attribute_name(attr)),
+            ));
+        }
+        Ok(())
     }
 
     /// Parse an attribute: #[name] or #[name(value)]

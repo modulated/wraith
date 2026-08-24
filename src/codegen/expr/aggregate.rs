@@ -1588,6 +1588,41 @@ pub(crate) fn emit_array_struct_field_indexed(
         None => (base.plus(finfo.offset as u16), elem_size),
     };
 
+    // A constant index needs no register and no scaling — the column entry is
+    // at a fixed address. A constant-index *read* was already served by the
+    // direct path in `generate_field_access`, so in practice only the write
+    // side arrives here with one; handling both keeps the two from disagreeing,
+    // and drops `LDA #k / TAY / STA col,Y` to a single `STA col+k`.
+    if let Some(k) = const_index(index, info) {
+        let at = field.plus(k as u16 * stride as u16);
+        match value {
+            None => {
+                emitter.emit_comment("Array-of-struct field read (constant index)");
+                emit_scalar_load_from(at, &finfo.ty, emitter);
+            }
+            Some(val) => {
+                if at.is_read_only() {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "cannot write to constant data".to_string(),
+                    ));
+                }
+                emitter.emit_comment("Array-of-struct field write (constant index)");
+                generate_expr(val, emitter, info, string_collector)?;
+                emitter.emit_inst("STA", &at.operand(0));
+                if is_multibyte {
+                    let hi = if high_byte_in_x(&finfo.ty) {
+                        "STX"
+                    } else {
+                        "STY"
+                    };
+                    emitter.emit_inst(hi, &at.operand(1));
+                }
+                emitter.mark_a_unknown();
+            }
+        }
+        return Ok(true);
+    }
+
     match value {
         None => {
             emitter.emit_comment("Array-of-struct indexed field read");

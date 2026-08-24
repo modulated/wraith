@@ -312,6 +312,61 @@ fn a_constant_index_resolves_to_one_absolute_address() {
 }
 
 #[test]
+fn a_constant_index_write_stores_directly() {
+    // The write side used to route a constant index through the runtime path —
+    // `LDA #k / TAY / STA col,Y` — where a single `STA col+k` does. A byte and
+    // several cycles per store, on the operation SoA exists to make cheap.
+    let asm = compile_success(
+        r#"
+        struct Ent { a: u8, b: u8, c: u8 }
+        #[soa]
+        static E: [Ent; 5] = [Ent { a: 0, b: 0, c: 0 }; 5];
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            E[3].c = 7;
+            OUT = E[3].c;
+            loop {}
+        }
+    "#,
+    );
+    let body = main_body(&asm);
+    assert!(
+        body.contains(&"STA $040D".to_string()),
+        "expected a direct store to the c column at base + 13:\n{}",
+        body.join("\n")
+    );
+    // No index register is set up for a constant-index store.
+    let main_only: Vec<_> = body
+        .iter()
+        .take_while(|l| !l.contains("STA $0900") && !l.contains("STA OUT"))
+        .collect();
+    assert!(
+        !main_only.iter().any(|l| l.as_str() == "TAY"),
+        "a constant-index store should not scale an index:\n{}",
+        body.join("\n")
+    );
+}
+
+#[test]
+fn a_constant_index_write_round_trips() {
+    let mut e = run(r#"
+        struct Ent { hp: u8, tag: u8 }
+        #[soa]
+        static E: [Ent; 4] = [Ent { hp: 0, tag: 0 }; 4];
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            E[1].hp = 99;
+            E[3].tag = 42;
+            OUT = E[1].hp + E[3].tag;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 99 + 42);
+}
+
+#[test]
 fn a_pointer_to_one_field_is_still_allowed() {
     // A *field* has an address even when the element does not — it is one byte
     // in one column — so the refusal must not overreach.
@@ -477,6 +532,52 @@ fn soa_on_an_addr_declaration_is_refused() {
     "#,
     );
     assert!(err.contains("names a fixed location"), "got:\n{err}");
+}
+
+#[test]
+fn an_attribute_an_enum_cannot_take_is_refused() {
+    // `enum`, `import` and `struct` dropped attributes on the floor the way
+    // `static` did before the storage arms were fixed.
+    let err = expect_error(
+        r#"
+        #[inline]
+        enum Colour { Red, Green }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(err.contains("an enum cannot take #[inline]"), "got:\n{err}");
+}
+
+#[test]
+fn an_attribute_a_struct_cannot_take_is_refused() {
+    let err = expect_error(
+        r#"
+        #[soa]
+        struct P { x: u8, y: u8 }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(err.contains("a struct cannot take #[soa]"), "got:\n{err}");
+}
+
+#[test]
+fn an_attribute_an_import_cannot_take_is_refused() {
+    // The refusal fires before the import path is even resolved, so a bad
+    // attribute is reported whether or not the module exists.
+    let err = expect_error(
+        r#"
+        #[inline]
+        import { foo } from "nowhere.wr";
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    assert!(
+        err.contains("an import cannot take #[inline]"),
+        "got:\n{err}"
+    );
 }
 
 // ============================================================================
