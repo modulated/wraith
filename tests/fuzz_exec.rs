@@ -337,6 +337,13 @@ enum E {
     /// the function that takes one. A unit enum's value *is* its variant
     /// index, so the oracle needs nothing but that index.
     EnumVal,
+    /// A `match` on the enum that extracts a variant's payload — the half of a
+    /// tagged union the tag read cannot reach. Variant 0 is unit and yields a
+    /// constant; the rest carry a `u8` and yield `(x as T)`. Which arm runs
+    /// discriminates the tag, and the arm that runs extracts the payload, so a
+    /// compiler that read the wrong offset or misrouted the tag is caught.
+    /// `main` only, where the enum is spelled `e`.
+    EnumMatch,
     /// `(t.len as T)`. A length read through the pointer, so it is wrong
     /// whenever the pointer is, and it needs nothing of the literal but its
     /// length.
@@ -900,6 +907,12 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         if g.allow_enum && g.rng.below(100) < 12 {
             return E::EnumVal;
         }
+        // A `match` that extracts the payload — the tagged-union half the tag
+        // read cannot reach. `main` only (it spells `e`), and `allow_loops` is
+        // the `main`-only signal.
+        if g.allow_enum && g.allow_loops && g.rng.below(100) < 10 {
+            return E::EnumMatch;
+        }
         // A string's `.len` is deliberately *not* generated freely. Reading it
         // stages the pointer through the four-byte high pool, so two of them
         // inside a multiply or a 16-bit operator exhaust it: at 12% of
@@ -1392,6 +1405,9 @@ struct Prog {
     /// Which variant `main`'s enum local holds, or `None` when the program
     /// declares no enum.
     enum_init: Option<usize>,
+    /// The `u8` payload the constructed variant carries. Variants past the
+    /// first hold one; variant 0 is unit and ignores this.
+    enum_payload: u8,
     /// Which of [`STRINGS`] `main` holds, or `None` when it holds none.
     str_init: Option<usize>,
     /// The `const` table's contents. Declared whenever `aggregates` is set, and
@@ -1942,6 +1958,7 @@ fn gen_program(seed: u64) -> Prog {
     // generated.
     let enum_init: Option<usize> =
         (g.rng.below(100) < 50).then(|| g.rng.below(EVARIANTS as u64) as usize);
+    let enum_payload = g.rng.below(256) as u8;
     g.allow_enum = enum_init.is_some();
     // And the string, independently again. `str` is its own spelling in the
     // type table — not `Named`, not a primitive — and is the kind two of the
@@ -2006,6 +2023,7 @@ fn gen_program(seed: u64) -> Prog {
         afield_init,
         nested_init,
         enum_init,
+        enum_payload,
         str_init,
         konst,
         vtable,
@@ -2041,6 +2059,10 @@ struct St<'a> {
     /// where no enum is in scope, which is what makes naming one there a bug
     /// in the generator rather than a silent zero.
     tag: Option<usize>,
+    /// The active variant's `u8` payload, when the enum in scope carries one.
+    /// `None` for a unit variant or no enum — naming a payload there is a
+    /// generator bug rather than a silent zero.
+    epay: Option<i64>,
     /// The length of the string in scope, on the same rule as `tag`.
     strlen: Option<usize>,
     counters: Vec<i64>,
@@ -2107,6 +2129,9 @@ fn call_fn(
         // The tag, when this function takes the enum. A unit enum's value is
         // its variant index, so nothing else has to travel.
         tag,
+        // The function never `match`es the enum — that read is `main` only —
+        // so no payload travels with it.
+        epay: None,
         // The string's length, for the same reason: reads stay at `.len`.
         strlen,
         // Function bodies contain no loops, so these are never indexed; sized
@@ -2272,6 +2297,20 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             st.tag.expect("an enum read with no enum in scope") as i64,
             ty,
         ),
+        E::EnumMatch => {
+            // The unit variant yields the constant its arm spells; a payload
+            // variant binds `x` and yields `(x as T)`, which is the payload
+            // narrowed to the context type.
+            let tag = st.tag.expect("an enum match with no enum in scope");
+            if tag == 0 {
+                narrow(0, ty)
+            } else {
+                narrow(
+                    st.epay.expect("a payload variant with no payload in scope"),
+                    ty,
+                )
+            }
+        }
         E::StrLen => narrow(
             st.strlen.expect("a string read with no string in scope") as i64,
             ty,
@@ -2460,6 +2499,10 @@ fn expected(p: &Prog) -> Vec<u32> {
             .map(|(v, t)| narrow(*v, *t))
             .collect(),
         tag: p.enum_init,
+        epay: match p.enum_init {
+            Some(k) if k > 0 => Some(p.enum_payload as i64),
+            _ => None,
+        },
         strlen: p.str_init.map(|k| STRINGS[k].len()),
         arr: if p.aggregates {
             at_base(&p.arr_init)
@@ -2643,6 +2686,12 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::NestedField(j) => format!("{}.n.g{j}", struct_name(sc)),
         E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_afield_index(ix, sc)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
+        E::EnumMatch => {
+            let tn = ty.name();
+            let mut arms = vec![format!("C::C0 => (0 as {tn})")];
+            arms.extend((1..EVARIANTS).map(|k| format!("C::C{k}(x) => (x as {tn})")));
+            format!("(match {} {{ {} }})", enum_name(sc), arms.join(", "))
+        }
         E::StrLen => format!("({}.len as {})", str_name(sc), ty.name()),
         // The Wrapped index reads `t.len` at run time, exactly as a slice index
         // reads `sl.len`, so the modulus is spelled in the source rather than
@@ -2958,7 +3007,15 @@ fn render_program(p: &Prog, form: Form) -> String {
         }
     };
     let enum_decl = if p.enum_init.is_some() {
-        let vs: Vec<String> = (0..EVARIANTS).map(|i| format!("C{i}")).collect();
+        let vs: Vec<String> = (0..EVARIANTS)
+            .map(|i| {
+                if i == 0 {
+                    format!("C{i}")
+                } else {
+                    format!("C{i}(u8)")
+                }
+            })
+            .collect();
         format!("enum C {{ {} }}\n", vs.join(", "))
     } else {
         String::new()
@@ -3110,7 +3167,11 @@ static DEV: VT = VT {{ call: {} }};\n",
         decls.push_str(&format!("    let p: &{} = {};\n", pt.name(), k.addr()));
     }
     if let Some(k) = p.enum_init {
-        decls.push_str(&format!("    let e: C = C::C{k};\n"));
+        if k == 0 {
+            decls.push_str(&format!("    let e: C = C::C{k};\n"));
+        } else {
+            decls.push_str(&format!("    let e: C = C::C{k}({});\n", p.enum_payload));
+        }
     }
     if let Some(k) = p.str_init {
         decls.push_str(&format!("    let t: str = \"{}\";\n", STRINGS[k]));
@@ -3423,6 +3484,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::AField(_)
             | E::PtrLoad
             | E::EnumVal
+            | E::EnumMatch
             | E::StrLen
             | E::StrIndex(_)
             | E::SliceElem(..)
@@ -3507,6 +3569,7 @@ fn strip_self_calls(e: &mut E) {
         | E::AField(_)
         | E::PtrLoad
         | E::EnumVal
+        | E::EnumMatch
         | E::StrLen
         | E::StrIndex(_)
         | E::SliceElem(..)
@@ -3703,7 +3766,13 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_index(ix, target, seen)
         }
-        E::Field(_) | E::NestedField(_) | E::AField(_) | E::PtrLoad | E::EnumVal | E::StrLen => {
+        E::Field(_)
+        | E::NestedField(_)
+        | E::AField(_)
+        | E::PtrLoad
+        | E::EnumVal
+        | E::EnumMatch
+        | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -4029,6 +4098,7 @@ fn the_generator_covers_what_it_claims() {
         ptr_field_targets: usize,
         ptr_elem_targets: usize,
         nested_reads: usize,
+        enum_match_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -4096,6 +4166,7 @@ fn the_generator_covers_what_it_claims() {
             E::AField(_) => s.afield_reads += 1,
             E::PtrLoad => s.ptr_reads += 1,
             E::EnumVal => s.enum_reads += 1,
+            E::EnumMatch => s.enum_match_reads += 1,
             E::StrLen => s.str_reads += 1,
             E::StrIndex(_) => s.str_index_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
@@ -4282,6 +4353,7 @@ fn the_generator_covers_what_it_claims() {
          `Named` like a struct, so only the type registry tells the two apart"
     );
     assert!(seen.enum_reads > 0, "never read an enum's tag");
+    assert!(seen.enum_match_reads > 0, "never matched an enum payload");
     assert!(
         seen.str_args > 0,
         "never passed a `str` to a function — its own spelling in the type table, and the \
@@ -4423,6 +4495,7 @@ fn the_oracle_matches_the_documented_semantics() {
         afield_init: [0; AFLEN],
         nested_init: [0; NESTED],
         enum_init: None,
+        enum_payload: 0,
         str_init: None,
         konst: [0; ALEN],
         vtable: 0,
@@ -4446,6 +4519,7 @@ fn the_oracle_matches_the_documented_semantics() {
         counters: Vec::new(),
         loops: Vec::new(),
         current: None,
+        epay: None,
         dev: 0,
         ptr: None,
         slices: Vec::new(),
@@ -4538,11 +4612,6 @@ mod coverage {
         ("Expr::CpuFlagOverflow", "same as `carry`"),
         ("Expr::CpuFlagNegative", "same as `carry`"),
         (
-            "Expr::Match",
-            "the statement form is generated; the expression form would need the oracle to \
-             model arm-type unification",
-        ),
-        (
             "Expr::BitOp",
             "single-bit access is covered by tests/e2e/bitfields.rs",
         ),
@@ -4572,10 +4641,11 @@ mod coverage {
             "Pattern::Range",
             "range patterns are covered exhaustively by tests/e2e/match_ranges.rs",
         ),
-        ("Pattern::EnumVariant", "enums are not generated"),
         (
             "Pattern::Variable",
-            "a binding pattern would put a value in scope that the oracle does not track",
+            "a bare binding pattern would put a value in scope that the oracle does not \
+             track; the enum payload's `C::C{k}(x)` binding is a tuple-variant pattern, \
+             which the compiler models separately",
         ),
         // --- Types -----------------------------------------------------------
         ("TypeExpr::StringBuf", "strings are aggregates"),
@@ -4600,6 +4670,13 @@ mod coverage {
     /// table overstates its case: `Div` appearing in most programs says nothing
     /// about division by zero, which never occurs.
     const CAVEATS: &[(&str, &str)] = &[
+        (
+            "Expr::Match",
+            "as a statement, the whole-body `ViaMatch` form; as an expression, the enum \
+             payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all \
+             share the context type so no arm-type unification is exercised. A match over \
+             integers or ranges as a value is not generated",
+        ),
         (
             "Item::Import",
             "one import of one name — `memcpy` from `std/mem.wr`, and only in a program \
@@ -4631,9 +4708,12 @@ mod coverage {
         ),
         (
             "Item::Enum",
-            "the enum is unit-only: three variants, no payloads. A payload is a separate \
-             lowering — the value points at a per-declaration block the oracle would have \
-             to model — and the tag is what a call has to carry correctly",
+            "one enum per program, three variants: `C0` unit, `C1(u8)` and `C2(u8)` \
+             carrying a payload. The tag is read as `(e as T)` and carried across a call; \
+             the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => \
+             (x as T), … }` — which discriminates the tag and extracts the byte. A `u16` \
+             payload is not generated, so the value stays two bytes in A:X like the unit \
+             enum, and a payload matched through the by-reference parameter is not either",
         ),
         (
             "Literal::String",
@@ -4646,8 +4726,10 @@ mod coverage {
         ),
         (
             "Expr::EnumVariant",
-            "only in `main`'s declaration, so which variant is program state and never a \
-             branch the oracle has to follow",
+            "in `main`'s declaration, `C::C{k}` or `C::C{k}(payload)`, so which variant and \
+             payload the enum holds is fixed program state. A `match` in `main` reads the \
+             payload back out; the arm that runs is fixed with the variant, so no branch \
+             the oracle has to follow at run time",
         ),
         (
             "BinaryOp::Div",
