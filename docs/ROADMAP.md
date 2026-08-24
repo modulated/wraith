@@ -68,6 +68,9 @@ read against a current picture:
 | 137 of the specification's 230 code blocks compile on every run | `tests/e2e/spec_examples.rs` |
 | A table generated from its index, `[\|i\| => i * i]`, folded once and emitted three ways | `tests/e2e/const_tables.rs` |
 | An array of structs stored as columns under `#[soa]`, with every whole-element use refused | `tests/e2e/soa.rs` |
+| Attributes on `enum`/`import`/`struct` refused rather than dropped; an SoA column at a constant index stored directly | `tests/e2e/soa.rs` |
+| The fuzzer indexes a string, points at a struct field and an array element, nests a struct, and matches an enum payload | `docs/fuzz-coverage.md` |
+| A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
 
 ## What keeps going wrong
 
@@ -125,6 +128,14 @@ cost several bugs before it was named.
   reported program no longer contained the failure, and the time lost re-deriving
   it was more than the reduction saved. The rejection's *reason* is part of the
   kind now.
+
+- **A latent collision hides until a rare construct becomes common.** Two label
+  namespaces both spelled their exits `mx_N` — the u8 modulo off the general
+  counter, `match` off its own — and since labels are file-global, a program
+  with both could emit the same name twice. It sat unhit for as long as `match`
+  was rare; the enum-payload fuzzer made matches common, and the two counters
+  met within 3000 seeds. A shared prefix across two independent counters is a
+  duplicate waiting for the traffic to find it — give each namespace its own.
 
 - **Verify against the bug, not against the fix.** Every correctness change
   here is checked by putting the defect back and watching a named test fail.
