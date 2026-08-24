@@ -341,6 +341,15 @@ enum E {
     /// whenever the pointer is, and it needs nothing of the literal but its
     /// length.
     StrLen,
+    /// `(t[<index>] as T)` — a byte of the string. A `str` is semantically an
+    /// array of `char`, so indexing yields a `char` and the cast makes it a
+    /// number; the byte lives one past the pointer, after the length prefix,
+    /// which is a different address computation from a plain array element.
+    ///
+    /// `main` only, and pure: the string is immutable ROM data, so unlike a
+    /// pointer read there is nothing to alias — the byte is a fact about the
+    /// literal, and the oracle reads it straight from [`STRINGS`].
+    StrIndex(Ix),
     /// `arr[<index>]`, in `main` only.
     Elem(Ix),
     /// `TBL[<index>]` — a `const` array, which lives in ROM and is reached
@@ -715,6 +724,10 @@ struct Gen<'a> {
     str_taker: Option<usize>,
     /// May the string's length be named here?
     allow_str: bool,
+    /// The length of `main`'s string, for a constant index that has to land
+    /// inside it — a literal may be shorter than [`ALEN`]. Zero when there is
+    /// no string.
+    str_len: usize,
     /// May the enum's tag be named here? True in `main` when the program
     /// declares one, and inside the function that takes it.
     allow_enum: bool,
@@ -1058,6 +1071,22 @@ fn gen_afield_index(g: &mut Gen) -> Ix {
     }
 }
 
+/// An index into `main`'s string, in range whatever the program computes.
+///
+/// The literal form is bounded by the string's own length, which may be
+/// shorter than [`ALEN`] — `"a"` has one byte — so it cannot reuse
+/// [`gen_index`]. The wrapped form reduces modulo `t.len` at run time, like a
+/// slice index, so it needs no compile-time length. No loop variable: a `for`
+/// bound may reach [`ALEN`], past the end of a short string, and an
+/// out-of-range read would be the generator's fault rather than the compiler's.
+fn gen_str_index(g: &mut Gen) -> Ix {
+    if g.rng.below(2) == 0 {
+        Ix::Lit(g.rng.below(g.str_len.max(1) as u64) as usize)
+    } else {
+        Ix::Wrapped(g.rng.below(g.vars as u64) as usize)
+    }
+}
+
 /// An index into a slice, which is in range whatever the slice currently
 /// views.
 ///
@@ -1222,6 +1251,19 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
         let dst = g.rng.below((ALEN - len + 1) as u64) as usize;
         let src = g.rng.below((ALEN - len + 1) as u64) as usize;
         return S::CopyRange { dst, src, len };
+    }
+    // A byte of the string read straight into a variable, on its own line
+    // rather than folded into an expression. Reading it stages the pointer
+    // through the four-byte high pool, and an arithmetic operand beside it —
+    // a multiply, another string read — exhausts the pool, which is why `.len`
+    // is not generated freely either. On its own statement, in `main`, the
+    // pool has nothing else in it, so both the constant-offset lowering (the
+    // offset folds into the pointer) and the runtime one (a `% t.len` index)
+    // stage cleanly.
+    if g.allow_str && g.allow_loops && !g.assignable.is_empty() && g.rng.below(100) < 14 {
+        let k = g.assignable.start + g.rng.below(g.assignable.len() as u64) as usize;
+        let ty = g.var_types[k];
+        return S::Assign(Place::Var(k), ty, E::StrIndex(gen_str_index(g)));
     }
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
@@ -1698,6 +1740,7 @@ fn gen_program(seed: u64) -> Prog {
         allow_fields: false,
         allow_enum: false,
         allow_str: false,
+        str_len: 0,
         vtable: 0,
         allow_indirect: false,
         allow_slices: false,
@@ -1825,6 +1868,7 @@ fn gen_program(seed: u64) -> Prog {
     let str_init: Option<usize> =
         (g.rng.below(100) < 50).then(|| g.rng.below(STRINGS.len() as u64) as usize);
     g.allow_str = str_init.is_some();
+    g.str_len = str_init.map_or(0, |k| STRINGS[k].len());
 
     // A cycle of two, when there are two non-candidate functions to make one
     // from. It is the two highest-numbered of them, which is also where the
@@ -2126,6 +2170,20 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             st.strlen.expect("a string read with no string in scope") as i64,
             ty,
         ),
+        E::StrIndex(ix) => {
+            // The string is `main`'s immutable literal, so the byte is a fact
+            // about it, not aliased state: read it straight from STRINGS. The
+            // modulus is the literal's own length — a short string has fewer
+            // than ALEN bytes — and the byte is always ASCII, so it fits every
+            // signed type without a sign question.
+            let k = st
+                .prog
+                .str_init
+                .expect("a string indexed with no string in scope");
+            let bytes = STRINGS[k].as_bytes();
+            let idx = eval_index_mod(ix, st, ty, bytes.len());
+            narrow(bytes[idx] as i64, ty)
+        }
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
@@ -2469,6 +2527,13 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_afield_index(ix, sc)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
         E::StrLen => format!("({}.len as {})", str_name(sc), ty.name()),
+        // The Wrapped index reads `t.len` at run time, exactly as a slice index
+        // reads `sl.len`, so the modulus is spelled in the source rather than
+        // baked in. A `char` cast straight to the context type.
+        E::StrIndex(ix) => {
+            let n = str_name(sc);
+            format!("({}[{}] as {})", n, render_slice_index(&n, ix, sc), ty.name())
+        }
         E::Dispatch { sel, arg } => {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
         }
@@ -3218,6 +3283,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::PtrLoad
             | E::EnumVal
             | E::StrLen
+            | E::StrIndex(_)
             | E::SliceElem(..)
             | E::SliceLen(_) => {}
         }
@@ -3300,6 +3366,7 @@ fn strip_self_calls(e: &mut E) {
         | E::PtrLoad
         | E::EnumVal
         | E::StrLen
+        | E::StrIndex(_)
         | E::SliceElem(..)
         | E::SliceLen(_) => {}
     }
@@ -3486,7 +3553,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_expr(arg, target, seen)
         }
-        E::Elem(ix) | E::Konst(ix) => {
+        E::Elem(ix) | E::Konst(ix) | E::StrIndex(ix) => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -3816,6 +3883,7 @@ fn the_generator_covers_what_it_claims() {
         enum_reads: usize,
         str_args: usize,
         str_reads: usize,
+        str_index_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -3883,6 +3951,7 @@ fn the_generator_covers_what_it_claims() {
             E::PtrLoad => s.ptr_reads += 1,
             E::EnumVal => s.enum_reads += 1,
             E::StrLen => s.str_reads += 1,
+            E::StrIndex(_) => s.str_index_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
         }
     }
@@ -4060,6 +4129,7 @@ fn the_generator_covers_what_it_claims() {
          kind two of the width lists had left out"
     );
     assert!(seen.str_reads > 0, "never read a string's length");
+    assert!(seen.str_index_reads > 0, "never indexed a string");
 }
 
 /// No name the generator invents may be a reserved word.
@@ -4395,9 +4465,12 @@ mod coverage {
         ),
         (
             "Literal::String",
-            "one of four literals, in `main`'s declaration only, and read only through \
-             `.len` — indexing a string is a second lowering the oracle would have to \
-             model, and `.len` is what a call has to carry the pointer correctly to answer",
+            "one of four literals, in `main`'s declaration only. Read through `.len`, and \
+             now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after \
+             the length prefix, for a constant and a run-time index both. Kept to its own \
+             statement in `main` rather than folded into an expression: the read stages the \
+             pointer through the four-byte high pool, and an arithmetic operand beside it \
+             exhausts it",
         ),
         (
             "Expr::EnumVariant",
