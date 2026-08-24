@@ -374,6 +374,11 @@ enum E {
     /// — is refused by the compiler, so generating it there would be a
     /// generator bug rather than a test.
     AField(Ix),
+    /// `s.n.g{j}` — a scalar field of the struct nested inside the struct. Its
+    /// bytes are inline, at the base plus the nested field's offset plus the
+    /// scalar's, so this is the two-level chain a compiler that resolved only
+    /// one level of `.field` would miscompute. `main` only, read-only.
+    NestedField(usize),
     /// `VTBL[<sel>](<arg>)` — a call through a table of function pointers,
     /// indexed at run time. The callee is not known until then, so this is the
     /// path where the compiler stages arguments at a fixed address and where
@@ -486,6 +491,11 @@ const SFIELDS: usize = 2;
 /// offset computed from the wrong array, and the two scalar fields sit either
 /// side of it so a base that is off by a field lands somewhere visible.
 const AFLEN: usize = 3;
+/// Scalar fields in the struct nested inside the struct — `S.n: Inner`, where
+/// `Inner { g0, g1 }`. A struct laid out inside another is inline bytes, so
+/// `s.n.g1` is the base plus the nested field's offset plus `g1`'s: a two-level
+/// offset a compiler that only knew one level would get wrong.
+const NESTED: usize = 2;
 /// Variants of the generated unit enum. Three is enough for the tag to be a
 /// value rather than a flag, and few enough that the whole range is reachable.
 const EVARIANTS: usize = 3;
@@ -858,11 +868,14 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // An element or a field is storage of the program's type, so it anchors
         // an expression exactly as a variable does.
         if g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
-            return match g.rng.below(4) {
+            return match g.rng.below(5) {
                 0 => E::Elem(gen_index(g)),
                 1 => E::Konst(gen_index(g)),
                 2 => E::Field(g.rng.below(SFIELDS as u64) as usize),
-                _ => E::AField(gen_afield_index(g)),
+                3 => E::AField(gen_afield_index(g)),
+                // A scalar of the struct nested inside the struct — the
+                // two-level `s.n.g{j}` chain.
+                _ => E::NestedField(g.rng.below(NESTED as u64) as usize),
             };
         }
         // Inside the struct-taking function the array and the table are out of
@@ -1372,6 +1385,10 @@ struct Prog {
     /// The struct's array field, initialised with the struct and written by
     /// `Place::AField`.
     afield_init: [i64; AFLEN],
+    /// The nested struct's scalar fields, initialised with the struct. Never
+    /// written — the nested field is read-only — so it changes only when the
+    /// whole struct is replaced by a `mks` call.
+    nested_init: [i64; NESTED],
     /// Which variant `main`'s enum local holds, or `None` when the program
     /// declares no enum.
     enum_init: Option<usize>,
@@ -1393,7 +1410,7 @@ struct Prog {
     mk_ranges: Vec<(usize, usize)>,
     /// The two structs `mks` chooses between, as (scalar fields, array field).
     /// Present exactly when the program declares the struct.
-    mks: Vec<([i64; SFIELDS], [i64; AFLEN])>,
+    mks: Vec<([i64; SFIELDS], [i64; AFLEN], [i64; NESTED])>,
     /// The two fields `pk` writes and reads, or `None` in a program that has
     /// no `pk`. Fixed per program because they are part of the function.
     poke: Option<(usize, usize)>,
@@ -1812,6 +1829,10 @@ fn gen_program(seed: u64) -> Prog {
     for v in afield_init.iter_mut() {
         *v = g.lit(base);
     }
+    let mut nested_init = [0i64; NESTED];
+    for v in nested_init.iter_mut() {
+        *v = g.lit(base);
+    }
     let mut konst = [0i64; ALEN];
     for v in konst.iter_mut() {
         *v = g.lit(base);
@@ -1854,7 +1875,7 @@ fn gen_program(seed: u64) -> Prog {
     g.allow_slices = !slices.is_empty();
     // The two structs `mks` chooses between, so a struct can arrive from a
     // call as well as from a declaration.
-    let mks: Vec<([i64; SFIELDS], [i64; AFLEN])> = if aggregates {
+    let mks: Vec<([i64; SFIELDS], [i64; AFLEN], [i64; NESTED])> = if aggregates {
         (0..2)
             .map(|_| {
                 let mut fs = [0i64; SFIELDS];
@@ -1865,7 +1886,11 @@ fn gen_program(seed: u64) -> Prog {
                 for v in a.iter_mut() {
                     *v = g.lit(base);
                 }
-                (fs, a)
+                let mut n = [0i64; NESTED];
+                for v in n.iter_mut() {
+                    *v = g.lit(base);
+                }
+                (fs, a, n)
             })
             .collect()
     } else {
@@ -1979,6 +2004,7 @@ fn gen_program(seed: u64) -> Prog {
         arr_init,
         field_init,
         afield_init,
+        nested_init,
         enum_init,
         str_init,
         konst,
@@ -2008,6 +2034,9 @@ struct St<'a> {
     /// struct through a by-reference parameter, and indexing the field there
     /// is not something the compiler emits.
     afield: Vec<i64>,
+    /// The struct nested inside the struct, `main`'s like the others. Read
+    /// through `s.n.g{j}` and travels with the struct.
+    nested: Vec<i64>,
     /// The variant `main`'s enum holds, or the one handed to a callee. `None`
     /// where no enum is in scope, which is what makes naming one there a bug
     /// in the generator rather than a silent zero.
@@ -2072,6 +2101,9 @@ fn call_fn(
         // The array field travels with them: it is part of the same bytes, and
         // `xp.a[i]` reads it through the same pointer.
         afield: afield.to_vec(),
+        // A function never names the nested field — `s.n.g{j}` is `main` only,
+        // like the array and the table — so it stays empty here.
+        nested: Vec::new(),
         // The tag, when this function takes the enum. A unit enum's value is
         // its variant index, so nothing else has to travel.
         tag,
@@ -2232,6 +2264,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             )
         }
         E::Field(i) => st.fields[*i],
+        E::NestedField(j) => st.nested[*j],
         E::AField(ix) => st.afield[eval_index_mod(ix, st, ty, AFLEN)],
         // `(e as T)` is the variant index at `T`. Reaching this with no tag
         // would mean the generator named an enum no scope has.
@@ -2387,9 +2420,10 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                 st.vars[*dst] = narrow(back, st.prog.var_types[*dst]);
             }
             S::StructFromCall(k) => {
-                let (fs, a) = &st.prog.mks[*k];
+                let (fs, a, n) = &st.prog.mks[*k];
                 st.fields = fs.iter().map(|v| narrow(*v, ty)).collect();
                 st.afield = a.iter().map(|v| narrow(*v, ty)).collect();
+                st.nested = n.iter().map(|v| narrow(*v, ty)).collect();
             }
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st) {
@@ -2442,6 +2476,11 @@ fn expected(p: &Prog) -> Vec<u32> {
             (true, Some(k)) => at_base(&p.mks[k].1),
             (true, None) => at_base(&p.afield_init),
         },
+        nested: match (p.aggregates, p.struct_init_from_call) {
+            (false, _) => Vec::new(),
+            (true, Some(k)) => at_base(&p.mks[k].2),
+            (true, None) => at_base(&p.nested_init),
+        },
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
         current: None,
@@ -2465,6 +2504,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         .chain(st.arr.iter())
         .chain(st.fields.iter())
         .chain(st.afield.iter())
+        .chain(st.nested.iter())
         .chain(descriptors.iter())
         .zip(cell_types(p))
         .map(|(v, t)| raw(*v, t))
@@ -2475,7 +2515,7 @@ fn expected(p: &Prog) -> Vec<u32> {
 fn cell_types(p: &Prog) -> Vec<Ty> {
     let mut out: Vec<Ty> = p.var_types.to_vec();
     if p.aggregates {
-        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN));
+        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN + NESTED));
     }
     out.extend(std::iter::repeat_n(p.base, 2 * p.slices.len()));
     out
@@ -2600,6 +2640,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::PtrLoad => "*p".to_string(),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
+        E::NestedField(j) => format!("{}.n.g{j}", struct_name(sc)),
         E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_afield_index(ix, sc)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
         E::StrLen => format!("({}.len as {})", str_name(sc), ty.name()),
@@ -2881,6 +2922,18 @@ fn uses_memcpy(stmts: &[S]) -> bool {
     })
 }
 
+/// The `n: Inner { g0: .., g1: .. }` piece of a struct literal, using the same
+/// integer renderer as the rest of the literal so a negative value is
+/// parenthesised the same way.
+fn nested_lit(n: &[i64; NESTED], lit: impl Fn(&i64) -> String) -> String {
+    let gs: Vec<String> = n
+        .iter()
+        .enumerate()
+        .map(|(j, v)| format!("g{j}: {}", lit(v)))
+        .collect();
+    format!("n: Inner {{ {} }}", gs.join(", "))
+}
+
 fn render_program(p: &Prog, form: Form) -> String {
     // `main`'s statements are rendered at the aggregate type: it is what an
     // element or a field reads as, and every expression that is not one
@@ -2917,9 +2970,12 @@ fn render_program(p: &Prog, form: Form) -> String {
         let mut fields: Vec<String> = vec![format!("f0: {tn}")];
         fields.push(format!("a: [{tn}; {AFLEN}]"));
         fields.extend((1..SFIELDS).map(|i| format!("f{i}: {tn}")));
+        fields.push("n: Inner".to_string());
         let table: Vec<String> = p.konst.iter().map(lit).collect();
+        let inner: Vec<String> = (0..NESTED).map(|j| format!("g{j}: {tn}")).collect();
         format!(
-            "struct S {{ {} }}\nconst TBL: [{tn}; {ALEN}] = [{}];\n",
+            "struct Inner {{ {} }}\nstruct S {{ {} }}\nconst TBL: [{tn}; {ALEN}] = [{}];\n",
+            inner.join(", "),
             fields.join(", "),
             table.join(", ")
         )
@@ -2948,8 +3004,8 @@ fn render_program(p: &Prog, form: Form) -> String {
     // in the callee — a constant literal is ROM data reached by label, a local
     // is frame storage reached by its address — and it is the local one that
     // used to come back as the struct's first byte in A.
-    if let [(f0, a0), (f1, a1)] = &p.mks[..] {
-        let init = |fs: &[i64; SFIELDS], a: &[i64; AFLEN]| -> String {
+    if let [(f0, a0, n0), (f1, a1, n1)] = &p.mks[..] {
+        let init = |fs: &[i64; SFIELDS], a: &[i64; AFLEN], n: &[i64; NESTED]| -> String {
             let elems: Vec<String> = a.iter().map(lit).collect();
             let mut parts: Vec<String> = vec![format!("f0: {}", lit(&fs[0]))];
             parts.push(format!("a: [{}]", elems.join(", ")));
@@ -2959,12 +3015,13 @@ fn render_program(p: &Prog, form: Form) -> String {
                     .skip(1)
                     .map(|(i, v)| format!("f{i}: {}", lit(v))),
             );
+            parts.push(nested_lit(n, &lit));
             format!("S {{ {} }}", parts.join(", "))
         };
         funcs.push_str(&format!(
             "fn mks(k: u8) -> S {{\n    if k == 0 {{ return {}; }}\n    let ms: S = {};\n    return ms;\n}}\n",
-            init(f0, a0),
-            init(f1, a1),
+            init(f0, a0, n0),
+            init(f1, a1, n1),
         ));
     }
 
@@ -3037,6 +3094,7 @@ static DEV: VT = VT {{ call: {} }};\n",
                 .skip(1)
                 .map(|(i, v)| format!("f{i}: {}", lit(v))),
         );
+        fields.push(nested_lit(&p.nested_init, &lit));
         // Bound from a call, or from a literal. The two are separate code —
         // one copies the returned bytes out at a declaration, the other at an
         // assignment — so the generator has to reach both.
@@ -3070,6 +3128,7 @@ static DEV: VT = VT {{ call: {} }};\n",
         cells.extend((0..ALEN).map(|i| format!("arr[{i}]")));
         cells.extend((0..SFIELDS).map(|i| format!("s.f{i}")));
         cells.extend((0..AFLEN).map(|i| format!("s.a[{i}]")));
+        cells.extend((0..NESTED).map(|j| format!("s.n.g{j}")));
     }
     for i in 0..p.slices.len() {
         cells.push(format!("sl{i}[0]"));
@@ -3360,6 +3419,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::Elem(_)
             | E::Konst(_)
             | E::Field(_)
+            | E::NestedField(_)
             | E::AField(_)
             | E::PtrLoad
             | E::EnumVal
@@ -3443,6 +3503,7 @@ fn strip_self_calls(e: &mut E) {
         | E::Elem(_)
         | E::Konst(_)
         | E::Field(_)
+        | E::NestedField(_)
         | E::AField(_)
         | E::PtrLoad
         | E::EnumVal
@@ -3642,7 +3703,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_index(ix, target, seen)
         }
-        E::Field(_) | E::AField(_) | E::PtrLoad | E::EnumVal | E::StrLen => {
+        E::Field(_) | E::NestedField(_) | E::AField(_) | E::PtrLoad | E::EnumVal | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -3967,6 +4028,7 @@ fn the_generator_covers_what_it_claims() {
         str_index_reads: usize,
         ptr_field_targets: usize,
         ptr_elem_targets: usize,
+        nested_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -4030,6 +4092,7 @@ fn the_generator_covers_what_it_claims() {
             E::SliceElem(_, _) => s.slice_reads += 1,
             E::SliceLen(_) => s.slice_lens += 1,
             E::Field(_) => s.field_reads += 1,
+            E::NestedField(_) => s.nested_reads += 1,
             E::AField(_) => s.afield_reads += 1,
             E::PtrLoad => s.ptr_reads += 1,
             E::EnumVal => s.enum_reads += 1,
@@ -4201,6 +4264,7 @@ fn the_generator_covers_what_it_claims() {
     assert!(seen.slice_reads > 0, "never read a slice element");
     assert!(seen.slice_lens > 0, "never read a slice length");
     assert!(seen.field_reads > 0, "never read a struct field");
+    assert!(seen.nested_reads > 0, "never read a nested struct field");
     assert!(
         seen.ptr_reads > 0,
         "never read through a pointer — the one expression whose storage is not decided \
@@ -4357,6 +4421,7 @@ fn the_oracle_matches_the_documented_semantics() {
         arr_init: [0; ALEN],
         field_init: [0; SFIELDS],
         afield_init: [0; AFLEN],
+        nested_init: [0; NESTED],
         enum_init: None,
         str_init: None,
         konst: [0; ALEN],
@@ -4377,6 +4442,7 @@ fn the_oracle_matches_the_documented_semantics() {
         arr: Vec::new(),
         fields: Vec::new(),
         afield: Vec::new(),
+        nested: Vec::new(),
         counters: Vec::new(),
         loops: Vec::new(),
         current: None,
@@ -4709,10 +4775,12 @@ mod coverage {
         ),
         (
             "Expr::Field",
-            "two scalar fields of the program's type and one array field, reached through \
-             the struct's own name in `main` and through the by-reference parameter inside \
-             the function that takes it — `xp.a[i]` included, which indexes an array field \
-             through a pointer. No struct nested inside another",
+            "two scalar fields of the program's type, one array field, and a nested struct \
+             `n: Inner` with two scalars of its own — reached through the struct's own name \
+             in `main` and through the by-reference parameter inside the function that takes \
+             it, `xp.a[i]` included, which indexes an array field through a pointer. The \
+             nested field is read as `s.n.g{j}` in `main` — a two-level offset — but not \
+             through the parameter",
         ),
         (
             "Item::Static",
@@ -4722,11 +4790,11 @@ mod coverage {
         ),
         (
             "Item::Struct",
-            "one struct per program: two scalar fields with an array field between them, so \
-             a base off by a field lands on a cell the program reports. It is declared as a \
-             local, passed to a function by address, returned from one — bound and assigned \
-             from that call, which are separate copies in the compiler — and written through \
-             a `&S`. Never nested inside another struct",
+            "two structs per program: `S`, with two scalar fields, an array field between \
+             them, and a nested `Inner`; and `Inner` itself, two scalars, laid out inline in \
+             `S`. `S` is declared as a local, passed to a function by address, returned from \
+             one — bound and assigned from that call, separate copies in the compiler — and \
+             written through a `&S`",
         ),
         (
             "Literal::Array",
