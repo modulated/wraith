@@ -3609,7 +3609,10 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
                 // Carry no expression, and no budget to drop.
-                S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => in_expr(e, id),
+                S::PtrStore(_, e)
+                | S::PtrPtrStore(_, e)
+                | S::PokeStruct(_, e)
+                | S::PokePtr(_, _, e) => in_expr(e, id),
                 S::Install(_)
                 | S::CopySlice(..)
                 | S::Reslice(..)
@@ -3683,7 +3686,9 @@ fn strip_stmt_self_calls(s: &mut S) {
             }
         }
         S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
-        S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => strip_self_calls(e),
+        S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
+            strip_self_calls(e)
+        }
         S::Install(_)
         | S::CopySlice(..)
         | S::Reslice(..)
@@ -3808,7 +3813,9 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => mutate_expr(e, target, seen),
+        S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
+            mutate_expr(e, target, seen)
+        }
         S::Install(_)
         | S::CopySlice(..)
         | S::SliceFromCall(..)
