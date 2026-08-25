@@ -1122,7 +1122,12 @@ fn generate_modulo(
     })?;
 
     let loop_label = emitter.next_label("md");
-    let end_label = emitter.next_label("mx");
+    // `mdx`, not `mx`: a match expression or statement labels its own end
+    // `mx_{id}` from a *separate* counter, and labels are file-global, so a
+    // function holding both a `%` and a `match` emitted two `mx_N` and the
+    // assembler rejected the duplicate. The two label spaces must not share a
+    // prefix.
+    let end_label = emitter.next_label("mdx");
 
     // Check for modulo by zero. Same latent bug as u8 divide: the zero path
     // used to fall into end_label and load `dividend_addr` before it was

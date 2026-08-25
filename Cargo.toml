@@ -13,7 +13,7 @@ resolver = "3"
 
 [package]
 name = "wraith"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 # The compiler is the primary binary; `flatasm` (src/bin/) is a secondary tool.
 # Keep bare `cargo run` invoking the compiler now that a second binary exists.

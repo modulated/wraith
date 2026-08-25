@@ -2,12 +2,27 @@
 
 use crate::ast::{
     AccessMode, AddressDecl, Enum, EnumVariant, FnAttribute, FnParam, Function, Import, Item,
-    SourceFile, Spanned, Static, Struct, StructField, TypeExpr,
+    SourceFile, Span, Spanned, Static, Struct, StructField, TypeExpr,
 };
 use crate::lexer::Token;
 
 use super::Parser;
 use super::error::{ParseError, ParseResult};
+
+/// How an attribute is written, for a diagnostic that names it.
+fn attribute_name(attr: &FnAttribute) -> &'static str {
+    match attr {
+        FnAttribute::Inline => "#[inline]",
+        FnAttribute::NoReturn => "#[noreturn]",
+        FnAttribute::Interrupt => "#[interrupt]",
+        FnAttribute::Nmi => "#[nmi]",
+        FnAttribute::Irq => "#[irq]",
+        FnAttribute::Reset => "#[reset]",
+        FnAttribute::Org(_) => "#[org]",
+        FnAttribute::Section(_) => "#[section]",
+        FnAttribute::Soa => "#[soa]",
+    }
+}
 
 impl Parser<'_> {
     /// Parse a complete source file
@@ -61,10 +76,14 @@ impl Parser<'_> {
     pub fn parse_item(&mut self) -> ParseResult<Spanned<Item>> {
         let start = self.current_span();
 
-        // Parse optional attributes
+        // Parse optional attributes, keeping each one's span: a refusal wants
+        // to point at the attribute rather than at the whole declaration.
         let mut attributes = Vec::with_capacity(4);
+        let mut attr_spans = Vec::with_capacity(4);
         while self.check(&Token::Hash) {
+            let at = self.current_span();
             attributes.push(self.parse_attribute()?);
+            attr_spans.push(at.merge(self.previous_span()));
         }
 
         // Parse optional 'pub' keyword
@@ -77,6 +96,7 @@ impl Parser<'_> {
 
         match self.peek().cloned() {
             Some(Token::Import) => {
+                Self::reject_attributes(&attributes, &attr_spans, "an import")?;
                 let import = self.parse_import()?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Import(import), span))
@@ -89,12 +109,14 @@ impl Parser<'_> {
             }
 
             Some(Token::Struct) => {
+                Self::reject_attributes(&attributes, &attr_spans, "a struct")?;
                 let s = self.parse_struct(attributes, is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Struct(s), span))
             }
 
             Some(Token::Enum) => {
+                Self::reject_attributes(&attributes, &attr_spans, "an enum")?;
                 let e = self.parse_enum(is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Enum(e), span))
@@ -129,6 +151,19 @@ impl Parser<'_> {
                     ty.node,
                     TypeExpr::Primitive(crate::ast::PrimitiveType::Addr)
                 ) {
+                    // An `addr` names a fixed hardware location; there is no
+                    // storage here to lay out, so no attribute applies — not
+                    // even the one the other two arms accept.
+                    if let Some(at) =
+                        Self::storage_attributes(&attributes, &attr_spans, "an addr declaration")?
+                    {
+                        return Err(ParseError::custom(
+                            at,
+                            "an addr declaration cannot take #[soa]: it names a fixed location \
+                             rather than storage the compiler lays out"
+                                .to_string(),
+                        ));
+                    }
                     Ok(Spanned::new(
                         Item::Address(AddressDecl {
                             name,
@@ -147,6 +182,7 @@ impl Parser<'_> {
                                 .to_string(),
                         ));
                     }
+                    let soa = Self::storage_attributes(&attributes, &attr_spans, "a const")?;
                     Ok(Spanned::new(
                         Item::Static(Static {
                             name,
@@ -154,6 +190,7 @@ impl Parser<'_> {
                             init,
                             mutable: false,
                             is_pub,
+                            soa,
                         }),
                         span,
                     ))
@@ -187,6 +224,7 @@ impl Parser<'_> {
                     ));
                 }
 
+                let soa = Self::storage_attributes(&attributes, &attr_spans, "a static")?;
                 Ok(Spanned::new(
                     Item::Static(Static {
                         name,
@@ -194,6 +232,7 @@ impl Parser<'_> {
                         init,
                         mutable: true,
                         is_pub,
+                        soa,
                     }),
                     span,
                 ))
@@ -284,6 +323,61 @@ impl Parser<'_> {
         })
     }
 
+    /// The one attribute a `static` or `const` accepts, and a refusal for the
+    /// rest.
+    ///
+    /// Every attribute used to be dropped on the floor here, so `#[inline]
+    /// static X: u8 = 1;` compiled and did nothing — the reader had asked for
+    /// something and been silently ignored. An attribute that does not apply
+    /// is now an error at the attribute.
+    fn storage_attributes(
+        attributes: &[FnAttribute],
+        spans: &[Span],
+        what: &str,
+    ) -> ParseResult<Option<Span>> {
+        let mut soa = None;
+        for (attr, span) in attributes.iter().zip(spans) {
+            match attr {
+                FnAttribute::Soa => {
+                    if soa.is_some() {
+                        return Err(ParseError::custom(
+                            *span,
+                            "#[soa] is already on this declaration".to_string(),
+                        ));
+                    }
+                    soa = Some(*span);
+                }
+                other => {
+                    return Err(ParseError::custom(
+                        *span,
+                        format!("{} cannot take {}", what, attribute_name(other)),
+                    ));
+                }
+            }
+        }
+        Ok(soa)
+    }
+
+    /// No attribute applies to this declaration kind, so reject any that appear.
+    ///
+    /// `enum`, `import` and `struct` used to discard their attributes the way
+    /// `static` did before the storage arms were fixed: `#[inline] enum E {…}`
+    /// compiled and did nothing. An attribute is a request, and a request the
+    /// compiler cannot honour is an error at the attribute, not a silence.
+    fn reject_attributes(
+        attributes: &[FnAttribute],
+        spans: &[Span],
+        what: &str,
+    ) -> ParseResult<()> {
+        if let Some((attr, span)) = attributes.iter().zip(spans).next() {
+            return Err(ParseError::custom(
+                *span,
+                format!("{} cannot take {}", what, attribute_name(attr)),
+            ));
+        }
+        Ok(())
+    }
+
     /// Parse an attribute: #[name] or #[name(value)]
     fn parse_attribute(&mut self) -> ParseResult<FnAttribute> {
         self.expect(&Token::Hash)?;
@@ -296,6 +390,7 @@ impl Parser<'_> {
                 self.advance();
                 match name.as_str() {
                     "inline" => FnAttribute::Inline,
+                    "soa" => FnAttribute::Soa,
                     "noreturn" => FnAttribute::NoReturn,
                     "interrupt" => FnAttribute::Interrupt,
                     "nmi" => FnAttribute::Nmi,

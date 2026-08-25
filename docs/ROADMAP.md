@@ -65,7 +65,12 @@ read against a current picture:
 | An unknown type in a declaration is reported where it is written | `tests/e2e/multi_error.rs` |
 | A broken module reports every error, once, however many paths reach it | `tests/e2e/import_diagnostics.rs` |
 | Every `SemaError` variant is pinned by a golden test or excused with a reason | `tests/e2e/error_diagnostics.rs` |
-| 133 of the specification's 225 code blocks compile on every run | `tests/e2e/spec_examples.rs` |
+| 137 of the specification's 230 code blocks compile on every run | `tests/e2e/spec_examples.rs` |
+| A table generated from its index, `[\|i\| => i * i]`, folded once and emitted three ways | `tests/e2e/const_tables.rs` |
+| An array of structs stored as columns under `#[soa]`, with every whole-element use refused | `tests/e2e/soa.rs` |
+| Attributes on `enum`/`import`/`struct` refused rather than dropped; an SoA column at a constant index stored directly | `tests/e2e/soa.rs` |
+| The fuzzer indexes a string, points at a struct field and an array element, nests a struct, and matches an enum payload | `docs/fuzz-coverage.md` |
+| A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
 
 ## What keeps going wrong
 
@@ -124,6 +129,14 @@ cost several bugs before it was named.
   it was more than the reduction saved. The rejection's *reason* is part of the
   kind now.
 
+- **A latent collision hides until a rare construct becomes common.** Two label
+  namespaces both spelled their exits `mx_N` — the u8 modulo off the general
+  counter, `match` off its own — and since labels are file-global, a program
+  with both could emit the same name twice. It sat unhit for as long as `match`
+  was rare; the enum-payload fuzzer made matches common, and the two counters
+  met within 3000 seeds. A shared prefix across two independent counters is a
+  duplicate waiting for the traffic to find it — give each namespace its own.
+
 - **Verify against the bug, not against the fix.** Every correctness change
   here is checked by putting the defect back and watching a named test fail.
   For a table copied from the specification, break the *reference* instead —
@@ -139,6 +152,74 @@ cost several bugs before it was named.
 
 `flags.bits[7:4]` — extract and insert a contiguous field. Single-bit access is
 complete; this is the multi-bit generalization.
+
+### Compile-time functions (`const fn`)
+
+Deferred, deliberately. A generated table already covers the common case — a
+table whose entries are a function of their index — and it does so with a
+constant evaluator that already existed. `const fn` is the general version: a
+named body, callable from a table's body and from any other constant, with
+recursion and its own termination question.
+
+The reason to wait is that the general feature is only worth its cost once
+there is a table the specific feature cannot express. Two candidates are
+plausible — a sine table wanting real arithmetic, and a CRC table wanting a
+loop per entry — and neither is a *shape* the current body can state, so this
+is the item to reach for when one turns up.
+
+### Patterns the 6502 has and the language does not
+
+These came out of a survey of what assembly programmers did on this machine
+that Wraith cannot say efficiently today. They are listed in the order their
+cost/benefit looked best; none is started. (Structure-of-arrays layout was the
+first of them and is now `#[soa]`; the count of the spec's compiling examples
+above is the other half of the same survey being worked through.)
+
+- **Page alignment.** `LDA tbl,X` crosses a page boundary and costs an extra
+  cycle; a table the programmer wants aligned has no way to say so.
+  `#[align(256)]` on a `const` or `static`, honoured by the section allocator.
+
+- **`critical { }` blocks.** Disabling interrupts around a multi-byte update is
+  `SEI` / body / `CLI` today — written by hand in `asm!`, and wrong if the
+  caller already had them disabled. A block form can save and restore the flag
+  instead, and the compiler knows how long the body is.
+
+- **Fixed-point arithmetic.** A `q8.8` type with the shifts folded in. Every
+  6502 program that draws anything reinvents this, usually as a pair of `u8`s
+  and a comment.
+
+- **Carry chaining / wider integers.** `u32` addition is four `ADC`s and no
+  `CLC` between them. The language stops at 16 bits, so wider arithmetic is
+  written out by hand at every use.
+
+- **Unroll control.** `#[unroll]` on a loop with a constant bound. The
+  trade — code size for the index arithmetic — is the programmer's to make,
+  and there is no way to make it.
+
+- **Calling-convention control.** A leaf function that wants its argument in X
+  rather than through the staging pool has no way to ask.
+
+### Columns for a local array, and for a nested field
+
+`#[soa]` applies to a top-level `static` or `const`, which is where an entity
+pool lives on this machine. Two shapes are outside it:
+
+- A local `let` array. `let` takes no attributes today, so this is a parser
+  change before it is a layout one. Frame arrays are small and short-lived, so
+  the multiply matters less; worth doing when something asks for it.
+- A field that is itself a struct or an array. Its parts would each want a
+  column, which is a nested scheme rather than the flat one — and the flat rule
+  ("every field is a scalar of one or two bytes") is what makes indexing a
+  column cost no multiply. Refused with a message that says so.
+
+Two smaller things the work exposed:
+
+- A constant index into a column still goes through the runtime-index path on
+  the *write* side: `E[1].hp = v` emits `LDA #1 / TAY / STA col,Y` where
+  `STA col+1` would do. Correct, three bytes larger.
+- `enum` and `import` declarations still drop attributes silently, the way
+  `static` did before this change. Nothing valid can be written there yet, so
+  nothing is currently mis-accepted, but the same silent-drop is waiting.
 
 ### Const attributes (consider later)
 

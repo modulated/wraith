@@ -529,6 +529,11 @@ let widened: u16 = 3;      // a `-> u16` function may `return` a u8
 
 Function attributes control code generation, placement, and calling conventions. They are specified using `#[attribute]` syntax before the function declaration.
 
+Attributes are not only for functions: [`#[soa]`](#columns-instead-of-records-soa)
+goes on a `static` or `const` array and chooses how it is laid out. An attribute
+that does not apply to the declaration it is written on is an error, rather than
+being ignored.
+
 #### `#[inline]`
 
 Inlines the function body at each call site, eliminating JSR/RTS overhead:
@@ -1011,6 +1016,10 @@ struct Entity {
 - Multi-byte fields stored little-endian
 - Total struct size = sum of field sizes
 
+An *array* of structs is interleaved by default — each record's bytes together,
+one record after the next — but can be stored the other way up, one column per
+field, with [`#[soa]`](#columns-instead-of-records-soa).
+
 An array field is part of the struct's bytes, not a pointer to them, so
 reaching an element is the struct's base plus the field's offset plus the
 scaled index:
@@ -1080,6 +1089,99 @@ let enemies: [Enemy; 8] = [
 enemies[0].health = enemies[0].health - 10;
 let x_pos: u8 = enemies[3].x;
 ```
+
+### Columns Instead of Records (`#[soa]`)
+
+An array of structs is stored interleaved by default: each record's fields sit
+together, one record after the next. `#[soa]` on a `static` or `const` array
+stores it the other way up — one column per field, each holding that field for
+every element.
+
+```rust,compile
+struct Sprite { x: u8, y: u8, hp: u8 }
+
+#[soa]
+static SPRITES: [Sprite; 8] = [Sprite { x: 0, y: 0, hp: 0 }; 8];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let i: u8 = 3;
+    SPRITES[i].y = 40;
+    OUT = SPRITES[i].y;
+    loop {}
+}
+```
+
+Nothing about the *source* changes: it is still an array of records, indexed and
+read the same way. What changes is the addressing mode.
+
+**Interleaved**, `SPRITES[i].y` must multiply the index by the element size
+before it can index at all — on a three-byte record that is seven instructions
+and nineteen cycles for one byte, and the multiply is recomputed for every field
+read:
+
+```
+STA $22 / CLC / ADC $22 / CLC / ADC $22 / TAY / LDA base,Y
+```
+
+**In columns**, the index scales by the *field's* own size, which for a byte
+field is not at all:
+
+```
+TAY / LDA col,Y
+```
+
+A two-byte field costs one `ASL A` rather than a multiply, so columns still win
+wherever a field is narrower than the record.
+
+#### What it costs
+
+An element is no longer contiguous, so **it has no address**. Every use that
+would need one is a compile error:
+
+```rust
+let e: Sprite = SPRITES[1];    // error: no address of its own
+let p: &Sprite = &SPRITES[1];  // error
+draw(SPRITES[1]);              // error, if `draw` takes a Sprite
+SPRITES[1] = other;            // error
+let some: &[Sprite] = SPRITES[0..2];  // error: a slice needs contiguous elements
+```
+
+A single *field* still has an address — it is one entry in one column — so
+`&SPRITES[1].hp` is fine.
+
+This is why the layout is asked for by name rather than inferred. If the
+compiler chose it, adding one `&SPRITES[i]` would silently flip the whole array
+back and turn every access from an index into a multiply, with nothing in the
+source to show for it. Named, that same line is an error, and the decision stays
+where it was written.
+
+#### Restrictions
+
+- The attribute goes on a `static` or `const` array, not on the struct. Whether
+  columns pay is a property of how a *collection* is traversed, not of the
+  record type: the same `Sprite` may be a hardware register block in one place
+  and a pool in another.
+- Every field must be a scalar of one or two bytes — a primitive, a pointer, a
+  function pointer or a fieldless enum. A field that is itself a struct or an
+  array would need its own nested columns, which is a separate feature.
+
+#### The compiler will suggest it
+
+An array of structs that is only ever reached one field at a time, and whose
+fields would all take columns, is pointed out:
+
+```
+warning: `A` is only ever read one field at a time, so every access multiplies
+the index by 2; `#[soa]` would store it as one column per field and index
+directly. The cost is that an element would no longer have an address
+```
+
+The *recommendation* is inferred; the layout is not. The suggestion is
+deliberately quiet: a single mention that is not a field read — a `&`, a slice,
+a whole-element binding — and it says nothing, because a suggestion the reader
+has to dismiss is worse than one never made.
 
 ### Passing Structs to Functions
 
@@ -1519,6 +1621,78 @@ let data: [u16; 5] = [100, 200, 300, 400, 500];
 
 buffer[5] = 42;
 let value: u16 = data[2];
+```
+
+### Generated Tables
+
+A table whose entries are a function of their index can be written as
+`[|i| => <expression>]`. Every entry is computed at compile time, so the
+program starts with the numbers already in place.
+
+```rust,compile
+const SQR: [u8; 16] = [|i| => i * i];
+const ROW: [u16; 4] = [|i| => 0x0400 + (i as u16) * 40];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let k: u8 = 7;
+    OUT = SQR[k];
+    loop {}
+}
+```
+
+`SQR` above becomes sixteen bytes of ROM: `$00 $01 $04 $09 $10 …`. No code
+runs to build it.
+
+**The length comes from the type.** It is not written in the expression, so
+a table's count is stated once, in its declaration. A generated table
+therefore needs a declared array type — there is nowhere else for the length
+to come from.
+
+**The index is a `u8`.** It is named by the closure's parameter (`i` above,
+but any name will do) and takes the values `0` through `len - 1`. Because it
+is a `u8`, a generated table holds at most 256 entries.
+
+**The body is ordinary arithmetic at the element type.** It may name other
+constants, and it wraps exactly the way the same expression would at run
+time, so a table and a loop over the same expression cannot disagree:
+
+```rust,compile
+const NARROW: [u8; 4] = [|i| => (i * 100) / 2];
+const WIDE: [u16; 4] = [|i| => ((i as u16) * 100) / 2];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    OUT = NARROW[3] + WIDE[3].low;
+    loop {}
+}
+```
+
+`NARROW` is `0, 50, 100, 22` — at `i = 3` the product overflows a `u8` to 44
+before the divide, which is what the equivalent `u8` loop computes. `WIDE`
+is `0, 50, 100, 150`. A wider intermediate needs a written cast, and the
+cast is the reader's decision rather than the compiler's.
+
+**The body must be constant.** It becomes data before the program runs, so
+it cannot read a `static`, call a function, or index another array.
+
+A generated table may be declared as a `const` (ROM data), as a `static`
+(written to RAM at startup) or as a local array (stored into its frame on
+entry):
+
+```rust,compile
+const LOG2: [u8; 8] = [|i| => i / 2];      // ROM
+static COUNTS: [u8; 4] = [|i| => i + 1];   // RAM, written at startup
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let mask: [u8; 4] = [|i| => 1 << i];   // frame
+    OUT = LOG2[7] + COUNTS[2] + mask[3];
+    loop {}
+}
 ```
 
 ### Slices
@@ -4710,6 +4884,52 @@ Because an interrupt can preempt main-line code at any point - including in the 
 
 ## Revision History
 
+- 2026-08-23 (0.7.0):
+
+  *Language.* Compile-time generated tables, written
+  `const SQR: [u8; 16] = [|i| => i * i];` — folded before the program runs,
+  with the length taken from the declared type. Structure-of-arrays layout for an array of structs, `#[soa]`,
+  storing one column per field so an indexed field read costs an index rather
+  than a multiply; every whole-element use columns cannot support is refused,
+  and a warning suggests the attribute where it would pay. Whole-array
+  assignment is refused — copy element-wise or with `memcpy`, so a move the
+  length of an array is visible in the source. `static` struct initialisers
+  accept `str`, enum and `&T` fields. An attribute written on a declaration it
+  does not apply to is an error rather than being ignored.
+
+  *Defined behaviour.* Divide by zero yields the all-ones sentinel at every
+  width and sign, and a divisor the compiler can see is zero is refused. A
+  shift count at or past the width shifts every bit out, and warns when the
+  count is constant. A `for` bound whose sign or width the counter cannot hold
+  is refused.
+
+  *Miscompiles fixed*, each with a regression test. A struct returned by value
+  came back as its first byte; a struct passed to an inlined call came through
+  as its first two bytes; an enum field of a struct was stored as a pointer's
+  low byte and read by dereferencing it; `*p` on a pointer-to-pointer dropped
+  the high byte; two-byte `static`s and `static` struct fields stored one byte;
+  re-pointing a `str` local wrote one byte of two; implicit widening took the
+  sign from the destination rather than the source, at seven sites, and a match
+  arm widened by zero regardless of its sign; a tail call rebound its
+  parameters at the wrong widths; a function-pointer argument was sized as one
+  byte; `&x.f[0]`, `&m[i][j]`, `p.a[i]` and `mk(6).f1` computed the wrong
+  address or were rejected; and `arr[i] = f()` called `f` twice.
+
+  *Diagnostics.* Several errors are reported per run with rustc-style spans. A
+  failed declaration no longer hides the bodies below it — only its own name is
+  suppressed — an unknown type is reported where it is written, and a broken
+  module reports every error once however many import paths reach it. Every
+  `SemaError` variant is now pinned by a golden test or carries a written
+  reason for not being.
+
+  *Compiler.* Argument staging for the four call forms merged into one routine
+  and one width table. Frame colouring given an edge for indirect calls, and
+  arguments spill to the software stack when the pool will not hold them. BSS
+  is repacked so a dropped `static` gives its bytes back. Two-branch
+  comparisons fuse into their branch. The differential fuzzer gained pointers
+  with alias modelling, aggregates, slices, function-pointer dispatch, mixed
+  widths and cross-call arguments; 137 of this document's examples are compiled
+  on every run.
 - 2026-08-09 (0.6.0): Pointer equality (`==`/`!=` on the same pointer type);
   bit mutation through a pointer or a runtime index; 65C02 `BBR`/`BBS` fusion for
   `if x.bit(n)`; function-pointer dispatch tables (`handlers[i](x)`) fixed for

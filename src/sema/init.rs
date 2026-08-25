@@ -89,6 +89,12 @@ pub trait InitContext {
 
     /// The address `&operand` denotes.
     fn address_of(&self, operand: &Spanned<Expr>) -> Result<u16, InitError>;
+
+    /// The folded entries of the generated table at `span`, if there is one.
+    ///
+    /// Supplied rather than recomputed: sema folds each table once, and two
+    /// sites folding it separately is two chances to disagree.
+    fn generated_table(&self, span: Span) -> Option<&[i64]>;
 }
 
 /// Flatten `expr` into exactly `size_of(ty)` bytes appended to `out`.
@@ -288,6 +294,29 @@ fn flatten_array(
             }
             Ok(())
         }
+        // A generated table: one entry per index, already folded by sema.
+        Expr::Literal(Literal::ArrayGen { .. }) => {
+            let Some(values) = ctx.generated_table(expr.span) else {
+                return Err(InitError::fatal(
+                    "this generated table was never folded, which is a compiler bug".to_string(),
+                    expr.span,
+                ));
+            };
+            if values.len() != len {
+                return Err(InitError::fatal(
+                    format!(
+                        "this generated table holds {} entries but the type holds {len}",
+                        values.len()
+                    ),
+                    expr.span,
+                ));
+            }
+            for (i, v) in values.iter().enumerate() {
+                pad_to(out, base + i * elem_size);
+                push_int(out, *v, elem_size);
+            }
+            Ok(())
+        }
         // A string initializing a byte array lays down its characters. The
         // length prefix belongs to the `str` representation, not to `[u8; N]`.
         Expr::Literal(Literal::String(s)) if elem_size == 1 => {
@@ -443,12 +472,48 @@ pub fn flatten_top(
     ty: &Type,
     ctx: &dyn InitContext,
     tolerate_unknown: bool,
+    soa: Option<&crate::sema::SoaLayout>,
 ) -> Result<Vec<InitByte>, InitError> {
     let size = size_of(ty, ctx.registry());
     let mut out = Vec::with_capacity(size);
     match flatten(&mut out, expr, ty, ctx) {
-        Ok(()) => Ok(out),
+        Ok(()) => Ok(transpose(out, soa, ctx)),
         Err(e) if tolerate_unknown && !e.fatal => Ok(vec![InitByte::Byte(0); size]),
         Err(e) => Err(e),
     }
+}
+
+/// Rearrange a flattened array of structs into one column per field.
+///
+/// The initializer is written as records and flattened as records, then turned
+/// on its side here — once, at the only place a whole declaration's image is
+/// produced. Doing it this way means every initializer form that already works
+/// (a literal, a fill, a nested enum, a `&OTHER`) keeps working without knowing
+/// the layout exists; the alternative was a second flattener that had to agree
+/// with the first about every one of those forms.
+fn transpose(
+    bytes: Vec<InitByte>,
+    soa: Option<&crate::sema::SoaLayout>,
+    ctx: &dyn InitContext,
+) -> Vec<InitByte> {
+    let Some(layout) = soa else { return bytes };
+    let Some(sdef) = ctx.registry().get_struct(&layout.elem).cloned() else {
+        return bytes;
+    };
+    let elem_size = sdef.total_size;
+
+    let mut out = vec![InitByte::Byte(0); bytes.len()];
+    for i in 0..layout.len {
+        for f in &sdef.fields {
+            let width = size_of(&f.ty, ctx.registry()).max(1);
+            let from = i * elem_size + f.offset;
+            let to = layout.column(f.offset) + i * width;
+            for k in 0..width {
+                if from + k < bytes.len() && to + k < out.len() {
+                    out[to + k] = bytes[from + k].clone();
+                }
+            }
+        }
+    }
+    out
 }

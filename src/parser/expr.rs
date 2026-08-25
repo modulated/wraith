@@ -371,6 +371,24 @@ impl Parser<'_> {
         let start = self.current_span();
         self.expect(&Token::LBracket)?;
 
+        // A generated table: `[|i| => <expr>]`. Unambiguous after `[`, since
+        // `|` is only ever infix and so can never begin an element.
+        if self.check(&Token::Pipe) {
+            self.advance();
+            let param = self.expect_ident()?;
+            self.expect(&Token::Pipe)?;
+            self.expect(&Token::FatArrow)?;
+            let body = self.parse_delimited_expr()?;
+            self.expect(&Token::RBracket)?;
+            return Ok(Spanned::new(
+                Expr::Literal(Literal::ArrayGen {
+                    param,
+                    body: Box::new(body),
+                }),
+                start.merge(self.previous_span()),
+            ));
+        }
+
         // Check for empty array
         if self.check(&Token::RBracket) {
             self.advance();

@@ -568,3 +568,30 @@ fn a_shift_one_below_the_width_still_keeps_a_bit() {
     assert_eq!(eval_u8("let a: u8 = 1; let n: u8 = 7; OUT = a << n;"), 0x80);
     assert_eq!(eval_u8("let a: u8 = 0x80; let n: u8 = 7; OUT = a >> n;"), 1);
 }
+
+/// A modulo must not label its exit in the `mx_` namespace, which belongs to
+/// `match`.
+///
+/// The exit was `mx_N` off the general label counter; a `match` labels its own
+/// end `mx_N` off a *separate* counter. Labels are file-global, so a program
+/// holding both a `%` and a `match` could emit two `mx_2` and the assembler
+/// rejected the duplicate — the differential fuzzer found it once enum-payload
+/// matches made `match` common. The two counters can align only by accident, so
+/// reproducing the exact collision is brittle; the invariant that forecloses it
+/// is not: the modulo owns `mdx_`, `match` owns `mx_`, and neither borrows the
+/// other's prefix. A program with a `%` and no `match` pins that — any `mx_`
+/// label here would be the modulo trespassing.
+#[test]
+fn a_modulo_labels_its_exit_outside_the_match_namespace() {
+    let asm = compile_success(
+        "const OUT: addr = 0x0900;\n#[reset]\nfn main() { let a: u8 = 10; let b: u8 = 3; OUT = a % b; loop {} }",
+    );
+    assert!(
+        asm.contains("mdx_"),
+        "the modulo exit should be labelled `mdx_`:\n{asm}"
+    );
+    assert!(
+        !asm.lines().any(|l| l.trim_start().starts_with("mx_")),
+        "a `%` must not emit an `mx_` label — that namespace is `match`'s:\n{asm}"
+    );
+}

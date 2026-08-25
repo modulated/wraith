@@ -18,6 +18,11 @@ A systems programming language that compiles directly to 6502 assembly. Wraith t
 - **Slices** - `&[T]` views over arrays with runtime length, passable to and returnable from functions
 - **Pointers** - `&x`, `*p`, `p[i]`, `p.field`, with an escape analysis that rejects a pointer outliving what it names
 - **Bitfield Access** - `flags.set_bit(7)` / `clear_bit` / `toggle_bit` / `.bit(n)` on any integer, constant-folded to a mask
+- **Compile-Time Tables** - `const SQR: [u8; 16] = [|i| => i * i];` folds to `.BYTE $00, $01, $04, $09, …` in ROM. The oldest 6502 trade — ROM for cycles — stated in the language instead of in a build script, with the length taken from the type so it is written once
+- **Structure-of-Arrays Layout** - `#[soa]` on an array of structs stores one column per field, so `sprites[i].y` is `LDA col,Y` instead of multiplying the index by the element size first: 6 cycles against 19. Asked for by name, because a layout the compiler chose could be flipped back by one added `&sprites[i]` with nothing in the source to show for it — the compiler suggests it and refuses the uses that would break it
+- **No Undefined Corners** - Divide by zero is the all-ones sentinel at every width and sign; a shift at or past the width shifts every bit out. Both are specified rather than left to whatever the emitted code happened to do, and the compiler refuses or warns where it can see the operand is constant
+- **Explicit Aggregate Copies** - A whole array is never copied by an assignment. Copy element-wise or with `memcpy`, so a move the length of an array is visible at the place it happens rather than hidden behind an `=`
+- **Rust-Style Diagnostics** - Several errors per run, each with a source span, caret and suggestion. A declaration that fails to check no longer hides the bodies below it, and a broken module reports every error once however many import paths reach it
 
 ## Quick Setup
 

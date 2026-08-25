@@ -30,6 +30,12 @@ pub enum FnAttribute {
     Org(u16),
     /// Place in specific memory section
     Section(String),
+    /// Store an array of structs as parallel columns, one per field.
+    ///
+    /// Only meaningful on a `static` or `const` array; [`Static::soa`] is where
+    /// it ends up. It lives in this enum because attributes are parsed before
+    /// the item's keyword is known.
+    Soa,
 }
 
 /// A struct field definition
@@ -135,6 +141,11 @@ pub struct Static {
     pub init: Spanned<super::expr::Expr>,
     pub mutable: bool,
     pub is_pub: bool,
+    /// Span of `#[soa]`, if this array is stored as parallel columns.
+    ///
+    /// The span rather than a bare flag: every refusal this attribute causes
+    /// wants to point at the line that asked for it.
+    pub soa: Option<Span>,
 }
 
 /// Import declaration

@@ -308,6 +308,41 @@ impl SemanticAnalyzer {
             });
         }
 
+        // `#[soa]` decides the array's layout, so it has to be settled before
+        // anything lays bytes down or resolves an address.
+        if let Some(at) = stat.soa {
+            self.register_soa(&name, &declared_ty, at, stat.ty.span)?;
+        }
+
+        // A generated table is folded here, not in the type checker: a `const`
+        // or `static` array's initialiser is flattened during registration and
+        // never reaches `check_expr`, so the declaration this feature exists
+        // for — a table in ROM — would otherwise never be folded at all.
+        if let crate::ast::Expr::Literal(crate::ast::Literal::ArrayGen { param, body }) =
+            &stat.init.node
+        {
+            let Type::Array(elem, len) = &declared_ty else {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "a generated table needs an array type, not {}",
+                        declared_ty.display_name()
+                    ),
+                    span: stat.ty.span,
+                });
+            };
+            if *len > 256 {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "a generated table holds at most 256 entries, because its index is a \
+                         `u8`; this one declares {len}"
+                    ),
+                    span: stat.ty.span,
+                });
+            }
+            let (elem, len) = ((**elem).clone(), *len);
+            self.fold_array_gen(param, body, &elem, len, stat.init.span)?;
+        }
+
         // If it's a non-mutable static (const), evaluate it and add to const_env
         if !stat.mutable {
             match eval_const_expr_with_env(&stat.init, &self.const_env) {
@@ -383,7 +418,7 @@ impl SemanticAnalyzer {
             let addr = self.bss_alloc(size, stat.name.span)?;
             // Record the startup value so the reset handler can write it: RAM
             // holds garbage at power-on and cannot be pre-loaded from ROM.
-            let bytes = self.static_init_bytes(&stat.init, &declared_ty)?;
+            let bytes = self.static_init_bytes(&name, &stat.init, &declared_ty)?;
             self.static_inits.push(crate::sema::StaticInit {
                 name: name.clone(),
                 addr,
@@ -411,12 +446,92 @@ impl SemanticAnalyzer {
         Ok(())
     }
 
+    /// Check that `#[soa]` can be honoured here, and record the column layout.
+    ///
+    /// Two restrictions, both of them about what a column *is*. The type has to
+    /// be an array of structs, because a column is a field; and every field has
+    /// to be one or two bytes, because a column is indexed by scaling the index
+    /// by the field's size and the machine can scale by one or two without a
+    /// multiply. A field that is itself a struct or an array would need its own
+    /// nested column scheme, which is a different feature.
+    fn register_soa(
+        &mut self,
+        name: &str,
+        declared_ty: &Type,
+        at: crate::ast::Span,
+        ty_span: crate::ast::Span,
+    ) -> Result<(), SemaError> {
+        let Type::Array(elem, len) = declared_ty else {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "#[soa] stores an array of structs as one column per field, so it needs \
+                     an array type, not {}",
+                    declared_ty.display_name()
+                ),
+                span: ty_span,
+            });
+        };
+        let Type::Named(struct_name) = &**elem else {
+            return Err(SemaError::Custom {
+                message: format!(
+                    "#[soa] needs an array of structs; the elements here are {}, which has no \
+                     fields to make columns of",
+                    elem.display_name()
+                ),
+                span: ty_span,
+            });
+        };
+        let Some(sdef) = self.type_registry.get_struct(struct_name).cloned() else {
+            return Err(SemaError::Custom {
+                message: format!("#[soa] needs an array of structs; '{struct_name}' is not one"),
+                span: ty_span,
+            });
+        };
+
+        for field in &sdef.fields {
+            // A column is indexed by scaling the index by the field's size,
+            // which the machine does without a multiply for one or two bytes.
+            // An aggregate field is excluded even at two bytes: its own parts
+            // would each want a column, which is a different feature.
+            let scalar = matches!(
+                field.ty,
+                Type::Primitive(_) | Type::Pointer(_) | Type::Function(..)
+            ) || matches!(&field.ty, Type::Named(n) if self.type_registry.get_enum(n).is_some());
+            let size = crate::sema::init::size_of(&field.ty, &self.type_registry);
+            if !scalar || size == 0 || size > 2 {
+                return Err(SemaError::Custom {
+                    message: format!(
+                        "#[soa] needs every field to be a scalar of one or two bytes, so that \
+                         indexing a column costs no multiply; '{}.{}' is {}",
+                        struct_name,
+                        field.name,
+                        field.ty.display_name()
+                    ),
+                    span: at,
+                });
+            }
+        }
+
+        self.soa_arrays.insert(
+            name.to_string(),
+            crate::sema::SoaLayout {
+                elem: struct_name.clone(),
+                len: *len,
+            },
+        );
+        Ok(())
+    }
+
     /// Record every symbol a static's initializer names, so dead-code
     /// elimination and the address-taken set can see through it.
     fn record_initializer_refs(&mut self, owner: &str, init: &Spanned<crate::ast::Expr>) {
         let mut names: Vec<String> = Vec::new();
         collect_variable_names(init, &mut names);
         for n in names {
+            // A name reached from an initializer never passes through the
+            // expression checker, so count it here or the SoA suggestion would
+            // not see `static P: &Ent = &A[0];` as a use of `A` at all.
+            *self.name_mentions.entry(n.clone()).or_insert(0) += 1;
             let is_function = self
                 .table
                 .lookup(&n)
@@ -444,6 +559,7 @@ impl SemanticAnalyzer {
     /// at one level of nesting.
     fn static_init_bytes(
         &self,
+        name: &str,
         init: &Spanned<crate::ast::Expr>,
         ty: &Type,
     ) -> Result<Vec<crate::sema::InitByte>, SemaError> {
@@ -451,10 +567,12 @@ impl SemanticAnalyzer {
         // undefined at power-on and that is what BSS means. An aggregate is not
         // tolerated, because writing out a table and silently getting zeros back
         // is the bug this shares its implementation to avoid.
-        crate::sema::init::flatten_top(init, ty, self, true).map_err(|e| SemaError::Custom {
-            message: e.message,
-            span: e.span,
-        })
+        crate::sema::init::flatten_top(init, ty, self, true, self.soa_arrays.get(name)).map_err(
+            |e| SemaError::Custom {
+                message: e.message,
+                span: e.span,
+            },
+        )
     }
 
     /// Resolve `&NAME` in a static's initializer to a fixed address.
@@ -685,7 +803,7 @@ impl SemanticAnalyzer {
                 None => continue,
             };
             let bytes = match asts.get(&name) {
-                Some(init) => self.static_init_bytes(init, &ty)?,
+                Some(init) => self.static_init_bytes(&name, init, &ty)?,
                 // No declaration to re-read: keep what registration produced.
                 None => match self.static_inits.iter().find(|i| i.name == name) {
                     Some(old) => old.bytes.clone(),
@@ -1565,6 +1683,10 @@ impl SemanticAnalyzer {
 
 /// How semantic analysis resolves the names inside a static's initializer.
 impl crate::sema::init::InitContext for SemanticAnalyzer {
+    fn generated_table(&self, span: crate::ast::Span) -> Option<&[i64]> {
+        self.generated_tables.get(&span).map(|v| v.as_slice())
+    }
+
     fn registry(&self) -> &crate::sema::type_defs::TypeRegistry {
         &self.type_registry
     }
@@ -1616,6 +1738,10 @@ fn collect_variable_names(e: &Spanned<crate::ast::Expr>, out: &mut Vec<String>) 
             }
         }
         Expr::Literal(Literal::ArrayFill { value, .. }) => collect_variable_names(value, out),
+        // A generated table's body names constants like any other initializer;
+        // its index parameter comes along too, which is harmless because no
+        // declared symbol answers to it.
+        Expr::Literal(Literal::ArrayGen { body, .. }) => collect_variable_names(body, out),
         Expr::StructInit { fields, .. } | Expr::AnonStructInit { fields } => {
             for f in fields {
                 collect_variable_names(&f.value, out);

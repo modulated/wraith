@@ -337,10 +337,26 @@ enum E {
     /// the function that takes one. A unit enum's value *is* its variant
     /// index, so the oracle needs nothing but that index.
     EnumVal,
+    /// A `match` on the enum that extracts a variant's payload — the half of a
+    /// tagged union the tag read cannot reach. Variant 0 is unit and yields a
+    /// constant; the rest carry a `u8` and yield `(x as T)`. Which arm runs
+    /// discriminates the tag, and the arm that runs extracts the payload, so a
+    /// compiler that read the wrong offset or misrouted the tag is caught.
+    /// `main` only, where the enum is spelled `e`.
+    EnumMatch,
     /// `(t.len as T)`. A length read through the pointer, so it is wrong
     /// whenever the pointer is, and it needs nothing of the literal but its
     /// length.
     StrLen,
+    /// `(t[<index>] as T)` — a byte of the string. A `str` is semantically an
+    /// array of `char`, so indexing yields a `char` and the cast makes it a
+    /// number; the byte lives one past the pointer, after the length prefix,
+    /// which is a different address computation from a plain array element.
+    ///
+    /// `main` only, and pure: the string is immutable ROM data, so unlike a
+    /// pointer read there is nothing to alias — the byte is a fact about the
+    /// literal, and the oracle reads it straight from [`STRINGS`].
+    StrIndex(Ix),
     /// `arr[<index>]`, in `main` only.
     Elem(Ix),
     /// `TBL[<index>]` — a `const` array, which lives in ROM and is reached
@@ -365,6 +381,11 @@ enum E {
     /// — is refused by the compiler, so generating it there would be a
     /// generator bug rather than a test.
     AField(Ix),
+    /// `s.n.g{j}` — a scalar field of the struct nested inside the struct. Its
+    /// bytes are inline, at the base plus the nested field's offset plus the
+    /// scalar's, so this is the two-level chain a compiler that resolved only
+    /// one level of `.field` would miscompute. `main` only, read-only.
+    NestedField(usize),
     /// `VTBL[<sel>](<arg>)` — a call through a table of function pointers,
     /// indexed at run time. The callee is not known until then, so this is the
     /// path where the compiler stages arguments at a fixed address and where
@@ -427,6 +448,44 @@ enum Place {
     AField(Ix),
 }
 
+/// What `main`'s pointer names. A `&T` used to be a second name for a
+/// *variable* only; it can equally name a struct field or an array element,
+/// and those are different addresses to take — `&s.f0` forces the struct into
+/// memory at a field offset, `&arr[k]` is the element-address computation the
+/// `memcpy` work had to get right — and different storage to alias. Which one
+/// it currently names is program state, moved by [`S::Repoint`], so a read
+/// through it is never a fact about the declaration.
+///
+/// A field or an element target is only ever at the aggregate type, so the
+/// pointer is at that type when it may name one; a variable target keeps the
+/// old freedom of any of the four types.
+#[derive(Clone, PartialEq)]
+enum PtrTarget {
+    Var(usize),
+    Field(usize),
+    Elem(usize),
+}
+
+impl PtrTarget {
+    /// The expression that reads the aliased place directly, under its own
+    /// name — for the invalidation follow-up after a store through the pointer.
+    fn read(&self) -> E {
+        match self {
+            PtrTarget::Var(k) => E::Var(*k),
+            PtrTarget::Field(k) => E::Field(*k),
+            PtrTarget::Elem(k) => E::Elem(Ix::Lit(*k)),
+        }
+    }
+    /// How `&<target>` is written.
+    fn addr(&self) -> String {
+        match self {
+            PtrTarget::Var(k) => format!("&v{k}"),
+            PtrTarget::Field(k) => format!("&s.f{k}"),
+            PtrTarget::Elem(k) => format!("&arr[{k}]"),
+        }
+    }
+}
+
 /// Elements in the generated array, and the largest `for` count, so a loop
 /// variable is always a valid index.
 const ALEN: usize = 4;
@@ -439,6 +498,11 @@ const SFIELDS: usize = 2;
 /// offset computed from the wrong array, and the two scalar fields sit either
 /// side of it so a base that is off by a field lands somewhere visible.
 const AFLEN: usize = 3;
+/// Scalar fields in the struct nested inside the struct — `S.n: Inner`, where
+/// `Inner { g0, g1 }`. A struct laid out inside another is inline bytes, so
+/// `s.n.g1` is the base plus the nested field's offset plus `g1`'s: a two-level
+/// offset a compiler that only knew one level would get wrong.
+const NESTED: usize = 2;
 /// Variants of the generated unit enum. Three is enough for the tag to be a
 /// value rather than a flag, and few enough that the whole range is reachable.
 const EVARIANTS: usize = 3;
@@ -501,7 +565,7 @@ enum S {
     /// `p = &v{k};` — the alias moved to another variable of the same type.
     /// What makes the pointer's target program state rather than a fact about
     /// the declaration, so a read through it cannot be folded away.
-    Repoint(usize),
+    Repoint(PtrTarget),
     /// `v{dst} = pk(&s, <expr>);` — a call that takes `main`'s struct **by
     /// pointer**, writes one of its fields, and returns another.
     ///
@@ -715,6 +779,10 @@ struct Gen<'a> {
     str_taker: Option<usize>,
     /// May the string's length be named here?
     allow_str: bool,
+    /// The length of `main`'s string, for a constant index that has to land
+    /// inside it — a literal may be shorter than [`ALEN`]. Zero when there is
+    /// no string.
+    str_len: usize,
     /// May the enum's tag be named here? True in `main` when the program
     /// declares one, and inside the function that takes it.
     allow_enum: bool,
@@ -735,7 +803,7 @@ struct Gen<'a> {
     /// Every target has the pointer's own type, so a store through it is never
     /// a widening: `&T` names a `T`, and the two ways of writing that storage
     /// have to agree byte for byte.
-    ptr_targets: Vec<usize>,
+    ptr_targets: Vec<PtrTarget>,
     ptr_ty: Ty,
     /// Whether `pk` exists, and which of `main`'s variables can take its
     /// result. Those are the ones at the aggregate type: `pk` returns a field,
@@ -807,11 +875,14 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // An element or a field is storage of the program's type, so it anchors
         // an expression exactly as a variable does.
         if g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
-            return match g.rng.below(4) {
+            return match g.rng.below(5) {
                 0 => E::Elem(gen_index(g)),
                 1 => E::Konst(gen_index(g)),
                 2 => E::Field(g.rng.below(SFIELDS as u64) as usize),
-                _ => E::AField(gen_afield_index(g)),
+                3 => E::AField(gen_afield_index(g)),
+                // A scalar of the struct nested inside the struct — the
+                // two-level `s.n.g{j}` chain.
+                _ => E::NestedField(g.rng.below(NESTED as u64) as usize),
             };
         }
         // Inside the struct-taking function the array and the table are out of
@@ -835,6 +906,12 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // field it fits any type and is not tied to the aggregate one.
         if g.allow_enum && g.rng.below(100) < 12 {
             return E::EnumVal;
+        }
+        // A `match` that extracts the payload — the tagged-union half the tag
+        // read cannot reach. `main` only (it spells `e`), and `allow_loops` is
+        // the `main`-only signal.
+        if g.allow_enum && g.allow_loops && g.rng.below(100) < 10 {
+            return E::EnumMatch;
         }
         // A string's `.len` is deliberately *not* generated freely. Reading it
         // stages the pointer through the four-byte high pool, so two of them
@@ -1058,6 +1135,22 @@ fn gen_afield_index(g: &mut Gen) -> Ix {
     }
 }
 
+/// An index into `main`'s string, in range whatever the program computes.
+///
+/// The literal form is bounded by the string's own length, which may be
+/// shorter than [`ALEN`] — `"a"` has one byte — so it cannot reuse
+/// [`gen_index`]. The wrapped form reduces modulo `t.len` at run time, like a
+/// slice index, so it needs no compile-time length. No loop variable: a `for`
+/// bound may reach [`ALEN`], past the end of a short string, and an
+/// out-of-range read would be the generator's fault rather than the compiler's.
+fn gen_str_index(g: &mut Gen) -> Ix {
+    if g.rng.below(2) == 0 {
+        Ix::Lit(g.rng.below(g.str_len.max(1) as u64) as usize)
+    } else {
+        Ix::Wrapped(g.rng.below(g.vars as u64) as usize)
+    }
+}
+
 /// An index into a slice, which is in range whatever the slice currently
 /// views.
 ///
@@ -1158,12 +1251,18 @@ fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
 fn gen_stmt_seq(g: &mut Gen, depth: u32) -> Vec<S> {
     let s = gen_stmt(g, depth);
     if matches!(s, S::PtrStore(..)) && !g.ptr_targets.is_empty() {
-        let pick = |g: &mut Gen| -> usize {
-            let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
-            g.ptr_targets[k]
-        };
-        let (dst, src) = (pick(g), pick(g));
-        return vec![s, S::Assign(Place::Var(dst), g.ptr_ty, E::Var(src))];
+        // Read one alias candidate straight back, under its own name, right
+        // after the store: a value written through `*p` has to be visible
+        // through the storage it aliases, and a compiler keeping that storage
+        // in a register across the store would answer with the stale one. The
+        // candidate may be a variable, a field, or an element, so the read is
+        // its direct access — the destination is any assignable variable of
+        // the pointer's (pointee's) type.
+        let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
+        let src = g.ptr_targets[k].read();
+        if let Some(dst) = (g.assignable.clone()).find(|i| g.var_types[*i] == g.ptr_ty) {
+            return vec![s, S::Assign(Place::Var(dst), g.ptr_ty, src)];
+        }
     }
     vec![s]
 }
@@ -1195,7 +1294,7 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     if !g.ptr_targets.is_empty() && g.rng.below(100) < 12 {
         if g.rng.below(3) == 0 {
             let k = g.rng.below(g.ptr_targets.len() as u64) as usize;
-            return S::Repoint(g.ptr_targets[k]);
+            return S::Repoint(g.ptr_targets[k].clone());
         }
         let ty = g.ptr_ty;
         return S::PtrStore(ty, gen_expr(g, ty, 2, false));
@@ -1222,6 +1321,19 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
         let dst = g.rng.below((ALEN - len + 1) as u64) as usize;
         let src = g.rng.below((ALEN - len + 1) as u64) as usize;
         return S::CopyRange { dst, src, len };
+    }
+    // A byte of the string read straight into a variable, on its own line
+    // rather than folded into an expression. Reading it stages the pointer
+    // through the four-byte high pool, and an arithmetic operand beside it —
+    // a multiply, another string read — exhausts the pool, which is why `.len`
+    // is not generated freely either. On its own statement, in `main`, the
+    // pool has nothing else in it, so both the constant-offset lowering (the
+    // offset folds into the pointer) and the runtime one (a `% t.len` index)
+    // stage cleanly.
+    if g.allow_str && g.allow_loops && !g.assignable.is_empty() && g.rng.below(100) < 14 {
+        let k = g.assignable.start + g.rng.below(g.assignable.len() as u64) as usize;
+        let ty = g.var_types[k];
+        return S::Assign(Place::Var(k), ty, E::StrIndex(gen_str_index(g)));
     }
     let pick = g.rng.below(100);
     if depth == 0 || pick < 50 || (!g.allow_loops && pick >= 72) {
@@ -1286,9 +1398,16 @@ struct Prog {
     /// The struct's array field, initialised with the struct and written by
     /// `Place::AField`.
     afield_init: [i64; AFLEN],
+    /// The nested struct's scalar fields, initialised with the struct. Never
+    /// written — the nested field is read-only — so it changes only when the
+    /// whole struct is replaced by a `mks` call.
+    nested_init: [i64; NESTED],
     /// Which variant `main`'s enum local holds, or `None` when the program
     /// declares no enum.
     enum_init: Option<usize>,
+    /// The `u8` payload the constructed variant carries. Variants past the
+    /// first hold one; variant 0 is unit and ignores this.
+    enum_payload: u8,
     /// Which of [`STRINGS`] `main` holds, or `None` when it holds none.
     str_init: Option<usize>,
     /// The `const` table's contents. Declared whenever `aggregates` is set, and
@@ -1307,13 +1426,13 @@ struct Prog {
     mk_ranges: Vec<(usize, usize)>,
     /// The two structs `mks` chooses between, as (scalar fields, array field).
     /// Present exactly when the program declares the struct.
-    mks: Vec<([i64; SFIELDS], [i64; AFLEN])>,
+    mks: Vec<([i64; SFIELDS], [i64; AFLEN], [i64; NESTED])>,
     /// The two fields `pk` writes and reads, or `None` in a program that has
     /// no `pk`. Fixed per program because they are part of the function.
     poke: Option<(usize, usize)>,
     /// The pointer `main` declares, as (type, initial target). `None` in a
     /// program without one.
-    ptr: Option<(Ty, usize)>,
+    ptr: Option<(Ty, PtrTarget)>,
     /// Which of them `main`'s struct is *bound* from, or `None` when it is
     /// declared from a literal.
     ///
@@ -1698,6 +1817,7 @@ fn gen_program(seed: u64) -> Prog {
         allow_fields: false,
         allow_enum: false,
         allow_str: false,
+        str_len: 0,
         vtable: 0,
         allow_indirect: false,
         allow_slices: false,
@@ -1723,6 +1843,10 @@ fn gen_program(seed: u64) -> Prog {
     }
     let mut afield_init = [0i64; AFLEN];
     for v in afield_init.iter_mut() {
+        *v = g.lit(base);
+    }
+    let mut nested_init = [0i64; NESTED];
+    for v in nested_init.iter_mut() {
         *v = g.lit(base);
     }
     let mut konst = [0i64; ALEN];
@@ -1767,7 +1891,7 @@ fn gen_program(seed: u64) -> Prog {
     g.allow_slices = !slices.is_empty();
     // The two structs `mks` chooses between, so a struct can arrive from a
     // call as well as from a declaration.
-    let mks: Vec<([i64; SFIELDS], [i64; AFLEN])> = if aggregates {
+    let mks: Vec<([i64; SFIELDS], [i64; AFLEN], [i64; NESTED])> = if aggregates {
         (0..2)
             .map(|_| {
                 let mut fs = [0i64; SFIELDS];
@@ -1778,7 +1902,11 @@ fn gen_program(seed: u64) -> Prog {
                 for v in a.iter_mut() {
                     *v = g.lit(base);
                 }
-                (fs, a)
+                let mut n = [0i64; NESTED];
+                for v in n.iter_mut() {
+                    *v = g.lit(base);
+                }
+                (fs, a, n)
             })
             .collect()
     } else {
@@ -1791,11 +1919,23 @@ fn gen_program(seed: u64) -> Prog {
     // Half the programs, because a program without one still has to be
     // generated: taking a local's address is what forces it into memory, and
     // the shapes that never do have their own bugs.
-    let ptr: Option<(Ty, usize)> = (g.rng.below(100) < 50).then(|| {
+    let ptr: Option<(Ty, PtrTarget)> = (g.rng.below(100) < 50).then(|| {
         let pt = g.pair.pick(g.rng);
-        let targets: Vec<usize> = (0..VARS).filter(|i| var_types[*i] == pt).collect();
+        let mut targets: Vec<PtrTarget> = (0..VARS)
+            .filter(|i| var_types[*i] == pt)
+            .map(PtrTarget::Var)
+            .collect();
+        // At the aggregate type, `&s.f0` and `&arr[k]` are addresses the
+        // pointer can equally hold — the struct field forces the struct into
+        // memory at an offset, the element is the address computation with a
+        // bug history. Added to the candidate set so `*p` may name any of them
+        // and `Repoint` may move between kinds.
+        if pt == base && aggregates {
+            targets.extend((0..SFIELDS).map(PtrTarget::Field));
+            targets.extend((0..ALEN).map(PtrTarget::Elem));
+        }
         let k = g.rng.below(targets.len() as u64) as usize;
-        (pt, targets[k])
+        (pt, targets[k].clone())
     });
     // `pk` writes one field of `main`'s struct through a `&S` and returns
     // another. Half the programs that have a struct at all.
@@ -1818,6 +1958,7 @@ fn gen_program(seed: u64) -> Prog {
     // generated.
     let enum_init: Option<usize> =
         (g.rng.below(100) < 50).then(|| g.rng.below(EVARIANTS as u64) as usize);
+    let enum_payload = g.rng.below(256) as u8;
     g.allow_enum = enum_init.is_some();
     // And the string, independently again. `str` is its own spelling in the
     // type table — not `Named`, not a primitive — and is the kind two of the
@@ -1825,6 +1966,7 @@ fn gen_program(seed: u64) -> Prog {
     let str_init: Option<usize> =
         (g.rng.below(100) < 50).then(|| g.rng.below(STRINGS.len() as u64) as usize);
     g.allow_str = str_init.is_some();
+    g.str_len = str_init.map_or(0, |k| STRINGS[k].len());
 
     // A cycle of two, when there are two non-candidate functions to make one
     // from. It is the two highest-numbered of them, which is also where the
@@ -1840,9 +1982,16 @@ fn gen_program(seed: u64) -> Prog {
     // scope that can name the pointer — it is `main`'s local, and a function
     // body has no way to spell it — so a function generated while this was set
     // produced `*p` with no `p` in scope.
-    if let Some((pt, _)) = ptr {
-        g.ptr_ty = pt;
-        g.ptr_targets = (0..VARS).filter(|i| var_types[*i] == pt).collect();
+    if let Some((pt, _)) = &ptr {
+        g.ptr_ty = *pt;
+        g.ptr_targets = (0..VARS)
+            .filter(|i| var_types[*i] == *pt)
+            .map(PtrTarget::Var)
+            .collect();
+        if *pt == base && aggregates {
+            g.ptr_targets.extend((0..SFIELDS).map(PtrTarget::Field));
+            g.ptr_targets.extend((0..ALEN).map(PtrTarget::Elem));
+        }
     }
     if poke.is_some() {
         g.poke_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
@@ -1872,7 +2021,9 @@ fn gen_program(seed: u64) -> Prog {
         arr_init,
         field_init,
         afield_init,
+        nested_init,
         enum_init,
+        enum_payload,
         str_init,
         konst,
         vtable,
@@ -1901,10 +2052,17 @@ struct St<'a> {
     /// struct through a by-reference parameter, and indexing the field there
     /// is not something the compiler emits.
     afield: Vec<i64>,
+    /// The struct nested inside the struct, `main`'s like the others. Read
+    /// through `s.n.g{j}` and travels with the struct.
+    nested: Vec<i64>,
     /// The variant `main`'s enum holds, or the one handed to a callee. `None`
     /// where no enum is in scope, which is what makes naming one there a bug
     /// in the generator rather than a silent zero.
     tag: Option<usize>,
+    /// The active variant's `u8` payload, when the enum in scope carries one.
+    /// `None` for a unit variant or no enum — naming a payload there is a
+    /// generator bug rather than a silent zero.
+    epay: Option<i64>,
     /// The length of the string in scope, on the same rule as `tag`.
     strlen: Option<usize>,
     counters: Vec<i64>,
@@ -1919,7 +2077,7 @@ struct St<'a> {
     /// Which of `main`'s variables the pointer currently names. `None` where
     /// there is no pointer in scope, which is what makes naming one there a
     /// generator bug rather than a silent zero.
-    ptr: Option<usize>,
+    ptr: Option<PtrTarget>,
     /// Each slice's current `(start, len)` into `TBL`. Program state too:
     /// `Reslice` and `CopySlice` move it. Empty inside a function, which names
     /// no slice.
@@ -1965,9 +2123,15 @@ fn call_fn(
         // The array field travels with them: it is part of the same bytes, and
         // `xp.a[i]` reads it through the same pointer.
         afield: afield.to_vec(),
+        // A function never names the nested field — `s.n.g{j}` is `main` only,
+        // like the array and the table — so it stays empty here.
+        nested: Vec::new(),
         // The tag, when this function takes the enum. A unit enum's value is
         // its variant index, so nothing else has to travel.
         tag,
+        // The function never `match`es the enum — that read is `main` only —
+        // so no payload travels with it.
+        epay: None,
         // The string's length, for the same reason: reads stay at `.len`.
         strlen,
         // Function bodies contain no loops, so these are never indexed; sized
@@ -2113,8 +2277,19 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         // the last `Repoint` left. A read is at the *pointee's* type, which is
         // the pointer's own, and then narrowed to the context like any other
         // storage read.
-        E::PtrLoad => narrow(st.vars[st.ptr.expect("a pointer read needs a pointer")], ty),
+        E::PtrLoad => {
+            let t = st.ptr.as_ref().expect("a pointer read needs a pointer");
+            narrow(
+                match t {
+                    PtrTarget::Var(k) => st.vars[*k],
+                    PtrTarget::Field(k) => st.fields[*k],
+                    PtrTarget::Elem(k) => st.arr[*k],
+                },
+                ty,
+            )
+        }
         E::Field(i) => st.fields[*i],
+        E::NestedField(j) => st.nested[*j],
         E::AField(ix) => st.afield[eval_index_mod(ix, st, ty, AFLEN)],
         // `(e as T)` is the variant index at `T`. Reaching this with no tag
         // would mean the generator named an enum no scope has.
@@ -2122,10 +2297,38 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             st.tag.expect("an enum read with no enum in scope") as i64,
             ty,
         ),
+        E::EnumMatch => {
+            // The unit variant yields the constant its arm spells; a payload
+            // variant binds `x` and yields `(x as T)`, which is the payload
+            // narrowed to the context type.
+            let tag = st.tag.expect("an enum match with no enum in scope");
+            if tag == 0 {
+                narrow(0, ty)
+            } else {
+                narrow(
+                    st.epay.expect("a payload variant with no payload in scope"),
+                    ty,
+                )
+            }
+        }
         E::StrLen => narrow(
             st.strlen.expect("a string read with no string in scope") as i64,
             ty,
         ),
+        E::StrIndex(ix) => {
+            // The string is `main`'s immutable literal, so the byte is a fact
+            // about it, not aliased state: read it straight from STRINGS. The
+            // modulus is the literal's own length — a short string has fewer
+            // than ALEN bytes — and the byte is always ASCII, so it fits every
+            // signed type without a sign question.
+            let k = st
+                .prog
+                .str_init
+                .expect("a string indexed with no string in scope");
+            let bytes = STRINGS[k].as_bytes();
+            let idx = eval_index_mod(ix, st, ty, bytes.len());
+            narrow(bytes[idx] as i64, ty)
+        }
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
@@ -2237,10 +2440,13 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             // target has it, so there is no widening to get wrong.
             S::PtrStore(t, e) => {
                 let v = narrow(eval(e, st, *t), *t);
-                let k = st.ptr.expect("a pointer store needs a target");
-                st.vars[k] = v;
+                match st.ptr.clone().expect("a pointer store needs a target") {
+                    PtrTarget::Var(k) => st.vars[k] = v,
+                    PtrTarget::Field(k) => st.fields[k] = v,
+                    PtrTarget::Elem(k) => st.arr[k] = v,
+                }
             }
-            S::Repoint(k) => st.ptr = Some(*k),
+            S::Repoint(k) => st.ptr = Some(k.clone()),
             // The argument is evaluated before the call, so the field it may
             // read is the one from *before* the write — which is the order the
             // machine runs it in too.
@@ -2253,9 +2459,10 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                 st.vars[*dst] = narrow(back, st.prog.var_types[*dst]);
             }
             S::StructFromCall(k) => {
-                let (fs, a) = &st.prog.mks[*k];
+                let (fs, a, n) = &st.prog.mks[*k];
                 st.fields = fs.iter().map(|v| narrow(*v, ty)).collect();
                 st.afield = a.iter().map(|v| narrow(*v, ty)).collect();
+                st.nested = n.iter().map(|v| narrow(*v, ty)).collect();
             }
             S::If(c, then, otherwise) => {
                 if eval_bool(c, st) {
@@ -2292,6 +2499,10 @@ fn expected(p: &Prog) -> Vec<u32> {
             .map(|(v, t)| narrow(*v, *t))
             .collect(),
         tag: p.enum_init,
+        epay: match p.enum_init {
+            Some(k) if k > 0 => Some(p.enum_payload as i64),
+            _ => None,
+        },
         strlen: p.str_init.map(|k| STRINGS[k].len()),
         arr: if p.aggregates {
             at_base(&p.arr_init)
@@ -2308,12 +2519,17 @@ fn expected(p: &Prog) -> Vec<u32> {
             (true, Some(k)) => at_base(&p.mks[k].1),
             (true, None) => at_base(&p.afield_init),
         },
+        nested: match (p.aggregates, p.struct_init_from_call) {
+            (false, _) => Vec::new(),
+            (true, Some(k)) => at_base(&p.mks[k].2),
+            (true, None) => at_base(&p.nested_init),
+        },
         counters: p.counters.iter().map(|c| *c as i64).collect(),
         loops: vec![0; p.loops],
         current: None,
         // The declaration installs the table's first entry.
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
-        ptr: p.ptr.map(|(_, k)| k),
+        ptr: p.ptr.as_ref().map(|(_, k)| k.clone()),
         slices: p.slices.clone(),
     };
     exec(&p.stmts, &mut st, p.base);
@@ -2331,6 +2547,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         .chain(st.arr.iter())
         .chain(st.fields.iter())
         .chain(st.afield.iter())
+        .chain(st.nested.iter())
         .chain(descriptors.iter())
         .zip(cell_types(p))
         .map(|(v, t)| raw(*v, t))
@@ -2341,7 +2558,7 @@ fn expected(p: &Prog) -> Vec<u32> {
 fn cell_types(p: &Prog) -> Vec<Ty> {
     let mut out: Vec<Ty> = p.var_types.to_vec();
     if p.aggregates {
-        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN));
+        out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN + NESTED));
     }
     out.extend(std::iter::repeat_n(p.base, 2 * p.slices.len()));
     out
@@ -2466,9 +2683,28 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::PtrLoad => "*p".to_string(),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
+        E::NestedField(j) => format!("{}.n.g{j}", struct_name(sc)),
         E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_afield_index(ix, sc)),
         E::EnumVal => format!("({} as {})", enum_name(sc), ty.name()),
+        E::EnumMatch => {
+            let tn = ty.name();
+            let mut arms = vec![format!("C::C0 => (0 as {tn})")];
+            arms.extend((1..EVARIANTS).map(|k| format!("C::C{k}(x) => (x as {tn})")));
+            format!("(match {} {{ {} }})", enum_name(sc), arms.join(", "))
+        }
         E::StrLen => format!("({}.len as {})", str_name(sc), ty.name()),
+        // The Wrapped index reads `t.len` at run time, exactly as a slice index
+        // reads `sl.len`, so the modulus is spelled in the source rather than
+        // baked in. A `char` cast straight to the context type.
+        E::StrIndex(ix) => {
+            let n = str_name(sc);
+            format!(
+                "({}[{}] as {})",
+                n,
+                render_slice_index(&n, ix, sc),
+                ty.name()
+            )
+        }
         E::Dispatch { sel, arg } => {
             format!("VTBL[{}]({})", render_sel(sel), render(arg, ty, sc))
         }
@@ -2603,7 +2839,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
             }
             S::SliceFromCall(i, k) => out.push_str(&format!("{pad}sl{i} = mk({k});\n")),
             S::PtrStore(t, e) => out.push_str(&format!("{pad}*p = {};\n", render(e, *t, sc))),
-            S::Repoint(k) => out.push_str(&format!("{pad}p = &v{k};\n")),
+            S::Repoint(k) => out.push_str(&format!("{pad}p = {};\n", k.addr())),
             S::PokeStruct(dst, e) => {
                 out.push_str(&format!("{pad}v{dst} = pk(&s, {});\n", render(e, ty, sc)))
             }
@@ -2735,6 +2971,18 @@ fn uses_memcpy(stmts: &[S]) -> bool {
     })
 }
 
+/// The `n: Inner { g0: .., g1: .. }` piece of a struct literal, using the same
+/// integer renderer as the rest of the literal so a negative value is
+/// parenthesised the same way.
+fn nested_lit(n: &[i64; NESTED], lit: impl Fn(&i64) -> String) -> String {
+    let gs: Vec<String> = n
+        .iter()
+        .enumerate()
+        .map(|(j, v)| format!("g{j}: {}", lit(v)))
+        .collect();
+    format!("n: Inner {{ {} }}", gs.join(", "))
+}
+
 fn render_program(p: &Prog, form: Form) -> String {
     // `main`'s statements are rendered at the aggregate type: it is what an
     // element or a field reads as, and every expression that is not one
@@ -2759,7 +3007,15 @@ fn render_program(p: &Prog, form: Form) -> String {
         }
     };
     let enum_decl = if p.enum_init.is_some() {
-        let vs: Vec<String> = (0..EVARIANTS).map(|i| format!("C{i}")).collect();
+        let vs: Vec<String> = (0..EVARIANTS)
+            .map(|i| {
+                if i == 0 {
+                    format!("C{i}")
+                } else {
+                    format!("C{i}(u8)")
+                }
+            })
+            .collect();
         format!("enum C {{ {} }}\n", vs.join(", "))
     } else {
         String::new()
@@ -2771,9 +3027,12 @@ fn render_program(p: &Prog, form: Form) -> String {
         let mut fields: Vec<String> = vec![format!("f0: {tn}")];
         fields.push(format!("a: [{tn}; {AFLEN}]"));
         fields.extend((1..SFIELDS).map(|i| format!("f{i}: {tn}")));
+        fields.push("n: Inner".to_string());
         let table: Vec<String> = p.konst.iter().map(lit).collect();
+        let inner: Vec<String> = (0..NESTED).map(|j| format!("g{j}: {tn}")).collect();
         format!(
-            "struct S {{ {} }}\nconst TBL: [{tn}; {ALEN}] = [{}];\n",
+            "struct Inner {{ {} }}\nstruct S {{ {} }}\nconst TBL: [{tn}; {ALEN}] = [{}];\n",
+            inner.join(", "),
             fields.join(", "),
             table.join(", ")
         )
@@ -2802,8 +3061,8 @@ fn render_program(p: &Prog, form: Form) -> String {
     // in the callee — a constant literal is ROM data reached by label, a local
     // is frame storage reached by its address — and it is the local one that
     // used to come back as the struct's first byte in A.
-    if let [(f0, a0), (f1, a1)] = &p.mks[..] {
-        let init = |fs: &[i64; SFIELDS], a: &[i64; AFLEN]| -> String {
+    if let [(f0, a0, n0), (f1, a1, n1)] = &p.mks[..] {
+        let init = |fs: &[i64; SFIELDS], a: &[i64; AFLEN], n: &[i64; NESTED]| -> String {
             let elems: Vec<String> = a.iter().map(lit).collect();
             let mut parts: Vec<String> = vec![format!("f0: {}", lit(&fs[0]))];
             parts.push(format!("a: [{}]", elems.join(", ")));
@@ -2813,12 +3072,13 @@ fn render_program(p: &Prog, form: Form) -> String {
                     .skip(1)
                     .map(|(i, v)| format!("f{i}: {}", lit(v))),
             );
+            parts.push(nested_lit(n, lit));
             format!("S {{ {} }}", parts.join(", "))
         };
         funcs.push_str(&format!(
             "fn mks(k: u8) -> S {{\n    if k == 0 {{ return {}; }}\n    let ms: S = {};\n    return ms;\n}}\n",
-            init(f0, a0),
-            init(f1, a1),
+            init(f0, a0, n0),
+            init(f1, a1, n1),
         ));
     }
 
@@ -2891,6 +3151,7 @@ static DEV: VT = VT {{ call: {} }};\n",
                 .skip(1)
                 .map(|(i, v)| format!("f{i}: {}", lit(v))),
         );
+        fields.push(nested_lit(&p.nested_init, lit));
         // Bound from a call, or from a literal. The two are separate code —
         // one copies the returned bytes out at a declaration, the other at an
         // assignment — so the generator has to reach both.
@@ -2902,11 +3163,15 @@ static DEV: VT = VT {{ call: {} }};\n",
     // Declared after the variables it may name, and before the statements
     // that move it. Taking a local's address is also what forces that local
     // into memory rather than a register, which is half of what this tests.
-    if let Some((pt, k)) = p.ptr {
-        decls.push_str(&format!("    let p: &{} = &v{k};\n", pt.name()));
+    if let Some((pt, k)) = &p.ptr {
+        decls.push_str(&format!("    let p: &{} = {};\n", pt.name(), k.addr()));
     }
     if let Some(k) = p.enum_init {
-        decls.push_str(&format!("    let e: C = C::C{k};\n"));
+        if k == 0 {
+            decls.push_str(&format!("    let e: C = C::C{k};\n"));
+        } else {
+            decls.push_str(&format!("    let e: C = C::C{k}({});\n", p.enum_payload));
+        }
     }
     if let Some(k) = p.str_init {
         decls.push_str(&format!("    let t: str = \"{}\";\n", STRINGS[k]));
@@ -2924,6 +3189,7 @@ static DEV: VT = VT {{ call: {} }};\n",
         cells.extend((0..ALEN).map(|i| format!("arr[{i}]")));
         cells.extend((0..SFIELDS).map(|i| format!("s.f{i}")));
         cells.extend((0..AFLEN).map(|i| format!("s.a[{i}]")));
+        cells.extend((0..NESTED).map(|j| format!("s.n.g{j}")));
     }
     for i in 0..p.slices.len() {
         cells.push(format!("sl{i}[0]"));
@@ -3214,10 +3480,13 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::Elem(_)
             | E::Konst(_)
             | E::Field(_)
+            | E::NestedField(_)
             | E::AField(_)
             | E::PtrLoad
             | E::EnumVal
+            | E::EnumMatch
             | E::StrLen
+            | E::StrIndex(_)
             | E::SliceElem(..)
             | E::SliceLen(_) => {}
         }
@@ -3296,10 +3565,13 @@ fn strip_self_calls(e: &mut E) {
         | E::Elem(_)
         | E::Konst(_)
         | E::Field(_)
+        | E::NestedField(_)
         | E::AField(_)
         | E::PtrLoad
         | E::EnumVal
+        | E::EnumMatch
         | E::StrLen
+        | E::StrIndex(_)
         | E::SliceElem(..)
         | E::SliceLen(_) => {}
     }
@@ -3486,7 +3758,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_expr(arg, target, seen)
         }
-        E::Elem(ix) | E::Konst(ix) => {
+        E::Elem(ix) | E::Konst(ix) | E::StrIndex(ix) => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -3494,7 +3766,13 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
             *seen += 1;
             mutate_index(ix, target, seen)
         }
-        E::Field(_) | E::AField(_) | E::PtrLoad | E::EnumVal | E::StrLen => {
+        E::Field(_)
+        | E::NestedField(_)
+        | E::AField(_)
+        | E::PtrLoad
+        | E::EnumVal
+        | E::EnumMatch
+        | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
                 return true;
@@ -3816,6 +4094,11 @@ fn the_generator_covers_what_it_claims() {
         enum_reads: usize,
         str_args: usize,
         str_reads: usize,
+        str_index_reads: usize,
+        ptr_field_targets: usize,
+        ptr_elem_targets: usize,
+        nested_reads: usize,
+        enum_match_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -3879,10 +4162,13 @@ fn the_generator_covers_what_it_claims() {
             E::SliceElem(_, _) => s.slice_reads += 1,
             E::SliceLen(_) => s.slice_lens += 1,
             E::Field(_) => s.field_reads += 1,
+            E::NestedField(_) => s.nested_reads += 1,
             E::AField(_) => s.afield_reads += 1,
             E::PtrLoad => s.ptr_reads += 1,
             E::EnumVal => s.enum_reads += 1,
+            E::EnumMatch => s.enum_match_reads += 1,
             E::StrLen => s.str_reads += 1,
+            E::StrIndex(_) => s.str_index_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
         }
     }
@@ -3954,8 +4240,13 @@ fn the_generator_covers_what_it_claims() {
                     s.stmts.insert("pointer-store");
                     walk_e(e, s, narrow_half);
                 }
-                S::Repoint(_) => {
+                S::Repoint(t) => {
                     s.stmts.insert("repoint");
+                    match t {
+                        PtrTarget::Field(_) => s.ptr_field_targets += 1,
+                        PtrTarget::Elem(_) => s.ptr_elem_targets += 1,
+                        PtrTarget::Var(_) => {}
+                    }
                 }
                 S::PokeStruct(_, e) => {
                     s.stmts.insert("struct-poke");
@@ -3973,6 +4264,13 @@ fn the_generator_covers_what_it_claims() {
             seen.types.insert(t.name());
         }
         walk_s(&p.stmts, &mut seen, p.pair.narrow);
+        if let Some((_, t)) = &p.ptr {
+            match t {
+                PtrTarget::Field(_) => seen.ptr_field_targets += 1,
+                PtrTarget::Elem(_) => seen.ptr_elem_targets += 1,
+                PtrTarget::Var(_) => {}
+            }
+        }
         for f in &p.funcs {
             walk_s(&f.body, &mut seen, p.pair.narrow);
             walk_e(&f.ret, &mut seen, p.pair.narrow);
@@ -4037,6 +4335,7 @@ fn the_generator_covers_what_it_claims() {
     assert!(seen.slice_reads > 0, "never read a slice element");
     assert!(seen.slice_lens > 0, "never read a slice length");
     assert!(seen.field_reads > 0, "never read a struct field");
+    assert!(seen.nested_reads > 0, "never read a nested struct field");
     assert!(
         seen.ptr_reads > 0,
         "never read through a pointer — the one expression whose storage is not decided \
@@ -4054,12 +4353,22 @@ fn the_generator_covers_what_it_claims() {
          `Named` like a struct, so only the type registry tells the two apart"
     );
     assert!(seen.enum_reads > 0, "never read an enum's tag");
+    assert!(seen.enum_match_reads > 0, "never matched an enum payload");
     assert!(
         seen.str_args > 0,
         "never passed a `str` to a function — its own spelling in the type table, and the \
          kind two of the width lists had left out"
     );
     assert!(seen.str_reads > 0, "never read a string's length");
+    assert!(seen.str_index_reads > 0, "never indexed a string");
+    assert!(
+        seen.ptr_field_targets > 0,
+        "a pointer never named a struct field"
+    );
+    assert!(
+        seen.ptr_elem_targets > 0,
+        "a pointer never named an array element"
+    );
 }
 
 /// No name the generator invents may be a reserved word.
@@ -4184,7 +4493,9 @@ fn the_oracle_matches_the_documented_semantics() {
         arr_init: [0; ALEN],
         field_init: [0; SFIELDS],
         afield_init: [0; AFLEN],
+        nested_init: [0; NESTED],
         enum_init: None,
+        enum_payload: 0,
         str_init: None,
         konst: [0; ALEN],
         vtable: 0,
@@ -4204,9 +4515,11 @@ fn the_oracle_matches_the_documented_semantics() {
         arr: Vec::new(),
         fields: Vec::new(),
         afield: Vec::new(),
+        nested: Vec::new(),
         counters: Vec::new(),
         loops: Vec::new(),
         current: None,
+        epay: None,
         dev: 0,
         ptr: None,
         slices: Vec::new(),
@@ -4299,11 +4612,6 @@ mod coverage {
         ("Expr::CpuFlagOverflow", "same as `carry`"),
         ("Expr::CpuFlagNegative", "same as `carry`"),
         (
-            "Expr::Match",
-            "the statement form is generated; the expression form would need the oracle to \
-             model arm-type unification",
-        ),
-        (
             "Expr::BitOp",
             "single-bit access is covered by tests/e2e/bitfields.rs",
         ),
@@ -4313,6 +4621,12 @@ mod coverage {
             "`bool` as a value has its own widening rule, separate from control flow",
         ),
         ("Literal::Char", "no character arithmetic is generated"),
+        (
+            "Literal::ArrayGen",
+            "not generated: a table whose entries are a function of the index is folded \
+             before the program runs, so the oracle would be checking the constant \
+             evaluator rather than the generated code. tests/e2e/const_tables.rs covers it",
+        ),
         (
             "Literal::ArrayFill",
             "the element-list form is generated, and lowers the same way",
@@ -4327,10 +4641,11 @@ mod coverage {
             "Pattern::Range",
             "range patterns are covered exhaustively by tests/e2e/match_ranges.rs",
         ),
-        ("Pattern::EnumVariant", "enums are not generated"),
         (
             "Pattern::Variable",
-            "a binding pattern would put a value in scope that the oracle does not track",
+            "a bare binding pattern would put a value in scope that the oracle does not \
+             track; the enum payload's `C::C{k}(x)` binding is a tuple-variant pattern, \
+             which the compiler models separately",
         ),
         // --- Types -----------------------------------------------------------
         ("TypeExpr::StringBuf", "strings are aggregates"),
@@ -4356,6 +4671,13 @@ mod coverage {
     /// about division by zero, which never occurs.
     const CAVEATS: &[(&str, &str)] = &[
         (
+            "Expr::Match",
+            "as a statement, the whole-body `ViaMatch` form; as an expression, the enum \
+             payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all \
+             share the context type so no arm-type unification is exercised. A match over \
+             integers or ranges as a value is not generated",
+        ),
+        (
             "Item::Import",
             "one import of one name — `memcpy` from `std/mem.wr`, and only in a program \
              that copies a run of bytes. Programs are otherwise single-file; the import \
@@ -4363,40 +4685,51 @@ mod coverage {
         ),
         (
             "UnaryOp::Deref",
-            "`*p` for a scalar `p`, read and written, in `main` only. The pointee is always \
-             one of `main`'s own variables of the pointer's type, so the alias the oracle \
-             models is a second name for storage it already tracks. No pointer to an \
-             element, a field or another pointer, and none passed to a function",
+            "`*p` for a scalar `p`, read and written, in `main` only. The pointee is a \
+             variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved \
+             between kinds by `Repoint`, so the alias the oracle models covers storage it \
+             already tracks under three names. No pointer to another pointer, and none \
+             passed to a function",
         ),
         (
             "TypeExpr::Pointer",
-            "one `&T` local per program that has one, at either half of the pair. Never a \
-             parameter, a return type, a struct field, or a pointer to a pointer",
+            "one `&T` local per program that has one — at either half of the pair when it \
+             names a variable, at the aggregate type when it names a field or element. \
+             Never a parameter, a return type, a struct field, or a pointer to a pointer",
         ),
         (
             "UnaryOp::AddrOf",
-            "three shapes: `&arr[i]` and `&TBL[i]` as the two source arguments of a \
-             `memcpy` — a local array in zero page and a `const` one reached by label, \
-             which are different address computations — and `&v{i}`, the address of a \
-             plain local, which is what a pointer is bound to and re-bound to. Never the \
-             address of a field, of a struct, or of a function",
+            "`&arr[i]` and `&TBL[i]` as the two source arguments of a `memcpy` — a local \
+             array in zero page and a `const` one reached by label, different address \
+             computations — and what a pointer is bound to and re-bound to: `&v{i}` (a \
+             plain local), `&s.f{i}` (a struct field, which forces the struct into memory \
+             at an offset), and `&arr[k]` (an element). Never the address of a whole \
+             struct or of a function",
         ),
         (
             "Item::Enum",
-            "the enum is unit-only: three variants, no payloads. A payload is a separate \
-             lowering — the value points at a per-declaration block the oracle would have \
-             to model — and the tag is what a call has to carry correctly",
+            "one enum per program, three variants: `C0` unit, `C1(u8)` and `C2(u8)` \
+             carrying a payload. The tag is read as `(e as T)` and carried across a call; \
+             the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => \
+             (x as T), … }` — which discriminates the tag and extracts the byte. A `u16` \
+             payload is not generated, so the value stays two bytes in A:X like the unit \
+             enum, and a payload matched through the by-reference parameter is not either",
         ),
         (
             "Literal::String",
-            "one of four literals, in `main`'s declaration only, and read only through \
-             `.len` — indexing a string is a second lowering the oracle would have to \
-             model, and `.len` is what a call has to carry the pointer correctly to answer",
+            "one of four literals, in `main`'s declaration only. Read through `.len`, and \
+             now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after \
+             the length prefix, for a constant and a run-time index both. Kept to its own \
+             statement in `main` rather than folded into an expression: the read stages the \
+             pointer through the four-byte high pool, and an arithmetic operand beside it \
+             exhausts it",
         ),
         (
             "Expr::EnumVariant",
-            "only in `main`'s declaration, so which variant is program state and never a \
-             branch the oracle has to follow",
+            "in `main`'s declaration, `C::C{k}` or `C::C{k}(payload)`, so which variant and \
+             payload the enum holds is fixed program state. A `match` in `main` reads the \
+             payload back out; the arm that runs is fixed with the variant, so no branch \
+             the oracle has to follow at run time",
         ),
         (
             "BinaryOp::Div",
@@ -4524,10 +4857,12 @@ mod coverage {
         ),
         (
             "Expr::Field",
-            "two scalar fields of the program's type and one array field, reached through \
-             the struct's own name in `main` and through the by-reference parameter inside \
-             the function that takes it — `xp.a[i]` included, which indexes an array field \
-             through a pointer. No struct nested inside another",
+            "two scalar fields of the program's type, one array field, and a nested struct \
+             `n: Inner` with two scalars of its own — reached through the struct's own name \
+             in `main` and through the by-reference parameter inside the function that takes \
+             it, `xp.a[i]` included, which indexes an array field through a pointer. The \
+             nested field is read as `s.n.g{j}` in `main` — a two-level offset — but not \
+             through the parameter",
         ),
         (
             "Item::Static",
@@ -4537,11 +4872,11 @@ mod coverage {
         ),
         (
             "Item::Struct",
-            "one struct per program: two scalar fields with an array field between them, so \
-             a base off by a field lands on a cell the program reports. It is declared as a \
-             local, passed to a function by address, returned from one — bound and assigned \
-             from that call, which are separate copies in the compiler — and written through \
-             a `&S`. Never nested inside another struct",
+            "two structs per program: `S`, with two scalar fields, an array field between \
+             them, and a nested `Inner`; and `Inner` itself, two scalars, laid out inline in \
+             `S`. `S` is declared as a local, passed to a function by address, returned from \
+             one — bound and assigned from that call, separate copies in the compiler — and \
+             written through a `&S`",
         ),
         (
             "Literal::Array",
@@ -4867,6 +5202,10 @@ mod coverage {
                 for e in elems {
                     w_expr(&e.node, s);
                 }
+            }
+            Literal::ArrayGen { body, .. } => {
+                note(s, "Literal", "ArrayGen");
+                w_expr(&body.node, s);
             }
             Literal::ArrayFill { .. } => note(s, "Literal", "ArrayFill"),
         }

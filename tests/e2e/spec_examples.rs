@@ -196,9 +196,10 @@ fn untagged_count(md: &str) -> usize {
 /// * **~29 truncated signatures** — `fn read_line(buf: &u8, max: u8) -> u8 { ... }`
 ///   and the stdlib reference's bodyless forms. The `...` is the point; giving
 ///   them bodies would make the reference longer and no clearer.
-/// * **~20 deliberate error examples** — a constant that overflows, a duplicate
-///   name, `addr` where it is not allowed, a pointer that escapes. They are in
-///   the spec *because* they fail; `error_diagnostics.rs` pins the messages.
+/// * **~21 deliberate error examples** — a constant that overflows, a duplicate
+///   name, `addr` where it is not allowed, a pointer that escapes, every
+///   whole-element use of an `#[soa]` array. They are in the spec *because*
+///   they fail; `error_diagnostics.rs` and `soa.rs` pin the messages.
 /// * **9 import examples** naming modules that are illustrations rather than
 ///   files in this tree.
 /// * The rest are prose fragments (bare `..` range syntax) and features the
@@ -208,8 +209,8 @@ fn the_untagged_blocks_stay_a_short_list() {
     let md = include_str!("../../docs/specification.md");
     let n = untagged_count(md);
     assert!(
-        n <= 92,
-        "{n} spec blocks carry no compile tag, up from 92. Tag the new example, \
+        n <= 93,
+        "{n} spec blocks carry no compile tag, up from 93. Tag the new example, \
          or add its category to the list above this test."
     );
 }
