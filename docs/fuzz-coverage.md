@@ -16,10 +16,10 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 |---|---:|---|
 | `Function` | 400 |  |
 | `Struct` | 312 | two structs per program: `S`, with two scalar fields, an array field between them, and a nested `Inner`; and `Inner` itself, two scalars, laid out inline in `S`. `S` is declared as a local, passed to a function by address, returned from one — bound and assigned from that call, separate copies in the compiler — and written through a `&S` |
-| `Enum` | 203 | one enum per program, three variants: `C0` unit, `C1(u8)` and `C2(u8)` carrying a payload. The tag is read as `(e as T)` and carried across a call; the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => (x as T), … }` — which discriminates the tag and extracts the byte. A `u16` payload is not generated, so the value stays two bytes in A:X like the unit enum, and a payload matched through the by-reference parameter is not either |
+| `Enum` | 210 | one enum per program, three variants: `C0` unit, `C1(u8)` and `C2(u8)` carrying a payload. The tag is read as `(e as T)` and carried across a call; the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => (x as T), … }` — which discriminates the tag and extracts the byte. A `u16` payload is not generated, so the value stays two bytes in A:X like the unit enum, and a payload matched through the by-reference parameter is not either |
 | `Static` | 312 | only the `const` table, which is read-only and lives in ROM; a mutable `static` in RAM is not generated, so what gets exercised is frame colouring rather than BSS |
 | `Address` | 400 |  |
-| `Import` | 26 | one import of one name — `memcpy` from `std/mem.wr`, and only in a program that copies a run of bytes. Programs are otherwise single-file; the import graph itself is covered by tests/e2e/imports.rs |
+| `Import` | 24 | one import of one name — `memcpy` from `std/mem.wr`, and only in a program that copies a run of bytes. Programs are otherwise single-file; the import graph itself is covered by tests/e2e/imports.rs |
 
 ## Statements
 
@@ -28,9 +28,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `VarDecl` | 400 | a program picks one signedness family and mixes its two widths — `u8`/`u16` or `i8`/`i16` — because those are the two the language widens between without an `as`. Variables, parameters, locals and return types each take either half; the array, the struct's fields, the `const` table and the slices all take one. Mixing across families, and any narrowing, happens only through a written cast |
 | `Assign` | 400 |  |
 | `Expr` | 400 |  |
-| `Return` | 373 | every generated function returns a value of the program's type, so the `u8`/`i8` (A) and `u16`/`i16` (A:Y) return conventions are covered but the pointer one (A:X) is not — that needs aggregates |
-| `If` | 383 |  |
-| `While` | 144 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
+| `Return` | 383 | every generated function returns a value of the program's type, so the `u8`/`i8` (A) and `u16`/`i16` (A:Y) return conventions are covered but the pointer one (A:X) is not — that needs aggregates |
+| `If` | 377 |  |
+| `While` | 153 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
 | `Loop` | 400 |  |
 | `For` | 400 | bounds are literals; a computed bound is not generated |
 | `ForEach` | — | not generated: a slice is generated but never iterated: `for x in sl` binds a value the oracle would have to track alongside the loop counter, which is a separate question from the descriptor this generates slices to exercise |
@@ -46,17 +46,17 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 |---|---:|---|
 | `Literal` | 400 |  |
 | `Variable` | 400 |  |
-| `Binary` | 400 |  |
-| `Unary` | 341 |  |
+| `Binary` | 399 |  |
+| `Unary` | 365 |  |
 | `Cast` | 397 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
-| `Field` | 293 | two scalar fields of the program's type, one array field, and a nested struct `n: Inner` with two scalars of its own — reached through the struct's own name in `main` and through the by-reference parameter inside the function that takes it, `xp.a[i]` included, which indexes an array field through a pointer. The nested field is read as `s.n.g{j}` in `main` — a two-level offset — but not through the parameter |
-| `Index` | 317 | the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, because the language does no bounds checking and an out-of-range access would be the generator's bug rather than the compiler's |
+| `Field` | 297 | two scalar fields of the program's type, one array field, and a nested struct `n: Inner` with two scalars of its own — reached through the struct's own name in `main` and through the by-reference parameter inside the function that takes it, `xp.a[i]` included, which indexes an array field through a pointer. The nested field is read as `s.n.g{j}` in `main` — a two-level offset — but not through the parameter |
+| `Index` | 299 | the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, because the language does no bounds checking and an out-of-range access would be the generator's bug rather than the compiler's |
 | `Slice` | 141 | always a sub-range of the `const` table, with literal bounds. That table lives in ROM and nothing writes it, so a slice is a read-only view and the oracle needs its two numbers rather than an alias model. A descriptor reaches a slice four ways — a range expression, a copy from another slice, a call to `mk`, and a parameter — which are four different codegen paths. Slices of a local array, of another slice, and with computed bounds are not generated |
 | `Call` | 400 | 1-3 arguments at either width, a return type of either width, and a callee that reads only its own scope, so argument evaluation order cannot be observed. A narrow argument to a wide parameter is widened by the language rather than by a cast, and the arithmetic happens at the narrow type first — which is the order this generates calls to check. The call graph is acyclic apart from recursion, which comes two ways: a function that calls itself, and a pair that call each other. Both are bounded by a budget parameter that every recursive edge decrements, so termination is a property of the shape — a pair member cannot reach its partner by an ordinary call, which would pass a fresh literal budget and reset the cycle's own depth. The pair is what puts two functions in one call-graph SCC, which is the case frame colouring solves with Tarjan and which a self-call never reaches. Cycles of three or more are not generated. Nesting depth is limited by the compiler's 11-byte argument-staging pool, which a call whose list does not fit spills to the software stack one argument at a time: the generator budgets a level's worth, and a program that exhausts it anyway is skipped and counted rather than reported |
-| `CallIndirect` | 69 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
+| `CallIndirect` | 77 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
 | `StructInit` | 312 |  |
 | `AnonStructInit` | — | not generated: the named form is generated; this one adds inference, not a codegen path |
-| `EnumVariant` | 203 | in `main`'s declaration, `C::C{k}` or `C::C{k}(payload)`, so which variant and payload the enum holds is fixed program state. A `match` in `main` reads the payload back out; the arm that runs is fixed with the variant, so no branch the oracle has to follow at run time |
+| `EnumVariant` | 210 | in `main`'s declaration, `C::C{k}` or `C::C{k}(payload)`, so which variant and payload the enum holds is fixed program state. A `match` in `main` reads the payload back out; the arm that runs is fixed with the variant, so no branch the oracle has to follow at run time |
 | `SliceLen` | 218 | read as a value and as the modulus of an index, so a descriptor whose length half is wrong shows up either way. Never assigned to |
 | `U16Low` | 400 |  |
 | `U16High` | 400 |  |
@@ -65,7 +65,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `CpuFlagOverflow` | — | not generated: same as `carry` |
 | `CpuFlagNegative` | — | not generated: same as `carry` |
 | `Paren` | 400 | every operator is parenthesised, so a precedence disagreement cannot masquerade as a codegen bug |
-| `Match` | 102 | as a statement, the whole-body `ViaMatch` form; as an expression, the enum payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all share the context type so no arm-type unification is exercised. A match over integers or ranges as a value is not generated |
+| `Match` | 114 | as a statement, the whole-body `ViaMatch` form; as an expression, the enum payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all share the context type so no arm-type unification is exercised. A match over integers or ranges as a value is not generated |
 | `BitOp` | — | not generated: single-bit access is covered by tests/e2e/bitfields.rs |
 
 ## Literals
@@ -75,7 +75,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Integer` | 400 | always inside the program's type; every operator has an operand mentioning a variable, so no subexpression is typed by its own literals |
 | `Bool` | — | not generated: `bool` as a value has its own widening rule, separate from control flow |
 | `Char` | — | not generated: no character arithmetic is generated |
-| `String` | 190 | one of four literals, in `main`'s declaration only. Read through `.len`, and now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after the length prefix, for a constant and a run-time index both. Kept to its own statement in `main` rather than folded into an expression: the read stages the pointer through the four-byte high pool, and an arithmetic operand beside it exhausts it |
+| `String` | 205 | one of four literals, in `main`'s declaration only. Read through `.len`, and now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after the length prefix, for a constant and a run-time index both. Kept to its own statement in `main` rather than folded into an expression: the read stages the pointer through the four-byte high pool, and an arithmetic operand beside it exhausts it |
 | `Array` | 312 | three arrays per program — a local in zero page, a `const` in ROM, and a field inside the struct, which reach their elements through three different bases — initialised from literals |
 | `ArrayFill` | — | not generated: the element-list form is generated, and lowers the same way |
 | `ArrayGen` | — | not generated: not generated: a table whose entries are a function of the index is folded before the program runs, so the oracle would be checking the constant evaluator rather than the generated code. tests/e2e/const_tables.rs covers it |
@@ -84,24 +84,24 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Add` | 343 |  |
-| `Sub` | 332 |  |
-| `Mul` | 259 |  |
-| `Div` | 286 | divisor is any expression, zero included — `x / 0` is the all-ones sentinel the specification defines, and `i8::MIN / -1` wraps like every other overflow. Only a *constant* divisor is excluded, since a zero one is a compile error |
-| `Mod` | 338 | divisor as for `Div` |
-| `BitAnd` | 304 |  |
-| `BitOr` | 302 |  |
-| `BitXor` | 290 |  |
-| `Shl` | 304 | shift count is a literal below the type's width, where the result is the plain shift |
-| `Shr` | 287 | shift count as for `Shl` |
-| `Eq` | 345 |  |
-| `Ne` | 83 |  |
-| `Lt` | 90 |  |
-| `Gt` | 184 |  |
-| `Le` | 113 |  |
-| `Ge` | 95 |  |
-| `And` | 76 |  |
-| `Or` | 39 |  |
+| `Add` | 369 |  |
+| `Sub` | 325 |  |
+| `Mul` | 262 |  |
+| `Div` | 281 | divisor is any expression, zero included — `x / 0` is the all-ones sentinel the specification defines, and `i8::MIN / -1` wraps like every other overflow. Only a *constant* divisor is excluded, since a zero one is a compile error |
+| `Mod` | 335 | divisor as for `Div` |
+| `BitAnd` | 299 |  |
+| `BitOr` | 315 |  |
+| `BitXor` | 278 |  |
+| `Shl` | 315 | shift count is a literal below the type's width, where the result is the plain shift |
+| `Shr` | 285 | shift count as for `Shl` |
+| `Eq` | 331 |  |
+| `Ne` | 91 |  |
+| `Lt` | 94 |  |
+| `Gt` | 189 |  |
+| `Le` | 95 |  |
+| `Ge` | 93 |  |
+| `And` | 89 |  |
+| `Or` | 37 |  |
 
 ## Unary operators
 
@@ -109,9 +109,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 |---|---:|---|
 | `Neg` | 207 | only on a literal |
 | `BitNot` | — | not generated: would widen the oracle for no new codegen path — `^ -1` covers the same lowering |
-| `Not` | 130 | only on a condition |
-| `AddrOf` | 219 | `&arr[i]` and `&TBL[i]` as the two source arguments of a `memcpy` — a local array in zero page and a `const` one reached by label, different address computations — and what a pointer is bound to and re-bound to: `&v{i}` (a plain local), `&s.f{i}` (a struct field, which forces the struct into memory at an offset), and `&arr[k]` (an element). Never the address of a whole struct or of a function |
-| `Deref` | 119 | `*p` for a scalar `p`, read and written, in `main` only. The pointee is a variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved between kinds by `Repoint`, so the alias the oracle models covers storage it already tracks under three names. No pointer to another pointer, and none passed to a function |
+| `Not` | 126 | only on a condition |
+| `AddrOf` | 260 | `&arr[i]` and `&TBL[i]` as the two source arguments of a `memcpy` — a local array in zero page and a `const` one reached by label, different address computations — and what a pointer is bound to and re-bound to: `&v{i}` (a plain local), `&s.f{i}` (a struct field, which forces the struct into memory at an offset), and `&arr[k]` (an element). Never the address of a whole struct or of a function |
+| `Deref` | 227 | `*p` for a scalar `p`, read and written, in `main` only. The pointee is a variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved between kinds by `Repoint`. It is also passed to a function — `bp(&v, x)` writes `main`'s variable through a `&T` parameter — so the alias the oracle models spans a call boundary as well. No pointer to another pointer |
 
 ## Match patterns
 
@@ -120,7 +120,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Literal` | 400 | a single constant selector, always taken |
 | `Range` | — | not generated: range patterns are covered exhaustively by tests/e2e/match_ranges.rs |
 | `Wildcard` | 400 |  |
-| `EnumVariant` | 102 |  |
+| `EnumVariant` | 114 |  |
 | `Variable` | — | not generated: a bare binding pattern would put a value in scope that the oracle does not track; the enum payload's `C::C{k}(x)` binding is a tuple-variant pattern, which the compiler models separately |
 
 ## Type forms
@@ -128,11 +128,11 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | Construct | Programs | Notes |
 |---|---:|---|
 | `Primitive` | 400 | one integer type per program — mixed-width arithmetic would bring the implicit widening rules into the oracle |
-| `Named` | 376 | only the generated struct; no enum, and no named type across a call boundary |
+| `Named` | 380 | only the generated struct; no enum, and no named type across a call boundary |
 | `StringBuf` | — | not generated: strings are aggregates |
 | `Array` | 312 | fixed lengths: 4 for the local and the `const` table, which is also the largest `for` count so a loop variable indexes them safely, and 3 for the struct's array field, which differs deliberately — an offset computed from the wrong array runs off the end of the shorter one |
 | `Slice` | 141 | declared in `main` at the program's own type, and taken as a parameter by `f0` — the one function no other can call, so the only caller is `main` and the only caller with a slice to pass. Never held in a struct or iterated |
-| `Pointer` | 246 | one `&T` local per program that has one — at either half of the pair when it names a variable, at the aggregate type when it names a field or element. Never a parameter, a return type, a struct field, or a pointer to a pointer |
+| `Pointer` | 301 | one `&T` local per program that has one — at either half of the pair when it names a variable, at the aggregate type when it names a field or element. Never a parameter, a return type, a struct field, or a pointer to a pointer |
 | `Function` | 176 | always `fn(T) -> T` at the program's own type: the table's entries must share a signature, and a one-argument one is what an indirect call can stage |
 
 ## Primitive types
@@ -140,9 +140,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | Construct | Programs | Notes |
 |---|---:|---|
 | `U8` | 400 |  |
-| `I8` | 321 |  |
+| `I8` | 320 |  |
 | `U16` | 400 |  |
-| `I16` | 282 |  |
+| `I16` | 285 |  |
 | `Bool` | — | not generated: generated only as a condition, which is never spelled as a type |
 | `Char` | — | not generated: no character arithmetic is generated |
 | `B8` | — | not generated: BCD is covered by tests/e2e/bcd.rs |

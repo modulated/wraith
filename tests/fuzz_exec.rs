@@ -579,6 +579,15 @@ enum S {
     /// A statement rather than an expression because it has a side effect on
     /// `main`'s state, and the oracle evaluates expressions without one.
     PokeStruct(usize, E),
+    /// `v{dst} = bp(&v{target}, <expr>);` — a call that takes one of `main`'s
+    /// variables **by pointer**, adds to it through the pointer, and returns
+    /// the new value. The scalar analogue of `PokeStruct`: the callee's `*pp`
+    /// and the caller's `v{target}` are the same byte(s), so the write inside
+    /// `bp` has to show up in `main` afterwards. A `&T` parameter that copied
+    /// instead of pointing would answer the return correctly and leave
+    /// `v{target}` untouched — which is why `target` and `dst` are read as two
+    /// separate cells in the output.
+    PokePtr(usize, usize, E),
     /// `s = mks({k});` — the whole struct replaced by one that arrives from a
     /// *call*, which returns a pointer to its bytes in A:X and leaves the
     /// caller to copy them out.
@@ -809,6 +818,10 @@ struct Gen<'a> {
     /// result. Those are the ones at the aggregate type: `pk` returns a field,
     /// so anything else would put a widening in the way of the answer.
     poke_targets: Vec<usize>,
+    /// May a `PokePtr` be generated here, and which of `main`'s variables it
+    /// may write through the pointer. `main` only, like the aggregates.
+    allow_pass_ptr: bool,
+    bp_targets: Vec<usize>,
     /// How many `sl{i}` are in scope: `SLICES` in `main`, and 0 inside a
     /// function, where the only slice is the parameter. What separates the two
     /// is that a statement can *move* a named slice, and `sp` is not one.
@@ -1299,6 +1312,15 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
         let ty = g.ptr_ty;
         return S::PtrStore(ty, gen_expr(g, ty, 2, false));
     }
+    // One of `main`'s variables written through a `&T` parameter, its new
+    // value read back. `main` only, and its own statement: the pointer is
+    // staged as a two-byte argument, and the alias is what makes the callee's
+    // write visible in `main`.
+    if g.allow_pass_ptr && !g.bp_targets.is_empty() && g.rng.below(100) < 10 {
+        let t = g.bp_targets[g.rng.below(g.bp_targets.len() as u64) as usize];
+        let d = g.bp_targets[g.rng.below(g.bp_targets.len() as u64) as usize];
+        return S::PokePtr(t, d, gen_expr(g, g.base, 2, false));
+    }
     // A field written through a `&S` inside a call, and another read back.
     if !g.poke_targets.is_empty() && g.rng.below(100) < 10 {
         let k = g.rng.below(g.poke_targets.len() as u64) as usize;
@@ -1430,6 +1452,9 @@ struct Prog {
     /// The two fields `pk` writes and reads, or `None` in a program that has
     /// no `pk`. Fixed per program because they are part of the function.
     poke: Option<(usize, usize)>,
+    /// Whether the program declares `bp`, the helper that writes one of
+    /// `main`'s variables through a `&T` parameter.
+    pass_ptr: bool,
     /// The pointer `main` declares, as (type, initial target). `None` in a
     /// program without one.
     ptr: Option<(Ty, PtrTarget)>,
@@ -1814,6 +1839,8 @@ fn gen_program(seed: u64) -> Prog {
         ptr_targets: Vec::new(),
         ptr_ty: base,
         poke_targets: Vec::new(),
+        allow_pass_ptr: false,
+        bp_targets: Vec::new(),
         allow_fields: false,
         allow_enum: false,
         allow_str: false,
@@ -1945,6 +1972,10 @@ fn gen_program(seed: u64) -> Prog {
             g.rng.below(SFIELDS as u64) as usize,
         )
     });
+    // `bp` writes one of `main`'s variables through a `&T` parameter. It needs
+    // a base-typed variable to point at and one to receive the return; both
+    // come from the same set, so one is enough.
+    let pass_ptr = (0..VARS).any(|i| var_types[i] == base) && g.rng.below(100) < 40;
     let struct_init_from_call =
         (!mks.is_empty() && g.rng.below(100) < 30).then(|| g.rng.below(2) as usize);
     // Decided here too, and for the same reason: `f0` may take the struct as a
@@ -1996,6 +2027,10 @@ fn gen_program(seed: u64) -> Prog {
     if poke.is_some() {
         g.poke_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
     }
+    if pass_ptr {
+        g.allow_pass_ptr = true;
+        g.bp_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
+    }
     g.main_slices = slices.len();
     // `f0` is the only function that can take a slice, and only when it exists
     // and is not one of the table's candidates.
@@ -2031,6 +2066,7 @@ fn gen_program(seed: u64) -> Prog {
         mk_ranges,
         mks,
         poke,
+        pass_ptr,
         ptr,
         struct_init_from_call,
         mutual,
@@ -2458,6 +2494,13 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                 st.fields[w] = v;
                 st.vars[*dst] = narrow(back, st.prog.var_types[*dst]);
             }
+            S::PokePtr(target, dst, e) => {
+                let base = st.prog.base;
+                let add = narrow(eval(e, st, base), base);
+                let new = narrow(st.vars[*target] + add, base);
+                st.vars[*target] = new;
+                st.vars[*dst] = new;
+            }
             S::StructFromCall(k) => {
                 let (fs, a, n) = &st.prog.mks[*k];
                 st.fields = fs.iter().map(|v| narrow(*v, ty)).collect();
@@ -2843,6 +2886,10 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
             S::PokeStruct(dst, e) => {
                 out.push_str(&format!("{pad}v{dst} = pk(&s, {});\n", render(e, ty, sc)))
             }
+            S::PokePtr(target, dst, e) => out.push_str(&format!(
+                "{pad}v{dst} = bp(&v{target}, {});\n",
+                render(e, ty, sc)
+            )),
             S::StructFromCall(k) => out.push_str(&format!("{pad}s = mks({k});\n")),
         }
     }
@@ -2967,7 +3014,8 @@ fn uses_memcpy(stmts: &[S]) -> bool {
         | S::StructFromCall(_)
         | S::PtrStore(..)
         | S::Repoint(_)
-        | S::PokeStruct(..) => false,
+        | S::PokeStruct(..)
+        | S::PokePtr(..) => false,
     })
 }
 
@@ -3090,6 +3138,15 @@ fn render_program(p: &Prog, form: Form) -> String {
     if let Some((w, r)) = p.poke {
         funcs.push_str(&format!(
             "fn pk(pp: &S, pw: {tn}) -> {tn} {{\n    let old: {tn} = pp.f{r};\n    pp.f{w} = pw;\n    return old;\n}}\n"
+        ));
+    }
+    // `bp` writes one of `main`'s variables through a `&T` parameter and
+    // returns the new value. The parameter is `&T` rather than `T`, so `*pp`
+    // and the caller's variable are the same bytes and the write shows up in
+    // `main` — the scalar half of the aliasing `pk` tests for a struct.
+    if p.pass_ptr {
+        funcs.push_str(&format!(
+            "fn bp(pp: &{tn}, pw: {tn}) -> {tn} {{\n    *pp = *pp + pw;\n    return *pp;\n}}\n"
         ));
     }
 
@@ -3517,7 +3574,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
                 // Carry no expression, and no budget to drop.
-                S::PtrStore(_, e) | S::PokeStruct(_, e) => in_expr(e, id),
+                S::PtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => in_expr(e, id),
                 S::Install(_)
                 | S::CopySlice(..)
                 | S::Reslice(..)
@@ -3590,7 +3647,7 @@ fn strip_stmt_self_calls(s: &mut S) {
             }
         }
         S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
-        S::PtrStore(_, e) | S::PokeStruct(_, e) => strip_self_calls(e),
+        S::PtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => strip_self_calls(e),
         S::Install(_)
         | S::CopySlice(..)
         | S::Reslice(..)
@@ -3715,7 +3772,7 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::PtrStore(_, e) | S::PokeStruct(_, e) => mutate_expr(e, target, seen),
+        S::PtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => mutate_expr(e, target, seen),
         S::Install(_)
         | S::CopySlice(..)
         | S::SliceFromCall(..)
@@ -4252,6 +4309,10 @@ fn the_generator_covers_what_it_claims() {
                     s.stmts.insert("struct-poke");
                     walk_e(e, s, narrow_half);
                 }
+                S::PokePtr(_, _, e) => {
+                    s.stmts.insert("pointer-param");
+                    walk_e(e, s, narrow_half);
+                }
             }
         }
     }
@@ -4296,6 +4357,7 @@ fn the_generator_covers_what_it_claims() {
         "pointer-store",
         "repoint",
         "struct-poke",
+        "pointer-param",
     ] {
         assert!(seen.stmts.contains(k), "never emitted a `{k}` statement");
     }
@@ -4481,6 +4543,7 @@ fn the_oracle_matches_the_documented_semantics() {
         (Ty::I8, -128, Op::Xor, -128, 0),
     ];
     let empty = Prog {
+        pass_ptr: false,
         pair: PAIRS[0],
         base: Ty::U8,
         var_types: [Ty::U8; VARS],
@@ -4687,9 +4750,9 @@ mod coverage {
             "UnaryOp::Deref",
             "`*p` for a scalar `p`, read and written, in `main` only. The pointee is a \
              variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved \
-             between kinds by `Repoint`, so the alias the oracle models covers storage it \
-             already tracks under three names. No pointer to another pointer, and none \
-             passed to a function",
+             between kinds by `Repoint`. It is also passed to a function — `bp(&v, x)` \
+             writes `main`'s variable through a `&T` parameter — so the alias the oracle \
+             models spans a call boundary as well. No pointer to another pointer",
         ),
         (
             "TypeExpr::Pointer",
