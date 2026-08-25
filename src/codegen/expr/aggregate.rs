@@ -752,6 +752,7 @@ pub fn generate_struct_init_runtime(
                     field_addr,
                     (esize * n) as u16,
                     esize,
+                    &field_info.ty,
                     value_expr,
                     emitter,
                     info,

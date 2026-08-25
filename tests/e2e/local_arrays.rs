@@ -330,3 +330,84 @@ fn arrays_with_different_fill_values_do_not_share_one() {
     "#);
     assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0xAA, 0xBB));
 }
+
+// ============================================================================
+// Nested arrays initialise in a local the same way they do in a `static`
+// ============================================================================
+
+/// A `[[T; N]; M]` local used to be refused — the element is itself an array,
+/// which the scalar-by-scalar init path could not store, though a `static` of
+/// the same type was laid out fine. Both go through the one flattener now.
+
+#[test]
+fn a_nested_array_fill_initialises_and_indexes() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let m: [[u8; 2]; 2] = [[7; 2]; 2];
+            m[1][0] = 3;
+            OUT = m[0][0] + m[0][1] + m[1][0] + m[1][1];
+            loop {}
+        }
+    "#);
+    // Three cells still hold the fill value 7; one was overwritten with 3.
+    assert_eq!(e.mem(0x0900), 7 + 7 + 3 + 7);
+}
+
+#[test]
+fn a_nested_array_literal_lays_out_row_major() {
+    let mut e = run(r#"
+        const A: addr = 0x0900;
+        const B: addr = 0x0901;
+        const C: addr = 0x0902;
+        const D: addr = 0x0903;
+        #[reset]
+        fn main() {
+            let m: [[u8; 2]; 2] = [[1, 2], [3, 4]];
+            A = m[0][0];
+            B = m[0][1];
+            C = m[1][0];
+            D = m[1][1];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        (e.mem(0x0900), e.mem(0x0901), e.mem(0x0902), e.mem(0x0903)),
+        (1, 2, 3, 4)
+    );
+}
+
+#[test]
+fn a_nested_array_of_u16_keeps_both_bytes() {
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let m: [[u16; 2]; 2] = [[0x1122, 0x3344], [0x5566, 0x7788]];
+            LO = m[1][0].low;
+            HI = m[1][0].high;
+            loop {}
+        }
+    "#);
+    assert_eq!((e.mem(0x0900), e.mem(0x0901)), (0x66, 0x55));
+}
+
+#[test]
+fn a_local_and_static_nested_array_agree() {
+    // The inconsistency this closes: the same initializer at the two storage
+    // classes must produce the same bytes.
+    let mut e = run(r#"
+        static S: [[u8; 2]; 2] = [[1, 2], [3, 4]];
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let m: [[u8; 2]; 2] = [[1, 2], [3, 4]];
+            let i: u8 = 1;
+            OUT = (m[i][0] == S[i][0]) as u8 + (m[i][1] == S[i][1]) as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 2, "local and static nested arrays disagree");
+}

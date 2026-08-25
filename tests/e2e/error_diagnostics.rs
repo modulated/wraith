@@ -590,3 +590,30 @@ fn every_sema_error_variant_is_pinned_or_excused() {
 // pins: ArrayIndexOutOfBounds
 // pins: WriteOnlyRead
 // pins: ReadOnlyWrite
+
+
+#[test]
+fn let_mut_names_the_absent_keyword() {
+    // The language has no `mut` (locals are mutable by default). A Rust habit
+    // writes `let mut x`, which used to parse `mut` as the name and fail at the
+    // next token with a baffling "expected `:`". The message now names the cause.
+    let err = render("#[reset]\nfn main() { let mut x: u8 = 5; loop {} }");
+    assert!(
+        err.contains("`mut` is not a keyword"),
+        "expected the mut diagnostic, got:\n{err}"
+    );
+    assert!(
+        err.contains("mutable by default"),
+        "the diagnostic should explain why, got:\n{err}"
+    );
+}
+
+#[test]
+fn a_variable_named_mut_is_still_allowed() {
+    // The guard fires only on `mut <ident>`; a variable literally named `mut`
+    // (followed by `:`) is a legal, if odd, name.
+    match compile("#[reset]\nfn main() { let mut: u8 = 5; loop {} }") {
+        CompileResult::Success(..) => {}
+        other => panic!("`let mut: u8` should compile, got {other:?}"),
+    }
+}
