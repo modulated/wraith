@@ -591,7 +591,6 @@ fn every_sema_error_variant_is_pinned_or_excused() {
 // pins: WriteOnlyRead
 // pins: ReadOnlyWrite
 
-
 #[test]
 fn let_mut_names_the_absent_keyword() {
     // The language has no `mut` (locals are mutable by default). A Rust habit

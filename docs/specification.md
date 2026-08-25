@@ -1871,28 +1871,31 @@ fn process(slice: &[u8]) {
 
 ### Multidimensional Arrays
 
-❌ **Status**: Arrays of arrays are **not implemented**. The type parses, but
-the compiler rejects it:
+An array element may itself be an array. The nesting is laid out row-major and
+inline — a `[[u8; 8]; 4]` is 32 contiguous bytes — and `m[i][j]` indexes it with
+no pointer chase. A `const`, a `static` and a `let` local all initialise from a
+nested literal, and a multidimensional array may be passed to a function.
 
-```rust
+```rust,compile,fragment
 let screen: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 0],
     [0, 1, 1, 1, 1, 1, 1, 0],
     [0, 1, 0, 0, 0, 0, 1, 0],
     [0, 0, 0, 0, 0, 0, 0, 0],
 ];
-// ERROR: unsupported operation: array elements must be constant expressions
+screen[1][3] = 2;                  // row 1, column 3
+let pixel: u8 = screen[2][5];
 ```
 
-**Workaround:** flatten to one dimension and index manually, or use an array
-of structs:
+A fill applies at each level, so `[[0; 8]; 4]` is thirty-two zeroes:
 
 ```rust,compile,fragment
-// 4 rows × 8 columns, flattened: element (r, c) lives at r * 8 + c
-let screen: [u8; 32] = [0; 32];
-screen[1 * 8 + 3] = 2;              // row 1, column 3
-let pixel: u8 = screen[2 * 8 + 5];
+let grid: [[u16; 3]; 2] = [[0; 3]; 2];
 ```
+
+Flattening to one dimension — `screen[r * 8 + c]` over a `[u8; 32]` — is still a
+fine choice where the index arithmetic is cheaper written out; it is no longer
+the only one.
 
 ### Array Assignment and Copying
 
@@ -4884,6 +4887,11 @@ Because an interrupt can preempt main-line code at any point - including in the 
 
 ## Revision History
 
+- 2026-08-25: Multidimensional arrays (`[[T; N]; M]`) implemented — a local now
+  initialises from a nested literal the way a `const` and `static` already did,
+  and `m[i][j]` indexing and passing one to a function were already in place.
+  And `let mut x` now reports that the language has no `mut` (locals are mutable
+  by default) instead of failing with a misleading "expected `:`".
 - 2026-08-23 (0.7.0):
 
   *Language.* Compile-time generated tables, written

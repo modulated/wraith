@@ -71,6 +71,8 @@ read against a current picture:
 | Attributes on `enum`/`import`/`struct` refused rather than dropped; an SoA column at a constant index stored directly | `tests/e2e/soa.rs` |
 | The fuzzer indexes a string, points at a struct field and an array element, nests a struct, and matches an enum payload | `docs/fuzz-coverage.md` |
 | The fuzzer passes a pointer to a function (`bp(&v, x)`) and reaches storage through a pointer-to-pointer (`**pp`) | `docs/fuzz-coverage.md` |
+| Multidimensional arrays (`[[T; N]; M]`) — a local initialises from a nested literal, matching `static`/`const` | `tests/e2e/local_arrays.rs`, `tests/e2e/types.rs` |
+| `let mut x` names the absent `mut` instead of failing with "expected `:`" | `tests/e2e/error_diagnostics.rs` |
 | A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
 
 ## What keeps going wrong
