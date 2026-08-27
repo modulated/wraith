@@ -102,6 +102,11 @@ pub fn generate_stmt(
         return Ok(());
     }
 
+    // Blame any zero-page pool exhaustion during this statement on the whole
+    // statement: it is the expression as written that keeps too much live at
+    // once, and the line is what the author can act on.
+    emitter.blame_span = Some(stmt.span);
+
     match &stmt.node {
         Stmt::Block(stmts) => {
             for s in stmts {

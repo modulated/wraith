@@ -36,7 +36,7 @@ cargo afl build --release
 mkdir -p out
 
 # Run AFL++ with seed inputs
-cargo afl fuzz -i seeds -o out target/release/fuzz_parser
+cargo afl fuzz -i seeds -o out target/release/fuzz_full_stack
 ```
 
 ### 4. Monitor Progress
@@ -67,7 +67,7 @@ cat out/default/crashes/id:000000* | cargo run --
 ### Minimize a crashing input
 
 ```bash
-cargo afl tmin -i out/default/crashes/id:000000* -o minimized.wr -- target/release/fuzz_parser
+cargo afl tmin -i out/default/crashes/id:000000* -o minimized.wr -- target/release/fuzz_full_stack
 ```
 
 ## Advanced Usage
@@ -78,13 +78,13 @@ Run AFL++ in parallel for faster fuzzing:
 
 ```bash
 # Terminal 1 (master)
-cargo afl fuzz -i seeds -o out -M fuzzer1 target/release/fuzz_parser
+cargo afl fuzz -i seeds -o out -M fuzzer1 target/release/fuzz_full_stack
 
 # Terminal 2 (secondary)
-cargo afl fuzz -i seeds -o out -S fuzzer2 target/release/fuzz_parser
+cargo afl fuzz -i seeds -o out -S fuzzer2 target/release/fuzz_full_stack
 
 # Terminal 3 (secondary)
-cargo afl fuzz -i seeds -o out -S fuzzer3 target/release/fuzz_parser
+cargo afl fuzz -i seeds -o out -S fuzzer3 target/release/fuzz_full_stack
 ```
 
 ### Persistent Mode (Faster)
@@ -112,7 +112,7 @@ Create `fuzz/dict.txt` with Wraith keywords to guide fuzzing.
 Then run with:
 
 ```bash
-cargo afl fuzz -i seeds -o out -x dict.txt target/release/fuzz_parser
+cargo afl fuzz -i seeds -o out -x dict.txt target/release/fuzz_full_stack
 ```
 
 ## Targets

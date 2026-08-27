@@ -206,9 +206,10 @@ fn generate_pointer_eq(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
-    let save = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in pointer compare".to_string())
-    })?;
+    let save = emitter
+        .temp_alloc
+        .alloc_high(2)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in pointer compare"))?;
     generate_expr(right, emitter, info, string_collector)?;
     emitter.emit_inst("STA", &format!("${:02X}", save));
     emitter.emit_inst("STX", &format!("${:02X}", save + 1));
@@ -858,12 +859,14 @@ fn generate_multiply_u8(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
     // Allocate temp storage. No hardcoded fallback: an exhausted pool means a
     // live value already occupies whatever address we'd guess.
-    let multiplicand = emitter.temp_alloc.alloc_high(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in u8 multiply".to_string())
-    })?;
-    let result_addr = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in u8 multiply".to_string())
-    })?;
+    let multiplicand = emitter
+        .temp_alloc
+        .alloc_high(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in u8 multiply"))?;
+    let result_addr = emitter
+        .temp_alloc
+        .alloc_primary(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in u8 multiply"))?;
     let temp = emitter.memory_layout.temp_reg();
 
     let loop_label = emitter.next_label("ml");
@@ -1010,9 +1013,10 @@ fn generate_divide(
 
     // Allocate temp storage. No hardcoded fallback: an exhausted pool means a
     // live value already occupies whatever address we'd guess.
-    let quotient_addr = emitter.temp_alloc.alloc_primary(2).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in u8 divide".to_string())
-    })?;
+    let quotient_addr = emitter
+        .temp_alloc
+        .alloc_primary(2)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in u8 divide"))?;
     let dividend_addr = quotient_addr + 1;
 
     let loop_label = emitter.next_label("dl");
@@ -1117,9 +1121,10 @@ fn generate_modulo(
 
     // Allocate temp storage. No hardcoded fallback: an exhausted pool means a
     // live value already occupies whatever address we'd guess.
-    let dividend_addr = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in u8 modulo".to_string())
-    })?;
+    let dividend_addr = emitter
+        .temp_alloc
+        .alloc_primary(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in u8 modulo"))?;
 
     let loop_label = emitter.next_label("md");
     // `mdx`, not `mx`: a match expression or statement labels its own end
@@ -1251,12 +1256,14 @@ fn emit_signed_zero_divisor_tail(emitter: &mut Emitter, zero: &str, done: &str, 
 
 fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let temp = emitter.memory_layout.temp_reg(); // divisor
-    let divd = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in i8 divide".to_string())
-    })?;
-    let sign = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in i8 divide".to_string())
-    })?;
+    let divd = emitter
+        .temp_alloc
+        .alloc_primary(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in i8 divide"))?;
+    let sign = emitter
+        .temp_alloc
+        .alloc_primary(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in i8 divide"))?;
 
     let (zero, done) = emit_signed_zero_divisor_check(emitter, false);
 
@@ -1292,9 +1299,10 @@ fn generate_divide_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
 
 fn generate_modulo_i8(emitter: &mut Emitter) -> Result<(), CodegenError> {
     let temp = emitter.memory_layout.temp_reg(); // divisor
-    let divd = emitter.temp_alloc.alloc_primary(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in i8 modulo".to_string())
-    })?;
+    let divd = emitter
+        .temp_alloc
+        .alloc_primary(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in i8 modulo"))?;
 
     let (zero, done) = emit_signed_zero_divisor_check(emitter, false);
 

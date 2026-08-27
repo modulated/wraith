@@ -60,7 +60,7 @@ pub fn compile_with_target(source: &str, target: TargetCpu) -> CompileResult {
     // Code generation
     match generate(&ast, &mut program, CommentVerbosity::Normal, target) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
-        Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
+        Err(e) => CompileResult::CodegenError(e.format_with_source_and_file(source, None)),
     }
 }
 
@@ -101,7 +101,7 @@ pub fn compile_with_base_path(source: &str, base_path: &str) -> CompileResult {
         TargetCpu::default(),
     ) {
         Ok((asm, _section_alloc)) => CompileResult::Success(warnings, asm),
-        Err(e) => CompileResult::CodegenError(format!("{:?}", e)),
+        Err(e) => CompileResult::CodegenError(e.format_with_source_and_file(source, None)),
     }
 }
 

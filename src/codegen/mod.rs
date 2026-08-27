@@ -73,6 +73,17 @@ pub enum CodegenError {
         notes: Vec<String>,
         span: Option<crate::ast::Span>,
     },
+    /// A fixed zero-page scratch pool ran out while lowering one expression —
+    /// the argument-staging pool or the expression-temporary pool. This is a
+    /// capacity limit of the backend, not a bug and not invalid input: the same
+    /// computation split across statements compiles. Carries the blamed
+    /// statement's span and a rewrite hint so it reads like any other
+    /// diagnostic rather than an internal error.
+    ResourceExhausted {
+        message: String,
+        hint: String,
+        span: Option<crate::ast::Span>,
+    },
     /// An internal compiler invariant was violated (a bug in the compiler, not the input).
     Internal(String),
 }
@@ -91,12 +102,35 @@ impl std::fmt::Display for CodegenError {
                 }
                 Ok(())
             }
+            CodegenError::ResourceExhausted { message, hint, .. } => {
+                write!(f, "{}\n  = help: {}", message, hint)
+            }
             CodegenError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
         }
     }
 }
 
 impl CodegenError {
+    /// A zero-page scratch pool ran out lowering one expression. `message` is
+    /// the existing wording (kept verbatim so callers and the differential
+    /// fuzzer recognise it); the hint is chosen from which pool it names and
+    /// tells the author to split the expression across statements.
+    pub fn pool_exhausted(message: &str, span: Option<crate::ast::Span>) -> CodegenError {
+        let hint = if message.contains("argument-evaluation pool") {
+            "this call stages more argument bytes in zero page than fit — evaluate a nested \
+             call into its own `let` binding first, then pass the result"
+        } else {
+            "this expression holds more values in the 6502's fixed zero-page scratch space than \
+             it has room for — split it into steps with intermediate `let` bindings so fewer are \
+             live at once"
+        };
+        CodegenError::ResourceExhausted {
+            message: message.to_string(),
+            hint: hint.to_string(),
+            span,
+        }
+    }
+
     /// Render with a source excerpt and caret, matching how parse and semantic
     /// errors are reported. Falls back to the plain message when the error
     /// carries no span.
@@ -116,6 +150,18 @@ impl CodegenError {
                     out.push_str(&format!("\n  = note: {}", note));
                 }
                 out
+            }
+            CodegenError::ResourceExhausted {
+                message,
+                hint,
+                span: Some(span),
+            } => {
+                format!(
+                    "error: {}\n{}\n  = help: {}",
+                    message,
+                    span.format_error_context(source, filename, message),
+                    hint
+                )
             }
             other => format!("error: {}", other),
         }
