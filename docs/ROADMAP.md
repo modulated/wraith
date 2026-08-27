@@ -70,6 +70,9 @@ read against a current picture:
 | An array of structs stored as columns under `#[soa]`, with every whole-element use refused | `tests/e2e/soa.rs` |
 | Attributes on `enum`/`import`/`struct` refused rather than dropped; an SoA column at a constant index stored directly | `tests/e2e/soa.rs` |
 | The fuzzer indexes a string, points at a struct field and an array element, nests a struct, and matches an enum payload | `docs/fuzz-coverage.md` |
+| The fuzzer passes a pointer to a function (`bp(&v, x)`) and reaches storage through a pointer-to-pointer (`**pp`) | `docs/fuzz-coverage.md` |
+| Multidimensional arrays (`[[T; N]; M]`) — a local initialises from a nested literal, matching `static`/`const` | `tests/e2e/local_arrays.rs`, `tests/e2e/types.rs` |
+| `let mut x` names the absent `mut` instead of failing with "expected `:`" | `tests/e2e/error_diagnostics.rs` |
 | A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
 
 ## What keeps going wrong
@@ -579,9 +582,13 @@ and an oracle that is merely *probably* right is worse than no oracle:
   `emit_static_field_load`'s offset is unverified by the generator — dropping it
   survives any number of seeds.
 
-  Still open: enum payloads, indexing a string rather than measuring it, a
-  struct nested inside a struct, and a struct returned *through a function
-  pointer* in the generator (that one has an e2e test).
+  Since closed: enum payloads, indexing a string rather than measuring it, a
+  struct nested inside a struct, a pointer to a struct field and an array
+  element, a pointer passed to a function (`bp(&v, x)`), and a pointer to a
+  pointer (`**pp`). What is left is narrow: a struct returned *through a
+  function pointer* in the generator (that one has an e2e test), a nested
+  field reached *through the by-reference parameter*, and a `u16` enum
+  payload — each recorded in the fuzzer's own caveats.
 - **Copying a run of bytes.** *Done.* `memcpy(&arr[d], &TBL[s], n)` is
   generated wherever the program's type is `u8`, which is what a whole-array
   assignment turned into once that statement was refused. It puts three things

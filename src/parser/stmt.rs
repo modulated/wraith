@@ -62,6 +62,20 @@ impl Parser<'_> {
         // Parse name
         let name = self.expect_ident()?;
 
+        // `mut` is not a keyword — the language has one pointer kind and no
+        // `mut` (see the spec). A Rust habit writes `let mut x`, which parses
+        // `mut` as the name and then fails at the *next* identifier with a
+        // baffling "expected `:`". Caught here so the message names the cause.
+        // A variable genuinely called `mut` (followed by `:`) is left alone.
+        if name.node == "mut" && matches!(self.peek(), Some(Token::Ident(_))) {
+            return Err(ParseError::custom_detailed(
+                name.span,
+                "`mut` is not a keyword in this language",
+                Some("locals are mutable by default, so there is no `mut` to write".to_string()),
+                Some("Help: write `let <name>: <type> = <value>;`".to_string()),
+            ));
+        }
+
         // Expect colon for type annotation (required)
         self.expect(&Token::Colon)?;
 

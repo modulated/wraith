@@ -1197,12 +1197,41 @@ pub(crate) fn generate_local_array_init(
     addr: u16,
     size: u16,
     elem_size: usize,
+    arr_ty: &crate::sema::types::Type,
     init: &Spanned<crate::ast::Expr>,
     emitter: &mut Emitter,
     info: &ProgramInfo,
 ) -> Result<(), CodegenError> {
     use crate::ast::{Expr, Literal};
     use crate::sema::const_eval::eval_const_expr;
+
+    // An array whose *elements* are themselves arrays cannot be stored one
+    // scalar at a time — `[[0; 2]; 2]` has no scalar element. A `static` of the
+    // same type is laid out by `sema::init::flatten`, which recurses through the
+    // nesting; a local used to reject it outright, so `let m: [[u8; 2]; 2]` and
+    // `static M: [[u8; 2]; 2]` disagreed. Route the nested case through the same
+    // flattener and store the byte image it produces.
+    if let crate::sema::types::Type::Array(elem, _) = arr_ty
+        && matches!(&**elem, crate::sema::types::Type::Array(..))
+    {
+        let bytes = crate::sema::init::flatten_top(init, arr_ty, info, false, None)
+            .map_err(|e| CodegenError::UnsupportedOperation(e.message))?;
+        for (i, b) in bytes.iter().enumerate() {
+            match b {
+                crate::sema::InitByte::Byte(v) => {
+                    emitter.emit_inst("LDA", &format!("#${:02X}", v));
+                    emitter.emit_inst("STA", &format!("${:04X}", addr + i as u16));
+                }
+                _ => {
+                    return Err(CodegenError::UnsupportedOperation(
+                        "a nested array of labels is not initialised in a local yet".to_string(),
+                    ));
+                }
+            }
+        }
+        emitter.invalidate_registers();
+        return Ok(());
+    }
 
     /// A constant initializer element, or None if it is not compile-time known.
     fn const_of(e: &Spanned<Expr>) -> Option<i64> {
@@ -1611,7 +1640,7 @@ pub(super) fn generate_var_decl(
                 "local array {} @ ${:04X} ({} bytes, RAM)",
                 name.node, arr.addr, arr.size
             ));
-            generate_local_array_init(arr.addr, arr.size, elem_size, init, emitter, info)?;
+            generate_local_array_init(arr.addr, arr.size, elem_size, &sym.ty, init, emitter, info)?;
             // Point the frame slot at the block.
             emitter.emit_inst("LDA", &format!("#${:02X}", arr.addr & 0xFF));
             emitter.emit_inst("STA", &format!("${:02X}", slot));

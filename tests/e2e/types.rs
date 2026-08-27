@@ -503,14 +503,30 @@ fn a_local_struct_array_larger_than_a_frame_slot_is_rejected() {
 }
 
 #[test]
-fn multidimensional_arrays_are_rejected_loudly() {
-    // The spec once claimed support; the compiler has none. Until it does,
-    // the rejection must stay loud rather than miscompile.
-    let r = crate::common::compile(
-        "fn main() { let m: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]]; m[1][2] = 9; }",
+fn multidimensional_arrays_lay_out_and_index() {
+    // Once rejected, now supported: a local `[[T; N]; M]` initialiser routes
+    // through the same flattener a `static` uses, so the two agree, and
+    // `m[i][j]` indexes row-major. Passing one to a function carries it by
+    // address like any other aggregate.
+    let mut e = crate::common::exec::run(
+        r#"
+        fn corner(m: [[u8; 3]; 2]) -> u8 { return m[1][2]; }
+        const OUT: addr = 0x0900;
+        const VIA: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let m: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+            m[1][2] = 9;
+            OUT = m[1][2] + m[0][1];   // 9 + 2
+            VIA = corner(m);            // the same element, read in the callee
+            loop {}
+        }
+    "#,
     );
-    assert!(
-        !matches!(r, crate::common::harness::CompileResult::Success(..)),
-        "arrays of arrays are not implemented"
+    assert_eq!(e.mem(0x0900), 9 + 2);
+    assert_eq!(
+        e.mem(0x0901),
+        9,
+        "a multidim array passed by value read wrong"
     );
 }

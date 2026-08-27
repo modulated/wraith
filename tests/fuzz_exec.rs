@@ -370,6 +370,11 @@ enum E {
     /// `main` only, and pure: the alias is what makes this interesting, and
     /// reading through it changes nothing.
     PtrLoad,
+    /// `**pp` — a read through `main`'s pointer-to-pointer, which names `p`.
+    /// With one pointer in scope `pp` can only be `&p`, so the value is the
+    /// same as `*p`; what differs is the code, a double dereference the
+    /// compiler had to be fixed for once already. `main` only, pure.
+    PtrPtrLoad,
     /// `s.f{i}`, in `main` only.
     Field(usize),
     /// `s.a[<index>]` — an element of the struct's *array field*, whose bytes
@@ -562,6 +567,10 @@ enum S {
     /// compiler that kept the variable in a register across the store would
     /// answer with the stale one.
     PtrStore(Ty, E),
+    /// `**pp = <expr>;` — a store through the pointer-to-pointer, landing in
+    /// whatever `p` names now. The double-dereference store, the write half of
+    /// [`E::PtrPtrLoad`].
+    PtrPtrStore(Ty, E),
     /// `p = &v{k};` — the alias moved to another variable of the same type.
     /// What makes the pointer's target program state rather than a fact about
     /// the declaration, so a read through it cannot be folded away.
@@ -579,6 +588,15 @@ enum S {
     /// A statement rather than an expression because it has a side effect on
     /// `main`'s state, and the oracle evaluates expressions without one.
     PokeStruct(usize, E),
+    /// `v{dst} = bp(&v{target}, <expr>);` — a call that takes one of `main`'s
+    /// variables **by pointer**, adds to it through the pointer, and returns
+    /// the new value. The scalar analogue of `PokeStruct`: the callee's `*pp`
+    /// and the caller's `v{target}` are the same byte(s), so the write inside
+    /// `bp` has to show up in `main` afterwards. A `&T` parameter that copied
+    /// instead of pointing would answer the return correctly and leave
+    /// `v{target}` untouched — which is why `target` and `dst` are read as two
+    /// separate cells in the output.
+    PokePtr(usize, usize, E),
     /// `s = mks({k});` — the whole struct replaced by one that arrives from a
     /// *call*, which returns a pointer to its bytes in A:X and leaves the
     /// caller to copy them out.
@@ -809,6 +827,12 @@ struct Gen<'a> {
     /// result. Those are the ones at the aggregate type: `pk` returns a field,
     /// so anything else would put a widening in the way of the answer.
     poke_targets: Vec<usize>,
+    /// May a `PokePtr` be generated here, and which of `main`'s variables it
+    /// may write through the pointer. `main` only, like the aggregates.
+    allow_pass_ptr: bool,
+    bp_targets: Vec<usize>,
+    /// May `**pp` be read or written here — the pointer-to-pointer. `main` only.
+    allow_pp: bool,
     /// How many `sl{i}` are in scope: `SLICES` in `main`, and 0 inside a
     /// function, where the only slice is the parameter. What separates the two
     /// is that a statement can *move* a named slice, and `sp` is not one.
@@ -900,7 +924,13 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // an expression exactly as a variable does — and unlike a variable,
         // *which* storage is not known until the last `Repoint` has run.
         if !g.ptr_targets.is_empty() && g.ptr_ty == ty && g.rng.below(100) < 18 {
-            return E::PtrLoad;
+            // The pointer-to-pointer reaches the same value by a double
+            // dereference — a different lowering the compiler was fixed for once.
+            return if g.allow_pp && g.rng.below(100) < 40 {
+                E::PtrPtrLoad
+            } else {
+                E::PtrLoad
+            };
         }
         // The tag is a small number cast to the expression's type, so unlike a
         // field it fits any type and is not tied to the aggregate one.
@@ -1250,7 +1280,7 @@ fn gen_block(g: &mut Gen, depth: u32) -> Vec<S> {
 /// where the value comes from.
 fn gen_stmt_seq(g: &mut Gen, depth: u32) -> Vec<S> {
     let s = gen_stmt(g, depth);
-    if matches!(s, S::PtrStore(..)) && !g.ptr_targets.is_empty() {
+    if matches!(s, S::PtrStore(..) | S::PtrPtrStore(..)) && !g.ptr_targets.is_empty() {
         // Read one alias candidate straight back, under its own name, right
         // after the store: a value written through `*p` has to be visible
         // through the storage it aliases, and a compiler keeping that storage
@@ -1297,7 +1327,20 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
             return S::Repoint(g.ptr_targets[k].clone());
         }
         let ty = g.ptr_ty;
-        return S::PtrStore(ty, gen_expr(g, ty, 2, false));
+        return if g.allow_pp && g.rng.below(100) < 40 {
+            S::PtrPtrStore(ty, gen_expr(g, ty, 2, false))
+        } else {
+            S::PtrStore(ty, gen_expr(g, ty, 2, false))
+        };
+    }
+    // One of `main`'s variables written through a `&T` parameter, its new
+    // value read back. `main` only, and its own statement: the pointer is
+    // staged as a two-byte argument, and the alias is what makes the callee's
+    // write visible in `main`.
+    if g.allow_pass_ptr && !g.bp_targets.is_empty() && g.rng.below(100) < 10 {
+        let t = g.bp_targets[g.rng.below(g.bp_targets.len() as u64) as usize];
+        let d = g.bp_targets[g.rng.below(g.bp_targets.len() as u64) as usize];
+        return S::PokePtr(t, d, gen_expr(g, g.base, 2, false));
     }
     // A field written through a `&S` inside a call, and another read back.
     if !g.poke_targets.is_empty() && g.rng.below(100) < 10 {
@@ -1430,6 +1473,11 @@ struct Prog {
     /// The two fields `pk` writes and reads, or `None` in a program that has
     /// no `pk`. Fixed per program because they are part of the function.
     poke: Option<(usize, usize)>,
+    /// Whether the program declares `bp`, the helper that writes one of
+    /// `main`'s variables through a `&T` parameter.
+    pass_ptr: bool,
+    /// Whether `main` declares `pp: &&T = &p`, a pointer to the pointer.
+    has_pp: bool,
     /// The pointer `main` declares, as (type, initial target). `None` in a
     /// program without one.
     ptr: Option<(Ty, PtrTarget)>,
@@ -1814,6 +1862,9 @@ fn gen_program(seed: u64) -> Prog {
         ptr_targets: Vec::new(),
         ptr_ty: base,
         poke_targets: Vec::new(),
+        allow_pass_ptr: false,
+        bp_targets: Vec::new(),
+        allow_pp: false,
         allow_fields: false,
         allow_enum: false,
         allow_str: false,
@@ -1919,6 +1970,7 @@ fn gen_program(seed: u64) -> Prog {
     // Half the programs, because a program without one still has to be
     // generated: taking a local's address is what forces it into memory, and
     // the shapes that never do have their own bugs.
+    let has_pp_roll = g.rng.below(100) < 50;
     let ptr: Option<(Ty, PtrTarget)> = (g.rng.below(100) < 50).then(|| {
         let pt = g.pair.pick(g.rng);
         let mut targets: Vec<PtrTarget> = (0..VARS)
@@ -1945,6 +1997,10 @@ fn gen_program(seed: u64) -> Prog {
             g.rng.below(SFIELDS as u64) as usize,
         )
     });
+    // `bp` writes one of `main`'s variables through a `&T` parameter. It needs
+    // a base-typed variable to point at and one to receive the return; both
+    // come from the same set, so one is enough.
+    let pass_ptr = (0..VARS).any(|i| var_types[i] == base) && g.rng.below(100) < 40;
     let struct_init_from_call =
         (!mks.is_empty() && g.rng.below(100) < 30).then(|| g.rng.below(2) as usize);
     // Decided here too, and for the same reason: `f0` may take the struct as a
@@ -1982,8 +2038,10 @@ fn gen_program(seed: u64) -> Prog {
     // scope that can name the pointer — it is `main`'s local, and a function
     // body has no way to spell it — so a function generated while this was set
     // produced `*p` with no `p` in scope.
+    let has_pp = ptr.is_some() && has_pp_roll;
     if let Some((pt, _)) = &ptr {
         g.ptr_ty = *pt;
+        g.allow_pp = has_pp;
         g.ptr_targets = (0..VARS)
             .filter(|i| var_types[*i] == *pt)
             .map(PtrTarget::Var)
@@ -1995,6 +2053,10 @@ fn gen_program(seed: u64) -> Prog {
     }
     if poke.is_some() {
         g.poke_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
+    }
+    if pass_ptr {
+        g.allow_pass_ptr = true;
+        g.bp_targets = (0..VARS).filter(|i| var_types[*i] == base).collect();
     }
     g.main_slices = slices.len();
     // `f0` is the only function that can take a slice, and only when it exists
@@ -2031,6 +2093,8 @@ fn gen_program(seed: u64) -> Prog {
         mk_ranges,
         mks,
         poke,
+        pass_ptr,
+        has_pp,
         ptr,
         struct_init_from_call,
         mutual,
@@ -2277,7 +2341,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         // the last `Repoint` left. A read is at the *pointee's* type, which is
         // the pointer's own, and then narrowed to the context like any other
         // storage read.
-        E::PtrLoad => {
+        E::PtrLoad | E::PtrPtrLoad => {
             let t = st.ptr.as_ref().expect("a pointer read needs a pointer");
             narrow(
                 match t {
@@ -2438,7 +2502,7 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
             // Both halves of the alias. The store lands in whichever variable
             // the pointer names *now*, and at the pointer's own type — every
             // target has it, so there is no widening to get wrong.
-            S::PtrStore(t, e) => {
+            S::PtrStore(t, e) | S::PtrPtrStore(t, e) => {
                 let v = narrow(eval(e, st, *t), *t);
                 match st.ptr.clone().expect("a pointer store needs a target") {
                     PtrTarget::Var(k) => st.vars[k] = v,
@@ -2457,6 +2521,13 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                 let back = st.fields[r];
                 st.fields[w] = v;
                 st.vars[*dst] = narrow(back, st.prog.var_types[*dst]);
+            }
+            S::PokePtr(target, dst, e) => {
+                let base = st.prog.base;
+                let add = narrow(eval(e, st, base), base);
+                let new = narrow(st.vars[*target] + add, base);
+                st.vars[*target] = new;
+                st.vars[*dst] = new;
             }
             S::StructFromCall(k) => {
                 let (fs, a, n) = &st.prog.mks[*k];
@@ -2682,6 +2753,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
         E::Elem(ix) => format!("arr[{}]", render_index(ix)),
         E::Konst(ix) => format!("TBL[{}]", render_index(ix)),
         E::PtrLoad => "*p".to_string(),
+        E::PtrPtrLoad => "**pp".to_string(),
         E::Field(f) => format!("{}.f{f}", struct_name(sc)),
         E::NestedField(j) => format!("{}.n.g{j}", struct_name(sc)),
         E::AField(ix) => format!("{}.a[{}]", struct_name(sc), render_afield_index(ix, sc)),
@@ -2839,10 +2911,15 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
             }
             S::SliceFromCall(i, k) => out.push_str(&format!("{pad}sl{i} = mk({k});\n")),
             S::PtrStore(t, e) => out.push_str(&format!("{pad}*p = {};\n", render(e, *t, sc))),
+            S::PtrPtrStore(t, e) => out.push_str(&format!("{pad}**pp = {};\n", render(e, *t, sc))),
             S::Repoint(k) => out.push_str(&format!("{pad}p = {};\n", k.addr())),
             S::PokeStruct(dst, e) => {
                 out.push_str(&format!("{pad}v{dst} = pk(&s, {});\n", render(e, ty, sc)))
             }
+            S::PokePtr(target, dst, e) => out.push_str(&format!(
+                "{pad}v{dst} = bp(&v{target}, {});\n",
+                render(e, ty, sc)
+            )),
             S::StructFromCall(k) => out.push_str(&format!("{pad}s = mks({k});\n")),
         }
     }
@@ -2966,8 +3043,10 @@ fn uses_memcpy(stmts: &[S]) -> bool {
         | S::SliceFromCall(..)
         | S::StructFromCall(_)
         | S::PtrStore(..)
+        | S::PtrPtrStore(..)
         | S::Repoint(_)
-        | S::PokeStruct(..) => false,
+        | S::PokeStruct(..)
+        | S::PokePtr(..) => false,
     })
 }
 
@@ -3092,6 +3171,15 @@ fn render_program(p: &Prog, form: Form) -> String {
             "fn pk(pp: &S, pw: {tn}) -> {tn} {{\n    let old: {tn} = pp.f{r};\n    pp.f{w} = pw;\n    return old;\n}}\n"
         ));
     }
+    // `bp` writes one of `main`'s variables through a `&T` parameter and
+    // returns the new value. The parameter is `&T` rather than `T`, so `*pp`
+    // and the caller's variable are the same bytes and the write shows up in
+    // `main` — the scalar half of the aliasing `pk` tests for a struct.
+    if p.pass_ptr {
+        funcs.push_str(&format!(
+            "fn bp(pp: &{tn}, pw: {tn}) -> {tn} {{\n    *pp = *pp + pw;\n    return *pp;\n}}\n"
+        ));
+    }
 
     // The function-pointer table, and the struct field a driver is installed
     // in. Both name the same candidates, and both have to come after the
@@ -3165,6 +3253,9 @@ static DEV: VT = VT {{ call: {} }};\n",
     // into memory rather than a register, which is half of what this tests.
     if let Some((pt, k)) = &p.ptr {
         decls.push_str(&format!("    let p: &{} = {};\n", pt.name(), k.addr()));
+        if p.has_pp {
+            decls.push_str(&format!("    let pp: &&{} = &p;\n", pt.name()));
+        }
     }
     if let Some(k) = p.enum_init {
         if k == 0 {
@@ -3483,6 +3574,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::NestedField(_)
             | E::AField(_)
             | E::PtrLoad
+            | E::PtrPtrLoad
             | E::EnumVal
             | E::EnumMatch
             | E::StrLen
@@ -3517,7 +3609,10 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 }
                 S::For(_, _, body) | S::While(_, body) => in_block(body, id),
                 // Carry no expression, and no budget to drop.
-                S::PtrStore(_, e) | S::PokeStruct(_, e) => in_expr(e, id),
+                S::PtrStore(_, e)
+                | S::PtrPtrStore(_, e)
+                | S::PokeStruct(_, e)
+                | S::PokePtr(_, _, e) => in_expr(e, id),
                 S::Install(_)
                 | S::CopySlice(..)
                 | S::Reslice(..)
@@ -3568,6 +3663,7 @@ fn strip_self_calls(e: &mut E) {
         | E::NestedField(_)
         | E::AField(_)
         | E::PtrLoad
+        | E::PtrPtrLoad
         | E::EnumVal
         | E::EnumMatch
         | E::StrLen
@@ -3590,7 +3686,9 @@ fn strip_stmt_self_calls(s: &mut S) {
             }
         }
         S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
-        S::PtrStore(_, e) | S::PokeStruct(_, e) => strip_self_calls(e),
+        S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
+            strip_self_calls(e)
+        }
         S::Install(_)
         | S::CopySlice(..)
         | S::Reslice(..)
@@ -3715,7 +3813,9 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         }
         // Dropping the statement entirely is `mutate_block`'s job; there is
         // nothing smaller to make it.
-        S::PtrStore(_, e) | S::PokeStruct(_, e) => mutate_expr(e, target, seen),
+        S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
+            mutate_expr(e, target, seen)
+        }
         S::Install(_)
         | S::CopySlice(..)
         | S::SliceFromCall(..)
@@ -3770,6 +3870,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
         | E::NestedField(_)
         | E::AField(_)
         | E::PtrLoad
+        | E::PtrPtrLoad
         | E::EnumVal
         | E::EnumMatch
         | E::StrLen => {
@@ -4090,6 +4191,7 @@ fn the_generator_covers_what_it_claims() {
         field_reads: usize,
         afield_reads: usize,
         ptr_reads: usize,
+        ptr_ptr_reads: usize,
         enum_args: usize,
         enum_reads: usize,
         str_args: usize,
@@ -4165,6 +4267,7 @@ fn the_generator_covers_what_it_claims() {
             E::NestedField(_) => s.nested_reads += 1,
             E::AField(_) => s.afield_reads += 1,
             E::PtrLoad => s.ptr_reads += 1,
+            E::PtrPtrLoad => s.ptr_ptr_reads += 1,
             E::EnumVal => s.enum_reads += 1,
             E::EnumMatch => s.enum_match_reads += 1,
             E::StrLen => s.str_reads += 1,
@@ -4240,6 +4343,10 @@ fn the_generator_covers_what_it_claims() {
                     s.stmts.insert("pointer-store");
                     walk_e(e, s, narrow_half);
                 }
+                S::PtrPtrStore(_, e) => {
+                    s.stmts.insert("pointer-ptr-store");
+                    walk_e(e, s, narrow_half);
+                }
                 S::Repoint(t) => {
                     s.stmts.insert("repoint");
                     match t {
@@ -4250,6 +4357,10 @@ fn the_generator_covers_what_it_claims() {
                 }
                 S::PokeStruct(_, e) => {
                     s.stmts.insert("struct-poke");
+                    walk_e(e, s, narrow_half);
+                }
+                S::PokePtr(_, _, e) => {
+                    s.stmts.insert("pointer-param");
                     walk_e(e, s, narrow_half);
                 }
             }
@@ -4296,6 +4407,7 @@ fn the_generator_covers_what_it_claims() {
         "pointer-store",
         "repoint",
         "struct-poke",
+        "pointer-param",
     ] {
         assert!(seen.stmts.contains(k), "never emitted a `{k}` statement");
     }
@@ -4340,6 +4452,10 @@ fn the_generator_covers_what_it_claims() {
         seen.ptr_reads > 0,
         "never read through a pointer — the one expression whose storage is not decided \
          until the last `p = &v` has run"
+    );
+    assert!(
+        seen.ptr_ptr_reads > 0,
+        "never read through a pointer-to-pointer"
     );
     assert!(
         seen.afield_reads > 0,
@@ -4481,6 +4597,8 @@ fn the_oracle_matches_the_documented_semantics() {
         (Ty::I8, -128, Op::Xor, -128, 0),
     ];
     let empty = Prog {
+        pass_ptr: false,
+        has_pp: false,
         pair: PAIRS[0],
         base: Ty::U8,
         var_types: [Ty::U8; VARS],
@@ -4687,9 +4805,11 @@ mod coverage {
             "UnaryOp::Deref",
             "`*p` for a scalar `p`, read and written, in `main` only. The pointee is a \
              variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved \
-             between kinds by `Repoint`, so the alias the oracle models covers storage it \
-             already tracks under three names. No pointer to another pointer, and none \
-             passed to a function",
+             between kinds by `Repoint`. It is passed to a function — `bp(&v, x)` writes \
+             `main`'s variable through a `&T` parameter — and reached through a second \
+             level, `**pp` for `pp: &&T = &p`, a double dereference with the same value \
+             as `*p` but its own lowering. The alias the oracle models spans a call \
+             boundary and two indirections",
         ),
         (
             "TypeExpr::Pointer",
