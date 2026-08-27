@@ -222,7 +222,7 @@ pub(super) fn generate_call(
         // Room for one argument at a time — this call's widest, not the
         // language's, so a call whose parameters are all bytes needs one.
         let scratch = emitter.temp_alloc.alloc_arg(widest_arg).ok_or_else(|| {
-            CodegenError::Internal(format!(
+            emitter.pool_error(&format!(
                 "argument-evaluation pool exhausted calling '{}': {} free of {}, and even \
                  one argument at a time needs {}",
                 function.node,
@@ -879,7 +879,7 @@ fn generate_indirect_call(
         // call can't clobber an earlier one, and nothing touches the staging
         // block until every arg is ready).
         let temp_base = emitter.temp_alloc.alloc_arg(total).ok_or_else(|| {
-            CodegenError::Internal("argument-evaluation pool exhausted (indirect call)".to_string())
+            emitter.pool_error("argument-evaluation pool exhausted (indirect call)")
         })?;
         let mut off = 0u8;
         let mut placed = Vec::new();
@@ -1324,9 +1324,8 @@ pub fn generate_tail_recursive_update(
         match emitter.temp_alloc.alloc_arg(total_bytes) {
             Some(addr) => addr,
             None => {
-                return Err(CodegenError::Internal(
-                    "argument-evaluation pool exhausted in tail-recursive update".to_string(),
-                ));
+                return Err(emitter
+                    .pool_error("argument-evaluation pool exhausted in tail-recursive update"));
             }
         }
     };

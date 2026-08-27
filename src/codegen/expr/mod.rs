@@ -208,9 +208,7 @@ pub fn generate_expr(
                         // save) may already own $F0/$F1, and the old hardcoded
                         // store overwrote it.
                         let stage = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
-                            CodegenError::Internal(
-                                "temporary storage exhausted in string .len".to_string(),
-                            )
+                            emitter.pool_error("temporary storage exhausted in string .len")
                         })?;
                         emitter.emit_inst("STA", &format!("${:02X}", stage));
                         emitter.emit_inst("STX", &format!("${:02X}", stage + 1));

@@ -81,9 +81,10 @@ pub(super) fn generate_index_assignment(
     // and if the pool is exhausted, fail loudly: the old $20/$21 fallback was
     // the very temp the comment above explains cannot hold the value.
     emitter.emit_comment("Save value to temp");
-    let save = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in index assignment".to_string())
-    })?;
+    let save = emitter
+        .temp_alloc
+        .alloc_high(2)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in index assignment"))?;
     let (save_lo, save_hi) = (save, save + 1);
     emitter.emit_inst("STA", &format!("${:02X}", save_lo));
     if is_multibyte {
@@ -894,9 +895,7 @@ pub(super) fn generate_field_assignment(
                 // The destination is the caller's storage: the pointer in this
                 // parameter's slot, plus the field's offset.
                 let dest = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
-                    CodegenError::Internal(
-                        "temporary storage exhausted in an enum field store".to_string(),
-                    )
+                    emitter.pool_error("temporary storage exhausted in an enum field store")
                 })?;
                 let slot = base_addr as u8;
                 emitter.emit_inst("CLC", "");
@@ -1021,9 +1020,10 @@ pub(super) fn generate_field_assignment(
         emitter.emit_inst("STX", &format!("${:02X}", ptr + 1));
 
         let is_multibyte = crate::codegen::expr::is_two_byte_value(&finfo.ty);
-        let park = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
-            CodegenError::Internal("temporary storage exhausted in a field store".to_string())
-        })?;
+        let park = emitter
+            .temp_alloc
+            .alloc_high(2)
+            .ok_or_else(|| emitter.pool_error("temporary storage exhausted in a field store"))?;
         generate_expr(value, emitter, info, string_collector)?;
         store_value_pair(
             emitter,
@@ -1426,9 +1426,10 @@ fn try_struct_place_assignment(
     if !matches!(&target.node, Expr::Index { .. }) {
         return Ok(false); // not a struct place we recognize; leave it below
     }
-    let dest_vec = emitter.temp_alloc.alloc_primary(2).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in struct copy".to_string())
-    })?;
+    let dest_vec = emitter
+        .temp_alloc
+        .alloc_primary(2)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in struct copy"))?;
     let Some(_) =
         crate::codegen::expr::emit_struct_place_address(target, emitter, info, string_collector)?
     else {
@@ -1440,9 +1441,10 @@ fn try_struct_place_assignment(
     emitter.emit_inst("STA", &format!("${:02X}", dest_vec));
     emitter.emit_inst("STX", &format!("${:02X}", dest_vec + 1));
 
-    let src_vec = emitter.temp_alloc.alloc_primary(2).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in struct copy".to_string())
-    })?;
+    let src_vec = emitter
+        .temp_alloc
+        .alloc_primary(2)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in struct copy"))?;
     let Some(src) =
         crate::codegen::expr::emit_struct_place_address(value, emitter, info, string_collector)?
     else {

@@ -50,6 +50,11 @@ pub struct Emitter {
     pub needs_mod16: bool,
     /// Track if the indirect-call trampoline is needed (function pointers)
     pub needs_indirect_call: bool,
+    /// Span of the statement currently being generated, so a zero-page pool
+    /// that runs out mid-expression can point the diagnostic at the line that
+    /// asked for too much at once rather than reporting a spanless internal
+    /// error. Set once per statement in `generate_stmt`.
+    pub blame_span: Option<crate::ast::Span>,
 }
 
 impl Default for Emitter {
@@ -80,7 +85,16 @@ impl Emitter {
             needs_div16: false,
             needs_mod16: false,
             needs_indirect_call: false,
+            blame_span: None,
         }
+    }
+
+    /// Build a "zero-page scratch pool exhausted" diagnostic blamed on the
+    /// statement currently being generated. `detail` names the pool and where
+    /// it ran out (e.g. "in an element address"); the shared hint tells the
+    /// author how to rewrite. See [`CodegenError::pool_exhausted`].
+    pub fn pool_error(&self, detail: &str) -> crate::codegen::CodegenError {
+        crate::codegen::CodegenError::pool_exhausted(detail, self.blame_span)
     }
 
     /// Check if verbosity is set to minimal

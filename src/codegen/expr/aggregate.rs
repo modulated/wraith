@@ -258,9 +258,10 @@ fn emit_element_address(
         return Ok(Some(elem));
     }
 
-    let parked = emitter.temp_alloc.alloc_high(1).ok_or_else(|| {
-        CodegenError::Internal("temporary storage exhausted in an element address".into())
-    })?;
+    let parked = emitter
+        .temp_alloc
+        .alloc_high(1)
+        .ok_or_else(|| emitter.pool_error("temporary storage exhausted in an element address"))?;
     generate_expr(index, emitter, info, string_collector)?;
     emit_scale_index(emitter, esize);
     emitter.emit_inst("STA", &format!("${:02X}", parked));
@@ -332,9 +333,10 @@ pub(super) fn generate_index(
         // (`.len`, u8 multiply, an enclosing index assignment's parked value)
         // gets different bytes. The old hardcoded $F0/$F1 collided with all
         // three.
-        let stage = emitter.temp_alloc.alloc_high(2).ok_or_else(|| {
-            CodegenError::Internal("temporary storage exhausted in string index".to_string())
-        })?;
+        let stage = emitter
+            .temp_alloc
+            .alloc_high(2)
+            .ok_or_else(|| emitter.pool_error("temporary storage exhausted in string index"))?;
 
         // Get string pointer
         generate_expr(object, emitter, info, string_collector)?;
@@ -1659,9 +1661,7 @@ pub(crate) fn emit_array_struct_field_indexed(
             // asserted "the index expression below does not touch" $F4/$F5
             // without reserving them; `ps[ident(1)].x = 42` stored 1.
             let park = emitter.temp_alloc.alloc_arg(2).ok_or_else(|| {
-                CodegenError::Internal(
-                    "temporary storage exhausted in array-of-struct field write".to_string(),
-                )
+                emitter.pool_error("temporary storage exhausted in array-of-struct field write")
             })?;
             generate_expr(val, emitter, info, string_collector)?;
             emitter.emit_inst("STA", &format!("${:02X}", park));

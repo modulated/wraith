@@ -616,3 +616,34 @@ fn a_variable_named_mut_is_still_allowed() {
         other => panic!("`let mut: u8` should compile, got {other:?}"),
     }
 }
+
+#[test]
+fn a_full_zero_page_pool_points_at_the_line_and_suggests_a_split() {
+    // A wide struct-array element read parked inside a three-term sum keeps more
+    // live in the four-byte expression pool than it holds. That used to surface
+    // as a spanless `internal compiler error`, which reads as a compiler bug the
+    // author cannot act on. It is a capacity limit: name it, point at the
+    // statement, and say how to rewrite it.
+    let err = render(
+        "struct S { f0: i16, a: [i16; 3] }\n\
+         static SINK: i16 = 0;\n\
+         fn f(xp: S, q: u8) -> i16 { return (xp.f0 + xp.a[q]) + xp.f0; }\n\
+         #[reset]\n\
+         fn main() { let s: S = S { f0: 10, a: [1, 2, 3] }; SINK = f(s, 2); loop {} }",
+    );
+    // Not dressed up as a compiler bug.
+    assert!(
+        !err.contains("internal compiler error"),
+        "a documented limit must not read as an ICE:\n{err}"
+    );
+    // The caret sits on the `return` line, not somewhere in a header.
+    assert!(
+        err.contains("return (xp.f0 + xp.a[q]) + xp.f0;"),
+        "the diagnostic should quote the offending statement:\n{err}"
+    );
+    // And it tells the author what to do about it.
+    assert!(
+        err.contains("help:") && err.contains("`let`"),
+        "the diagnostic should suggest splitting with a `let`:\n{err}"
+    );
+}
