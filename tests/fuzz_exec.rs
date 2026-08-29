@@ -1107,7 +1107,21 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         // answer. It is *anchored*, which keeps it from being a constant: a
         // divisor the compiler can see is zero is a compile error, and the
         // sentinel is for the divisor that is only zero sometimes.
-        Op::Div | Op::Rem => gen_expr(g, ty, depth - 1, true),
+        //
+        // Anchoring is not airtight: where the divisor's type has no run-time
+        // value in scope — an `i8` inside a function whose only scalars are
+        // `u8` and `i16` — it degrades to literals, and `(-19) / 27` folds to
+        // a constant zero the compiler rejects. So a divisor that folds to
+        // zero is forced odd, hence non-zero; a run-time divisor (and its
+        // sentinel coverage) is left untouched.
+        Op::Div | Op::Rem => {
+            let d = gen_expr(g, ty, depth - 1, true);
+            if const_fold(&d, ty) == Some(0) {
+                E::Bin(Box::new(d), Op::Or, Box::new(E::Lit(1)))
+            } else {
+                d
+            }
+        }
         Op::Shl | Op::Shr => E::Lit(g.rng.below(ty.bits() as u64) as i64),
         _ => gen_expr(g, ty, depth - 1, false),
     };
@@ -2219,6 +2233,71 @@ fn call_fn(
     eval(&f.ret, &st, f.ret_ty)
 }
 
+/// Apply a binary operator to two already-evaluated operands, at the operator's
+/// type. The one place the language's arithmetic lives, so [`eval`] and
+/// [`const_fold`] cannot drift from each other.
+fn apply_bin(a: i64, op: Op, b: i64, ty: Ty) -> i64 {
+    let v = match op {
+        Op::Add => a.wrapping_add(b),
+        Op::Sub => a.wrapping_sub(b),
+        Op::Mul => a.wrapping_mul(b),
+        // `x / 0` and `x % 0` are the all-ones value of the type — defined, not
+        // undefined, so a divisor that is only zero *sometimes* needs no
+        // avoiding. `narrow` turns -1 into 0xFF or 0xFFFF for the unsigned
+        // halves of the pair.
+        //
+        // `i8::MIN / -1` overflows and is *also* defined: every arithmetic
+        // operator wraps, and `narrow(128, i8)` is -128, which is what the
+        // compiler produces.
+        Op::Div => {
+            if b == 0 {
+                -1
+            } else {
+                a.wrapping_div(b)
+            }
+        }
+        Op::Rem => {
+            if b == 0 {
+                -1
+            } else {
+                a.wrapping_rem(b)
+            }
+        }
+        // Bitwise operators act on the value's bit pattern, so a negative
+        // operand has to be seen unsigned first.
+        Op::And => (raw(a, ty) & raw(b, ty)) as i64,
+        Op::Or => (raw(a, ty) | raw(b, ty)) as i64,
+        Op::Xor => (raw(a, ty) ^ raw(b, ty)) as i64,
+        Op::Shl => a << b.clamp(0, ty.bits() as i64 - 1),
+        // `>>` on a signed type is arithmetic, which is what Rust's `>>` on
+        // `i64` already does for our sign-correct values.
+        Op::Shr => a >> b.clamp(0, ty.bits() as i64 - 1),
+    };
+    narrow(v, ty)
+}
+
+/// The value of `e` if the compiler can fold it to a constant, mirroring the
+/// arithmetic subset the compiler's own const-evaluator sees: literals and
+/// operators over literals, with casts. Any node that reads run-time state —
+/// a variable, an element, a call, a pointer — makes the whole expression
+/// non-constant and yields `None`.
+///
+/// Its one use is keeping a *divisor* from being a constant the compiler can
+/// prove is zero. A run-time-zero divisor is defined (the all-ones sentinel);
+/// a compile-time-zero one is a hard error the oracle would misread as a
+/// miscompile. Anchoring is meant to keep a divisor non-constant, but where its
+/// type has no run-time value in scope it degrades to literals — `(-19) / 27`
+/// folds to 0 — so the divisor site checks this and repairs it.
+fn const_fold(e: &E, ty: Ty) -> Option<i64> {
+    match e {
+        E::Lit(v) => Some(narrow(*v, ty)),
+        E::Cast(to, inner) => Some(narrow(narrow(const_fold(inner, ty)?, *to), ty)),
+        E::At(from, inner) => Some(narrow(const_fold(inner, *from)?, ty)),
+        E::Bin(l, op, r) => Some(apply_bin(const_fold(l, ty)?, *op, const_fold(r, ty)?, ty)),
+        _ => None,
+    }
+}
+
 fn eval(e: &E, st: &St, ty: Ty) -> i64 {
     match e {
         E::Lit(v) => narrow(*v, ty),
@@ -2396,43 +2475,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
-            let v = match op {
-                Op::Add => a.wrapping_add(b),
-                Op::Sub => a.wrapping_sub(b),
-                Op::Mul => a.wrapping_mul(b),
-                // `x / 0` and `x % 0` are the all-ones value of the type —
-                // defined, not undefined, so the generator no longer has to
-                // avoid a zero divisor. `narrow` turns -1 into 0xFF or 0xFFFF
-                // for the unsigned halves of the pair.
-                //
-                // `i8::MIN / -1` overflows and is *also* defined: every
-                // arithmetic operator wraps, and `narrow(128, i8)` is -128,
-                // which is what the compiler produces.
-                Op::Div => {
-                    if b == 0 {
-                        -1
-                    } else {
-                        a.wrapping_div(b)
-                    }
-                }
-                Op::Rem => {
-                    if b == 0 {
-                        -1
-                    } else {
-                        a.wrapping_rem(b)
-                    }
-                }
-                // Bitwise operators act on the value's bit pattern, so a
-                // negative operand has to be seen unsigned first.
-                Op::And => (raw(a, ty) & raw(b, ty)) as i64,
-                Op::Or => (raw(a, ty) | raw(b, ty)) as i64,
-                Op::Xor => (raw(a, ty) ^ raw(b, ty)) as i64,
-                Op::Shl => a << b.clamp(0, ty.bits() as i64 - 1),
-                // `>>` on a signed type is arithmetic, which is what Rust's
-                // `>>` on `i64` already does for our sign-correct values.
-                Op::Shr => a >> b.clamp(0, ty.bits() as i64 - 1),
-            };
-            narrow(v, ty)
+            apply_bin(a, *op, b, ty)
         }
     }
 }
@@ -5716,5 +5759,41 @@ mod precedence {
                  flat: {flat}\n  tree: {tree}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod zero_divisor {
+    use super::*;
+
+    #[test]
+    fn const_fold_matches_the_compilers_arithmetic_subset() {
+        // Literals and operators over them fold; anything that reads run-time
+        // state does not. `(-19) / 27` is the shape that slipped through.
+        assert_eq!(const_fold(&E::Lit(0), Ty::I16), Some(0));
+        let folds_to_zero = E::Bin(Box::new(E::Lit(-19)), Op::Div, Box::new(E::Lit(27)));
+        assert_eq!(const_fold(&folds_to_zero, Ty::I16), Some(0));
+        // A variable makes the whole expression non-constant.
+        assert_eq!(const_fold(&E::Var(0), Ty::I16), None);
+        assert_eq!(
+            const_fold(
+                &E::Bin(Box::new(E::Var(0)), Op::Div, Box::new(E::Lit(27))),
+                Ty::I16
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn seed_5392_no_longer_folds_a_zero_divisor() {
+        // The seed that found it: `p0 % ((-19) / 27)`, whose divisor the
+        // compiler folds to zero and rejects, while the oracle expected a run.
+        // `check_seed` returns `Err` only for a genuine miscompile; `Ok` covers
+        // both a clean run and a documented skip. The divisor repair keeps it
+        // out of the `Err` arm.
+        assert!(
+            check_seed(5392).is_ok(),
+            "seed 5392 still reports a constant-zero divisor as a miscompile"
+        );
     }
 }
