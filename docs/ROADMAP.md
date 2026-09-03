@@ -75,6 +75,7 @@ read against a current picture:
 | `let mut x` names the absent `mut` instead of failing with "expected `:`" | `tests/e2e/error_diagnostics.rs` |
 | A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
 | An interrupt handler saves only the zero-page scratch its reachable code writes, not the whole region (a counter handler: 63 bytes → 0) | `tests/e2e/interrupts.rs` |
+| A comparison collapses to a bare branch inside a standalone function, not only when inlined — a void `RTS` no longer looks like it reads A and the flags | `tests/e2e/branch_fusion.rs` |
 
 ## What keeps going wrong
 
@@ -279,9 +280,17 @@ Finding it took an instrumented run reporting every guard's value per site.
 Two earlier guesses were measured and both were wrong — worth remembering
 before optimising against intuition.
 
-**Still open:** the remaining materialised booleans are the ones feeding
-something other than a branch (an assignment, an argument), where the 0/1 is
-genuinely wanted. No estimate of what that is worth yet.
+*Then a second cause.* The guard refused a collapse whenever the boolean
+looked live in `A` or the flags after the branch, and at a void function's
+`RTS` both did: the liveness treated a return as reading the accumulator and
+every flag, as if a caller took them. A value returns in a register and is
+loaded there immediately before the `RTS`; a flag is never a return channel and
+a void function returns nothing. So `RTS` reads neither — and with that, a
+condition inside a *standalone* function collapses the same as one inlined into
+`main`, which it did not before. `tests/e2e/branch_fusion.rs`. (The earlier note
+here — that the survivors fed an assignment or an argument, where the 0/1 was
+wanted — was wrong: every one fed a branch, and this is what blocked them.
+Instrumenting the guard, once more, is what showed it.)
 
 ### Smaller code
 

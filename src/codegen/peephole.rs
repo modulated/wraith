@@ -833,7 +833,11 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, true_label) == 2
             && uses(lines, end_label) == 2
             && live_out[w[9]] & CMP_FLAGS == 0
-            && a_live_out[w[9]] & CMP_FLAGS == 0
+            // A-liveness is a one-bit lattice, so a plain `== 0` says what is
+            // meant: the boolean this collapse removes must be dead in A after
+            // the branch. (Masking with `CMP_FLAGS` happened to work only
+            // because `FLAG_N` is bit 0.)
+            && a_live_out[w[9]] == 0
         {
             // `B1` taken means false, and falling past `B2` means false too, so
             // both land on the label the `JMP` used to target — which is where
@@ -928,7 +932,7 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, true_label) == 3
             && uses(lines, end_label) == 2
             && live_out[w[8]] & CMP_FLAGS == 0
-            && a_live_out[w[8]] & CMP_FLAGS == 0
+            && a_live_out[w[8]] == 0
         {
             for b in [b1, b2] {
                 result.push(Line::Instruction {
@@ -1005,7 +1009,7 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, true_label) == 2
             && uses(lines, end_label) == 2
             && live_out[w[7]] & CMP_FLAGS == 0
-            && a_live_out[w[7]] & CMP_FLAGS == 0
+            && a_live_out[w[7]] == 0
         {
             result.push(Line::Instruction {
                 mnemonic: br.clone(),
@@ -1279,7 +1283,13 @@ fn flags_read(mnemonic: &str) -> u8 {
         "BMI" | "BPL" => FLAG_N,
         "BVC" | "BVS" => FLAG_V,
         "ADC" | "SBC" | "ROL" | "ROR" => FLAG_C,
-        "PHP" | "JSR" | "RTS" | "BRK" => FLAG_ALL,
+        // `PHP` pushes the flags and `BRK` records them; a call is treated as
+        // reading them because the callee's first instructions are not in view.
+        // `RTS` is deliberately absent: this ABI returns values in registers,
+        // never in a flag, so a function's final flags are dead — nothing after
+        // the return reads them. Leaving `RTS` here kept a live boolean's
+        // materialisation alive right up to a void function's return.
+        "PHP" | "JSR" | "BRK" => FLAG_ALL,
         _ => 0,
     }
 }
@@ -1293,7 +1303,17 @@ fn a_read(mnemonic: &str, operand: Option<&str>) -> u8 {
         // Accumulator addressing: `LSR` with no operand shifts A, `LSR $40`
         // shifts memory.
         "ASL" | "LSR" | "ROL" | "ROR" => u8::from(operand.is_none_or(|o| o.is_empty() || o == "A")),
-        "JSR" | "RTS" | "RTI" | "BRK" => 1,
+        // A call passes arguments in A, and `RTI`/`BRK` bound an interrupt frame
+        // whose A this pass will not reason about. `RTS` is deliberately absent:
+        // A is a return value only when the function returns one, and codegen
+        // then loads it into A immediately before the `RTS`, so that write —
+        // not the `RTS` — is what keeps it live. Treating a *void* function's
+        // `RTS` as reading A left the throwaway boolean of an `if`/`while`
+        // condition looking live all the way to the return, blocking its
+        // collapse. Only `compute_a_liveness` (the boolean-collapse guard) reads
+        // this, and that match never covers a `return`, so a value return is
+        // never dropped.
+        "JSR" | "RTI" | "BRK" => 1,
         _ => 0,
     }
 }
