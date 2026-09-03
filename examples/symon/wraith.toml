@@ -1,0 +1,44 @@
+# Symon memory map (Symon 6502 simulator, "Symon" default machine)
+#
+#   $0000-$00FF  zero page      - compiler scratch and call-graph-colored frames
+#   $0100-$01FF  hardware stack - fixed by the 6502
+#   $0200-$02FF  STACK          - Wraith's software stack (below)
+#   $0300-$0FFF  BSS            - statics (below)
+#   $1000-$6FFF  free RAM       - left for programs loaded and run by the monitor
+#   $7000-$77CF  video RAM      - the 6545 CRTC's frame buffer, 80x25 characters
+#   $7800-$7FFF  free RAM
+#   $8000-$800F  6522 VIA       - not a section: `const … : addr` names its registers
+#   $8800-$8803  6551 ACIA      - likewise
+#   $9000-$9001  6545 CRTC      - likewise
+#   $C000-$FFF9  CODE + DATA    - 16 KB ROM, less the six vector bytes
+#   $FFFA-$FFFF  vectors        - written by the compiler, cannot be a section
+#
+# Symon has 32 KB of RAM at $0000-$7FFF and 16 KB of ROM at $C000-$FFFF, so
+# nothing here resembles the repository's default map: there, CODE starts at
+# $8000, which on this machine is the VIA.
+
+[[sections]]
+name = "STACK"
+start = 0x0200
+end = 0x02FF
+description = "Wraith's software stack: recursion frame saves and operand spills"
+
+[[sections]]
+name = "BSS"
+start = 0x0300
+end = 0x0FFF
+description = "Statics (3.25 KB). Ends well below the $7000 frame buffer, and above the zero page, hardware stack and software stack"
+
+[[sections]]
+name = "CODE"
+start = 0xC000
+end = 0xEFFF
+description = "Monitor code in ROM (12 KB)"
+
+[[sections]]
+name = "DATA"
+start = 0xF000
+end = 0xFFF9
+description = "String literals and const tables in ROM. Stops at $FFF9 because $FFFA-$FFFF is the vector table"
+
+default_section = "CODE"

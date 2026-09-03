@@ -1,0 +1,869 @@
+// A monitor ROM for Symon, the 6502 simulator.
+//
+// Symon models a small single-board machine, and this is the program that
+// would live in its ROM: it brings up the serial console, the timer and the
+// display, then reads commands from the terminal. Everything the console
+// prints goes to both the serial line and the CRT, so the two halves of the
+// machine stay in step.
+//
+//   $0000-$7FFF   32 KB RAM
+//   $8000-$800F   6522 VIA
+//   $8800-$8803   6551 ACIA, wired to the terminal window
+//   $9000-$9001   6545 CRTC, with its frame buffer at $7000
+//   $C000-$FFFF   16 KB ROM
+//
+// The memory map above is `wraith.toml` in this directory, not something the
+// compiler knows: the same source with a different config is a different
+// board. See README.md for building and loading the image.
+//
+// Three things here are what a real machine actually asks of a language, and
+// are the reason the example exists:
+//
+//   * Two interrupt sources on one `#[irq]` handler. The ACIA raises IRQ when
+//     a byte arrives; the VIA's timer 1 raises it about forty times a second.
+//     The handler tells them apart from their status registers and shares
+//     state with the foreground through `static`s, which is the only way it
+//     can - a handler cannot see another function's frame.
+//   * A receive ring buffer written by the handler and read by the foreground.
+//     One writer per index, so no lock is needed; the notes on `RX_HEAD` say
+//     why the indices free-run instead of wrapping.
+//   * A 2000-byte frame buffer addressed through a compile-time row table.
+//     `ROW_ADDR[r]` is a ROM lookup rather than a multiply by 80, which is the
+//     oldest trade on this processor and here it is one line of source.
+
+import {enable_interrupts, disable_interrupts} from "../../std/intrinsics.wr";
+
+// ===========================================================================
+// Hardware
+// ===========================================================================
+
+// --- 6551 ACIA ($8800-$8803) ----------------------------------------------
+//
+// $8801 is two registers: reading it gives status, writing it (with any
+// value) is a programmed reset.
+//
+// The catch that shapes the driver below: reading status clears the ACIA's
+// interrupt flag and releases the IRQ line, while the received byte stays in
+// $8800 until something reads it. A byte can therefore arrive in the window
+// between the processor sampling IRQ and taking it, have its interrupt
+// cancelled by the transmit loop's status read, and sit in the receiver with
+// nothing left to announce it. `ser_putc` closes that window by collecting
+// the byte itself, under a critical section; see the note there.
+
+const ACIA_DATA:   addr       = 0x8800;
+const ACIA_STATUS: read  addr = 0x8801;
+const ACIA_RESET:  write addr = 0x8801;
+const ACIA_CMD:    addr       = 0x8802;
+const ACIA_CTRL:   addr       = 0x8803;
+
+const ST_TDRE: u8 = 0x10;      // transmit register empty: safe to write
+const ST_RDRF: u8 = 0x08;      // receive register full: a byte is waiting
+
+// Control: 8 data bits, 1 stop bit, and baud select 0 - the "16x external
+// clock" rate, which Symon reads as "as fast as the terminal will take it".
+const CTRL_8N1_EXT: u8 = 0x00;
+
+// Command: DTR asserted (bit 0), receiver interrupt enabled (bit 1 clear),
+// transmitter interrupt disabled with RTS low (bits 3:2 = 10). Receive is
+// interrupt-driven, transmit is polled.
+const CMD_RX_IRQ: u8 = 0x09;
+
+// --- 6522 VIA ($8000-$800F) -----------------------------------------------
+//
+// Only timer 1 is used, free-running, as the machine's clock tick.
+
+const VIA_T1CL: addr = 0x8004;
+const VIA_T1CH: addr = 0x8005;
+const VIA_T1LL: addr = 0x8006;
+const VIA_T1LH: addr = 0x8007;
+const VIA_ACR:  addr = 0x800B;
+const VIA_IFR:  addr = 0x800D;
+const VIA_IER:  addr = 0x800E;
+
+const ACR_T1_FREERUN: u8 = 0x40;   // reload from the latch and keep counting
+const IFR_T1:         u8 = 0x40;   // timer 1 timed out
+const IER_SET_T1:     u8 = 0xC0;   // bit 7 set = "enable the bits I also set"
+
+// 25000 cycles between ticks: 25 ms on a 1 MHz 6502, so TICKS advances about
+// forty times a second. Latches are written low byte first; writing the high
+// byte of the counter is what starts the timer.
+const T1_PERIOD_LO: u8 = 0xA8;     // 25000 = $61A8
+const T1_PERIOD_HI: u8 = 0x61;
+
+// Iterations of the software delay loop that come to the same 25 ms on a
+// machine whose VIA does not keep time. Counted off the generated assembly -
+// the loop is 73 cycles an iteration - rather than derived from anything, so
+// treat it as a dial to turn if the animations run at the wrong speed on your
+// simulator's clock. See `delay_spin`.
+const SPIN_PER_TICK: u16 = 340;
+
+// --- 6545 CRTC ($9000-$9001) ----------------------------------------------
+//
+// Two ports: write a register number to $9000, then its value to $9001.
+
+const CRTC_ADDR: write addr = 0x9000;
+const CRTC_DATA: addr       = 0x9001;
+
+const CRTC_R_CURSOR_HI: u8 = 14;
+const CRTC_R_CURSOR_LO: u8 = 15;
+
+// A 6545 is configured by writing registers 0-15 in order, which is what this
+// table is: horizontal and vertical timing for an 80x25 display of 8x8
+// characters, then the display start address ($7000, R12/R13) and the cursor
+// position (R14/R15, rewritten on every keystroke by `crt_cursor`).
+const CRTC_SETUP: [u8; 16] = [
+    99,     // R0  horizontal total (character times, less one)
+    80,     // R1  horizontal displayed  - COLS
+    84,     // R2  horizontal sync position
+    0x09,   // R3  sync widths: 9 character times horizontal
+    32,     // R4  vertical total (character rows, less one)
+    5,      // R5  vertical total adjust (scan lines)
+    25,     // R6  vertical displayed    - ROWS
+    27,     // R7  vertical sync position
+    0,      // R8  interlace and skew: non-interlaced
+    7,      // R9  scan lines per character row, less one
+    0,      // R10 cursor start scan line (no blink)
+    7,      // R11 cursor end scan line
+    0x70,   // R12 display start address, high  - $7000
+    0x00,   // R13 display start address, low
+    0x70,   // R14 cursor address, high
+    0x00,   // R15 cursor address, low
+];
+
+// ===========================================================================
+// The screen
+// ===========================================================================
+
+const VIDEO: u16 = 0x7000;
+const COLS:  u8  = 80;
+const ROWS:  u8  = 25;
+
+// The address of every row, computed at compile time. Fifty bytes of ROM
+// buys `LDA ROW_ADDR,X` in place of a multiply by 80 on every character
+// written - and the length is the one in the type, so 80 and 25 are stated
+// once each, above.
+const ROW_ADDR: [u16; 25] = [|i| => VIDEO + (i as u16) * (COLS as u16)];
+
+const CH_SPACE: u8 = 0x20;
+const CH_BALL:  u8 = 0x2A;   // '*'
+
+const ASCII_BS:  u8 = 0x08;
+const ASCII_LF:  u8 = 0x0A;
+const ASCII_CR:  u8 = 0x0D;
+const ASCII_DEL: u8 = 0x7F;
+
+// ===========================================================================
+// State shared with the interrupt handler
+// ===========================================================================
+//
+// The receive ring. RX_HEAD belongs to whoever is collecting bytes from the
+// ACIA and RX_TAIL to the foreground reading them out, so the two ends never
+// contend: a byte-sized store on this CPU cannot be observed half-done. The
+// indices free-run and wrap at 256 and only the subscript is masked, so
+// `head - tail` is the count and `head == tail` means empty. Masking the
+// indices themselves would make a full ring indistinguishable from an empty
+// one.
+//
+// `acia_receive` is the single place RX_HEAD is advanced, called from the
+// handler and - because of the status-register quirk noted above - from
+// `ser_putc` with the interrupt held off, so only one of them is ever inside
+// it at a time.
+
+const RX_MASK: u8 = 31;      // the ring is 32 bytes: a power of two, for this
+
+static RX_BUF:  [u8; 32] = [0; 32];
+static RX_HEAD: u8 = 0;      // advanced by the handler
+static RX_TAIL: u8 = 0;      // advanced by the foreground
+
+// The tick counter, kept twice. TICK8 is the one a delay loop watches, and a
+// single byte is read atomically whatever the handler is doing. TICKS is the
+// 16-bit count the `ticks` command prints, and reading it needs the interrupt
+// held off for the two loads - which is the whole of the hazard the language
+// spec warns about, in the two places it actually occurs.
+static TICK8: u8  = 0;
+static TICKS: u16 = 0;
+
+// Whether timer 1 was found to be running at all - see `timer_init`. Symon's
+// 6522 is a skeleton whose reads return zero and whose writes are dropped, so
+// on that machine this stays 0 and every delay falls back to counting.
+static HAVE_TIMER: u8 = 0;
+
+// ===========================================================================
+// Console state
+// ===========================================================================
+
+static CUR_ROW: u8 = 0;
+static CUR_COL: u8 = 0;
+
+const LINE_MAX: u8 = 72;
+static LINE:     [u8; 72] = [0; 72];
+static LINE_LEN: u8 = 0;
+
+// Parser cursor and results. A command handler reads what the parser left
+// here rather than taking arguments, so adding an argument to a command does
+// not change any signature.
+static POS:      u8  = 0;
+static PARSE_OK: u8  = 0;
+static ARG_ADDR: u16 = 0;
+static ARG_BYTE: u8  = 0;
+
+// ===========================================================================
+// Raw memory access
+// ===========================================================================
+//
+// A computed address is not a Wraith pointer to anything the compiler can
+// name, so these three are the escape hatch: indirect load, indirect store,
+// and indirect jump.
+
+fn mem_read(address: u16) -> u8 {
+    asm {
+        "LDY #$00",
+        "LDA ({address}),Y"
+    }
+}
+
+fn mem_write(address: u16, value: u8) {
+    asm {
+        "LDY #$00",
+        "LDA {value}",
+        "STA ({address}),Y"
+    }
+}
+
+fn mem_jump(address: u16) {
+    asm {
+        "JMP ({address})"
+    }
+}
+
+// ===========================================================================
+// Interrupts
+// ===========================================================================
+
+#[irq]
+fn on_irq() {
+    // The ACIA first: it is the source that loses data if it is left waiting.
+    // Reading status is also what clears its interrupt flag, so this read has
+    // to happen whether or not a byte arrived.
+    acia_receive(ACIA_STATUS);
+
+    // Then the timer. Writing a one back to the flag bit is what clears it on
+    // a 6522; leaving it set would re-enter this handler forever.
+    if (VIA_IFR & IFR_T1) != 0 {
+        VIA_IFR = IFR_T1;
+        TICK8 = TICK8 + 1;
+        TICKS = TICKS + 1;
+    }
+}
+
+// ===========================================================================
+// Serial
+// ===========================================================================
+
+fn acia_init() {
+    ACIA_RESET = 0;              // any value: the write is the reset
+    ACIA_CTRL  = CTRL_8N1_EXT;
+    ACIA_CMD   = CMD_RX_IRQ;
+    RX_HEAD = 0;
+    RX_TAIL = 0;
+}
+
+/// Take a byte off the ACIA if `st` - a status read that has just happened -
+/// says one is there. Every read of the status register goes through this,
+/// because that read is what clears the interrupt: a caller that looks at
+/// status and walks away may have cancelled the handler's only notice that a
+/// byte arrived.
+fn acia_receive(st: u8) {
+    if (st & ST_RDRF) != 0 {
+        RX_BUF[RX_HEAD & RX_MASK] = ACIA_DATA;
+        RX_HEAD = RX_HEAD + 1;
+    }
+}
+
+/// Transmit is polled, and polling means reading status, which means this has
+/// to collect the receiver's byte too - otherwise a character typed while the
+/// monitor is printing can lose its interrupt to this loop. The critical
+/// section is what makes collecting it safe: with the interrupt held off, the
+/// handler cannot be inside `acia_receive` at the same time, so RX_HEAD still
+/// has a single writer. Two instructions of interrupt latency per character
+/// transmitted is the whole cost.
+fn ser_putc(ch: u8) {
+    loop {
+        disable_interrupts();
+        let st: u8 = ACIA_STATUS;
+        acia_receive(st);
+        if (st & ST_TDRE) != 0 {
+            ACIA_DATA = ch;
+            enable_interrupts();
+            return;
+        }
+        enable_interrupts();
+    }
+}
+
+fn key_ready() -> u8 {
+    if RX_HEAD == RX_TAIL { return 0; }
+    return 1;
+}
+
+fn key_get() -> u8 {
+    loop {
+        if key_ready() != 0 { break; }
+    }
+    let ch: u8 = RX_BUF[RX_TAIL & RX_MASK];
+    RX_TAIL = RX_TAIL + 1;
+    return ch;
+}
+
+/// Throw away anything already typed, so a keypress that stopped an animation
+/// is not then read as the start of a command.
+fn key_flush() {
+    RX_TAIL = RX_HEAD;
+}
+
+// ===========================================================================
+// The timer
+// ===========================================================================
+
+/// Start timer 1, then find out whether it actually started.
+///
+/// The probe is not defensive programming for its own sake. A 6522 that is
+/// only half there answers every read with zero, which is indistinguishable
+/// from a timer that has not timed out yet - so a delay loop waiting on the
+/// tick counter waits forever, and the machine appears to hang on the first
+/// animation frame. Asking the question once, at boot, costs an eighth of a
+/// second and turns a lockup into a slower clock. Symon's VIA is exactly this
+/// case: `Via6522.read` returns 0 and `write` is a stub.
+///
+/// Interrupts must already be enabled when this runs; the tick it waits for
+/// arrives through the handler.
+fn timer_init() {
+    VIA_ACR = ACR_T1_FREERUN;
+    VIA_T1LL = T1_PERIOD_LO;
+    VIA_T1LH = T1_PERIOD_HI;
+    VIA_T1CL = T1_PERIOD_LO;
+    VIA_T1CH = T1_PERIOD_HI;     // writing the counter high byte starts it
+    VIA_IER = IER_SET_T1;
+    TICK8 = 0;
+    TICKS = 0;
+
+    // One period is 25000 cycles; wait about five of them before giving up.
+    HAVE_TIMER = 0;
+    let spins: u16 = 0;
+    while spins < 8000 {
+        if TICK8 != 0 {
+            HAVE_TIMER = 1;
+            return;
+        }
+        spins = spins + 1;
+    }
+}
+
+/// Wait `n` twenty-five millisecond periods.
+///
+/// With a working timer this sleeps on the tick counter, which costs nothing
+/// and keeps time whatever the processor is clocked at. Without one there is
+/// nothing to sleep on, so it counts instead - approximately, and at the
+/// mercy of the clock rate, but it always comes back.
+fn delay_ticks(n: u8) {
+    if HAVE_TIMER == 0 {
+        delay_spin(n);
+        return;
+    }
+    let left: u8 = n;
+    while left != 0 {
+        let mark: u8 = TICK8;
+        loop {
+            if TICK8 != mark { break; }
+        }
+        left = left - 1;
+    }
+}
+
+/// The fallback: an empty loop trimmed to about 25 ms per unit on a 1 MHz
+/// 6502. Nothing here is precise, and it does not need to be - it paces an
+/// animation, and the only real requirement is that it terminates.
+fn delay_spin(n: u8) {
+    let left: u8 = n;
+    while left != 0 {
+        let i: u16 = 0;
+        while i < SPIN_PER_TICK {
+            i = i + 1;
+        }
+        left = left - 1;
+    }
+}
+
+/// The 16-bit count, read with the interrupt held off. Without the SEI the
+/// handler could land between the two loads and produce a value that was
+/// never on the clock - $00FF read as $0100's low half, say.
+fn ticks_now() -> u16 {
+    disable_interrupts();
+    let v: u16 = TICKS;
+    enable_interrupts();
+    return v;
+}
+
+// ===========================================================================
+// The CRT
+// ===========================================================================
+
+fn crtc_write(reg: u8, value: u8) {
+    CRTC_ADDR = reg;
+    CRTC_DATA = value;
+}
+
+fn crtc_init() {
+    let r: u8 = 0;
+    while r < 16 {
+        crtc_write(r, CRTC_SETUP[r]);
+        r = r + 1;
+    }
+}
+
+/// Park the hardware cursor on the character the next write will land on.
+fn crt_cursor() {
+    let at: u16 = ROW_ADDR[CUR_ROW] + (CUR_COL as u16);
+    crtc_write(CRTC_R_CURSOR_HI, at.high);
+    crtc_write(CRTC_R_CURSOR_LO, at.low);
+}
+
+fn vpoke(row: u8, col: u8, ch: u8) {
+    mem_write(ROW_ADDR[row] + (col as u16), ch);
+}
+
+fn row_blank(row: u8) {
+    let base: u16 = ROW_ADDR[row];
+    let c: u8 = 0;
+    while c < COLS {
+        mem_write(base + (c as u16), CH_SPACE);
+        c = c + 1;
+    }
+}
+
+fn screen_clear() {
+    let r: u8 = 0;
+    while r < ROWS {
+        row_blank(r);
+        r = r + 1;
+    }
+    CUR_ROW = 0;
+    CUR_COL = 0;
+    crt_cursor();
+}
+
+/// Move every row up one and blank the last. Two thousand bytes through an
+/// indirect load and store is not fast, but it is what the hardware offers:
+/// this CRTC's display start address is fixed at $7000 by the config above,
+/// so the screen cannot be scrolled by moving the start address instead.
+fn screen_scroll() {
+    let r: u8 = 0;
+    while r < ROWS - 1 {
+        let dst: u16 = ROW_ADDR[r];
+        let src: u16 = ROW_ADDR[r + 1];
+        let c: u8 = 0;
+        while c < COLS {
+            mem_write(dst + (c as u16), mem_read(src + (c as u16)));
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    row_blank(ROWS - 1);
+}
+
+fn crt_newline() {
+    CUR_COL = 0;
+    if CUR_ROW < ROWS - 1 {
+        CUR_ROW = CUR_ROW + 1;
+    } else {
+        screen_scroll();
+    }
+}
+
+fn crt_putc(ch: u8) {
+    if ch == ASCII_LF {
+        crt_newline();
+        return;
+    }
+    if ch == ASCII_CR {
+        CUR_COL = 0;
+        return;
+    }
+    if ch == ASCII_BS {
+        if CUR_COL > 0 {
+            CUR_COL = CUR_COL - 1;
+            vpoke(CUR_ROW, CUR_COL, CH_SPACE);
+        }
+        return;
+    }
+    vpoke(CUR_ROW, CUR_COL, ch);
+    if CUR_COL < COLS - 1 {
+        CUR_COL = CUR_COL + 1;
+    } else {
+        crt_newline();
+    }
+}
+
+// ===========================================================================
+// The console: serial and CRT together
+// ===========================================================================
+
+fn out(ch: u8) {
+    ser_putc(ch);
+    crt_putc(ch);
+}
+
+fn puts(s: str) {
+    for c in s {
+        out(c as u8);
+    }
+}
+
+fn newline() {
+    out(ASCII_CR);
+    out(ASCII_LF);
+}
+
+fn space() { out(CH_SPACE); }
+
+fn hex_digit(n: u8) -> u8 {
+    if n < 10 { return 0x30 + n; }
+    return 0x41 + (n - 10);
+}
+
+fn put_hex8(v: u8) {
+    out(hex_digit(v >> 4));
+    out(hex_digit(v & 0x0F));
+}
+
+fn put_hex16(v: u16) {
+    put_hex8(v.high);
+    put_hex8(v.low);
+}
+
+fn put_dec16(v: u16) {
+    // Five digits, leading zeros suppressed. Division by a constant is the
+    // compiler's problem, not this program's.
+    let n: u16 = v;
+    let started: u8 = 0;
+    let scale: u16 = 10000;
+    while scale != 0 {
+        let d: u8 = (n / scale).low;
+        n = n % scale;
+        if d != 0 { started = 1; }
+        if started != 0 { out(0x30 + d); }
+        scale = scale / 10;
+    }
+    if started == 0 { out(0x30); }
+}
+
+// ===========================================================================
+// Line editing
+// ===========================================================================
+
+fn read_line() {
+    LINE_LEN = 0;
+    loop {
+        crt_cursor();
+        let ch: u8 = key_get();
+        if ch == ASCII_CR || ch == ASCII_LF {
+            newline();
+            return;
+        }
+        if ch == ASCII_BS || ch == ASCII_DEL {
+            if LINE_LEN > 0 {
+                LINE_LEN = LINE_LEN - 1;
+                out(ASCII_BS);
+                ser_putc(CH_SPACE);
+                ser_putc(ASCII_BS);
+            }
+        } else if ch >= CH_SPACE && ch < ASCII_DEL && LINE_LEN < LINE_MAX {
+            LINE[LINE_LEN] = ch;
+            LINE_LEN = LINE_LEN + 1;
+            out(ch);
+        }
+    }
+}
+
+// ===========================================================================
+// Parsing
+// ===========================================================================
+
+fn upper(ch: u8) -> u8 {
+    if ch >= 0x61 && ch <= 0x7A { return ch - 0x20; }
+    return ch;
+}
+
+fn at_end() -> u8 {
+    if POS >= LINE_LEN { return 1; }
+    return 0;
+}
+
+fn skip_spaces() {
+    while POS < LINE_LEN {
+        if LINE[POS] != CH_SPACE { return; }
+        POS = POS + 1;
+    }
+}
+
+/// Does the word at POS match `w`, ignoring case? On a match POS is left just
+/// past it, so a command's arguments parse from where its name ended.
+fn word_is(w: str) -> u8 {
+    let n: u8 = w.len as u8;
+    if LINE_LEN - POS < n { return 0; }
+    let i: u8 = 0;
+    while i < n {
+        if upper(LINE[POS + i]) != upper(w[i] as u8) { return 0; }
+        i = i + 1;
+    }
+    // A word only matches if it ends here: "cls" must not match "clsx".
+    if POS + n < LINE_LEN {
+        if LINE[POS + n] != CH_SPACE { return 0; }
+    }
+    POS = POS + n;
+    return 1;
+}
+
+fn hex_value(ch: u8) -> u8 {
+    if ch >= 0x30 && ch <= 0x39 { return ch - 0x30; }
+    if ch >= 0x41 && ch <= 0x46 { return ch - 0x41 + 10; }
+    if ch >= 0x61 && ch <= 0x66 { return ch - 0x61 + 10; }
+    return 0xFF;
+}
+
+/// One to four hex digits into ARG_ADDR. PARSE_OK says whether there were any.
+fn parse_hex() {
+    skip_spaces();
+    let value: u16 = 0;
+    let digits: u8 = 0;
+    while POS < LINE_LEN && digits < 4 {
+        let d: u8 = hex_value(LINE[POS]);
+        if d == 0xFF { break; }
+        value = (value << 4) | (d as u16);
+        digits = digits + 1;
+        POS = POS + 1;
+    }
+    ARG_ADDR = value;
+    if digits == 0 { PARSE_OK = 0; } else { PARSE_OK = 1; }
+}
+
+fn parse_byte() {
+    parse_hex();
+    ARG_BYTE = ARG_ADDR.low;
+}
+
+// ===========================================================================
+// Commands
+// ===========================================================================
+
+const BANNER_TEXT: str = "Wraith on Symon";
+const PROMPT:      str = "> ";
+const ERR_SYNTAX:  str = "?syntax\r\n";
+const ERR_UNKNOWN: str = "?command - type HELP\r\n";
+
+fn print_banner() {
+    puts("\r\n");
+    puts(BANNER_TEXT);
+    puts("\r\n6551 console, 6522 tick, 6545 display\r\n");
+    puts("HELP for commands\r\n\r\n");
+}
+
+fn cmd_help() {
+    puts("CLS               clear the screen\r\n");
+    puts("ECHO <text>       print text\r\n");
+    puts("PEEK <addr>       read one byte\r\n");
+    puts("POKE <addr> <bb>  write one byte\r\n");
+    puts("DUMP <addr>       64 bytes from addr\r\n");
+    puts("GO <addr>         jump to addr\r\n");
+    puts("TICKS             timer 1 tick count\r\n");
+    puts("BOUNCE            animate, any key stops\r\n");
+    puts("MARQUEE <text>    scroll text, any key stops\r\n");
+}
+
+fn cmd_peek() {
+    parse_hex();
+    if PARSE_OK == 0 { puts(ERR_SYNTAX); return; }
+    put_hex16(ARG_ADDR);
+    out(0x3A);              // ':'
+    space();
+    put_hex8(mem_read(ARG_ADDR));
+    newline();
+}
+
+fn cmd_poke() {
+    parse_hex();
+    if PARSE_OK == 0 { puts(ERR_SYNTAX); return; }
+    let target: u16 = ARG_ADDR;
+    parse_byte();
+    if PARSE_OK == 0 { puts(ERR_SYNTAX); return; }
+    mem_write(target, ARG_BYTE);
+    puts("ok\r\n");
+}
+
+fn cmd_dump() {
+    parse_hex();
+    if PARSE_OK == 0 { puts(ERR_SYNTAX); return; }
+    let at: u16 = ARG_ADDR;
+    let row: u8 = 0;
+    while row < 4 {
+        put_hex16(at);
+        out(0x3A);
+        let i: u8 = 0;
+        while i < 16 {
+            space();
+            put_hex8(mem_read(at + (i as u16)));
+            i = i + 1;
+        }
+        space();
+        // The same sixteen bytes as characters, unprintables as '.'.
+        i = 0;
+        while i < 16 {
+            let b: u8 = mem_read(at + (i as u16));
+            if b < CH_SPACE || b >= ASCII_DEL { b = 0x2E; }
+            out(b);
+            i = i + 1;
+        }
+        newline();
+        at = at + 16;
+        row = row + 1;
+    }
+}
+
+fn cmd_go() {
+    parse_hex();
+    if PARSE_OK == 0 { puts(ERR_SYNTAX); return; }
+    puts("jump ");
+    put_hex16(ARG_ADDR);
+    newline();
+    mem_jump(ARG_ADDR);
+}
+
+fn cmd_echo() {
+    skip_spaces();
+    while POS < LINE_LEN {
+        out(LINE[POS]);
+        POS = POS + 1;
+    }
+    newline();
+}
+
+fn cmd_ticks() {
+    if HAVE_TIMER == 0 {
+        puts("timer 1 is not running - delays are counted\r\n");
+        return;
+    }
+    put_dec16(ticks_now());
+    puts(" ticks\r\n");
+}
+
+/// A character bouncing off the edges of the display, one step per tick.
+/// Direction is a byte rather than a signed step so that `x - 1` at the left
+/// wall never has to underflow: the two cases are written out.
+fn cmd_bounce() {
+    screen_clear();
+    let x: u8 = 1;
+    let y: u8 = 1;
+    let right: u8 = 1;
+    let down:  u8 = 1;
+    loop {
+        if key_ready() != 0 { break; }
+        vpoke(y, x, CH_SPACE);
+
+        if right != 0 {
+            x = x + 1;
+            if x >= COLS - 1 { right = 0; }
+        } else {
+            x = x - 1;
+            if x == 0 { right = 1; }
+        }
+        if down != 0 {
+            y = y + 1;
+            if y >= ROWS - 1 { down = 0; }
+        } else {
+            y = y - 1;
+            if y == 0 { down = 1; }
+        }
+
+        vpoke(y, x, CH_BALL);
+        delay_ticks(1);
+    }
+    key_flush();
+    screen_clear();
+}
+
+/// Scroll the rest of the line across the middle row. The text is redrawn
+/// from the buffer every frame at a rotating offset, so nothing is copied and
+/// the frame costs 80 stores.
+fn cmd_marquee() {
+    skip_spaces();
+    let start: u8 = POS;
+    let len:   u8 = LINE_LEN - POS;
+    if len == 0 { puts(ERR_SYNTAX); return; }
+
+    screen_clear();
+    let row:   u8 = ROWS / 2;
+    let width: u8 = len + 8;     // the text, then a gap before it comes round
+    let off:   u8 = 0;
+    loop {
+        if key_ready() != 0 { break; }
+        let c: u8 = 0;
+        while c < COLS {
+            let k: u8 = (off + c) % width;
+            let ch: u8 = CH_SPACE;
+            if k < len { ch = LINE[start + k]; }
+            vpoke(row, c, ch);
+            c = c + 1;
+        }
+        off = off + 1;
+        if off >= width { off = 0; }
+        delay_ticks(2);
+    }
+    key_flush();
+    screen_clear();
+}
+
+// ===========================================================================
+// Dispatch
+// ===========================================================================
+
+fn run_line() {
+    POS = 0;
+    skip_spaces();
+    if at_end() != 0 { return; }
+
+    if word_is("HELP") != 0 { cmd_help(); return; }
+    if word_is("CLS") != 0 { screen_clear(); return; }
+    if word_is("ECHO") != 0 { cmd_echo(); return; }
+    if word_is("PEEK") != 0 { cmd_peek(); return; }
+    if word_is("POKE") != 0 { cmd_poke(); return; }
+    if word_is("DUMP") != 0 { cmd_dump(); return; }
+    if word_is("GO") != 0 { cmd_go(); return; }
+    if word_is("TICKS") != 0 { cmd_ticks(); return; }
+    if word_is("BOUNCE") != 0 { cmd_bounce(); return; }
+    if word_is("MARQUEE") != 0 { cmd_marquee(); return; }
+
+    puts(ERR_UNKNOWN);
+}
+
+#[reset]
+fn main() {
+    asm {
+        "LDX #$FF",
+        "TXS",              // the hardware stack is undefined at power-on
+        "CLD"               // and so is decimal mode
+    }
+
+    acia_init();
+    crtc_init();
+    screen_clear();
+    enable_interrupts();
+    timer_init();          // probes for its own hardware, so IRQs first
+
+    print_banner();
+
+    loop {
+        puts(PROMPT);
+        read_line();
+        run_line();
+    }
+}
