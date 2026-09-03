@@ -4,6 +4,7 @@
 *.asm
 *.o
 *.bin
+*.rom
 
 # Local agent/editor config
 .claude/
