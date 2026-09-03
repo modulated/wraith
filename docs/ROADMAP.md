@@ -74,6 +74,7 @@ read against a current picture:
 | Multidimensional arrays (`[[T; N]; M]`) — a local initialises from a nested literal, matching `static`/`const` | `tests/e2e/local_arrays.rs`, `tests/e2e/types.rs` |
 | `let mut x` names the absent `mut` instead of failing with "expected `:`" | `tests/e2e/error_diagnostics.rs` |
 | A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
+| An interrupt handler saves only the zero-page scratch its reachable code writes, not the whole region (a counter handler: 63 bytes → 0) | `tests/e2e/interrupts.rs` |
 
 ## What keeps going wrong
 
@@ -910,6 +911,21 @@ are neither generated nor exercised beyond the tag.
   kept because dropping the math working storage from the save list (keeping
   the push/pop balance, so nothing else breaks) fails the new test and no
   existing one.
+
+  *Narrowed.* The save set was the whole shared scratch region — 63 zero-page
+  bytes, ~1000 cycles per interrupt — whatever the handler touched. It is now
+  exactly the scratch bytes the handler's reachable code *writes*: an address
+  the handler never writes it cannot corrupt, and codegen knows the addresses
+  where the sema AST scan does not, so a pre-pass emits each reachable function
+  into a throwaway emitter and unions the zero-page stores
+  (`narrow_interrupt_scratch`). A `DATA_PORT = DATA_PORT + 1` counter handler
+  now saves nothing; `interrupt_counter` shrank 824 → 68 bytes. It falls back to
+  the full region whenever the graph is opaque — an indirect call, inline `asm`,
+  or a 16-bit math routine whose own scratch use is not scanned — so the
+  conservative save is still there where it must be. The `run_interrupted` guard
+  now also drives a *non-opaque* scratch-touching handler (a 16-bit compare
+  through `$20/$21`, the same bytes `main`'s arithmetic stages), which is where
+  a save narrowed one byte too far would surface.
 
   The storm has to be bounded: an interrupt pulls the CPU out of `loop {}` as
   readily as out of anything else, and the harness detects termination by the

@@ -13,9 +13,9 @@ factorial_tail 334 0 142
 fib_recurse 243 0 105
 fibonacci 212 0 87
 fsm 484 4 222
-interrupt_counter 824 0 526
-interrupts 575 0 314
-intrinsics_demo 529 0 317
+interrupt_counter 68 0 22
+interrupts 203 0 66
+intrinsics_demo 151 0 65
 loop_unroll_demo 0 0 38
 monitor_standalone 2711 153 1047
 pointers 597 0 242

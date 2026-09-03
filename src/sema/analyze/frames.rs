@@ -225,6 +225,14 @@ impl SemanticAnalyzer {
                     save_scratch,
                     save_math,
                     shared_frames,
+                    // Codegen narrows the scratch save by scanning these
+                    // functions' emitted code; sorted for a deterministic scan.
+                    reachable: {
+                        let mut r: Vec<String> = reachable.iter().cloned().collect();
+                        r.sort();
+                        r
+                    },
+                    scratch_addrs: None,
                 },
             );
         }

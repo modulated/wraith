@@ -1140,7 +1140,7 @@ pub struct FrameInfo {
 /// interrupted main-thread code. Computed by `finalize_frames` per handler.
 #[derive(Debug, Clone, Default)]
 pub struct InterruptSaveInfo {
-    /// Save the shared codegen scratch ($20-$3F, $F0-$FE) around the handler body.
+    /// Save the shared codegen scratch ($20-$3F, $E0-$FE) around the handler body.
     pub save_scratch: bool,
     /// Save the mul16/div16 working storage ($D0-$DC) — set if the handler graph
     /// performs 16-bit multiply/divide/modulo.
@@ -1148,6 +1148,16 @@ pub struct InterruptSaveInfo {
     /// (base, size) of frames belonging to functions shared between this handler
     /// and main-thread code, which must be preserved across the handler.
     pub shared_frames: Vec<(u8, u8)>,
+    /// Functions reachable from this handler, so codegen can scan their emitted
+    /// code to learn which scratch bytes the handler's graph actually writes.
+    pub reachable: Vec<String>,
+    /// The exact scratch addresses to save, narrowed by codegen from the bytes
+    /// the handler's reachable code writes. `None` until codegen computes it (or
+    /// when it cannot see through the graph — an indirect call, inline `asm`,
+    /// or a math routine), in which case `zp_save_addrs` falls back to the whole
+    /// scratch region. Sema's own depth check runs before this is set and so is
+    /// always conservative.
+    pub scratch_addrs: Option<Vec<u8>>,
 }
 
 impl InterruptSaveInfo {
@@ -1161,12 +1171,21 @@ impl InterruptSaveInfo {
     pub fn zp_save_addrs(&self) -> Vec<u8> {
         let mut addrs = Vec::new();
         if self.save_scratch {
-            addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
-            addrs.extend(0xE0u8..=0xEF); // indirect-arg staging block: an NMI
-            // landing between staging and the callee's prologue copy would
-            // otherwise destroy in-flight args when the handler itself calls
-            // indirectly
-            addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
+            match &self.scratch_addrs {
+                // Narrowed by codegen to the scratch bytes the handler's graph
+                // actually writes; already a subset of the region below.
+                Some(narrowed) => addrs.extend(narrowed.iter().copied()),
+                // Not yet narrowed, or the graph is opaque: save the whole
+                // shared scratch region.
+                None => {
+                    addrs.extend(0x20u8..=0x3F); // codegen temps / pointer ops
+                    addrs.extend(0xE0u8..=0xEF); // indirect-arg staging block: an NMI
+                    // landing between staging and the callee's prologue copy would
+                    // otherwise destroy in-flight args when the handler itself calls
+                    // indirectly
+                    addrs.extend(0xF0u8..=0xFE); // binary-save + arg pools + scalar spill
+                }
+            }
         }
         if self.save_math {
             addrs.extend(0xD0u8..=0xDC); // mul16/div16 working storage + params

@@ -202,6 +202,41 @@ fn a_math_handler_saves_the_math_scratch() {
     assert!(body.contains("LDA $20"), "binary-op scratch saved:\n{body}");
 }
 
+/// A handler that touches scratch but is *not* opaque saves only the bytes it
+/// writes, not the whole region. A 16-bit compare stages its operands through
+/// $20/$21; it must save those, and it has no business saving the argument
+/// pool ($F4+) or the indirect-arg staging block ($E0+) it never touches.
+#[test]
+fn a_handler_saves_only_the_scratch_it_writes() {
+    let asm = compile_success(
+        r#"
+        const OUT: addr = 0x400;
+        #[irq]
+        fn on_irq() {
+            let a: u16 = 700;
+            let b: u16 = 9;
+            if a > b { OUT = 1; }
+        }
+        #[reset]
+        fn main() { loop {} }
+    "#,
+    );
+    let handler = asm.split("on_irq:").nth(1).expect("handler emitted");
+    let body = handler.split("RTI").next().unwrap();
+    assert!(
+        body.contains("LDA $20"),
+        "16-bit compare scratch saved:\n{body}"
+    );
+    // The full blanket would push all of $F0-$FE and $E0-$EF; the narrowed
+    // save touches none of the pool bytes this handler never writes.
+    for unused in ["LDA $F4", "LDA $F0", "LDA $E0", "LDA $3F"] {
+        assert!(
+            !body.contains(unused),
+            "narrowed handler saved `{unused}` it never writes:\n{body}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hardware-stack (page 1) depth
 //

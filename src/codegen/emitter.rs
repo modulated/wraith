@@ -55,6 +55,21 @@ pub struct Emitter {
     /// asked for too much at once rather than reporting a spanless internal
     /// error. Set once per statement in `generate_stmt`.
     pub blame_span: Option<crate::ast::Span>,
+    /// Zero-page addresses this emitter has written at a statically known
+    /// location (a store or read-modify-write to a bare `$NN`). Used to narrow
+    /// an interrupt handler's scratch save to what its reachable code touches.
+    pub zp_written: [bool; 256],
+    /// Set when a write might reach zero page at an address this pass cannot
+    /// pin — an indexed or indirect store, an inline `asm` instruction, or a
+    /// raw routine body. An interrupt handler whose graph sets this keeps the
+    /// full conservative scratch save rather than a narrowed one.
+    pub zp_write_opaque: bool,
+    /// Symbol name → absolute address, so a store to a named location (a
+    /// `const addr` I/O register, which is emitted by name and is `Absolute`
+    /// even when its value is in zero page) can be classed as zero-page or not.
+    /// Populated only for the interrupt scratch-narrowing pass; empty otherwise,
+    /// where a symbol store is treated as opaque and no narrowing is read.
+    pub symbol_addrs: std::collections::HashMap<String, u16>,
 }
 
 impl Default for Emitter {
@@ -86,7 +101,70 @@ impl Emitter {
             needs_mod16: false,
             needs_indirect_call: false,
             blame_span: None,
+            zp_written: [false; 256],
+            zp_write_opaque: false,
+            symbol_addrs: std::collections::HashMap::new(),
         }
+    }
+
+    /// Every 6502/65C02 mnemonic that writes memory, so anything else can be
+    /// treated as touching no zero page. Stores, read-modify-writes, and the
+    /// 65C02 single-bit `RMBn`/`SMBn`. Stack pushes write page one, never zero
+    /// page, so they are deliberately absent.
+    fn writes_memory(mnemonic: &str) -> bool {
+        matches!(
+            mnemonic,
+            "STA"
+                | "STX"
+                | "STY"
+                | "STZ"
+                | "INC"
+                | "DEC"
+                | "ASL"
+                | "LSR"
+                | "ROL"
+                | "ROR"
+                | "TRB"
+                | "TSB"
+        ) || (mnemonic.len() == 4
+            && (mnemonic.starts_with("RMB") || mnemonic.starts_with("SMB"))
+            && mnemonic.as_bytes()[3].is_ascii_digit())
+    }
+
+    /// Record the zero-page effect of a memory-writing instruction, for
+    /// interrupt scratch narrowing. A bare `$NN` operand is a precise zero-page
+    /// write; an absolute `$NNNN` or the accumulator touches no zero page; any
+    /// other form that writes memory (a zero-page index, an indirect, a symbol)
+    /// could land in zero page at an address this pass cannot pin, so it is
+    /// recorded as opaque and forces the full save.
+    fn note_zp_write(&mut self, operand: &str) {
+        // Drop any trailing `; comment` a raw line may carry.
+        let op = operand.split(';').next().unwrap_or("").trim();
+        if op.is_empty() || op.eq_ignore_ascii_case("A") {
+            return; // e.g. `ASL A`: no memory touched.
+        }
+        if let Some(hex) = op.strip_prefix('$') {
+            if hex.len() == 2 {
+                if let Ok(addr) = u8::from_str_radix(hex, 16) {
+                    self.zp_written[addr as usize] = true;
+                    return;
+                }
+            } else if hex.len() == 4 && u16::from_str_radix(hex, 16).is_ok() {
+                return; // absolute: not zero page.
+            }
+        } else if op.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            // A bare symbol — a `const addr` I/O register, stored by name. Its
+            // recorded address decides whether it lands in zero page.
+            match self.symbol_addrs.get(op) {
+                Some(&a) if a <= 0xFF => self.zp_written[a as usize] = true,
+                Some(_) => {}                        // absolute
+                None => self.zp_write_opaque = true, // a symbol we cannot resolve
+            }
+            return;
+        }
+        // A zero-page index (`$20,X`), an indirect (`($20),Y`), or anything else
+        // that could reach zero page at an address this pass cannot pin.
+        self.zp_write_opaque = true;
     }
 
     /// Build a "zero-page scratch pool exhausted" diagnostic blamed on the
@@ -184,6 +262,14 @@ impl Emitter {
         // 0e2cd37, and of `x * y + x` eliding the reload of x after JSR mul16).
         if mnemonic == "JSR" {
             self.reg_state.invalidate_all();
+        }
+
+        // Record which zero-page bytes a store or read-modify-write touches, so
+        // an interrupt handler's scratch save can be narrowed to them. Inline
+        // `asm` reaches here too (it is emitted through `emit_inst`), so an
+        // exotic addressing mode in a handler is caught as opaque.
+        if Self::writes_memory(mnemonic) {
+            self.note_zp_write(operand);
         }
 
         self.track_effect(mnemonic, operand);
@@ -298,6 +384,18 @@ impl Emitter {
     pub fn emit_raw(&mut self, line: &str) {
         self.output.push_str(line);
         self.output.push('\n');
+
+        // A raw line carrying a store still writes zero page, so track it the
+        // same as `emit_inst` does — the boolean-materialisation and 16-bit
+        // routines emit their instructions this way. Labels (`foo:`),
+        // directives (`.BYTE`), and comments (`;`) write nothing. The write set
+        // is exhaustive for zero page, so any other mnemonic is safely ignored.
+        let t = line.trim();
+        let mut parts = t.splitn(2, char::is_whitespace);
+        let mnemonic = parts.next().unwrap_or("");
+        if Self::writes_memory(mnemonic) {
+            self.note_zp_write(parts.next().unwrap_or(""));
+        }
     }
 
     pub fn emit_org(&mut self, address: u16) {
