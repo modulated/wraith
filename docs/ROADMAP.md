@@ -77,6 +77,7 @@ read against a current picture:
 | An interrupt handler saves only the zero-page scratch its reachable code writes, not the whole region (a counter handler: 63 bytes → 0) | `tests/e2e/interrupts.rs` |
 | A comparison collapses to a bare branch inside a standalone function, not only when inlined — a void `RTS` no longer looks like it reads A and the flags | `tests/e2e/branch_fusion.rs` |
 | A constant or zero-extended 16-bit operand folds into the immediate that reads it (`CMP #$54` / `ADC #$00`) instead of staging through the `$20/$21` scratch pair | `tests/e2e/execution.rs` |
+| An expression argument with no call in it is evaluated straight into the callee's frame slot, skipping the `$F4`-`$FE` pool round-trip and the byte-by-byte copy that followed it | `tests/e2e/nested_calls.rs` |
 
 ## What keeps going wrong
 
@@ -675,13 +676,22 @@ pool (`$F4-$FE`) as one contiguous block, so a call nested in another call's
 argument list needed room for both lists at once and four 16-bit arguments
 inside four more was a compile error.
 
-A call whose whole list fits still stages there — it is the cheaper path, `LDA
-temp; STA param` per byte, and nothing that used to fit changed by a byte. When
-the block does not fit, each argument now moves to the software stack as soon
-as it is evaluated, so the pool holds only that call's *widest single
-argument* and the depth is bounded by the stack's 256 bytes. Because the frame
-save shares that stack, a recursive callee's save happens before the arguments
-go on rather than after, or it would bury them.
+A call whose whole list fits still stages there when it has to — but the
+common case no longer pays for the pool at all. When no argument contains a
+call, the callee is not address-taken and the edge is not a recursion one,
+each argument is evaluated straight into the callee's frame slot, skipping the
+`$F4`-`$FE` pool and the `LDA temp; STA param` copy that used to follow it. The
+frame colouring already guarantees those slots do not alias the caller's live
+frame outside a recursion SCC, and the stdlib helpers an argument's evaluation
+may `JSR` work in `$D0`-`$D8`, clear of the `$40`-`$CF` frame region, so a slot
+written early cannot be clobbered while a later argument is built. This is
+where the byte savings in the code-size baseline came from. The pool is still
+the path for a recursive edge, an address-taken callee, or a list with a call
+nested in it. When even the pool does not fit, each argument moves to the
+software stack as soon as it is evaluated, so the pool holds only that call's
+*widest single argument* and the depth is bounded by the stack's 256 bytes.
+Because the frame save shares that stack, a recursive callee's save happens
+before the arguments go on rather than after, or it would bury them.
 
 What is left is that a nesting level still costs its widest argument, so around
 five levels of 16-bit nesting exhausts the pool. Removing even that means
