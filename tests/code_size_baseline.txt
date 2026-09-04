@@ -11,7 +11,7 @@ dead_code_demo 20 0 6
 device_drivers 2075 20 859
 factorial_tail 286 0 113
 fib_recurse 243 0 100
-fibonacci 212 0 82
+fibonacci 212 0 79
 fsm 420 4 190
 interrupt_counter 68 0 22
 interrupts 203 0 65
@@ -23,8 +23,8 @@ slice_assign 99 0 32
 slice_test 2081 0 796
 stack_overflow_demo 165 0 65
 string_concat 102 22 44
-string_features_demo 1004 55 418
-string_iteration 440 6 174
+string_features_demo 1004 55 406
+string_iteration 440 6 171
 string_slicing 117 12 49
 strings 270 21 105
 struct 157 0 56

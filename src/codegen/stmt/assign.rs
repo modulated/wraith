@@ -1925,10 +1925,11 @@ pub(super) fn generate_assign(
                     .get(&target.span)
                     .or_else(|| info.table.lookup(target_name));
 
-                // INC/DEC operate on a single byte and do not touch the
-                // carry, so they cannot implement ±1 on a multi-byte
-                // value: `a = a + 1` on a u16 holding $00FF must carry
-                // into the high byte, which INC alone never does.
+                // A single-byte `x = x ± 1` is one INC/DEC. INC/DEC do not
+                // touch the carry, so a multi-byte value needs the carry/borrow
+                // supplied by hand (the two-byte block below); a `u16` holding
+                // $00FF must carry into its high byte, which INC alone never
+                // does.
                 let is_single_byte = sym.is_some_and(|s| {
                     matches!(
                         s.ty,
@@ -1937,6 +1938,21 @@ pub(super) fn generate_assign(
                                 | crate::ast::PrimitiveType::I8
                                 | crate::ast::PrimitiveType::B8
                                 | crate::ast::PrimitiveType::Bool
+                        )
+                    )
+                });
+
+                // The plain binary 16-bit types. `b16` is excluded on purpose:
+                // BCD ±1 has to run through decimal-mode `ADC`/`SBC`, and INC
+                // ignores the decimal flag, so `$09 + 1` would give `$0A` where
+                // BCD wants `$10`. `addr` is a one-byte type here, so it is not
+                // in this set; pointer `+`/`-` is refused in sema and never
+                // reaches this path.
+                let is_two_byte = sym.is_some_and(|s| {
+                    matches!(
+                        s.ty,
+                        crate::sema::types::Type::Primitive(
+                            crate::ast::PrimitiveType::U16 | crate::ast::PrimitiveType::I16
                         )
                     )
                 });
@@ -1979,6 +1995,75 @@ pub(super) fn generate_assign(
                             // x = x - 1 -> DEC $addr
                             emitter.emit_inst("DEC", &format!("${:04X}", *addr));
                             emitter.reg_state.invalidate_memory(*addr);
+                            return Ok(());
+                        }
+                        _ => {
+                            // Not an INC/DEC pattern, fall through to normal codegen
+                        }
+                    }
+                }
+
+                // Two-byte `x = x ± 1`: INC/DEC the low byte, then carry (or
+                // borrow) into the high byte by hand, instead of the full
+                // load / add-with-carry / store-both path. The low and high
+                // bytes are adjacent, low first (little-endian). A fresh label
+                // ends the sequence; `emit_label` invalidates register tracking
+                // there, so the branch join needs no reasoning of its own.
+                if let Some(sym) = sym
+                    && is_two_byte
+                {
+                    // The high byte sits one past the low. A zero-page value at
+                    // $FF would put its high byte outside zero page, so leave
+                    // that (impossible for a coloured frame slot) to the normal
+                    // path.
+                    match (op, &sym.location) {
+                        (
+                            crate::ast::BinaryOp::Add,
+                            crate::sema::table::SymbolLocation::ZeroPage(addr),
+                        ) if *addr < 0xFF => {
+                            // INC lo; BNE end; INC hi; end:
+                            let end = emitter.next_label("incw");
+                            emitter.emit_inst("INC", &format!("${:02X}", *addr));
+                            emitter.emit_inst("BNE", &end);
+                            emitter.emit_inst("INC", &format!("${:02X}", addr + 1));
+                            emitter.emit_label(&end);
+                            return Ok(());
+                        }
+                        (
+                            crate::ast::BinaryOp::Add,
+                            crate::sema::table::SymbolLocation::Absolute(addr),
+                        ) => {
+                            let end = emitter.next_label("incw");
+                            emitter.emit_inst("INC", &format!("${:04X}", *addr));
+                            emitter.emit_inst("BNE", &end);
+                            emitter.emit_inst("INC", &format!("${:04X}", addr + 1));
+                            emitter.emit_label(&end);
+                            return Ok(());
+                        }
+                        (
+                            crate::ast::BinaryOp::Sub,
+                            crate::sema::table::SymbolLocation::ZeroPage(addr),
+                        ) if *addr < 0xFF => {
+                            // LDA lo; BNE end; DEC hi; end: DEC lo. The low byte
+                            // being zero is exactly when the decrement borrows.
+                            let end = emitter.next_label("decw");
+                            emitter.emit_inst("LDA", &format!("${:02X}", *addr));
+                            emitter.emit_inst("BNE", &end);
+                            emitter.emit_inst("DEC", &format!("${:02X}", addr + 1));
+                            emitter.emit_label(&end);
+                            emitter.emit_inst("DEC", &format!("${:02X}", *addr));
+                            return Ok(());
+                        }
+                        (
+                            crate::ast::BinaryOp::Sub,
+                            crate::sema::table::SymbolLocation::Absolute(addr),
+                        ) => {
+                            let end = emitter.next_label("decw");
+                            emitter.emit_inst("LDA", &format!("${:04X}", *addr));
+                            emitter.emit_inst("BNE", &end);
+                            emitter.emit_inst("DEC", &format!("${:04X}", addr + 1));
+                            emitter.emit_label(&end);
+                            emitter.emit_inst("DEC", &format!("${:04X}", *addr));
                             return Ok(());
                         }
                         _ => {

@@ -78,6 +78,8 @@ read against a current picture:
 | A comparison collapses to a bare branch inside a standalone function, not only when inlined — a void `RTS` no longer looks like it reads A and the flags | `tests/e2e/branch_fusion.rs` |
 | A constant or zero-extended 16-bit operand folds into the immediate that reads it (`CMP #$54` / `ADC #$00`) instead of staging through the `$20/$21` scratch pair | `tests/e2e/execution.rs` |
 | An expression argument with no call in it is evaluated straight into the callee's frame slot, skipping the `$F4`-`$FE` pool round-trip and the byte-by-byte copy that followed it | `tests/e2e/nested_calls.rs` |
+| A `u16`/`i16` `x = x ± 1` is an `INC`/`DEC` with the carry (or borrow) supplied by hand, not the fifteen-instruction load / add-with-carry / store-both — `b16` stays on the decimal-mode path | `tests/e2e/execution.rs` |
+| A 16-bit add/subtract/bitwise result stored to memory skips the `PHA`/`TYA`/`TAY`/`PLA` shuffle when A, Y and the flags are dead after the store — eight instructions become five | `tests/e2e/execution.rs` |
 
 ## What keeps going wrong
 
@@ -150,6 +152,18 @@ cost several bugs before it was named.
   agreeing with a reference you derived from the code proves nothing. And
   beware a test that passes by luck of layout: the `str` page-crossing bug was
   invisible until two literals landed in different pages.
+
+- **A liveness rule two passes read in opposite directions.** Whether a bare
+  `RTS` reads the accumulator is a judgement call, and two peepholes need
+  opposite answers. `collapse_boolean_compares` needs it to read *nothing* — a
+  void condition's throwaway boolean must look dead through the return, or it
+  never collapses. The 16-bit store fusion needs it to read *A and Y* — the
+  register cache can return a just-stored value straight from the registers with
+  a bare `RTS` and no reload (`x = x - 0; return x`), so a fusion that leaves the
+  high byte in A silently returns it as the low. The shared `a_read`/`y_read`
+  omit `RTS` for the first pass; the fusion computes its own liveness that adds
+  it back, rather than either pass borrowing the other's answer. A fuzzer at
+  seed 6111 found the store fusion trusting the wrong one.
 
 ---
 
