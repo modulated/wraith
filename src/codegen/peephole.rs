@@ -178,6 +178,7 @@ pub fn optimize(
         result = eliminate_jmp_to_next(&result);
         result = collapse_boolean_compares(&result);
         result = fold_literal_operand(&result);
+        result = fold_staged_16bit_literal(&result);
         result = eliminate_nop_carry_pairs(&result);
         result = eliminate_redundant_cmp_zero(&result);
         result = eliminate_redundant_ldy_zero(&result);
@@ -664,6 +665,199 @@ fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
     }
 
     result
+}
+
+/// Fold a compile-time constant staged into the 16-bit scratch pair
+/// (`$20`/`$21`, `MemoryLayout::temp_reg()`) into the immediate operand of the
+/// instruction that reads it back.
+///
+/// The 16-bit binary driver stages its right operand into `$20`/`$21` and reads
+/// it with `CMP $20`/`CPY $21` (a compare) or `ADC`/`SBC` (arithmetic). When
+/// that operand is a constant — a literal bound like `i < 340`, or the `#$00`
+/// high half of a zero-extended byte — the staged byte is a known immediate and
+/// the reader can take it directly. Dropping the store leaves the feeding
+/// `LDA #imm`/`LDY #imm` dead, which the load-elimination passes then remove.
+///
+/// Conservative: a temp byte is folded only when *every* reference to it before
+/// its next plain write is an immediate-capable read (`ADC SBC CMP CPX CPY AND
+/// ORA EOR`), and never across a `JSR` (a callee may stage its own values there)
+/// or a read-modify-write or indirect use.
+fn fold_staged_16bit_literal(lines: &[Line]) -> Vec<Line> {
+    const TEMPS: [&str; 2] = ["$20", "$21"];
+    const FOLDABLE: [&str; 8] = ["ADC", "SBC", "CMP", "CPX", "CPY", "AND", "ORA", "EOR"];
+    const PURE_WRITE: [&str; 4] = ["STA", "STX", "STY", "STZ"];
+
+    let significant: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !matches!(l, Line::Comment(_) | Line::Empty))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Uses of `temp` that the store at `start-1` *dominates*: reads reached
+    // with the store's value for certain, so their `$temp` operand can become
+    // the immediate. Scanning stops at the first control-flow edge (a label, a
+    // call, a return) or a redefinition — past any of those a different value
+    // could reach a read. A decimal region and an indirect are refused entirely
+    // (see the notes below), so this returns `None` there rather than a partial
+    // list. `Some(vec)` otherwise, possibly empty.
+    let dominated_uses = |start: usize, temp: &str| -> Option<Vec<usize>> {
+        let mut uses = Vec::new();
+        for &idx in significant.iter().skip(start) {
+            let Line::Instruction {
+                mnemonic, operand, ..
+            } = &lines[idx]
+            else {
+                return Some(uses); // a label/directive ends the dominated run
+            };
+            match mnemonic.as_str() {
+                // An immediate `ADC`/`SBC` is correct in a decimal region but
+                // exposes the binary `CLC/ADC #1 -> INC A` peephole; leave BCD
+                // staged in memory.
+                "SED" => return None,
+                "JSR" | "RTS" | "RTI" | "BRK" => return Some(uses),
+                _ => {}
+            }
+            match operand.as_deref() {
+                // `($20),Y` reads the pointer at $20 *and* $21 but names only
+                // $20, so a store to $21 feeding it looks unreferenced.
+                Some(op) if op.contains('(') => return None,
+                Some(op) if op == temp => {
+                    if FOLDABLE.contains(&mnemonic.as_str()) {
+                        uses.push(idx);
+                    } else {
+                        // A plain write ends the run; any other read is
+                        // un-foldable. Either way, stop with what we have.
+                        return Some(uses);
+                    }
+                }
+                Some(op) if op.contains(temp) => return None, // `$20,X`
+                _ => {}
+            }
+        }
+        Some(uses)
+    };
+
+    // Whether the store at `start-1` is dead once its `dominated` uses are
+    // rewritten to immediates: no *other* reference to `temp` reaches, in
+    // straight-line order, before the temp is next plainly written or the
+    // stream ends. Any reference not in `dominated` (a read past a join, an
+    // indirect, a call that might read the pool) keeps the store. Conservative:
+    // it treats textual order as reachability, which only ever keeps a store.
+    let store_dead = |start: usize, temp: &str, dominated: &[usize]| -> bool {
+        for &idx in significant.iter().skip(start) {
+            let Line::Instruction {
+                mnemonic, operand, ..
+            } = &lines[idx]
+            else {
+                continue;
+            };
+            if mnemonic == "JSR" {
+                return false; // a callee may read the staging pool
+            }
+            match operand.as_deref() {
+                Some(op) if op == temp => {
+                    if PURE_WRITE.contains(&mnemonic.as_str()) {
+                        return true; // redefined before any un-rewritten read
+                    }
+                    if !dominated.contains(&idx) {
+                        return false; // a real read of the stored value survives
+                    }
+                }
+                Some(op) if op.contains(temp) => return false, // indirect/indexed
+                _ => {}
+            }
+        }
+        true
+    };
+
+    let mut delete: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut rewrite: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
+    // Immediate currently held in each register, cleared by any non-immediate
+    // write (and by a call). Lets a store to a temp be tagged with its value.
+    let (mut a, mut x, mut y): (Option<String>, Option<String>, Option<String>) =
+        (None, None, None);
+
+    for (sp, &idx) in significant.iter().enumerate() {
+        let Line::Instruction {
+            mnemonic, operand, ..
+        } = &lines[idx]
+        else {
+            // A label or directive is a control-flow join (or a segment break):
+            // what a register holds past it is not known from the linear scan.
+            a = None;
+            x = None;
+            y = None;
+            continue;
+        };
+        let m = mnemonic.as_str();
+        let op = operand.as_deref();
+
+        // A store of a known-immediate register into a temp byte is a candidate.
+        let staged = match (m, op) {
+            ("STA", Some(t)) if TEMPS.contains(&t) => a.clone().map(|v| (t, v)),
+            ("STY", Some(t)) if TEMPS.contains(&t) => y.clone().map(|v| (t, v)),
+            ("STX", Some(t)) if TEMPS.contains(&t) => x.clone().map(|v| (t, v)),
+            _ => None,
+        };
+        if let Some((temp, imm)) = staged
+            && let Some(uses) = dominated_uses(sp + 1, temp)
+            && !uses.is_empty()
+        {
+            if store_dead(sp + 1, temp, &uses) {
+                delete.insert(idx);
+            }
+            for u in uses {
+                rewrite.insert(u, imm.clone());
+            }
+        }
+
+        // Update the register-immediate state for the next line.
+        match (m, op) {
+            ("LDA", Some(v)) if v.starts_with('#') => a = Some(v.to_string()),
+            ("LDX", Some(v)) if v.starts_with('#') => x = Some(v.to_string()),
+            ("LDY", Some(v)) if v.starts_with('#') => y = Some(v.to_string()),
+            ("JSR", _) => {
+                a = None;
+                x = None;
+                y = None;
+            }
+            _ => {
+                if a_written(m, op) != 0 {
+                    a = None;
+                }
+                if matches!(m, "LDX" | "TAX" | "INX" | "DEX" | "PLX") {
+                    x = None;
+                }
+                if matches!(m, "LDY" | "TAY" | "INY" | "DEY" | "PLY") {
+                    y = None;
+                }
+            }
+        }
+    }
+
+    if delete.is_empty() && rewrite.is_empty() {
+        return lines.to_vec();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !delete.contains(i))
+        .map(|(i, l)| match (rewrite.get(&i), l) {
+            (
+                Some(imm),
+                Line::Instruction {
+                    mnemonic, comment, ..
+                },
+            ) => Line::Instruction {
+                mnemonic: mnemonic.clone(),
+                operand: Some(imm.clone()),
+                comment: comment.clone(),
+            },
+            _ => l.clone(),
+        })
+        .collect()
 }
 
 /// Collapse a materialized boolean that a condition immediately re-tests:

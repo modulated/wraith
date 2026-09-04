@@ -76,6 +76,7 @@ read against a current picture:
 | A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
 | An interrupt handler saves only the zero-page scratch its reachable code writes, not the whole region (a counter handler: 63 bytes → 0) | `tests/e2e/interrupts.rs` |
 | A comparison collapses to a bare branch inside a standalone function, not only when inlined — a void `RTS` no longer looks like it reads A and the flags | `tests/e2e/branch_fusion.rs` |
+| A constant or zero-extended 16-bit operand folds into the immediate that reads it (`CMP #$54` / `ADC #$00`) instead of staging through the `$20/$21` scratch pair | `tests/e2e/execution.rs` |
 
 ## What keeps going wrong
 

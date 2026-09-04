@@ -2517,3 +2517,71 @@ fn field_assignment_does_not_stale_register() {
         "q must read 0x34 after the u16 field store"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 16-bit constant operands fold into the immediate that reads them
+//
+// The 16-bit binary driver stages its right operand into $20/$21 and reads it
+// back; a constant bound or a zero-extended byte is a known immediate the
+// reader can take directly (`fold_staged_16bit_literal`). These pin the win
+// and, more importantly, that it stays correct through control flow.
+// ---------------------------------------------------------------------------
+
+/// `while i < 340` counts to exactly 340 — the bound folds into `CPY #$01` /
+/// `CMP #$54`, and the loop must still terminate at the right place.
+#[test]
+fn a_folded_sixteen_bit_bound_still_terminates_the_loop() {
+    let mut e = run("const OUT0: addr = 0x0900;\n\
+         const OUT1: addr = 0x0901;\n\
+         #[reset]\n\
+         fn main() {\n\
+         \x20   let i: u16 = 0;\n\
+         \x20   while i < 340 { i = i + 1; }\n\
+         \x20   OUT0 = i.low; OUT1 = i.high;\n\
+         \x20   loop {}\n\
+         }\n");
+    // 340 = $0154.
+    assert_eq!(e.mem(0x0900), 0x54, "low byte of the final count");
+    assert_eq!(e.mem(0x0901), 0x01, "high byte of the final count");
+}
+
+/// The staging is actually gone: the loop condition reads the bound as an
+/// immediate, not from the $20/$21 scratch pair.
+#[test]
+fn a_folded_sixteen_bit_compare_uses_immediates() {
+    let asm = crate::common::harness::compile_success(
+        "const OUT: addr = 0x0900;\n\
+         #[reset]\n\
+         fn main() { let i: u16 = 0; while i < 340 { i = i + 1; } OUT = i.low; loop {} }\n",
+    );
+    assert!(
+        asm.contains("CMP #$54"),
+        "low byte not folded to an immediate:\n{asm}"
+    );
+    assert!(
+        asm.contains("CPY #$01"),
+        "high byte not folded to an immediate:\n{asm}"
+    );
+    // The compare no longer stages the constant into the scratch pair.
+    assert!(
+        !asm.contains("CMP $20") && !asm.contains("CPY $21"),
+        "the 16-bit bound is still read from scratch:\n{asm}"
+    );
+}
+
+/// A zero-extended byte adds through `ADC #$00`, not a staged `#$00` in $21.
+/// The accumulate is the shape `base + (b as u16)` from array indexing.
+#[test]
+fn a_zero_extended_byte_adds_without_staging_the_high_zero() {
+    let asm = crate::common::harness::compile_success(
+        "const OUT: addr = 0x0900;\n\
+         const IN: addr = 0xD000;\n\
+         static BASE: u16 = 4000;\n\
+         #[reset]\n\
+         fn main() { let b: u8 = IN; let r: u16 = BASE + (b as u16); OUT = r.low; loop {} }\n",
+    );
+    assert!(
+        asm.contains("ADC #$00"),
+        "zero-extend high byte not folded:\n{asm}"
+    );
+}
