@@ -629,9 +629,20 @@ fn emit_const_array(
     // .ORG. Every const array used to be written at $C000, so two of them
     // overlapped, the address ignored whatever the memory map said, and none of
     // them were visible to the #[org] conflict check.
-    let addr = section_alloc
-        .allocate("DATA", byte_size as u16)
-        .map_err(CodegenError::SectionError)?;
+    //
+    // `#[align]` (sema has already confirmed it is a const array) rounds that
+    // address up to a page boundary, so `LDA table,X` never crosses a page and
+    // the element offset is the low byte. The label moves with the `.ORG`, so
+    // every reference to the table still resolves through it.
+    let addr = if stat.align.is_some() {
+        section_alloc
+            .allocate_aligned("DATA", byte_size as u16, 256)
+            .map_err(CodegenError::SectionError)?
+    } else {
+        section_alloc
+            .allocate("DATA", byte_size as u16)
+            .map_err(CodegenError::SectionError)?
+    };
     section_alloc.record_allocation(
         name.clone(),
         addr,

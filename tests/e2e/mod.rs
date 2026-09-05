@@ -5,6 +5,7 @@
 mod addr_of_rom;
 mod aggregate_dispatch;
 mod aggregate_init;
+mod align;
 mod assign_side_effects;
 mod bcd;
 mod bcd_validation;

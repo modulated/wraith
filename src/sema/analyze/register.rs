@@ -314,6 +314,33 @@ impl SemanticAnalyzer {
             self.register_soa(&name, &declared_ty, at, stat.ty.span)?;
         }
 
+        // `#[align]` page-aligns a const array table in ROM. Two things it is
+        // not for: a mutable `static` (its RAM is repacked to reclaim dropped
+        // globals, and that repack infers sizes from address gaps that padding
+        // would corrupt — a separate piece of work), and anything that is not an
+        // array (a scalar or `str` is at most two bytes and gains nothing from a
+        // page boundary while wasting up to 255).
+        if let Some(at) = stat.align {
+            if stat.mutable {
+                return Err(SemaError::Custom {
+                    message:
+                        "#[align] is not supported on a mutable `static` yet; it applies to a \
+                              `const` array table in ROM"
+                            .to_string(),
+                    span: at,
+                });
+            }
+            if !matches!(declared_ty, Type::Array(_, _)) {
+                return Err(SemaError::Custom {
+                    message:
+                        "#[align] applies to an array table; a scalar or string gains nothing \
+                              from page alignment"
+                            .to_string(),
+                    span: at,
+                });
+            }
+        }
+
         // A generated table is folded here, not in the type checker: a `const`
         // or `static` array's initialiser is flattened during registration and
         // never reaches `check_expr`, so the declaration this feature exists

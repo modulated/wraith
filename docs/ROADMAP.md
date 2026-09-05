@@ -81,6 +81,7 @@ read against a current picture:
 | A `u16`/`i16` `x = x ± 1` is an `INC`/`DEC` with the carry (or borrow) supplied by hand, not the fifteen-instruction load / add-with-carry / store-both — `b16` stays on the decimal-mode path | `tests/e2e/execution.rs` |
 | A 16-bit add/subtract/bitwise result stored to memory skips the `PHA`/`TYA`/`TAY`/`PLA` shuffle when A, Y and the flags are dead after the store — eight instructions become five | `tests/e2e/execution.rs` |
 | The size baseline measures the `examples/symon/` monitor too, compiled against its own `wraith.toml` (config resolved beside the source, not the working directory), so the codegen wins on a real program are self-tracking — `screen_scroll`'s inner byte-move is 58 instructions where it was 66, and the whole ROM 2395 where it was 2739 | `tests/code_size.rs` |
+| `#[align]` page-aligns a `const` array table in ROM so an indexed read never crosses a page boundary; bare, since the page is the only alignment the 6502 rewards. Refused on a mutable `static`, a scalar, an `addr`, and a function | `tests/e2e/align.rs` |
 
 ## What keeps going wrong
 
@@ -197,9 +198,14 @@ cost/benefit looked best; none is started. (Structure-of-arrays layout was the
 first of them and is now `#[soa]`; the count of the spec's compiling examples
 above is the other half of the same survey being worked through.)
 
-- **Page alignment.** `LDA tbl,X` crosses a page boundary and costs an extra
-  cycle; a table the programmer wants aligned has no way to say so.
-  `#[align(256)]` on a `const` or `static`, honoured by the section allocator.
+- **Page alignment.** *Done for const tables.* `LDA tbl,X` crosses a page
+  boundary and costs an extra cycle; `#[align]` on a `const` array now rounds its
+  address up to the next `$xx00` in the section allocator, so a table that fits a
+  page never crosses and its element offset is the low byte. Bare — the page is
+  the only alignment the 6502 rewards, so the attribute takes no argument. Still
+  open: `#[align]` on a mutable `static` (BSS is repacked to reclaim dropped
+  globals, and that repack infers sizes from address gaps that padding would
+  corrupt — refused for now with a message that says so).
 
 - **`critical { }` blocks.** Disabling interrupts around a multi-byte update is
   `SEI` / body / `CLI` today — written by hand in `asm!`, and wrong if the

@@ -530,9 +530,9 @@ let widened: u16 = 3;      // a `-> u16` function may `return` a u8
 Function attributes control code generation, placement, and calling conventions. They are specified using `#[attribute]` syntax before the function declaration.
 
 Attributes are not only for functions: [`#[soa]`](#columns-instead-of-records-soa)
-goes on a `static` or `const` array and chooses how it is laid out. An attribute
-that does not apply to the declaration it is written on is an error, rather than
-being ignored.
+and [`#[align]`](#page-alignment-align) go on a `static` or `const` array and
+choose how it is laid out. An attribute that does not apply to the declaration it
+is written on is an error, rather than being ignored.
 
 #### `#[inline]`
 
@@ -1182,6 +1182,46 @@ The *recommendation* is inferred; the layout is not. The suggestion is
 deliberately quiet: a single mention that is not a field read — a `&`, a slice,
 a whole-element binding — and it says nothing, because a suggestion the reader
 has to dismiss is worse than one never made.
+
+### Page Alignment (`#[align]`)
+
+`#[align]` on a `const` array places the table on a 256-byte page boundary
+(`$xx00`):
+
+```rust,compile
+#[align]
+const SQUARES: [u8; 16] = [|i| => i * i];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let i: u8 = 5;
+    OUT = SQUARES[i];
+    loop {}
+}
+```
+
+On the 6502 an indexed read (`LDA table,X`) costs an extra cycle whenever
+`base + index` crosses a page boundary, and the crossing depends on the index —
+so an unaligned table gives a hot loop data-dependent timing. A table that starts
+on a page boundary and fits within a page never crosses: every access is the fast
+path, the timing is fixed, and the element's offset is simply the low byte of its
+address.
+
+The attribute is **bare** — it takes no argument. The page is the only alignment
+that changes anything on this machine (there is no cache, and sub-page boundaries
+do not affect the indexed-read penalty), so there is nothing else to ask for;
+`#[align(256)]` is rejected in favour of `#[align]`.
+
+The cost is the padding between the previous item and the next page boundary, so
+alignment is worth it for a table read in a loop, not for one touched once.
+
+#### Restrictions
+
+- `#[align]` goes on a **`const` array** — a read-only table in ROM. It is not
+  yet supported on a mutable `static` (whose RAM is repacked to reclaim dropped
+  globals) and is meaningless on a scalar, a string, or an `addr`; each is an
+  error rather than a silent no-op.
 
 ### Passing Structs to Functions
 
