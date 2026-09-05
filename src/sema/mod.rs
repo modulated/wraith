@@ -793,6 +793,12 @@ pub enum Warning {
     /// Constant with non-uppercase name
     NonUppercaseConstant { name: String, span: Span },
 
+    /// `atomic` on a one-byte static, where it does nothing: a single-byte load
+    /// or store is one instruction and cannot be interrupted part-way, so there
+    /// is no torn access to guard against. No code is emitted for it; the
+    /// declaration behaves as a plain `static`.
+    AtomicOnByte { name: String, span: Span },
+
     /// An array of structs that is only ever reached one field at a time, and
     /// so could be stored as columns.
     ///
@@ -976,6 +982,15 @@ impl Warning {
                     "constant `{}` should have an uppercase name\n  = help: rename it to `{}`",
                     name,
                     name.to_uppercase()
+                ),
+                span,
+            ),
+            Warning::AtomicOnByte { name, span } => (
+                format!(
+                    "`atomic` on `{}` has no effect: a one-byte load or store cannot be \
+                     interrupted mid-access, so there is nothing to guard\n  = help: drop \
+                     `atomic`; it is only meaningful on a two-byte value shared with an interrupt",
+                    name
                 ),
                 span,
             ),
@@ -1288,6 +1303,11 @@ pub struct ProgramInfo {
     /// Every array declared `#[soa]`, by the name of the static or const that
     /// declares it. Absent means interleaved, which is the default.
     pub soa_arrays: HashMap<String, SoaLayout>,
+    /// Names of `atomic static`s whose type is two bytes, so codegen guards each
+    /// whole-variable read and each assignment to them with `PHP;SEI;…;PLP`. A
+    /// one-byte `atomic` static is not here — a byte access cannot be torn, so it
+    /// carries no guard (only a warning at its declaration).
+    pub atomic_statics: HashSet<String>,
     /// Named compile-time constants, by name. Codegen flattens `const` array
     /// initializers itself, and those element expressions were never
     /// type-checked, so there is no `folded_constants` entry to look up — this

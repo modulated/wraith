@@ -341,6 +341,42 @@ impl SemanticAnalyzer {
             }
         }
 
+        // `atomic` guards a two-byte scalar shared with an interrupt. A one-byte
+        // value is already atomic (a byte load/store is one instruction), so it
+        // only warns; an aggregate cannot ride the A:Y load/store path the guard
+        // wraps, so it is refused. The parser only lets `atomic` precede a
+        // `static`, so this is always a mutable global here.
+        if let Some(at) = stat.atomic {
+            use crate::ast::PrimitiveType as P;
+            let two_byte_scalar = matches!(
+                declared_ty,
+                Type::Primitive(P::U16 | P::I16 | P::B16)
+                    | Type::Pointer(_)
+                    | Type::String
+                    | Type::Function(_, _)
+            );
+            let one_byte_scalar = matches!(
+                declared_ty,
+                Type::Primitive(P::U8 | P::I8 | P::B8 | P::Bool | P::Char | P::Addr)
+            );
+            if two_byte_scalar {
+                self.atomic_statics.insert(name.clone());
+            } else if one_byte_scalar {
+                self.warnings.push(Warning::AtomicOnByte {
+                    name: name.clone(),
+                    span: at,
+                });
+            } else {
+                return Err(SemaError::Custom {
+                    message: "`atomic` applies to a scalar shared with an interrupt (a two-byte \
+                              value like `u16`), not an array, struct, or slice — guard those with \
+                              a critical section around the access"
+                        .to_string(),
+                    span: at,
+                });
+            }
+        }
+
         // A generated table is folded here, not in the type checker: a `const`
         // or `static` array's initialiser is flattened during registration and
         // never reaches `check_expr`, so the declaration this feature exists

@@ -93,6 +93,8 @@ pub struct SemanticAnalyzer {
     pub(super) generated_tables: HashMap<Span, Vec<i64>>,
     /// Every array declared `#[soa]`, by the name of its static or const.
     pub(super) soa_arrays: HashMap<String, crate::sema::SoaLayout>,
+    /// Names of two-byte `atomic static`s, whose accesses codegen guards.
+    pub(super) atomic_statics: HashSet<String>,
     /// How many times each name is mentioned anywhere, and how many of those
     /// mentions were the `arr[i].field` shape.
     ///
@@ -241,6 +243,7 @@ impl SemanticAnalyzer {
             failed_declarations: std::collections::HashSet::new(),
             generated_tables: HashMap::default(),
             soa_arrays: HashMap::default(),
+            atomic_statics: HashSet::default(),
             name_mentions: HashMap::default(),
             indexed_field_reads: HashMap::default(),
             current_return_type: None,
@@ -604,6 +607,7 @@ impl SemanticAnalyzer {
             folded_constants: self.folded_constants.clone(),
             generated_tables: self.generated_tables.clone(),
             soa_arrays: self.soa_arrays.clone(),
+            atomic_statics: self.atomic_statics.clone(),
             loop_bound_slots: self.loop_bound_slots.clone(),
             slice_return_temps: self.slice_return_temps.clone(),
             local_arrays: self.local_arrays.clone(),

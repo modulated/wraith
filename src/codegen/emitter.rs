@@ -28,6 +28,11 @@ pub struct Emitter {
     loop_stack: Vec<LoopContext>,
     /// Inline depth tracking (>0 means we're generating inline code)
     inline_depth: u32,
+    /// Nesting depth of `atomic` access regions. The outermost `enter_atomic`
+    /// masks interrupts (`PHP; SEI`) and the matching `exit_atomic` restores
+    /// them (`PLP`); inner enters/exits are no-ops, so a read of an atomic
+    /// static inside an atomic assignment does not stack redundant guards.
+    atomic_depth: u32,
     /// Suffix for uniquifying labels in current inline expansion
     inline_label_suffix: Option<usize>,
     /// End labels of in-progress inline expansions (a stack: inlines nest).
@@ -89,6 +94,7 @@ impl Emitter {
             temp_alloc: TempAllocator::new(),
             loop_stack: Vec::new(),
             inline_depth: 0,
+            atomic_depth: 0,
             inline_label_suffix: None,
             inline_end_labels: Vec::new(),
             byte_count: 0,
@@ -643,6 +649,30 @@ impl Emitter {
     /// Invalidate all register tracking (call on branches, function calls, etc.)
     pub fn invalidate_registers(&mut self) {
         self.reg_state.invalidate_all();
+    }
+
+    /// Begin an `atomic` access region: mask interrupts so a multi-byte read or
+    /// write cannot be seen (or interrupted) half-done. Only the outermost call
+    /// emits `PHP; SEI` — a nested region (a read of an atomic static inside an
+    /// atomic assignment) rides the same mask. `PHP` saves the caller's
+    /// interrupt-disable flag so [`exit_atomic`](Self::exit_atomic) restores it
+    /// rather than blindly re-enabling: correct even when interrupts were
+    /// already off.
+    pub fn enter_atomic(&mut self) {
+        if self.atomic_depth == 0 {
+            self.emit_inst("PHP", "");
+            self.emit_inst("SEI", "");
+        }
+        self.atomic_depth += 1;
+    }
+
+    /// End an `atomic` region, restoring the saved interrupt flag when the
+    /// outermost region closes.
+    pub fn exit_atomic(&mut self) {
+        self.atomic_depth -= 1;
+        if self.atomic_depth == 0 {
+            self.emit_inst("PLP", "");
+        }
     }
 
     /// Drop any cached belief that a register mirrors this zero-page location.

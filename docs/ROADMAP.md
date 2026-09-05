@@ -82,6 +82,7 @@ read against a current picture:
 | A 16-bit add/subtract/bitwise result stored to memory skips the `PHA`/`TYA`/`TAY`/`PLA` shuffle when A, Y and the flags are dead after the store — eight instructions become five | `tests/e2e/execution.rs` |
 | The size baseline measures the `examples/symon/` monitor too, compiled against its own `wraith.toml` (config resolved beside the source, not the working directory), so the codegen wins on a real program are self-tracking — `screen_scroll`'s inner byte-move is 58 instructions where it was 66, and the whole ROM 2395 where it was 2739 | `tests/code_size.rs` |
 | `#[align]` page-aligns a `const` array table in ROM so an indexed read never crosses a page boundary; bare, since the page is the only alignment the 6502 rewards. Refused on a mutable `static`, a scalar, an `addr`, and a function | `tests/e2e/align.rs` |
+| `atomic static` masks interrupts (`PHP;SEI;…;PLP`, save/restore) around each whole-variable read and each assignment of a two-byte value shared with a handler, so no torn read or lost update; a one-byte `atomic` warns and emits nothing; an aggregate is refused | `tests/e2e/atomic.rs` |
 
 ## What keeps going wrong
 
@@ -207,10 +208,16 @@ above is the other half of the same survey being worked through.)
   globals, and that repack infers sizes from address gaps that padding would
   corrupt — refused for now with a message that says so).
 
-- **`critical { }` blocks.** Disabling interrupts around a multi-byte update is
-  `SEI` / body / `CLI` today — written by hand in `asm!`, and wrong if the
-  caller already had them disabled. A block form can save and restore the flag
-  instead, and the compiler knows how long the body is.
+- **`critical { }` blocks.** *The common case is covered by `atomic`; a general
+  block is still open.* Disabling interrupts around a multi-byte update is `SEI`
+  / body / `CLI` today — written by hand in `asm!`, and wrong if the caller
+  already had them disabled. `atomic static` now handles the frequent case — a
+  two-byte value shared with a handler — by masking each whole-variable read and
+  each assignment with `PHP; SEI; … ; PLP` (save/restore, so nesting and a
+  handler's own access are safe). What a `critical { }` block would add is a
+  transaction spanning *several statements or variables* (read one, decide,
+  write another), which no per-variable rule can make indivisible. Worth
+  building when a program needs one; the `atomic` mechanism is the same guard.
 
 - **Fixed-point arithmetic.** A `q8.8` type with the shifts folded in. Every
   6502 program that draws anything reinvents this, usually as a pair of `u8`s

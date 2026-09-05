@@ -104,6 +104,25 @@ impl Parser<'_> {
             false
         };
 
+        // Optional `atomic` prefix, only valid before `static`. Consumed here so
+        // the `static` arm below sees its keyword; a following non-`static`
+        // keyword is an error rather than a silently dropped modifier.
+        let atomic = if self.check(&Token::Atomic) {
+            let sp = self.current_span();
+            self.advance();
+            if !self.check(&Token::Static) {
+                return Err(ParseError::custom(
+                    sp,
+                    "`atomic` applies only to a `static`: it guards a mutable value shared with \
+                     an interrupt handler"
+                        .to_string(),
+                ));
+            }
+            Some(sp)
+        } else {
+            None
+        };
+
         match self.peek().cloned() {
             Some(Token::Import) => {
                 Self::reject_attributes(&attributes, &attr_spans, "an import")?;
@@ -213,6 +232,7 @@ impl Parser<'_> {
                             is_pub,
                             soa: attrs.soa,
                             align: attrs.align,
+                            atomic: None,
                         }),
                         span,
                     ))
@@ -256,6 +276,7 @@ impl Parser<'_> {
                         is_pub,
                         soa: attrs.soa,
                         align: attrs.align,
+                        atomic,
                     }),
                     span,
                 ))

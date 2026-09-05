@@ -7,6 +7,7 @@ mod aggregate_dispatch;
 mod aggregate_init;
 mod align;
 mod assign_side_effects;
+mod atomic;
 mod bcd;
 mod bcd_validation;
 mod bitfields;

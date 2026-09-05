@@ -154,6 +154,10 @@ pub struct Static {
     /// Span of `#[align]`, if this const array is page-aligned in ROM. Same
     /// reasoning as `soa` for keeping the span rather than a bool.
     pub align: Option<Span>,
+    /// Span of the `atomic` keyword, if this mutable static's multi-byte
+    /// accesses are made interrupt-atomic. The span so a refusal (on a const,
+    /// an aggregate) or the no-op warning (on a one-byte type) can point at it.
+    pub atomic: Option<Span>,
 }
 
 /// Import declaration

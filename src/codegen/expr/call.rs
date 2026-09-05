@@ -1201,6 +1201,7 @@ fn generate_inline_call(
             folded_constants: info.folded_constants.clone(),
             generated_tables: info.generated_tables.clone(),
             soa_arrays: info.soa_arrays.clone(),
+            atomic_statics: info.atomic_statics.clone(),
             const_env: info.const_env.clone(),
             loop_bound_slots: info.loop_bound_slots.clone(),
             slice_return_temps: info.slice_return_temps.clone(),
