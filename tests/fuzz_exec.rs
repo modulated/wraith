@@ -412,6 +412,11 @@ enum E {
     /// `(sl{i}.len as {ty})` — the other half of the descriptor, and the half a
     /// partial copy loses without disturbing any element. `main` only.
     SliceLen(usize),
+    /// `GSTATIC` — a read of the mutable `static` in RAM, at the program's base
+    /// type. Its value is program state written by [`S::GStore`], so a read
+    /// cannot be folded to its initialiser. Unlike a local, it lives at an
+    /// absolute BSS address the reset handler initialises. `main` only.
+    GLoad,
 }
 
 /// Which entry of the function-pointer table a `Dispatch` selects. In range by
@@ -441,6 +446,17 @@ enum Ix {
     /// `u8` (indexing rejects a 16-bit index) and the modulus pins the range,
     /// whatever the variable holds.
     Wrapped(usize),
+}
+
+/// A `match` arm's pattern, at the program's base type. Values are non-negative
+/// and within the type; a 16-bit match can carry a bound past 255, which is the
+/// range-arm bug's home (a low-byte-only compare would take the wrong arm).
+#[derive(Clone, Debug)]
+enum MatchPat {
+    /// `v =>` — a single value.
+    Lit(i64),
+    /// `lo..=hi =>` (inclusive) or `lo..hi =>` (exclusive), `lo <= hi`.
+    Range(i64, i64, bool),
 }
 
 /// Somewhere a value can be stored. Its type decides the assignment's
@@ -625,6 +641,22 @@ enum S {
         dst: usize,
         src: usize,
         len: usize,
+    },
+    /// `GSTATIC = <expr>;` — a store to the mutable `static` in RAM. The value
+    /// is base-typed and may itself read the static ([`E::GLoad`]), so this is a
+    /// read-modify-write to an absolute BSS address — the store, the INC/DEC
+    /// fast path and the A:Y-shuffle fusion all against `$04xx` rather than a
+    /// zero-page frame slot. `main` only.
+    GStore(E),
+    /// `match <scrut> { pat => { … } … _ => { … } }` on an integer, in `main`.
+    /// A dispatch the compiler lowers to a comparison chain — literal arms and
+    /// range arms, the latter width-correct only if it compares the whole
+    /// scrutinee and not just its low byte. The scrutinee and every pattern are
+    /// at the base type; arms are disjoint and a wildcard covers the rest.
+    IntMatch {
+        scrut: E,
+        arms: Vec<(MatchPat, Vec<S>)>,
+        default: Vec<S>,
     },
 }
 
@@ -1431,6 +1463,43 @@ fn gen_stmt(g: &mut Gen, depth: u32) -> S {
     }
 }
 
+/// A `match` on an integer, in `main`: either a few distinct literal arms or one
+/// range arm, always disjoint, plus a wildcard. Patterns are non-negative and
+/// within the base type; a 16-bit base allows a bound past 255, so the range
+/// compare has to look past the low byte to route correctly.
+fn gen_int_match(g: &mut Gen, depth: u32) -> S {
+    let base = g.base;
+    let scrut = gen_expr(g, base, 2, false);
+    let cap = (base.max() as u64).min(400);
+    let mut arms: Vec<(MatchPat, Vec<S>)> = Vec::new();
+    if g.rng.below(100) < 55 {
+        let n = 1 + g.rng.below(3) as usize;
+        let mut used: Vec<i64> = Vec::new();
+        for _ in 0..n {
+            let v = g.rng.below(cap + 1) as i64;
+            if !used.contains(&v) {
+                used.push(v);
+                let body = gen_block(g, depth - 1);
+                arms.push((MatchPat::Lit(v), body));
+            }
+        }
+    } else {
+        let a = g.rng.below(cap + 1) as i64;
+        let b = g.rng.below(cap + 1) as i64;
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        // An exclusive `lo..hi` is empty when `lo == hi`; make that one inclusive.
+        let inclusive = lo == hi || g.rng.below(2) == 0;
+        let body = gen_block(g, depth - 1);
+        arms.push((MatchPat::Range(lo, hi, inclusive), body));
+    }
+    let default = gen_block(g, depth - 1);
+    S::IntMatch {
+        scrut,
+        arms,
+        default,
+    }
+}
+
 #[derive(Clone)]
 struct Prog {
     /// The pair of widths this program mixes.
@@ -1508,6 +1577,11 @@ struct Prog {
     /// a budget and call each other at `d - 1`, so the cycle terminates by the
     /// same construction a self-call does.
     mutual: Option<(usize, usize)>,
+    /// The initial value of `main`'s mutable `static GSTATIC`, or `None` when
+    /// the program declares none. Its type is `base`. Unlike the `const` table
+    /// this lives in RAM (BSS): the reset handler writes the initial value, and
+    /// `S::GStore` overwrites it, so the state carries its own copy.
+    mut_static: Option<i64>,
 }
 
 impl Prog {
@@ -2082,7 +2156,48 @@ fn gen_program(seed: u64) -> Prog {
     g.str_taker = (str_init.is_some() && count > vtable && funcs[0].str_param).then_some(0);
 
     let n = 2 + g.rng.below(3) as usize;
-    let stmts = (0..n).flat_map(|_| gen_stmt_seq(&mut g, 2)).collect();
+    let mut stmts: Vec<S> = (0..n).flat_map(|_| gen_stmt_seq(&mut g, 2)).collect();
+
+    // A mutable `static` in RAM (BSS), read and written in `main`. Exercises the
+    // whole storage class the const table never reaches: BSS allocation, the
+    // reset handler's initialiser write, and — the point after the recent
+    // codegen work — a store, a read-modify-write, and the 16-bit INC/DEC fast
+    // path all against an *absolute* address rather than a zero-page frame slot.
+    // Two statements at the end so its final value is deterministic: a plain
+    // store, then an RMW that reads the static back through `E::GLoad`.
+    let mut_static = (g.rng.below(100) < 45).then(|| {
+        let init = narrow(g.rng.below(0x1_0000) as i64, base);
+        stmts.push(S::GStore(gen_arg(&mut g, base, 3)));
+        let op = if g.rng.below(2) == 0 {
+            Op::Add
+        } else {
+            Op::Sub
+        };
+        // Half the RMWs step by a literal 1 — the INC/DEC path — and half by a
+        // computed value, which stores a 16-bit result to the absolute address.
+        // A `Bin` operand must be at the base type with no widening, so this is
+        // `gen_expr` (a same-type expression) rather than `gen_arg` (a boundary
+        // value that may carry an `At` widening the two operands could not share).
+        let step = if g.rng.below(2) == 0 {
+            E::Lit(1)
+        } else {
+            gen_expr(&mut g, base, 1, false)
+        };
+        stmts.push(S::GStore(E::Bin(Box::new(E::GLoad), op, Box::new(step))));
+        init
+    });
+
+    // An integer `match` in `main`: a scrutinee at the base type dispatched over
+    // disjoint literal arms or one range arm, plus a wildcard default. Range
+    // patterns on a 16-bit base drive the comparison-chain path that historically
+    // mis-lowered, so this earns its place beside the arithmetic cases. Appended
+    // before the counter/loop capture so any counters or loops the arm bodies
+    // introduce are recorded.
+    if g.rng.below(100) < 30 {
+        let m = gen_int_match(&mut g, 2);
+        stmts.push(m);
+    }
+
     let (counters, loops) = (g.counters, g.loops);
     Prog {
         pair,
@@ -2112,6 +2227,7 @@ fn gen_program(seed: u64) -> Prog {
         ptr,
         struct_init_from_call,
         mutual,
+        mut_static,
     }
 }
 
@@ -2160,6 +2276,9 @@ struct St<'a> {
     /// `Reslice` and `CopySlice` move it. Empty inside a function, which names
     /// no slice.
     slices: Vec<(usize, usize)>,
+    /// The mutable `static`'s current value, `None` where none is in scope.
+    /// `S::GStore` writes it; `E::GLoad` reads it.
+    gstatic: Option<i64>,
 }
 
 /// Call a generated function. Its locals are fresh per invocation — which is
@@ -2224,6 +2343,8 @@ fn call_fn(
         // The parameter, when this function takes one — the only slice its
         // body can name, and the one `sp` resolves to.
         slices: slice.into_iter().collect(),
+        // A function body cannot name `main`'s static, like the pointer above.
+        gstatic: None,
     };
     let _ = ty; // the caller's type; a callee works entirely at its own
     if f.recursive && budget == 0 {
@@ -2472,6 +2593,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let idx = eval_index_mod(ix, st, ty, bytes.len());
             narrow(bytes[idx] as i64, ty)
         }
+        E::GLoad => st.gstatic.expect("a static read with no static in scope"),
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
@@ -2597,6 +2719,35 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                     st.counters[*id] -= 1;
                 }
             }
+            // The static's own type is `base`, and `GStore` only appears in
+            // `main`, where `ty` is `base` — so the value is computed and stored
+            // at the static's width.
+            S::GStore(e) => {
+                let base = st.prog.base;
+                st.gstatic = Some(narrow(eval(e, st, base), base));
+            }
+            // First matching arm wins, exactly as the compiler compares in
+            // order; the value and every pattern are narrowed to the base type,
+            // so the comparison uses that type's signed/unsigned ordering.
+            S::IntMatch {
+                scrut,
+                arms,
+                default,
+            } => {
+                let base = st.prog.base;
+                let s = narrow(eval(scrut, st, base), base);
+                let taken = arms.iter().find(|(p, _)| match p {
+                    MatchPat::Lit(v) => s == narrow(*v, base),
+                    MatchPat::Range(lo, hi, incl) => {
+                        let (lo, hi) = (narrow(*lo, base), narrow(*hi, base));
+                        s >= lo && if *incl { s <= hi } else { s < hi }
+                    }
+                });
+                match taken {
+                    Some((_, body)) => exec(body, st, ty),
+                    None => exec(default, st, ty),
+                }
+            }
         }
     }
 }
@@ -2645,6 +2796,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
         ptr: p.ptr.as_ref().map(|(_, k)| k.clone()),
         slices: p.slices.clone(),
+        gstatic: p.mut_static.map(|v| narrow(v, p.base)),
     };
     exec(&p.stmts, &mut st, p.base);
     // Each slice reports its first element and its length — the two halves of
@@ -2655,6 +2807,9 @@ fn expected(p: &Prog) -> Vec<u32> {
         .iter()
         .flat_map(|(start, len)| [narrow(p.konst[*start], p.base), narrow(*len as i64, p.base)])
         .collect();
+    // The mutable static reports its final value as the last cell, after the
+    // descriptors — the same position `cell_types` and the rendered stores use.
+    let gstatic: Vec<i64> = st.gstatic.into_iter().collect();
     // Each cell at its own width, which is no longer one number per program.
     st.vars
         .iter()
@@ -2663,6 +2818,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         .chain(st.afield.iter())
         .chain(st.nested.iter())
         .chain(descriptors.iter())
+        .chain(gstatic.iter())
         .zip(cell_types(p))
         .map(|(v, t)| raw(*v, t))
         .collect()
@@ -2675,6 +2831,9 @@ fn cell_types(p: &Prog) -> Vec<Ty> {
         out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN + NESTED));
     }
     out.extend(std::iter::repeat_n(p.base, 2 * p.slices.len()));
+    if p.mut_static.is_some() {
+        out.push(p.base);
+    }
     out
 }
 
@@ -2829,6 +2988,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             format!("{n}[{}]", render_slice_index(&n, ix, sc))
         }
         E::SliceLen(i) => format!("({}.len as {})", slice_name(*i, sc), ty.name()),
+        E::GLoad => "GSTATIC".to_string(),
         // No syntax of its own: where this narrows the type, the widening back
         // is what the language does by itself.
         E::At(from, inner) => render(inner, *from, sc),
@@ -2964,6 +3124,37 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 render(e, ty, sc)
             )),
             S::StructFromCall(k) => out.push_str(&format!("{pad}s = mks({k});\n")),
+            S::GStore(e) => out.push_str(&format!("{pad}GSTATIC = {};\n", render(e, ty, sc))),
+            S::IntMatch {
+                scrut,
+                arms,
+                default,
+            } => {
+                // Anchor the scrutinee to the base type: a bare-literal or
+                // otherwise width-ambiguous scrutinee would default to `u8`, and
+                // the pattern type follows the scrutinee — so a 16-bit pattern
+                // would not compile, and a small one would compare at the wrong
+                // width, taking a different arm than the base-typed oracle.
+                out.push_str(&format!(
+                    "{pad}match ({} as {}) {{\n",
+                    render(scrut, ty, sc),
+                    ty.name()
+                ));
+                for (p, body) in arms {
+                    let pat = match p {
+                        MatchPat::Lit(v) => format!("{v}"),
+                        MatchPat::Range(lo, hi, true) => format!("{lo}..={hi}"),
+                        MatchPat::Range(lo, hi, false) => format!("{lo}..{hi}"),
+                    };
+                    out.push_str(&format!("{pad}    {pat} => {{\n"));
+                    out.push_str(&render_stmts(body, ty, indent + 8, sc));
+                    out.push_str(&format!("{pad}    }}\n"));
+                }
+                out.push_str(&format!("{pad}    _ => {{\n"));
+                out.push_str(&render_stmts(default, ty, indent + 8, sc));
+                out.push_str(&format!("{pad}    }}\n"));
+                out.push_str(&format!("{pad}}}\n"));
+            }
         }
     }
     out
@@ -3079,6 +3270,9 @@ fn uses_memcpy(stmts: &[S]) -> bool {
             uses_memcpy(then) || otherwise.as_deref().is_some_and(uses_memcpy)
         }
         S::For(_, _, body) | S::While(_, body) => uses_memcpy(body),
+        S::IntMatch { arms, default, .. } => {
+            arms.iter().any(|(_, body)| uses_memcpy(body)) || uses_memcpy(default)
+        }
         S::Assign(..)
         | S::Install(_)
         | S::CopySlice(..)
@@ -3089,7 +3283,8 @@ fn uses_memcpy(stmts: &[S]) -> bool {
         | S::PtrPtrStore(..)
         | S::Repoint(_)
         | S::PokeStruct(..)
-        | S::PokePtr(..) => false,
+        | S::PokePtr(..)
+        | S::GStore(_) => false,
     })
 }
 
@@ -3253,6 +3448,14 @@ static DEV: VT = VT {{ call: {} }};\n",
         String::new()
     };
 
+    // The mutable static, at top level. Its name is uppercase so it is not
+    // mistaken for a constant-naming warning, and its initial value is written
+    // by the reset handler into BSS.
+    let static_decl = match p.mut_static {
+        Some(init) => format!("static GSTATIC: {} = {};\n", p.base.name(), init),
+        None => String::new(),
+    };
+
     let mut decls = String::new();
     for (i, (v, vt)) in p.init.iter().zip(p.var_types.iter()).enumerate() {
         let lit = if *v < 0 {
@@ -3329,6 +3532,9 @@ static DEV: VT = VT {{ call: {} }};\n",
         cells.push(format!("sl{i}[0]"));
         cells.push(format!("(sl{i}.len as {tn})"));
     }
+    if p.mut_static.is_some() {
+        cells.push("GSTATIC".to_string());
+    }
 
     // Cells are packed at their own widths, so an output index counts bytes
     // written so far rather than cells.
@@ -3364,22 +3570,22 @@ static DEV: VT = VT {{ call: {} }};\n",
     match form {
         Form::Inline => {
             format!(
-                "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
+                "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
             )
         }
         Form::ViaFunction => format!(
-            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}fn body() {{\n{decls}{body}{stores}}}\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}fn body() {{\n{decls}{body}{stores}}}\n\
              #[reset]\nfn main() {{\n    body();\n    loop {{}}\n}}\n"
         ),
         Form::ViaMatch => format!(
-            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
                  match sel {{\n        0 => {{\n{}{}        }}\n        _ => {{}}\n    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&bump(&body)),
             bump(&bump(&stores)),
         ),
         Form::ViaLoop => format!(
-            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&body),
             bump(&stores),
@@ -3623,7 +3829,8 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::StrLen
             | E::StrIndex(_)
             | E::SliceElem(..)
-            | E::SliceLen(_) => {}
+            | E::SliceLen(_)
+            | E::GLoad => {}
         }
     }
     fn in_bool(b: &mut B, id: usize) {
@@ -3656,6 +3863,18 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 | S::PtrPtrStore(_, e)
                 | S::PokeStruct(_, e)
                 | S::PokePtr(_, _, e) => in_expr(e, id),
+                S::GStore(e) => in_expr(e, id),
+                S::IntMatch {
+                    scrut,
+                    arms,
+                    default,
+                } => {
+                    in_expr(scrut, id);
+                    for (_, body) in arms {
+                        in_block(body, id);
+                    }
+                    in_block(default, id);
+                }
                 S::Install(_)
                 | S::CopySlice(..)
                 | S::Reslice(..)
@@ -3712,7 +3931,8 @@ fn strip_self_calls(e: &mut E) {
         | E::StrLen
         | E::StrIndex(_)
         | E::SliceElem(..)
-        | E::SliceLen(_) => {}
+        | E::SliceLen(_)
+        | E::GLoad => {}
     }
 }
 
@@ -3731,6 +3951,18 @@ fn strip_stmt_self_calls(s: &mut S) {
         S::For(_, _, body) | S::While(_, body) => body.iter_mut().for_each(strip_stmt_self_calls),
         S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
             strip_self_calls(e)
+        }
+        S::GStore(e) => strip_self_calls(e),
+        S::IntMatch {
+            scrut,
+            arms,
+            default,
+        } => {
+            strip_self_calls(scrut);
+            for (_, body) in arms {
+                body.iter_mut().for_each(strip_stmt_self_calls);
+            }
+            default.iter_mut().for_each(strip_stmt_self_calls);
         }
         S::Install(_)
         | S::CopySlice(..)
@@ -3859,6 +4091,22 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
             mutate_expr(e, target, seen)
         }
+        S::GStore(e) => mutate_expr(e, target, seen),
+        S::IntMatch {
+            scrut,
+            arms,
+            default,
+        } => {
+            if mutate_expr(scrut, target, seen) {
+                return true;
+            }
+            for (_, body) in arms {
+                if mutate_block(body, target, seen) {
+                    return true;
+                }
+            }
+            mutate_block(default, target, seen)
+        }
         S::Install(_)
         | S::CopySlice(..)
         | S::SliceFromCall(..)
@@ -3916,6 +4164,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
         | E::PtrPtrLoad
         | E::EnumVal
         | E::EnumMatch
+        | E::GLoad
         | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
@@ -4244,6 +4493,7 @@ fn the_generator_covers_what_it_claims() {
         ptr_elem_targets: usize,
         nested_reads: usize,
         enum_match_reads: usize,
+        static_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -4315,6 +4565,7 @@ fn the_generator_covers_what_it_claims() {
             E::EnumMatch => s.enum_match_reads += 1,
             E::StrLen => s.str_reads += 1,
             E::StrIndex(_) => s.str_index_reads += 1,
+            E::GLoad => s.static_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
         }
     }
@@ -4405,6 +4656,28 @@ fn the_generator_covers_what_it_claims() {
                 S::PokePtr(_, _, e) => {
                     s.stmts.insert("pointer-param");
                     walk_e(e, s, narrow_half);
+                }
+                S::GStore(e) => {
+                    s.stmts.insert("static-store");
+                    walk_e(e, s, narrow_half);
+                }
+                S::IntMatch {
+                    scrut,
+                    arms,
+                    default,
+                } => {
+                    s.stmts.insert("int-match");
+                    if arms.iter().any(|(p, _)| matches!(p, MatchPat::Range(..))) {
+                        s.stmts.insert("int-match-range");
+                    }
+                    if arms.iter().any(|(p, _)| matches!(p, MatchPat::Lit(_))) {
+                        s.stmts.insert("int-match-lit");
+                    }
+                    walk_e(scrut, s, narrow_half);
+                    for (_, body) in arms {
+                        walk_s(body, s, narrow_half);
+                    }
+                    walk_s(default, s, narrow_half);
                 }
             }
         }
@@ -4667,6 +4940,7 @@ fn the_oracle_matches_the_documented_semantics() {
         ptr: None,
         struct_init_from_call: None,
         mutual: None,
+        mut_static: None,
     };
     let st = St {
         prog: &empty,
@@ -4684,6 +4958,7 @@ fn the_oracle_matches_the_documented_semantics() {
         dev: 0,
         ptr: None,
         slices: Vec::new(),
+        gstatic: None,
     };
     for (ty, a, op, b, want) in cases {
         let e = E::Bin(Box::new(E::Lit(*a)), *op, Box::new(E::Lit(*b)));
@@ -4799,10 +5074,6 @@ mod coverage {
         ),
         // --- Patterns --------------------------------------------------------
         (
-            "Pattern::Range",
-            "range patterns are covered exhaustively by tests/e2e/match_ranges.rs",
-        ),
-        (
             "Pattern::Variable",
             "a bare binding pattern would put a value in scope that the oracle does not \
              track; the enum payload's `C::C{k}(x)` binding is a tuple-variant pattern, \
@@ -4833,10 +5104,19 @@ mod coverage {
     const CAVEATS: &[(&str, &str)] = &[
         (
             "Expr::Match",
-            "as a statement, the whole-body `ViaMatch` form; as an expression, the enum \
-             payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all \
-             share the context type so no arm-type unification is exercised. A match over \
-             integers or ranges as a value is not generated",
+            "as a statement, three forms — the whole-body `ViaMatch` control-flow shuffle, \
+             and in `main` an integer `match` on the base type dispatched over disjoint \
+             literal arms or one range arm with a wildcard default, first-match-wins; as an \
+             expression, the enum payload read `match e { C::C0 => …, C::C{k}(x) => (x as \
+             T) }`, whose arms all share the context type so no arm-type unification is \
+             exercised. A match as a *value* over integers or ranges is not generated",
+        ),
+        (
+            "Pattern::Range",
+            "an arm of the integer `match` in `main` — one range over the base type, \
+             inclusive or exclusive, disjoint from the wildcard default. On a 16-bit base \
+             it drives the comparison-chain lowering that once mis-ordered the bytes. \
+             Never nested, and never a value match",
         ),
         (
             "Item::Import",
@@ -5029,9 +5309,12 @@ mod coverage {
         ),
         (
             "Item::Static",
-            "only the `const` table, which is read-only and lives in ROM; a mutable `static` \
-             in RAM is not generated, so what gets exercised is frame colouring rather than \
-             BSS",
+            "the `const` table in ROM, and — in some programs — one mutable `static GSTATIC` \
+             in RAM, of the program's base type. `main` initialises it (the reset handler \
+             writes the value into BSS), stores an expression to it, and reads it back through \
+             a read-modify-write, so a plain store, an INC/DEC and a 16-bit result all land at \
+             an absolute address rather than a zero-page frame slot. A mutable aggregate static \
+             is not generated; only a scalar",
         ),
         (
             "Item::Struct",

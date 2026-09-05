@@ -285,6 +285,20 @@ pub(super) fn generate_variable(
                 // Check if this is an address declaration - use symbolic name
                 if sym.kind == SymbolKind::Address {
                     emitter.emit_lda_symbol(name);
+                } else if (is_u16 || is_pointer_like) && info.atomic_statics.contains(name) {
+                    // A two-byte `atomic static`: mask interrupts so a handler
+                    // cannot change the value between the two loads (a torn
+                    // read). A fresh `LDA` — not the register-cache-optimized
+                    // load — because a value cached from before the guard could
+                    // be one the handler has since overwritten.
+                    emitter.enter_atomic();
+                    emitter.emit_inst("LDA", &format!("${:04X}", _addr));
+                    if is_u16 {
+                        emitter.emit_inst("LDY", &format!("${:04X}", _addr + 1));
+                    } else {
+                        emitter.emit_inst("LDX", &format!("${:04X}", _addr + 1));
+                    }
+                    emitter.exit_atomic();
                 } else {
                     // Regular variable at absolute address - use numeric
                     emitter.emit_lda_abs(_addr);

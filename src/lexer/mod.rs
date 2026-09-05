@@ -39,6 +39,11 @@ pub enum Token {
     /// ROM data). Shared across functions and interrupt handlers.
     #[token("static")]
     Static,
+    /// Prefix on a `static`: reads and writes of a value shared with an
+    /// interrupt handler are made atomic (interrupts masked across a multi-byte
+    /// access) so a handler cannot observe or cause a torn value.
+    #[token("atomic")]
+    Atomic,
     #[token("let")]
     Let,
     #[token("as")]

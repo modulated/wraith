@@ -173,6 +173,42 @@ impl SectionAllocator {
         Ok(addr)
     }
 
+    /// Allocate `size` bytes in a section at an address that is a multiple of
+    /// `align`, skipping the padding before it. Used by `#[align]` to page-align
+    /// a const table so indexed reads never cross a page boundary.
+    ///
+    /// Implemented by advancing the section cursor to the aligned boundary and
+    /// then allocating normally, so the reserved-range and overflow handling is
+    /// the same as [`allocate`](Self::allocate). (A reservation landing exactly
+    /// on the boundary could nudge the result off it; that does not happen for
+    /// DATA, which carries no `#[org]` reservations.)
+    pub fn allocate_aligned(
+        &mut self,
+        section_name: &str,
+        size: u16,
+        align: u16,
+    ) -> Result<u16, String> {
+        let section = self
+            .config
+            .get_section(section_name)
+            .ok_or_else(|| format!("Unknown section: {}", section_name))?;
+        let (sec_start, sec_end) = (section.start, section.end);
+
+        let cursor = *self.offsets.get(section_name).unwrap();
+        let addr = sec_start as u32 + cursor as u32;
+        let align = align.max(1) as u32;
+        let aligned = addr.div_ceil(align) * align;
+        if aligned + size.max(1) as u32 - 1 > sec_end as u32 {
+            return Err(format!(
+                "Section '{}' overflow: aligning {} bytes to a {}-byte boundary at ${:04X} \
+                 runs past the section end ${:04X}",
+                section_name, size, align, aligned, sec_end
+            ));
+        }
+        *self.offsets.get_mut(section_name).unwrap() = (aligned as u16) - sec_start;
+        self.allocate(section_name, size)
+    }
+
     /// Allocate in the default section (CODE)
     pub fn allocate_default(&mut self, size: u16) -> Result<u16, String> {
         let default_section = self.config.default_section().clone();
@@ -465,5 +501,39 @@ mod reservation_tests {
         let mut a = tiny();
         assert_eq!(a.allocate("CODE", 16).unwrap(), 0x8000);
         assert_eq!(a.allocate("CODE", 16).unwrap(), 0x8010);
+    }
+
+    /// A four-page section, to watch `allocate_aligned` skip to a page boundary.
+    fn four_pages() -> SectionAllocator {
+        SectionAllocator::new(MemoryConfig {
+            sections: vec![Section::new("DATA", 0xD000, 0xD3FF)],
+            default_section_name: "DATA".to_string(),
+        })
+    }
+
+    #[test]
+    fn aligned_allocation_rounds_up_to_the_next_page() {
+        let mut a = four_pages();
+        // A short table lands at the base, mid-page after it.
+        assert_eq!(a.allocate("DATA", 3).unwrap(), 0xD000);
+        // The aligned one skips the rest of the page to $D100.
+        assert_eq!(a.allocate_aligned("DATA", 4, 256).unwrap(), 0xD100);
+        // A following plain allocation packs right after it, no more padding.
+        assert_eq!(a.allocate("DATA", 2).unwrap(), 0xD104);
+    }
+
+    #[test]
+    fn aligned_allocation_at_a_boundary_does_not_move() {
+        let mut a = four_pages();
+        // Cursor already on a page boundary ($D000): alignment is a no-op.
+        assert_eq!(a.allocate_aligned("DATA", 8, 256).unwrap(), 0xD000);
+    }
+
+    #[test]
+    fn aligned_allocation_reports_overflow_past_the_section() {
+        let mut a = four_pages();
+        // Fill into the last page, then ask to align past the end.
+        assert_eq!(a.allocate("DATA", 0x301).unwrap(), 0xD000); // through $D300
+        assert!(a.allocate_aligned("DATA", 4, 256).is_err());
     }
 }

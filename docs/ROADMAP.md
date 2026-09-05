@@ -81,6 +81,10 @@ read against a current picture:
 | A `u16`/`i16` `x = x ± 1` is an `INC`/`DEC` with the carry (or borrow) supplied by hand, not the fifteen-instruction load / add-with-carry / store-both — `b16` stays on the decimal-mode path | `tests/e2e/execution.rs` |
 | A 16-bit add/subtract/bitwise result stored to memory skips the `PHA`/`TYA`/`TAY`/`PLA` shuffle when A, Y and the flags are dead after the store — eight instructions become five | `tests/e2e/execution.rs` |
 | The size baseline measures the `examples/symon/` monitor too, compiled against its own `wraith.toml` (config resolved beside the source, not the working directory), so the codegen wins on a real program are self-tracking — `screen_scroll`'s inner byte-move is 58 instructions where it was 66, and the whole ROM 2395 where it was 2739 | `tests/code_size.rs` |
+| `#[align]` page-aligns a `const` array table in ROM so an indexed read never crosses a page boundary; bare, since the page is the only alignment the 6502 rewards. Refused on a mutable `static`, a scalar, an `addr`, and a function | `tests/e2e/align.rs` |
+| `atomic static` masks interrupts (`PHP;SEI;…;PLP`, save/restore) around each whole-variable read and each assignment of a two-byte value shared with a handler, so no torn read or lost update; a one-byte `atomic` warns and emits nothing; an aggregate is refused | `tests/e2e/atomic.rs` |
+| The fuzzer generates a mutable `static` in RAM — a store, a read-modify-write and the INC/DEC path against an *absolute* BSS address, the storage class the const table never reached | `docs/fuzz-coverage.md` |
+| The fuzzer dispatches an integer `match` on the base type — disjoint literal arms or a range arm with a wildcard — which caught a peephole dropping the `LDA` that sets N for a signed range's low-bound `BMI`, so a negative computed scrutinee wrongly passed `≥ 0` | `docs/fuzz-coverage.md`, `tests/e2e/match_ranges.rs` |
 
 ## What keeps going wrong
 
@@ -166,6 +170,17 @@ cost several bugs before it was named.
   it back, rather than either pass borrowing the other's answer. A fuzzer at
   seed 6111 found the store fusion trusting the wrong one.
 
+- **A load that is dropped for its value can be load-bearing for its flags.**
+  `STA $20; LDA $20` looked like a value no-op — A already holds what was stored
+  — so a peephole dropped the reload. But `LDA` sets N/Z and `STA` does not, and
+  a signed range match emits exactly `STA $20; LDA $20; BMI` to test the sign
+  bit against a lower bound of 0. With the reload gone, `BMI` read whatever set N
+  last — for a computed scrutinee, the shift routine's `CPX #$00` (N clear) — so
+  a negative value passed the "≥ 0" test and took the wrong arm. Same shape as
+  the `CMP #$00` and transfer-pair eliminations that were already guarded by flag
+  liveness; this store/load pair simply wasn't. A fuzzer at seed 100357 found it,
+  once an integer `match` on the base type made computed signed scrutinees common.
+
 ---
 
 ## Language features
@@ -197,14 +212,25 @@ cost/benefit looked best; none is started. (Structure-of-arrays layout was the
 first of them and is now `#[soa]`; the count of the spec's compiling examples
 above is the other half of the same survey being worked through.)
 
-- **Page alignment.** `LDA tbl,X` crosses a page boundary and costs an extra
-  cycle; a table the programmer wants aligned has no way to say so.
-  `#[align(256)]` on a `const` or `static`, honoured by the section allocator.
+- **Page alignment.** *Done for const tables.* `LDA tbl,X` crosses a page
+  boundary and costs an extra cycle; `#[align]` on a `const` array now rounds its
+  address up to the next `$xx00` in the section allocator, so a table that fits a
+  page never crosses and its element offset is the low byte. Bare — the page is
+  the only alignment the 6502 rewards, so the attribute takes no argument. Still
+  open: `#[align]` on a mutable `static` (BSS is repacked to reclaim dropped
+  globals, and that repack infers sizes from address gaps that padding would
+  corrupt — refused for now with a message that says so).
 
-- **`critical { }` blocks.** Disabling interrupts around a multi-byte update is
-  `SEI` / body / `CLI` today — written by hand in `asm!`, and wrong if the
-  caller already had them disabled. A block form can save and restore the flag
-  instead, and the compiler knows how long the body is.
+- **`critical { }` blocks.** *The common case is covered by `atomic`; a general
+  block is still open.* Disabling interrupts around a multi-byte update is `SEI`
+  / body / `CLI` today — written by hand in `asm!`, and wrong if the caller
+  already had them disabled. `atomic static` now handles the frequent case — a
+  two-byte value shared with a handler — by masking each whole-variable read and
+  each assignment with `PHP; SEI; … ; PLP` (save/restore, so nesting and a
+  handler's own access are safe). What a `critical { }` block would add is a
+  transaction spanning *several statements or variables* (read one, decide,
+  write another), which no per-variable rule can make indivisible. Worth
+  building when a program needs one; the `atomic` mechanism is the same guard.
 
 - **Fixed-point arithmetic.** A `q8.8` type with the shifts folded in. Every
   6502 program that draws anything reinvents this, usually as a pair of `u8`s

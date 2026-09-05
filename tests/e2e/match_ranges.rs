@@ -160,6 +160,36 @@ fn i8_range_arms() {
     );
 }
 
+/// The lower-bound test against `0` is a bare sign-bit check (`BMI`), which
+/// reads the N flag left by the load of the scrutinee. When the scrutinee is a
+/// computed value the compiler stores it (`STA $20`) and reloads it (`LDA $20`)
+/// to set N — but a peephole once dropped the reload as redundant, so `BMI`
+/// read a stale flag from whatever produced the value (here the shift routine's
+/// `CPX #$00`, which left N clear). A negative scrutinee then passed the "≥ 0"
+/// test and took the arm. The scrutinee must be *computed*, not a bare variable,
+/// to force the store/reload the bug depended on.
+#[test]
+fn a_computed_negative_scrutinee_fails_the_low_bound() {
+    // `arr[0] >> 0` is -51: negative, so outside `0..105`, so the default runs.
+    assert_eq!(
+        arm_taken(
+            "let arr: [i8; 2] = [-51, 7]; \
+             match ((arr[0] >> 0) as i8) { 0..105 => { OUT = 1; } _ => { OUT = 2; } }"
+        ),
+        2,
+        "a negative computed scrutinee is below the range and must miss the arm"
+    );
+    // The same shape with a value that *is* in range still matches.
+    assert_eq!(
+        arm_taken(
+            "let arr: [i8; 2] = [40, 7]; \
+             match ((arr[0] >> 0) as i8) { 0..105 => { OUT = 1; } _ => { OUT = 2; } }"
+        ),
+        1,
+        "an in-range computed scrutinee must still take the arm"
+    );
+}
+
 /// `0..=127` on an `i8` asks "is it < 128", which is not representable — the
 /// truncated bound reads as -128 and the arm matched nothing.
 #[test]

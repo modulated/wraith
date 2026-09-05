@@ -36,6 +36,11 @@ pub enum FnAttribute {
     /// it ends up. It lives in this enum because attributes are parsed before
     /// the item's keyword is known.
     Soa,
+    /// Page-align a const array table so indexed reads never cross a page
+    /// boundary (the 6502's extra-cycle penalty) and the element offset is the
+    /// table's low byte. Bare — the only meaningful alignment on this machine is
+    /// the 256-byte page. Lands in [`Static::align`].
+    Align,
 }
 
 /// A struct field definition
@@ -146,6 +151,13 @@ pub struct Static {
     /// The span rather than a bare flag: every refusal this attribute causes
     /// wants to point at the line that asked for it.
     pub soa: Option<Span>,
+    /// Span of `#[align]`, if this const array is page-aligned in ROM. Same
+    /// reasoning as `soa` for keeping the span rather than a bool.
+    pub align: Option<Span>,
+    /// Span of the `atomic` keyword, if this mutable static's multi-byte
+    /// accesses are made interrupt-atomic. The span so a refusal (on a const,
+    /// an aggregate) or the no-op warning (on a one-byte type) can point at it.
+    pub atomic: Option<Span>,
 }
 
 /// Import declaration

@@ -314,6 +314,69 @@ impl SemanticAnalyzer {
             self.register_soa(&name, &declared_ty, at, stat.ty.span)?;
         }
 
+        // `#[align]` page-aligns a const array table in ROM. Two things it is
+        // not for: a mutable `static` (its RAM is repacked to reclaim dropped
+        // globals, and that repack infers sizes from address gaps that padding
+        // would corrupt — a separate piece of work), and anything that is not an
+        // array (a scalar or `str` is at most two bytes and gains nothing from a
+        // page boundary while wasting up to 255).
+        if let Some(at) = stat.align {
+            if stat.mutable {
+                return Err(SemaError::Custom {
+                    message:
+                        "#[align] is not supported on a mutable `static` yet; it applies to a \
+                              `const` array table in ROM"
+                            .to_string(),
+                    span: at,
+                });
+            }
+            if !matches!(declared_ty, Type::Array(_, _)) {
+                return Err(SemaError::Custom {
+                    message:
+                        "#[align] applies to an array table; a scalar or string gains nothing \
+                              from page alignment"
+                            .to_string(),
+                    span: at,
+                });
+            }
+        }
+
+        // `atomic` guards a two-byte scalar shared with an interrupt. A one-byte
+        // value is already atomic (a byte load/store is one instruction), so it
+        // only warns; an aggregate cannot ride the A:Y load/store path the guard
+        // wraps, so it is refused. The parser only lets `atomic` precede a
+        // `static`, so this is always a mutable global here.
+        if let Some(at) = stat.atomic {
+            use crate::ast::PrimitiveType as P;
+            let two_byte_scalar = matches!(
+                declared_ty,
+                Type::Primitive(P::U16 | P::I16 | P::B16)
+                    | Type::Pointer(_)
+                    | Type::String
+                    | Type::Function(_, _)
+            );
+            let one_byte_scalar = matches!(
+                declared_ty,
+                Type::Primitive(P::U8 | P::I8 | P::B8 | P::Bool | P::Char | P::Addr)
+            );
+            if two_byte_scalar {
+                self.atomic_statics.insert(name.clone());
+            } else if one_byte_scalar {
+                self.warnings.push(Warning::AtomicOnByte {
+                    name: name.clone(),
+                    span: at,
+                });
+            } else {
+                return Err(SemaError::Custom {
+                    message: "`atomic` applies to a scalar shared with an interrupt (a two-byte \
+                              value like `u16`), not an array, struct, or slice — guard those with \
+                              a critical section around the access"
+                        .to_string(),
+                    span: at,
+                });
+            }
+        }
+
         // A generated table is folded here, not in the type checker: a `const`
         // or `static` array's initialiser is flattened during registration and
         // never reaches `check_expr`, so the declaration this feature exists

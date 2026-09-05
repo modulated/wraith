@@ -242,6 +242,7 @@ fn format_token(token: &Token) -> String {
         Token::Continue => "keyword 'continue'".to_string(),
         Token::Const => "keyword 'const'".to_string(),
         Token::Static => "keyword 'static'".to_string(),
+        Token::Atomic => "keyword 'atomic'".to_string(),
         Token::Let => "keyword 'let'".to_string(),
         Token::True => "keyword 'true'".to_string(),
         Token::False => "keyword 'false'".to_string(),

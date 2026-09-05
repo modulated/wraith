@@ -9,6 +9,15 @@ use crate::lexer::Token;
 use super::Parser;
 use super::error::{ParseError, ParseResult};
 
+/// The attributes a `static`/`const` declaration accepts, each carrying the span
+/// of where it was written so a later refusal can point at it. Both are absent
+/// on a plain declaration.
+#[derive(Default)]
+struct StorageAttrs {
+    soa: Option<Span>,
+    align: Option<Span>,
+}
+
 /// How an attribute is written, for a diagnostic that names it.
 fn attribute_name(attr: &FnAttribute) -> &'static str {
     match attr {
@@ -21,6 +30,7 @@ fn attribute_name(attr: &FnAttribute) -> &'static str {
         FnAttribute::Org(_) => "#[org]",
         FnAttribute::Section(_) => "#[section]",
         FnAttribute::Soa => "#[soa]",
+        FnAttribute::Align => "#[align]",
     }
 }
 
@@ -94,6 +104,25 @@ impl Parser<'_> {
             false
         };
 
+        // Optional `atomic` prefix, only valid before `static`. Consumed here so
+        // the `static` arm below sees its keyword; a following non-`static`
+        // keyword is an error rather than a silently dropped modifier.
+        let atomic = if self.check(&Token::Atomic) {
+            let sp = self.current_span();
+            self.advance();
+            if !self.check(&Token::Static) {
+                return Err(ParseError::custom(
+                    sp,
+                    "`atomic` applies only to a `static`: it guards a mutable value shared with \
+                     an interrupt handler"
+                        .to_string(),
+                ));
+            }
+            Some(sp)
+        } else {
+            None
+        };
+
         match self.peek().cloned() {
             Some(Token::Import) => {
                 Self::reject_attributes(&attributes, &attr_spans, "an import")?;
@@ -103,6 +132,17 @@ impl Parser<'_> {
             }
 
             Some(Token::Fn) => {
+                // `#[soa]`/`#[align]` describe how storage is laid out; a
+                // function has none, so reject them here rather than parsing on
+                // and silently ignoring the request.
+                for (attr, span) in attributes.iter().zip(&attr_spans) {
+                    if matches!(attr, FnAttribute::Soa | FnAttribute::Align) {
+                        return Err(ParseError::custom(
+                            *span,
+                            format!("a function cannot take {}", attribute_name(attr)),
+                        ));
+                    }
+                }
                 let func = self.parse_function(attributes, is_pub)?;
                 let span = start.merge(self.previous_span());
                 Ok(Spanned::new(Item::Function(Box::new(func)), span))
@@ -153,14 +193,14 @@ impl Parser<'_> {
                 ) {
                     // An `addr` names a fixed hardware location; there is no
                     // storage here to lay out, so no attribute applies — not
-                    // even the one the other two arms accept.
-                    if let Some(at) =
-                        Self::storage_attributes(&attributes, &attr_spans, "an addr declaration")?
-                    {
+                    // even the ones the other two arms accept.
+                    let attrs =
+                        Self::storage_attributes(&attributes, &attr_spans, "an addr declaration")?;
+                    if let Some(at) = attrs.soa.or(attrs.align) {
                         return Err(ParseError::custom(
                             at,
-                            "an addr declaration cannot take #[soa]: it names a fixed location \
-                             rather than storage the compiler lays out"
+                            "an addr declaration cannot take #[soa] or #[align]: it names a fixed \
+                             location rather than storage the compiler lays out"
                                 .to_string(),
                         ));
                     }
@@ -182,7 +222,7 @@ impl Parser<'_> {
                                 .to_string(),
                         ));
                     }
-                    let soa = Self::storage_attributes(&attributes, &attr_spans, "a const")?;
+                    let attrs = Self::storage_attributes(&attributes, &attr_spans, "a const")?;
                     Ok(Spanned::new(
                         Item::Static(Static {
                             name,
@@ -190,7 +230,9 @@ impl Parser<'_> {
                             init,
                             mutable: false,
                             is_pub,
-                            soa,
+                            soa: attrs.soa,
+                            align: attrs.align,
+                            atomic: None,
                         }),
                         span,
                     ))
@@ -224,7 +266,7 @@ impl Parser<'_> {
                     ));
                 }
 
-                let soa = Self::storage_attributes(&attributes, &attr_spans, "a static")?;
+                let attrs = Self::storage_attributes(&attributes, &attr_spans, "a static")?;
                 Ok(Spanned::new(
                     Item::Static(Static {
                         name,
@@ -232,7 +274,9 @@ impl Parser<'_> {
                         init,
                         mutable: true,
                         is_pub,
-                        soa,
+                        soa: attrs.soa,
+                        align: attrs.align,
+                        atomic,
                     }),
                     span,
                 ))
@@ -334,18 +378,27 @@ impl Parser<'_> {
         attributes: &[FnAttribute],
         spans: &[Span],
         what: &str,
-    ) -> ParseResult<Option<Span>> {
-        let mut soa = None;
+    ) -> ParseResult<StorageAttrs> {
+        let mut out = StorageAttrs::default();
         for (attr, span) in attributes.iter().zip(spans) {
             match attr {
                 FnAttribute::Soa => {
-                    if soa.is_some() {
+                    if out.soa.is_some() {
                         return Err(ParseError::custom(
                             *span,
                             "#[soa] is already on this declaration".to_string(),
                         ));
                     }
-                    soa = Some(*span);
+                    out.soa = Some(*span);
+                }
+                FnAttribute::Align => {
+                    if out.align.is_some() {
+                        return Err(ParseError::custom(
+                            *span,
+                            "#[align] is already on this declaration".to_string(),
+                        ));
+                    }
+                    out.align = Some(*span);
                 }
                 other => {
                     return Err(ParseError::custom(
@@ -355,7 +408,7 @@ impl Parser<'_> {
                 }
             }
         }
-        Ok(soa)
+        Ok(out)
     }
 
     /// No attribute applies to this declaration kind, so reject any that appear.
@@ -396,6 +449,20 @@ impl Parser<'_> {
                     "nmi" => FnAttribute::Nmi,
                     "irq" => FnAttribute::Irq,
                     "reset" => FnAttribute::Reset,
+                    "align" => {
+                        // Bare: the only alignment worth anything on the 6502 is
+                        // the 256-byte page. Reject an argument rather than
+                        // silently accepting `#[align(128)]` and page-aligning.
+                        if self.check(&Token::LParen) {
+                            return Err(ParseError::custom(
+                                name_span,
+                                "#[align] takes no arguments; it page-aligns (256 bytes), \
+                                 the only alignment the 6502 rewards"
+                                    .to_string(),
+                            ));
+                        }
+                        FnAttribute::Align
+                    }
                     "org" => {
                         self.expect(&Token::LParen)?;
                         let addr = match self.peek().cloned() {

@@ -321,8 +321,55 @@ program: local variables are allocated in per-function frames that the compiler
   ```
 - `addr` may not be declared `static` — an `addr` names a fixed hardware
   location, so it stays `const`
-- Statics shared with interrupt handlers are **not** protected: guard multi-byte
-  updates with a `SEI`/`CLI` critical section
+- A two-byte `static` shared with an interrupt handler can tear unless its
+  accesses are made indivisible — see [`atomic`](#interrupt-safe-statics-atomic)
+  below
+
+#### Interrupt-Safe Statics (`atomic`)
+
+A two-byte load or store is two instructions. If an interrupt handler reads (or
+writes) the same `static` between them, it sees — or leaves — a value that is
+half old and half new. `TICKS` above is the classic case: the handler increments
+it while the main program reads it.
+
+Prefix the `static` with `atomic` and the compiler masks interrupts around every
+whole-variable read and every assignment, so each access is indivisible:
+
+```rust,compile
+const OUT_LO: addr = 0x0200;
+const OUT_HI: addr = 0x0201;
+atomic static TICKS: u16 = 0;
+
+#[irq]
+fn on_irq() {
+    TICKS = TICKS + 1;          // the whole read-modify-write is masked
+}
+
+#[reset]
+fn main() {
+    let now: u16 = TICKS;       // read both bytes with no handler in between
+    OUT_LO = now.low;
+    OUT_HI = now.high;
+    loop {}
+}
+```
+
+The guard is `PHP; SEI; …; PLP` — it **saves and restores** the interrupt-disable
+flag rather than unconditionally re-enabling it, so it is correct inside a
+handler (which already has interrupts masked) and when one atomic access nests in
+another. A whole assignment is masked as a unit, so `TICKS = TICKS + 1` cannot
+lose an update; the RHS is evaluated inside the mask, so keep it short (avoid a
+call there — interrupts stay off across it).
+
+Notes and limits:
+- `atomic` is only for a **two-byte scalar** `static` (`u16`, `i16`, a pointer, a
+  function pointer). A **one-byte** value is already atomic — a byte load or
+  store is one instruction — so `atomic` on it warns and emits nothing.
+- It does not apply to a `const` (immutable, never torn), to a local, or to an
+  aggregate (array, struct, slice); those are compile errors.
+- It makes each *access* indivisible, not a *transaction* spanning several
+  statements. `a = TICKS; …; TICKS = a + f();` still has a gap; that needs a
+  critical section around the whole sequence.
 
 **Configuring RAM.** The `BSS` region defaults to `$0400-$07FF` (1 KB of user
 RAM, clear of the zero page, the hardware stack at `$0100-$01FF`, and the
@@ -530,9 +577,9 @@ let widened: u16 = 3;      // a `-> u16` function may `return` a u8
 Function attributes control code generation, placement, and calling conventions. They are specified using `#[attribute]` syntax before the function declaration.
 
 Attributes are not only for functions: [`#[soa]`](#columns-instead-of-records-soa)
-goes on a `static` or `const` array and chooses how it is laid out. An attribute
-that does not apply to the declaration it is written on is an error, rather than
-being ignored.
+and [`#[align]`](#page-alignment-align) go on a `static` or `const` array and
+choose how it is laid out. An attribute that does not apply to the declaration it
+is written on is an error, rather than being ignored.
 
 #### `#[inline]`
 
@@ -1182,6 +1229,46 @@ The *recommendation* is inferred; the layout is not. The suggestion is
 deliberately quiet: a single mention that is not a field read — a `&`, a slice,
 a whole-element binding — and it says nothing, because a suggestion the reader
 has to dismiss is worse than one never made.
+
+### Page Alignment (`#[align]`)
+
+`#[align]` on a `const` array places the table on a 256-byte page boundary
+(`$xx00`):
+
+```rust,compile
+#[align]
+const SQUARES: [u8; 16] = [|i| => i * i];
+const OUT: addr = 0x0900;
+
+#[reset]
+fn main() {
+    let i: u8 = 5;
+    OUT = SQUARES[i];
+    loop {}
+}
+```
+
+On the 6502 an indexed read (`LDA table,X`) costs an extra cycle whenever
+`base + index` crosses a page boundary, and the crossing depends on the index —
+so an unaligned table gives a hot loop data-dependent timing. A table that starts
+on a page boundary and fits within a page never crosses: every access is the fast
+path, the timing is fixed, and the element's offset is simply the low byte of its
+address.
+
+The attribute is **bare** — it takes no argument. The page is the only alignment
+that changes anything on this machine (there is no cache, and sub-page boundaries
+do not affect the indexed-read penalty), so there is nothing else to ask for;
+`#[align(256)]` is rejected in favour of `#[align]`.
+
+The cost is the padding between the previous item and the next page boundary, so
+alignment is worth it for a table read in a loop, not for one touched once.
+
+#### Restrictions
+
+- `#[align]` goes on a **`const` array** — a read-only table in ROM. It is not
+  yet supported on a mutable `static` (whose RAM is repacked to reclaim dropped
+  globals) and is meaningless on a scalar, a string, or an `addr`; each is an
+  error rather than a silent no-op.
 
 ### Passing Structs to Functions
 

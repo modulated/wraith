@@ -1876,6 +1876,30 @@ pub(super) fn generate_assign(
     info: &ProgramInfo,
     string_collector: &mut StringCollector,
 ) -> Result<(), CodegenError> {
+    // Writing a two-byte `atomic static` — a plain store, a read-modify-write
+    // (`t = t + 1`), or the INC/DEC fast path — is masked as a whole, so an
+    // interrupt cannot see it half-written or slip its own update between the
+    // load and the store. The region spans the value's evaluation too, which is
+    // what makes `t = t + 1` atomic rather than just its two halves; a read of
+    // the same static inside rides this mask instead of adding its own.
+    let atomic =
+        matches!(&target.node, crate::ast::Expr::Variable(n) if info.atomic_statics.contains(n));
+    if atomic {
+        emitter.enter_atomic();
+        let result = generate_assign_inner(target, value, emitter, info, string_collector);
+        emitter.exit_atomic();
+        return result;
+    }
+    generate_assign_inner(target, value, emitter, info, string_collector)
+}
+
+fn generate_assign_inner(
+    target: &Spanned<crate::ast::Expr>,
+    value: &Spanned<crate::ast::Expr>,
+    emitter: &mut Emitter,
+    info: &ProgramInfo,
+    string_collector: &mut StringCollector,
+) -> Result<(), CodegenError> {
     // Slice reassignment: `s = arr[a..b];` materializes a new descriptor
     // into the slice variable's slot (same as the `let` form).
     if let crate::ast::Expr::Variable(target_name) = &target.node
