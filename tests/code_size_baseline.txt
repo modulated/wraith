@@ -29,5 +29,6 @@ string_slicing 117 12 49
 strings 270 21 105
 struct 157 0 56
 struct_nested 70 0 20
+symon/symon_monitor 6133 642 2395
 syntax_demo 70 0 26
 tuple 876 21 384

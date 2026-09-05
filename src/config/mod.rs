@@ -160,6 +160,27 @@ impl Config {
         }
     }
 
+    /// Load the `wraith.toml` that governs a given source file: the nearest one
+    /// found walking up from the file's own directory, or the default map when
+    /// there is none.
+    ///
+    /// This is how a program is compiled against the memory map sitting beside
+    /// it — `examples/symon/wraith.toml`, whose map is nothing like the
+    /// repository default — rather than the one in whatever directory the
+    /// compiler happens to run from. A malformed nearest file falls back to the
+    /// default, matching [`load_or_default`](Self::load_or_default).
+    pub fn from_source(source: &Path) -> Self {
+        let mut dir = source.parent();
+        while let Some(d) = dir {
+            let candidate = d.join("wraith.toml");
+            if candidate.exists() {
+                return Self::from_file(&candidate).unwrap_or_default();
+            }
+            dir = d.parent();
+        }
+        Self::default()
+    }
+
     /// Try to load from wraith.toml in current directory, fall back to defaults.
     ///
     /// A malformed file falls back to the default map here; call
@@ -227,6 +248,12 @@ impl MemoryConfig {
     /// Load from wraith.toml or use defaults
     pub fn load_or_default() -> Self {
         Self::from_config(Config::load_or_default())
+    }
+
+    /// Load the memory map governing a source file — the nearest `wraith.toml`
+    /// walking up from its directory, else the default. See [`Config::from_source`].
+    pub fn from_source(source: &Path) -> Self {
+        Self::from_config(Config::from_source(source))
     }
 
     /// Create default memory layout for 6502
@@ -298,6 +325,33 @@ mod tests {
         let default = config.default_section();
         assert_eq!(default.name, "CODE");
         assert_eq!(default.start, 0x8000);
+    }
+
+    #[test]
+    fn from_source_picks_the_map_beside_the_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // A file in `examples/symon/` compiles against that directory's map,
+        // where CODE is ROM at $C000 — nothing like the default $8000.
+        let symon = Config::from_source(&root.join("examples/symon/symon_monitor.wr"));
+        let code = symon.sections.iter().find(|s| s.name == "CODE").unwrap();
+        assert_eq!(code.start, 0xC000, "symon's CODE is its own ROM base");
+
+        // A top-level example has no `wraith.toml` beside it, so the walk climbs
+        // to the repository's, whose CODE is the $8000 default.
+        let flat = Config::from_source(&root.join("examples/fibonacci.wr"));
+        let code = flat.sections.iter().find(|s| s.name == "CODE").unwrap();
+        assert_eq!(code.start, 0x8000, "a top-level example uses the repo map");
+    }
+
+    #[test]
+    fn from_source_defaults_when_no_config_is_found() {
+        // A path with no `wraith.toml` anywhere above it falls back to the
+        // built-in map rather than erroring.
+        let cfg = Config::from_source(Path::new("/nonexistent/deep/path/prog.wr"));
+        assert_eq!(cfg.default_section, "CODE");
+        let code = cfg.sections.iter().find(|s| s.name == "CODE").unwrap();
+        assert_eq!(code.start, 0x8000);
     }
 
     #[test]

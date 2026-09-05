@@ -80,6 +80,7 @@ read against a current picture:
 | An expression argument with no call in it is evaluated straight into the callee's frame slot, skipping the `$F4`-`$FE` pool round-trip and the byte-by-byte copy that followed it | `tests/e2e/nested_calls.rs` |
 | A `u16`/`i16` `x = x ± 1` is an `INC`/`DEC` with the carry (or borrow) supplied by hand, not the fifteen-instruction load / add-with-carry / store-both — `b16` stays on the decimal-mode path | `tests/e2e/execution.rs` |
 | A 16-bit add/subtract/bitwise result stored to memory skips the `PHA`/`TYA`/`TAY`/`PLA` shuffle when A, Y and the flags are dead after the store — eight instructions become five | `tests/e2e/execution.rs` |
+| The size baseline measures the `examples/symon/` monitor too, compiled against its own `wraith.toml` (config resolved beside the source, not the working directory), so the codegen wins on a real program are self-tracking — `screen_scroll`'s inner byte-move is 58 instructions where it was 66, and the whole ROM 2395 where it was 2739 | `tests/code_size.rs` |
 
 ## What keeps going wrong
 
@@ -717,6 +718,19 @@ being reached through a dozen `continue`s.
 The failure is still a compile error rather than a miscompile, and the fuzzer
 budgets one argument per level to match, skipping and counting anything that
 overruns anyway.
+
+The direct-to-frame path also stops at the *first* argument that contains a
+call: `mem_write(dst + c, mem_read(src + c))` still stages both arguments
+through the pool and spills to the software stack, because the inner
+`mem_read` call forces the whole list back onto the reserved path. This is the
+larger half of what `examples/symon/`'s `screen_scroll` inner loop still pays —
+now that it is in the size baseline, that cost is a number that moves when the
+per-argument version lands: a plain argument evaluated direct even when a
+*sibling* argument holds a call. The sibling case is not a free extension of
+the current one, though — a plain argument written into the callee frame before
+a sibling call can be clobbered by that call's own frame, which is not coloured
+disjoint from a sibling's the way a caller's is, so it needs the "stage the
+plain arguments after the last call, pool the rest" ordering worked out first.
 
 ### The expression temp pool runs out under combined pressure
 

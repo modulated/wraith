@@ -1410,3 +1410,17 @@ pub fn analyze_with_path(ast: &SourceFile, file_path: PathBuf) -> Result<Program
     let mut analyzer = SemanticAnalyzer::with_base_path(file_path);
     analyzer.analyze(ast)
 }
+
+/// Analyse against an explicit memory map, rather than the one in the working
+/// directory. Used to compile a source file against the `wraith.toml` beside it
+/// (see [`crate::config::MemoryConfig::from_source`]); the resulting map travels
+/// on through `ProgramInfo::memory_config`, which codegen reads for placement.
+pub fn analyze_with_config(
+    ast: &SourceFile,
+    file_path: PathBuf,
+    memory_config: crate::config::MemoryConfig,
+) -> Result<ProgramInfo, SemaError> {
+    let mut analyzer = SemanticAnalyzer::with_base_path(file_path);
+    analyzer.memory_config = memory_config;
+    analyzer.analyze(ast)
+}

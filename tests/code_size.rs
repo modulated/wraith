@@ -51,8 +51,11 @@ fn measure(path: &Path) -> Result<Sizes, String> {
     let tokens = wraith::lex(&source).map_err(|e| format!("lex: {e:?}"))?;
     let ast = wraith::parser::Parser::parse(&tokens).map_err(|e| format!("parse: {e:?}"))?;
     // The path of the file itself: imports resolve relative to it, so an
-    // example importing `../std/mem.wr` finds the stdlib.
-    let mut program = wraith::sema::analyze_with_path(&ast, path.to_path_buf())
+    // example importing `../std/mem.wr` finds the stdlib. The memory map comes
+    // from the `wraith.toml` beside the source (walking up), not the working
+    // directory's — `examples/symon/` carries a map nothing like the default.
+    let config = wraith::config::MemoryConfig::from_source(path);
+    let mut program = wraith::sema::analyze_with_config(&ast, path.to_path_buf(), config)
         .map_err(|e| format!("sema: {e:?}"))?;
     let (asm, alloc) = wraith::codegen::generate(
         &ast,
@@ -86,19 +89,34 @@ fn measure(path: &Path) -> Result<Sizes, String> {
     Ok(sizes)
 }
 
-/// Every example, by file stem, in a stable order.
+/// Collect every `.wr` under `dir`, recursively, so an example that needs its
+/// own project directory (its own `wraith.toml`, a subdirectory of helpers)
+/// counts too — `examples/symon/` is the first such.
+fn collect_wr(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("examples dir is readable") {
+        let p = entry.expect("dir entry is readable").path();
+        if p.is_dir() {
+            collect_wr(&p, out);
+        } else if p.extension().is_some_and(|x| x == "wr") {
+            out.push(p);
+        }
+    }
+}
+
+/// Every example, in a stable order. A top-level file is named by its bare stem
+/// (`fibonacci`); one in a subdirectory keeps the directory (`symon/symon_monitor`),
+/// so two examples of the same name in different projects cannot collide.
 fn measure_corpus() -> BTreeMap<String, Sizes> {
-    let mut out = BTreeMap::new();
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(examples_dir())
-        .expect("examples/ is readable")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "wr"))
-        .collect();
+    let root = examples_dir();
+    let mut paths = Vec::new();
+    collect_wr(&root, &mut paths);
     paths.sort();
 
-    for p in paths {
-        let name = p.file_stem().unwrap().to_string_lossy().to_string();
-        match measure(&p) {
+    let mut out = BTreeMap::new();
+    for p in &paths {
+        let rel = p.strip_prefix(&root).unwrap_or(p);
+        let name = rel.with_extension("").to_string_lossy().to_string();
+        match measure(p) {
             Ok(s) => {
                 out.insert(name, s);
             }

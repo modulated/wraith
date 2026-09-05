@@ -1077,7 +1077,10 @@ pub fn generate(
     if let Some(stack) = program.memory_config.get_section("STACK") {
         emitter.memory_layout.software_stack_base = stack.start;
     }
-    let mut section_alloc = SectionAllocator::default();
+    // Place sections from the same map sema resolved (`analyze_with_config` may
+    // have set a source-relative one), rather than re-reading the working
+    // directory's `wraith.toml` a second time and risking a different answer.
+    let mut section_alloc = SectionAllocator::new(program.memory_config.clone());
     let mut string_collector = StringCollector::new();
 
     // A `str` in a `static`'s startup image carries the literal's *content*
