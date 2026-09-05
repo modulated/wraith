@@ -84,6 +84,7 @@ read against a current picture:
 | `#[align]` page-aligns a `const` array table in ROM so an indexed read never crosses a page boundary; bare, since the page is the only alignment the 6502 rewards. Refused on a mutable `static`, a scalar, an `addr`, and a function | `tests/e2e/align.rs` |
 | `atomic static` masks interrupts (`PHP;SEI;…;PLP`, save/restore) around each whole-variable read and each assignment of a two-byte value shared with a handler, so no torn read or lost update; a one-byte `atomic` warns and emits nothing; an aggregate is refused | `tests/e2e/atomic.rs` |
 | The fuzzer generates a mutable `static` in RAM — a store, a read-modify-write and the INC/DEC path against an *absolute* BSS address, the storage class the const table never reached | `docs/fuzz-coverage.md` |
+| The fuzzer dispatches an integer `match` on the base type — disjoint literal arms or a range arm with a wildcard — which caught a peephole dropping the `LDA` that sets N for a signed range's low-bound `BMI`, so a negative computed scrutinee wrongly passed `≥ 0` | `docs/fuzz-coverage.md`, `tests/e2e/match_ranges.rs` |
 
 ## What keeps going wrong
 
@@ -168,6 +169,17 @@ cost several bugs before it was named.
   omit `RTS` for the first pass; the fusion computes its own liveness that adds
   it back, rather than either pass borrowing the other's answer. A fuzzer at
   seed 6111 found the store fusion trusting the wrong one.
+
+- **A load that is dropped for its value can be load-bearing for its flags.**
+  `STA $20; LDA $20` looked like a value no-op — A already holds what was stored
+  — so a peephole dropped the reload. But `LDA` sets N/Z and `STA` does not, and
+  a signed range match emits exactly `STA $20; LDA $20; BMI` to test the sign
+  bit against a lower bound of 0. With the reload gone, `BMI` read whatever set N
+  last — for a computed scrutinee, the shift routine's `CPX #$00` (N clear) — so
+  a negative value passed the "≥ 0" test and took the wrong arm. Same shape as
+  the `CMP #$00` and transfer-pair eliminations that were already guarded by flag
+  liveness; this store/load pair simply wasn't. A fuzzer at seed 100357 found it,
+  once an integer `match` on the base type made computed signed scrutinees common.
 
 ---
 

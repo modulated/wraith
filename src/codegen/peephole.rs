@@ -297,6 +297,12 @@ fn eliminate_redundant_stores(lines: &[Line], volatile: &VolatileSymbols) -> Vec
 
 /// Eliminate load immediately after store to same location: STA $40; LDA $40 → STA $40
 fn eliminate_load_after_store(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
+    // The load sets N and Z from the value; the store it follows does not. So the
+    // load can only be dropped when those flags are dead afterwards — otherwise a
+    // following branch (a signed range match emits `LDA $20; BMI` to test the
+    // sign bit) would read a flag left by whatever ran before the store. Decided
+    // by flag liveness over the branch graph, not by peeking at the next line.
+    let live_out = compute_flag_liveness(lines);
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -320,22 +326,16 @@ fn eliminate_load_after_store(lines: &[Line], volatile: &VolatileSymbols) -> Vec
             // (a read-write mapping) the read may return different hardware
             // state, so preserve it whenever the location is a volatile read.
             let volatile_read = volatile.is_volatile_read(op1);
+            let nz_dead = live_out[i + 1] & (FLAG_N | FLAG_Z) == 0;
             // STA $40; LDA $40 → STA $40 (A already contains the value)
-            if m1 == "STA" && m2 == "LDA" && op1 == op2 && !volatile_read {
+            // STX $40; LDX $40 and STY $40; LDY $40 likewise.
+            let store_load = matches!(
+                (m1.as_str(), m2.as_str()),
+                ("STA", "LDA") | ("STX", "LDX") | ("STY", "LDY")
+            );
+            if store_load && op1 == op2 && !volatile_read && nz_dead {
                 result.push(lines[i].clone());
                 i += 2; // Skip the load
-                continue;
-            }
-            // STX $40; LDX $40 → STX $40
-            if m1 == "STX" && m2 == "LDX" && op1 == op2 && !volatile_read {
-                result.push(lines[i].clone());
-                i += 2;
-                continue;
-            }
-            // STY $40; LDY $40 → STY $40
-            if m1 == "STY" && m2 == "LDY" && op1 == op2 && !volatile_read {
-                result.push(lines[i].clone());
-                i += 2;
                 continue;
             }
         }
@@ -2509,6 +2509,17 @@ mod tests {
         let lines = parse_assembly(asm);
         let optimized = eliminate_load_after_store(&lines, &VolatileSymbols::default());
         assert_eq!(optimized.len(), 1);
+    }
+
+    #[test]
+    fn test_load_after_store_kept_when_a_branch_reads_the_flags() {
+        // The LDA re-establishes N from $40 for the BMI; STA sets no flags, so
+        // dropping the load would leave BMI reading a stale N. A signed range
+        // match on a computed scrutinee emits exactly this `STA $20; LDA $20; BMI`.
+        let asm = "    STA $20\n    LDA $20\n    BMI target\ntarget:\n";
+        let lines = parse_assembly(asm);
+        let optimized = eliminate_load_after_store(&lines, &VolatileSymbols::default());
+        assert_eq!(optimized.len(), 4, "the load feeds the BMI's N flag");
     }
 
     #[test]
