@@ -412,6 +412,11 @@ enum E {
     /// `(sl{i}.len as {ty})` — the other half of the descriptor, and the half a
     /// partial copy loses without disturbing any element. `main` only.
     SliceLen(usize),
+    /// `GSTATIC` — a read of the mutable `static` in RAM, at the program's base
+    /// type. Its value is program state written by [`S::GStore`], so a read
+    /// cannot be folded to its initialiser. Unlike a local, it lives at an
+    /// absolute BSS address the reset handler initialises. `main` only.
+    GLoad,
 }
 
 /// Which entry of the function-pointer table a `Dispatch` selects. In range by
@@ -626,6 +631,12 @@ enum S {
         src: usize,
         len: usize,
     },
+    /// `GSTATIC = <expr>;` — a store to the mutable `static` in RAM. The value
+    /// is base-typed and may itself read the static ([`E::GLoad`]), so this is a
+    /// read-modify-write to an absolute BSS address — the store, the INC/DEC
+    /// fast path and the A:Y-shuffle fusion all against `$04xx` rather than a
+    /// zero-page frame slot. `main` only.
+    GStore(E),
 }
 
 /// Variables in `main`.
@@ -1508,6 +1519,11 @@ struct Prog {
     /// a budget and call each other at `d - 1`, so the cycle terminates by the
     /// same construction a self-call does.
     mutual: Option<(usize, usize)>,
+    /// The initial value of `main`'s mutable `static GSTATIC`, or `None` when
+    /// the program declares none. Its type is `base`. Unlike the `const` table
+    /// this lives in RAM (BSS): the reset handler writes the initial value, and
+    /// `S::GStore` overwrites it, so the state carries its own copy.
+    mut_static: Option<i64>,
 }
 
 impl Prog {
@@ -2082,7 +2098,37 @@ fn gen_program(seed: u64) -> Prog {
     g.str_taker = (str_init.is_some() && count > vtable && funcs[0].str_param).then_some(0);
 
     let n = 2 + g.rng.below(3) as usize;
-    let stmts = (0..n).flat_map(|_| gen_stmt_seq(&mut g, 2)).collect();
+    let mut stmts: Vec<S> = (0..n).flat_map(|_| gen_stmt_seq(&mut g, 2)).collect();
+
+    // A mutable `static` in RAM (BSS), read and written in `main`. Exercises the
+    // whole storage class the const table never reaches: BSS allocation, the
+    // reset handler's initialiser write, and — the point after the recent
+    // codegen work — a store, a read-modify-write, and the 16-bit INC/DEC fast
+    // path all against an *absolute* address rather than a zero-page frame slot.
+    // Two statements at the end so its final value is deterministic: a plain
+    // store, then an RMW that reads the static back through `E::GLoad`.
+    let mut_static = (g.rng.below(100) < 45).then(|| {
+        let init = narrow(g.rng.below(0x1_0000) as i64, base);
+        stmts.push(S::GStore(gen_arg(&mut g, base, 3)));
+        let op = if g.rng.below(2) == 0 {
+            Op::Add
+        } else {
+            Op::Sub
+        };
+        // Half the RMWs step by a literal 1 — the INC/DEC path — and half by a
+        // computed value, which stores a 16-bit result to the absolute address.
+        // A `Bin` operand must be at the base type with no widening, so this is
+        // `gen_expr` (a same-type expression) rather than `gen_arg` (a boundary
+        // value that may carry an `At` widening the two operands could not share).
+        let step = if g.rng.below(2) == 0 {
+            E::Lit(1)
+        } else {
+            gen_expr(&mut g, base, 1, false)
+        };
+        stmts.push(S::GStore(E::Bin(Box::new(E::GLoad), op, Box::new(step))));
+        init
+    });
+
     let (counters, loops) = (g.counters, g.loops);
     Prog {
         pair,
@@ -2112,6 +2158,7 @@ fn gen_program(seed: u64) -> Prog {
         ptr,
         struct_init_from_call,
         mutual,
+        mut_static,
     }
 }
 
@@ -2160,6 +2207,9 @@ struct St<'a> {
     /// `Reslice` and `CopySlice` move it. Empty inside a function, which names
     /// no slice.
     slices: Vec<(usize, usize)>,
+    /// The mutable `static`'s current value, `None` where none is in scope.
+    /// `S::GStore` writes it; `E::GLoad` reads it.
+    gstatic: Option<i64>,
 }
 
 /// Call a generated function. Its locals are fresh per invocation — which is
@@ -2224,6 +2274,8 @@ fn call_fn(
         // The parameter, when this function takes one — the only slice its
         // body can name, and the one `sp` resolves to.
         slices: slice.into_iter().collect(),
+        // A function body cannot name `main`'s static, like the pointer above.
+        gstatic: None,
     };
     let _ = ty; // the caller's type; a callee works entirely at its own
     if f.recursive && budget == 0 {
@@ -2472,6 +2524,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let idx = eval_index_mod(ix, st, ty, bytes.len());
             narrow(bytes[idx] as i64, ty)
         }
+        E::GLoad => st.gstatic.expect("a static read with no static in scope"),
         E::Bin(l, op, r) => {
             let a = eval(l, st, ty);
             let b = eval(r, st, ty);
@@ -2597,6 +2650,13 @@ fn exec(stmts: &[S], st: &mut St, ty: Ty) {
                     st.counters[*id] -= 1;
                 }
             }
+            // The static's own type is `base`, and `GStore` only appears in
+            // `main`, where `ty` is `base` — so the value is computed and stored
+            // at the static's width.
+            S::GStore(e) => {
+                let base = st.prog.base;
+                st.gstatic = Some(narrow(eval(e, st, base), base));
+            }
         }
     }
 }
@@ -2645,6 +2705,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         dev: if p.vtable > 0 { p.candidate(0) } else { 0 },
         ptr: p.ptr.as_ref().map(|(_, k)| k.clone()),
         slices: p.slices.clone(),
+        gstatic: p.mut_static.map(|v| narrow(v, p.base)),
     };
     exec(&p.stmts, &mut st, p.base);
     // Each slice reports its first element and its length — the two halves of
@@ -2655,6 +2716,9 @@ fn expected(p: &Prog) -> Vec<u32> {
         .iter()
         .flat_map(|(start, len)| [narrow(p.konst[*start], p.base), narrow(*len as i64, p.base)])
         .collect();
+    // The mutable static reports its final value as the last cell, after the
+    // descriptors — the same position `cell_types` and the rendered stores use.
+    let gstatic: Vec<i64> = st.gstatic.into_iter().collect();
     // Each cell at its own width, which is no longer one number per program.
     st.vars
         .iter()
@@ -2663,6 +2727,7 @@ fn expected(p: &Prog) -> Vec<u32> {
         .chain(st.afield.iter())
         .chain(st.nested.iter())
         .chain(descriptors.iter())
+        .chain(gstatic.iter())
         .zip(cell_types(p))
         .map(|(v, t)| raw(*v, t))
         .collect()
@@ -2675,6 +2740,9 @@ fn cell_types(p: &Prog) -> Vec<Ty> {
         out.extend(std::iter::repeat_n(p.base, ALEN + SFIELDS + AFLEN + NESTED));
     }
     out.extend(std::iter::repeat_n(p.base, 2 * p.slices.len()));
+    if p.mut_static.is_some() {
+        out.push(p.base);
+    }
     out
 }
 
@@ -2829,6 +2897,7 @@ fn render(e: &E, ty: Ty, sc: Scope) -> String {
             format!("{n}[{}]", render_slice_index(&n, ix, sc))
         }
         E::SliceLen(i) => format!("({}.len as {})", slice_name(*i, sc), ty.name()),
+        E::GLoad => "GSTATIC".to_string(),
         // No syntax of its own: where this narrows the type, the widening back
         // is what the language does by itself.
         E::At(from, inner) => render(inner, *from, sc),
@@ -2964,6 +3033,7 @@ fn render_stmts(stmts: &[S], ty: Ty, indent: usize, sc: Scope) -> String {
                 render(e, ty, sc)
             )),
             S::StructFromCall(k) => out.push_str(&format!("{pad}s = mks({k});\n")),
+            S::GStore(e) => out.push_str(&format!("{pad}GSTATIC = {};\n", render(e, ty, sc))),
         }
     }
     out
@@ -3089,7 +3159,8 @@ fn uses_memcpy(stmts: &[S]) -> bool {
         | S::PtrPtrStore(..)
         | S::Repoint(_)
         | S::PokeStruct(..)
-        | S::PokePtr(..) => false,
+        | S::PokePtr(..)
+        | S::GStore(_) => false,
     })
 }
 
@@ -3253,6 +3324,14 @@ static DEV: VT = VT {{ call: {} }};\n",
         String::new()
     };
 
+    // The mutable static, at top level. Its name is uppercase so it is not
+    // mistaken for a constant-naming warning, and its initial value is written
+    // by the reset handler into BSS.
+    let static_decl = match p.mut_static {
+        Some(init) => format!("static GSTATIC: {} = {};\n", p.base.name(), init),
+        None => String::new(),
+    };
+
     let mut decls = String::new();
     for (i, (v, vt)) in p.init.iter().zip(p.var_types.iter()).enumerate() {
         let lit = if *v < 0 {
@@ -3329,6 +3408,9 @@ static DEV: VT = VT {{ call: {} }};\n",
         cells.push(format!("sl{i}[0]"));
         cells.push(format!("(sl{i}.len as {tn})"));
     }
+    if p.mut_static.is_some() {
+        cells.push("GSTATIC".to_string());
+    }
 
     // Cells are packed at their own widths, so an output index counts bytes
     // written so far rather than cells.
@@ -3364,22 +3446,22 @@ static DEV: VT = VT {{ call: {} }};\n",
     match form {
         Form::Inline => {
             format!(
-                "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
+                "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}#[reset]\nfn main() {{\n{decls}{body}{stores}    loop {{}}\n}}\n"
             )
         }
         Form::ViaFunction => format!(
-            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}fn body() {{\n{decls}{body}{stores}}}\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}fn body() {{\n{decls}{body}{stores}}}\n\
              #[reset]\nfn main() {{\n    body();\n    loop {{}}\n}}\n"
         ),
         Form::ViaMatch => format!(
-            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}#[reset]\nfn main() {{\n{decls}    let sel: u8 = 0;\n\
                  match sel {{\n        0 => {{\n{}{}        }}\n        _ => {{}}\n    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&bump(&body)),
             bump(&bump(&stores)),
         ),
         Form::ViaLoop => format!(
-            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
+            "{head}{enum_decl}{struct_decl}{funcs}{vtable_decl}{static_decl}#[reset]\nfn main() {{\n{decls}    for w0 in 0..1 {{\n{}{}    }}\n\
              \x20   loop {{}}\n}}\n",
             bump(&body),
             bump(&stores),
@@ -3623,7 +3705,8 @@ fn drop_budgets(p: &mut Prog, id: usize) {
             | E::StrLen
             | E::StrIndex(_)
             | E::SliceElem(..)
-            | E::SliceLen(_) => {}
+            | E::SliceLen(_)
+            | E::GLoad => {}
         }
     }
     fn in_bool(b: &mut B, id: usize) {
@@ -3656,6 +3739,7 @@ fn drop_budgets(p: &mut Prog, id: usize) {
                 | S::PtrPtrStore(_, e)
                 | S::PokeStruct(_, e)
                 | S::PokePtr(_, _, e) => in_expr(e, id),
+                S::GStore(e) => in_expr(e, id),
                 S::Install(_)
                 | S::CopySlice(..)
                 | S::Reslice(..)
@@ -3712,7 +3796,8 @@ fn strip_self_calls(e: &mut E) {
         | E::StrLen
         | E::StrIndex(_)
         | E::SliceElem(..)
-        | E::SliceLen(_) => {}
+        | E::SliceLen(_)
+        | E::GLoad => {}
     }
 }
 
@@ -3732,6 +3817,7 @@ fn strip_stmt_self_calls(s: &mut S) {
         S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
             strip_self_calls(e)
         }
+        S::GStore(e) => strip_self_calls(e),
         S::Install(_)
         | S::CopySlice(..)
         | S::Reslice(..)
@@ -3859,6 +3945,7 @@ fn mutate_stmt(s: &mut S, target: usize, seen: &mut usize) -> bool {
         S::PtrStore(_, e) | S::PtrPtrStore(_, e) | S::PokeStruct(_, e) | S::PokePtr(_, _, e) => {
             mutate_expr(e, target, seen)
         }
+        S::GStore(e) => mutate_expr(e, target, seen),
         S::Install(_)
         | S::CopySlice(..)
         | S::SliceFromCall(..)
@@ -3916,6 +4003,7 @@ fn mutate_expr(e: &mut E, target: usize, seen: &mut usize) -> bool {
         | E::PtrPtrLoad
         | E::EnumVal
         | E::EnumMatch
+        | E::GLoad
         | E::StrLen => {
             if *seen == target {
                 *e = E::Var(0);
@@ -4244,6 +4332,7 @@ fn the_generator_covers_what_it_claims() {
         ptr_elem_targets: usize,
         nested_reads: usize,
         enum_match_reads: usize,
+        static_reads: usize,
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -4315,6 +4404,7 @@ fn the_generator_covers_what_it_claims() {
             E::EnumMatch => s.enum_match_reads += 1,
             E::StrLen => s.str_reads += 1,
             E::StrIndex(_) => s.str_index_reads += 1,
+            E::GLoad => s.static_reads += 1,
             E::Lit(_) | E::Var(_) | E::Elem(_) | E::Konst(_) => {}
         }
     }
@@ -4404,6 +4494,10 @@ fn the_generator_covers_what_it_claims() {
                 }
                 S::PokePtr(_, _, e) => {
                     s.stmts.insert("pointer-param");
+                    walk_e(e, s, narrow_half);
+                }
+                S::GStore(e) => {
+                    s.stmts.insert("static-store");
                     walk_e(e, s, narrow_half);
                 }
             }
@@ -4667,6 +4761,7 @@ fn the_oracle_matches_the_documented_semantics() {
         ptr: None,
         struct_init_from_call: None,
         mutual: None,
+        mut_static: None,
     };
     let st = St {
         prog: &empty,
@@ -4684,6 +4779,7 @@ fn the_oracle_matches_the_documented_semantics() {
         dev: 0,
         ptr: None,
         slices: Vec::new(),
+        gstatic: None,
     };
     for (ty, a, op, b, want) in cases {
         let e = E::Bin(Box::new(E::Lit(*a)), *op, Box::new(E::Lit(*b)));
@@ -5029,9 +5125,12 @@ mod coverage {
         ),
         (
             "Item::Static",
-            "only the `const` table, which is read-only and lives in ROM; a mutable `static` \
-             in RAM is not generated, so what gets exercised is frame colouring rather than \
-             BSS",
+            "the `const` table in ROM, and — in some programs — one mutable `static GSTATIC` \
+             in RAM, of the program's base type. `main` initialises it (the reset handler \
+             writes the value into BSS), stores an expression to it, and reads it back through \
+             a read-modify-write, so a plain store, an INC/DEC and a 16-bit result all land at \
+             an absolute address rather than a zero-page frame slot. A mutable aggregate static \
+             is not generated; only a scalar",
         ),
         (
             "Item::Struct",

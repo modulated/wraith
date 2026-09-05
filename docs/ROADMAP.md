@@ -83,6 +83,7 @@ read against a current picture:
 | The size baseline measures the `examples/symon/` monitor too, compiled against its own `wraith.toml` (config resolved beside the source, not the working directory), so the codegen wins on a real program are self-tracking — `screen_scroll`'s inner byte-move is 58 instructions where it was 66, and the whole ROM 2395 where it was 2739 | `tests/code_size.rs` |
 | `#[align]` page-aligns a `const` array table in ROM so an indexed read never crosses a page boundary; bare, since the page is the only alignment the 6502 rewards. Refused on a mutable `static`, a scalar, an `addr`, and a function | `tests/e2e/align.rs` |
 | `atomic static` masks interrupts (`PHP;SEI;…;PLP`, save/restore) around each whole-variable read and each assignment of a two-byte value shared with a handler, so no torn read or lost update; a one-byte `atomic` warns and emits nothing; an aggregate is refused | `tests/e2e/atomic.rs` |
+| The fuzzer generates a mutable `static` in RAM — a store, a read-modify-write and the INC/DEC path against an *absolute* BSS address, the storage class the const table never reached | `docs/fuzz-coverage.md` |
 
 ## What keeps going wrong
 
