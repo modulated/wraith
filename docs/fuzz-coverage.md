@@ -16,10 +16,10 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 |---|---:|---|
 | `Function` | 400 |  |
 | `Struct` | 312 | two structs per program: `S`, with two scalar fields, an array field between them, and a nested `Inner`; and `Inner` itself, two scalars, laid out inline in `S`. `S` is declared as a local, passed to a function by address, returned from one — bound and assigned from that call, separate copies in the compiler — and written through a `&S` |
-| `Enum` | 202 | one enum per program, three variants: `C0` unit, `C1(u8)` and `C2(u8)` carrying a payload. The tag is read as `(e as T)` and carried across a call; the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => (x as T), … }` — which discriminates the tag and extracts the byte. A `u16` payload is not generated, so the value stays two bytes in A:X like the unit enum, and a payload matched through the by-reference parameter is not either |
-| `Static` | 349 | the `const` table in ROM, and — in some programs — one mutable `static GSTATIC` in RAM, of the program's base type. `main` initialises it (the reset handler writes the value into BSS), stores an expression to it, and reads it back through a read-modify-write, so a plain store, an INC/DEC and a 16-bit result all land at an absolute address rather than a zero-page frame slot. A mutable aggregate static is not generated; only a scalar |
+| `Enum` | 202 | one enum per program, three variants: `C0` unit and two carrying a payload. The payload is a `u8` three programs in five and the pair's wide type (`u16` or `i16`) in the other two, so the two-byte payload extracted into A:X and cast down is exercised as well as the one-byte one. The tag is read as `(e as T)` and carried across a call; the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => (x as T), … }` — which discriminates the tag and extracts the value. A payload matched through the by-reference parameter is not generated |
+| `Static` | 347 | the `const` table in ROM, and — in some programs — one mutable `static GSTATIC` in RAM, of the program's base type. `main` initialises it (the reset handler writes the value into BSS), stores an expression to it, and reads it back through a read-modify-write, so a plain store, an INC/DEC and a 16-bit result all land at an absolute address rather than a zero-page frame slot. A mutable aggregate static is not generated; only a scalar |
 | `Address` | 400 |  |
-| `Import` | 32 | one import of one name — `memcpy` from `std/mem.wr`, and only in a program that copies a run of bytes. Programs are otherwise single-file; the import graph itself is covered by tests/e2e/imports.rs |
+| `Import` | 30 | one import of one name — `memcpy` from `std/mem.wr`, and only in a program that copies a run of bytes. Programs are otherwise single-file; the import graph itself is covered by tests/e2e/imports.rs |
 
 ## Statements
 
@@ -30,7 +30,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Expr` | 400 |  |
 | `Return` | 383 | every generated function returns a value of the program's type, so the `u8`/`i8` (A) and `u16`/`i16` (A:Y) return conventions are covered but the pointer one (A:X) is not — that needs aggregates |
 | `If` | 382 |  |
-| `While` | 151 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
+| `While` | 168 | counts down a dedicated variable no generated assignment can touch, so termination is a property of the generator rather than a hope |
 | `Loop` | 400 |  |
 | `For` | 400 | bounds are literals; a computed bound is not generated |
 | `ForEach` | — | not generated: a slice is generated but never iterated: `for x in sl` binds a value the oracle would have to track alongside the loop counter, which is a separate question from the descriptor this generates slices to exercise |
@@ -48,24 +48,24 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Variable` | 400 |  |
 | `Binary` | 399 |  |
 | `Unary` | 370 |  |
-| `Cast` | 396 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
-| `Field` | 295 | two scalar fields of the program's type, one array field, and a nested struct `n: Inner` with two scalars of its own — reached through the struct's own name in `main` and through the by-reference parameter inside the function that takes it, `xp.a[i]` included, which indexes an array field through a pointer. The nested field is read as `s.n.g{j}` in `main` — a two-level offset — but not through the parameter |
-| `Index` | 321 | the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, because the language does no bounds checking and an out-of-range access would be the generator's bug rather than the compiler's |
+| `Cast` | 398 | always out to another type and straight back, so the program's type is unchanged — truncation and sign-extension with nothing else attached |
+| `Field` | 298 | two scalar fields of the program's type, one array field, and a nested struct `n: Inner` with two scalars of its own — reached through the struct's own name in `main` and through the by-reference parameter inside the function that takes it, `xp.a[i]` included, which indexes an array field through a pointer. The nested field is read as a two-level offset both ways: `s.n.g{j}` from a label in `main`, and `xp.n.g{j}` through the pointer inside the function |
+| `Index` | 316 | the index is a constant, a loop variable, or `(v as u8) % 4` — always in range, because the language does no bounds checking and an out-of-range access would be the generator's bug rather than the compiler's |
 | `Slice` | 141 | always a sub-range of the `const` table, with literal bounds. That table lives in ROM and nothing writes it, so a slice is a read-only view and the oracle needs its two numbers rather than an alias model. A descriptor reaches a slice four ways — a range expression, a copy from another slice, a call to `mk`, and a parameter — which are four different codegen paths. Slices of a local array, of another slice, and with computed bounds are not generated |
 | `Call` | 400 | 1-3 arguments at either width, a return type of either width, and a callee that reads only its own scope, so argument evaluation order cannot be observed. A narrow argument to a wide parameter is widened by the language rather than by a cast, and the arithmetic happens at the narrow type first — which is the order this generates calls to check. The call graph is acyclic apart from recursion, which comes two ways: a function that calls itself, and a pair that call each other. Both are bounded by a budget parameter that every recursive edge decrements, so termination is a property of the shape — a pair member cannot reach its partner by an ordinary call, which would pass a fresh literal budget and reset the cycle's own depth. The pair is what puts two functions in one call-graph SCC, which is the case frame colouring solves with Tarjan and which a self-call never reaches. Cycles of three or more are not generated. Nesting depth is limited by the compiler's 11-byte argument-staging pool, which a call whose list does not fit spills to the software stack one argument at a time: the generator budgets a level's worth, and a program that exhausts it anyway is skipped and counted rather than reported |
-| `CallIndirect` | 89 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
+| `CallIndirect` | 91 | two shapes, both with one argument: `VTBL[sel](x)` through a table of same-signature functions indexed by a constant or a runtime value, and `DEV.call(x)` through a pointer held in a struct field, which `DEV.call = fN` rebinds. The candidates take one parameter and do not recurse, so they share a signature; they are never called from inside one another, so the call graph stays acyclic; and the dispatch appears in `main` only, so a callee is still a function of its arguments alone. Pointer and aggregate arguments to an indirect call are not generated |
 | `StructInit` | 312 |  |
 | `AnonStructInit` | — | not generated: the named form is generated; this one adds inference, not a codegen path |
 | `EnumVariant` | 202 | in `main`'s declaration, `C::C{k}` or `C::C{k}(payload)`, so which variant and payload the enum holds is fixed program state. A `match` in `main` reads the payload back out; the arm that runs is fixed with the variant, so no branch the oracle has to follow at run time |
-| `SliceLen` | 230 | read as a value and as the modulus of an index, so a descriptor whose length half is wrong shows up either way. Never assigned to |
+| `SliceLen` | 225 | read as a value and as the modulus of an index, so a descriptor whose length half is wrong shows up either way. Never assigned to |
 | `U16Low` | 400 |  |
 | `U16High` | 400 |  |
 | `CpuFlagCarry` | — | not generated: a status flag depends on the instruction that last set it — a property of the emitted code rather than of the source the oracle reads |
 | `CpuFlagZero` | — | not generated: same as `carry` |
 | `CpuFlagOverflow` | — | not generated: same as `carry` |
 | `CpuFlagNegative` | — | not generated: same as `carry` |
-| `Paren` | 399 | every operator is parenthesised, so a precedence disagreement cannot masquerade as a codegen bug |
-| `Match` | 120 | as a statement, three forms — the whole-body `ViaMatch` control-flow shuffle, and in `main` an integer `match` on the base type dispatched over disjoint literal arms or one range arm with a wildcard default, first-match-wins; as an expression, the enum payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all share the context type so no arm-type unification is exercised. A match as a *value* over integers or ranges is not generated |
+| `Paren` | 400 | every operator is parenthesised, so a precedence disagreement cannot masquerade as a codegen bug |
+| `Match` | 123 | as a statement, three forms — the whole-body `ViaMatch` control-flow shuffle, and in `main` an integer `match` on the base type dispatched over disjoint literal arms or one range arm with a wildcard default, first-match-wins; as an expression, the enum payload read `match e { C::C0 => …, C::C{k}(x) => (x as T) }`, whose arms all share the context type so no arm-type unification is exercised. A match as a *value* over integers or ranges is not generated |
 | `BitOp` | — | not generated: single-bit access is covered by tests/e2e/bitfields.rs |
 
 ## Literals
@@ -75,7 +75,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Integer` | 400 | always inside the program's type; every operator has an operand mentioning a variable, so no subexpression is typed by its own literals |
 | `Bool` | — | not generated: `bool` as a value has its own widening rule, separate from control flow |
 | `Char` | — | not generated: no character arithmetic is generated |
-| `String` | 193 | one of four literals, in `main`'s declaration only. Read through `.len`, and now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after the length prefix, for a constant and a run-time index both. Kept to its own statement in `main` rather than folded into an expression: the read stages the pointer through the four-byte high pool, and an arithmetic operand beside it exhausts it |
+| `String` | 189 | one of four literals, in `main`'s declaration only. Read through `.len`, and now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after the length prefix, for a constant and a run-time index both. Kept to its own statement in `main` rather than folded into an expression: the read stages the pointer through the four-byte high pool, and an arithmetic operand beside it exhausts it |
 | `Array` | 312 | three arrays per program — a local in zero page, a `const` in ROM, and a field inside the struct, which reach their elements through three different bases — initialised from literals |
 | `ArrayFill` | — | not generated: the element-list form is generated, and lowers the same way |
 | `ArrayGen` | — | not generated: not generated: a table whose entries are a function of the index is folded before the program runs, so the oracle would be checking the constant evaluator rather than the generated code. tests/e2e/const_tables.rs covers it |
@@ -84,43 +84,43 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Add` | 380 |  |
-| `Sub` | 363 |  |
-| `Mul` | 292 |  |
-| `Div` | 315 | divisor is any expression, zero included — `x / 0` is the all-ones sentinel the specification defines, and `i8::MIN / -1` wraps like every other overflow. Only a *constant* divisor is excluded, since a zero one is a compile error |
-| `Mod` | 357 | divisor as for `Div` |
-| `BitAnd` | 328 |  |
-| `BitOr` | 328 |  |
-| `BitXor` | 311 |  |
-| `Shl` | 321 | shift count is a literal below the type's width, where the result is the plain shift |
-| `Shr` | 315 | shift count as for `Shl` |
-| `Eq` | 327 |  |
-| `Ne` | 109 |  |
+| `Add` | 378 |  |
+| `Sub` | 359 |  |
+| `Mul` | 291 |  |
+| `Div` | 311 | divisor is any expression, zero included — `x / 0` is the all-ones sentinel the specification defines, and `i8::MIN / -1` wraps like every other overflow. Only a *constant* divisor is excluded, since a zero one is a compile error |
+| `Mod` | 351 | divisor as for `Div` |
+| `BitAnd` | 334 |  |
+| `BitOr` | 330 |  |
+| `BitXor` | 312 |  |
+| `Shl` | 330 | shift count is a literal below the type's width, where the result is the plain shift |
+| `Shr` | 321 | shift count as for `Shl` |
+| `Eq` | 326 |  |
+| `Ne` | 95 |  |
 | `Lt` | 98 |  |
-| `Gt` | 196 |  |
-| `Le` | 105 |  |
-| `Ge` | 114 |  |
-| `And` | 93 |  |
+| `Gt` | 210 |  |
+| `Le` | 107 |  |
+| `Ge` | 111 |  |
+| `And` | 82 |  |
 | `Or` | 40 |  |
 
 ## Unary operators
 
 | Construct | Programs | Notes |
 |---|---:|---|
-| `Neg` | 206 | only on a literal |
+| `Neg` | 207 | only on a literal |
 | `BitNot` | — | not generated: would widen the oracle for no new codegen path — `^ -1` covers the same lowering |
-| `Not` | 139 | only on a condition |
-| `AddrOf` | 275 | `&arr[i]` and `&TBL[i]` as the two source arguments of a `memcpy` — a local array in zero page and a `const` one reached by label, different address computations — and what a pointer is bound to and re-bound to: `&v{i}` (a plain local), `&s.f{i}` (a struct field, which forces the struct into memory at an offset), and `&arr[k]` (an element). Never the address of a whole struct or of a function |
-| `Deref` | 246 | `*p` for a scalar `p`, read and written, in `main` only. The pointee is a variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved between kinds by `Repoint`. It is passed to a function — `bp(&v, x)` writes `main`'s variable through a `&T` parameter — and reached through a second level, `**pp` for `pp: &&T = &p`, a double dereference with the same value as `*p` but its own lowering. The alias the oracle models spans a call boundary and two indirections |
+| `Not` | 129 | only on a condition |
+| `AddrOf` | 268 | `&arr[i]` and `&TBL[i]` as the two source arguments of a `memcpy` — a local array in zero page and a `const` one reached by label, different address computations — and what a pointer is bound to and re-bound to: `&v{i}` (a plain local), `&s.f{i}` (a struct field, which forces the struct into memory at an offset), and `&arr[k]` (an element). Never the address of a whole struct or of a function |
+| `Deref` | 248 | `*p` for a scalar `p`, read and written, in `main` only. The pointee is a variable, a struct field (`&s.f0`), or an array element (`&arr[k]`), moved between kinds by `Repoint`. It is passed to a function — `bp(&v, x)` writes `main`'s variable through a `&T` parameter — and reached through a second level, `**pp` for `pp: &&T = &p`, a double dereference with the same value as `*p` but its own lowering. The alias the oracle models spans a call boundary and two indirections |
 
 ## Match patterns
 
 | Construct | Programs | Notes |
 |---|---:|---|
 | `Literal` | 400 | a single constant selector, always taken |
-| `Range` | 57 | an arm of the integer `match` in `main` — one range over the base type, inclusive or exclusive, disjoint from the wildcard default. On a 16-bit base it drives the comparison-chain lowering that once mis-ordered the bytes. Never nested, and never a value match |
+| `Range` | 52 | an arm of the integer `match` in `main` — one range over the base type, inclusive or exclusive, disjoint from the wildcard default. On a 16-bit base it drives the comparison-chain lowering that once mis-ordered the bytes. Never nested, and never a value match |
 | `Wildcard` | 400 |  |
-| `EnumVariant` | 120 |  |
+| `EnumVariant` | 123 |  |
 | `Variable` | — | not generated: a bare binding pattern would put a value in scope that the oracle does not track; the enum payload's `C::C{k}(x)` binding is a tuple-variant pattern, which the compiler models separately |
 
 ## Type forms
@@ -140,9 +140,9 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | Construct | Programs | Notes |
 |---|---:|---|
 | `U8` | 400 |  |
-| `I8` | 324 |  |
+| `I8` | 328 |  |
 | `U16` | 400 |  |
-| `I16` | 292 |  |
+| `I16` | 298 |  |
 | `Bool` | — | not generated: generated only as a condition, which is never spelled as a type |
 | `Char` | — | not generated: no character arithmetic is generated |
 | `B8` | — | not generated: BCD is covered by tests/e2e/bcd.rs |
