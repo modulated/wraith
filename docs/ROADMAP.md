@@ -637,11 +637,17 @@ and an oracle that is merely *probably* right is worse than no oracle:
 
   Since closed: enum payloads, indexing a string rather than measuring it, a
   struct nested inside a struct, a pointer to a struct field and an array
-  element, a pointer passed to a function (`bp(&v, x)`), and a pointer to a
-  pointer (`**pp`). What is left is narrow: a struct returned *through a
-  function pointer* in the generator (that one has an e2e test), a nested
-  field reached *through the by-reference parameter*, and a `u16` enum
-  payload — each recorded in the fuzzer's own caveats.
+  element, a pointer passed to a function (`bp(&v, x)`), a pointer to a
+  pointer (`**pp`), a nested field reached *through the by-reference parameter*
+  (`xp.n.g{j}`), and a two-byte enum payload (the pair's wide type, extracted
+  into A:X and cast down) — the last two each verified sound at 5000 seeds and
+  guarded by a coverage assertion. What is left is one case, and it is left on
+  purpose: a struct returned *through a function pointer* in the generator.
+  Its correctness is already pinned by `tests/e2e/aggregate_dispatch.rs`
+  (`a_struct_returned_through_a_function_pointer_binds` and siblings), and
+  reaching it through the differential generator would need a struct-typed
+  vtable signature, a struct-producing dispatch *statement*, and a second
+  struct in the oracle's scope — a large change for coverage that exists.
 - **Copying a run of bytes.** *Done.* `memcpy(&arr[d], &TBL[s], n)` is
   generated wherever the program's type is `u8`, which is what a whole-array
   assignment turned into once that statement was refused. It puts three things
