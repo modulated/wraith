@@ -74,6 +74,13 @@ read against a current picture:
 | Multidimensional arrays (`[[T; N]; M]`) — a local initialises from a nested literal, matching `static`/`const` | `tests/e2e/local_arrays.rs`, `tests/e2e/types.rs` |
 | `let mut x` names the absent `mut` instead of failing with "expected `:`" | `tests/e2e/error_diagnostics.rs` |
 | A `%` and a `match` in one program no longer collide on an `mx_` label — a latent assembler-reject the payload fuzzer found | `tests/e2e/operators.rs` |
+| An interrupt handler saves only the zero-page scratch its reachable code writes, not the whole region (a counter handler: 63 bytes → 0) | `tests/e2e/interrupts.rs` |
+| A comparison collapses to a bare branch inside a standalone function, not only when inlined — a void `RTS` no longer looks like it reads A and the flags | `tests/e2e/branch_fusion.rs` |
+| A constant or zero-extended 16-bit operand folds into the immediate that reads it (`CMP #$54` / `ADC #$00`) instead of staging through the `$20/$21` scratch pair | `tests/e2e/execution.rs` |
+| An expression argument with no call in it is evaluated straight into the callee's frame slot, skipping the `$F4`-`$FE` pool round-trip and the byte-by-byte copy that followed it | `tests/e2e/nested_calls.rs` |
+| A `u16`/`i16` `x = x ± 1` is an `INC`/`DEC` with the carry (or borrow) supplied by hand, not the fifteen-instruction load / add-with-carry / store-both — `b16` stays on the decimal-mode path | `tests/e2e/execution.rs` |
+| A 16-bit add/subtract/bitwise result stored to memory skips the `PHA`/`TYA`/`TAY`/`PLA` shuffle when A, Y and the flags are dead after the store — eight instructions become five | `tests/e2e/execution.rs` |
+| The size baseline measures the `examples/symon/` monitor too, compiled against its own `wraith.toml` (config resolved beside the source, not the working directory), so the codegen wins on a real program are self-tracking — `screen_scroll`'s inner byte-move is 58 instructions where it was 66, and the whole ROM 2395 where it was 2739 | `tests/code_size.rs` |
 
 ## What keeps going wrong
 
@@ -146,6 +153,18 @@ cost several bugs before it was named.
   agreeing with a reference you derived from the code proves nothing. And
   beware a test that passes by luck of layout: the `str` page-crossing bug was
   invisible until two literals landed in different pages.
+
+- **A liveness rule two passes read in opposite directions.** Whether a bare
+  `RTS` reads the accumulator is a judgement call, and two peepholes need
+  opposite answers. `collapse_boolean_compares` needs it to read *nothing* — a
+  void condition's throwaway boolean must look dead through the return, or it
+  never collapses. The 16-bit store fusion needs it to read *A and Y* — the
+  register cache can return a just-stored value straight from the registers with
+  a bare `RTS` and no reload (`x = x - 0; return x`), so a fusion that leaves the
+  high byte in A silently returns it as the low. The shared `a_read`/`y_read`
+  omit `RTS` for the first pass; the fusion computes its own liveness that adds
+  it back, rather than either pass borrowing the other's answer. A fuzzer at
+  seed 6111 found the store fusion trusting the wrong one.
 
 ---
 
@@ -278,9 +297,17 @@ Finding it took an instrumented run reporting every guard's value per site.
 Two earlier guesses were measured and both were wrong — worth remembering
 before optimising against intuition.
 
-**Still open:** the remaining materialised booleans are the ones feeding
-something other than a branch (an assignment, an argument), where the 0/1 is
-genuinely wanted. No estimate of what that is worth yet.
+*Then a second cause.* The guard refused a collapse whenever the boolean
+looked live in `A` or the flags after the branch, and at a void function's
+`RTS` both did: the liveness treated a return as reading the accumulator and
+every flag, as if a caller took them. A value returns in a register and is
+loaded there immediately before the `RTS`; a flag is never a return channel and
+a void function returns nothing. So `RTS` reads neither — and with that, a
+condition inside a *standalone* function collapses the same as one inlined into
+`main`, which it did not before. `tests/e2e/branch_fusion.rs`. (The earlier note
+here — that the survivors fed an assignment or an argument, where the 0/1 was
+wanted — was wrong: every one fed a branch, and this is what blocked them.
+Instrumenting the guard, once more, is what showed it.)
 
 ### Smaller code
 
@@ -664,13 +691,22 @@ pool (`$F4-$FE`) as one contiguous block, so a call nested in another call's
 argument list needed room for both lists at once and four 16-bit arguments
 inside four more was a compile error.
 
-A call whose whole list fits still stages there — it is the cheaper path, `LDA
-temp; STA param` per byte, and nothing that used to fit changed by a byte. When
-the block does not fit, each argument now moves to the software stack as soon
-as it is evaluated, so the pool holds only that call's *widest single
-argument* and the depth is bounded by the stack's 256 bytes. Because the frame
-save shares that stack, a recursive callee's save happens before the arguments
-go on rather than after, or it would bury them.
+A call whose whole list fits still stages there when it has to — but the
+common case no longer pays for the pool at all. When no argument contains a
+call, the callee is not address-taken and the edge is not a recursion one,
+each argument is evaluated straight into the callee's frame slot, skipping the
+`$F4`-`$FE` pool and the `LDA temp; STA param` copy that used to follow it. The
+frame colouring already guarantees those slots do not alias the caller's live
+frame outside a recursion SCC, and the stdlib helpers an argument's evaluation
+may `JSR` work in `$D0`-`$D8`, clear of the `$40`-`$CF` frame region, so a slot
+written early cannot be clobbered while a later argument is built. This is
+where the byte savings in the code-size baseline came from. The pool is still
+the path for a recursive edge, an address-taken callee, or a list with a call
+nested in it. When even the pool does not fit, each argument moves to the
+software stack as soon as it is evaluated, so the pool holds only that call's
+*widest single argument* and the depth is bounded by the stack's 256 bytes.
+Because the frame save shares that stack, a recursive callee's save happens
+before the arguments go on rather than after, or it would bury them.
 
 What is left is that a nesting level still costs its widest argument, so around
 five levels of 16-bit nesting exhausts the pool. Removing even that means
@@ -682,6 +718,19 @@ being reached through a dozen `continue`s.
 The failure is still a compile error rather than a miscompile, and the fuzzer
 budgets one argument per level to match, skipping and counting anything that
 overruns anyway.
+
+The direct-to-frame path also stops at the *first* argument that contains a
+call: `mem_write(dst + c, mem_read(src + c))` still stages both arguments
+through the pool and spills to the software stack, because the inner
+`mem_read` call forces the whole list back onto the reserved path. This is the
+larger half of what `examples/symon/`'s `screen_scroll` inner loop still pays —
+now that it is in the size baseline, that cost is a number that moves when the
+per-argument version lands: a plain argument evaluated direct even when a
+*sibling* argument holds a call. The sibling case is not a free extension of
+the current one, though — a plain argument written into the callee frame before
+a sibling call can be clobbered by that call's own frame, which is not coloured
+disjoint from a sibling's the way a caller's is, so it needs the "stage the
+plain arguments after the last call, pool the rest" ordering worked out first.
 
 ### The expression temp pool runs out under combined pressure
 
@@ -910,6 +959,21 @@ are neither generated nor exercised beyond the tag.
   kept because dropping the math working storage from the save list (keeping
   the push/pop balance, so nothing else breaks) fails the new test and no
   existing one.
+
+  *Narrowed.* The save set was the whole shared scratch region — 63 zero-page
+  bytes, ~1000 cycles per interrupt — whatever the handler touched. It is now
+  exactly the scratch bytes the handler's reachable code *writes*: an address
+  the handler never writes it cannot corrupt, and codegen knows the addresses
+  where the sema AST scan does not, so a pre-pass emits each reachable function
+  into a throwaway emitter and unions the zero-page stores
+  (`narrow_interrupt_scratch`). A `DATA_PORT = DATA_PORT + 1` counter handler
+  now saves nothing; `interrupt_counter` shrank 824 → 68 bytes. It falls back to
+  the full region whenever the graph is opaque — an indirect call, inline `asm`,
+  or a 16-bit math routine whose own scratch use is not scanned — so the
+  conservative save is still there where it must be. The `run_interrupted` guard
+  now also drives a *non-opaque* scratch-touching handler (a 16-bit compare
+  through `$20/$21`, the same bytes `main`'s arithmetic stages), which is where
+  a save narrowed one byte too far would surface.
 
   The storm has to be bounded: an interrupt pulls the CPU out of `loop {}` as
   readily as out of anything else, and the harness detects termination by the

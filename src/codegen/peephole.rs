@@ -178,6 +178,8 @@ pub fn optimize(
         result = eliminate_jmp_to_next(&result);
         result = collapse_boolean_compares(&result);
         result = fold_literal_operand(&result);
+        result = fold_staged_16bit_literal(&result);
+        result = fuse_16bit_arith_store(&result, volatile);
         result = eliminate_nop_carry_pairs(&result);
         result = eliminate_redundant_cmp_zero(&result);
         result = eliminate_redundant_ldy_zero(&result);
@@ -666,6 +668,328 @@ fn fold_literal_operand(lines: &[Line]) -> Vec<Line> {
     result
 }
 
+/// Fold a compile-time constant staged into the 16-bit scratch pair
+/// (`$20`/`$21`, `MemoryLayout::temp_reg()`) into the immediate operand of the
+/// instruction that reads it back.
+///
+/// The 16-bit binary driver stages its right operand into `$20`/`$21` and reads
+/// it with `CMP $20`/`CPY $21` (a compare) or `ADC`/`SBC` (arithmetic). When
+/// that operand is a constant — a literal bound like `i < 340`, or the `#$00`
+/// high half of a zero-extended byte — the staged byte is a known immediate and
+/// the reader can take it directly. Dropping the store leaves the feeding
+/// `LDA #imm`/`LDY #imm` dead, which the load-elimination passes then remove.
+///
+/// Conservative: a temp byte is folded only when *every* reference to it before
+/// its next plain write is an immediate-capable read (`ADC SBC CMP CPX CPY AND
+/// ORA EOR`), and never across a `JSR` (a callee may stage its own values there)
+/// or a read-modify-write or indirect use.
+fn fold_staged_16bit_literal(lines: &[Line]) -> Vec<Line> {
+    const TEMPS: [&str; 2] = ["$20", "$21"];
+    const FOLDABLE: [&str; 8] = ["ADC", "SBC", "CMP", "CPX", "CPY", "AND", "ORA", "EOR"];
+    const PURE_WRITE: [&str; 4] = ["STA", "STX", "STY", "STZ"];
+
+    let significant: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !matches!(l, Line::Comment(_) | Line::Empty))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Uses of `temp` that the store at `start-1` *dominates*: reads reached
+    // with the store's value for certain, so their `$temp` operand can become
+    // the immediate. Scanning stops at the first control-flow edge (a label, a
+    // call, a return) or a redefinition — past any of those a different value
+    // could reach a read. A decimal region and an indirect are refused entirely
+    // (see the notes below), so this returns `None` there rather than a partial
+    // list. `Some(vec)` otherwise, possibly empty.
+    let dominated_uses = |start: usize, temp: &str| -> Option<Vec<usize>> {
+        let mut uses = Vec::new();
+        for &idx in significant.iter().skip(start) {
+            let Line::Instruction {
+                mnemonic, operand, ..
+            } = &lines[idx]
+            else {
+                return Some(uses); // a label/directive ends the dominated run
+            };
+            match mnemonic.as_str() {
+                // An immediate `ADC`/`SBC` is correct in a decimal region but
+                // exposes the binary `CLC/ADC #1 -> INC A` peephole; leave BCD
+                // staged in memory.
+                "SED" => return None,
+                "JSR" | "RTS" | "RTI" | "BRK" => return Some(uses),
+                _ => {}
+            }
+            match operand.as_deref() {
+                // `($20),Y` reads the pointer at $20 *and* $21 but names only
+                // $20, so a store to $21 feeding it looks unreferenced.
+                Some(op) if op.contains('(') => return None,
+                Some(op) if op == temp => {
+                    if FOLDABLE.contains(&mnemonic.as_str()) {
+                        uses.push(idx);
+                    } else {
+                        // A plain write ends the run; any other read is
+                        // un-foldable. Either way, stop with what we have.
+                        return Some(uses);
+                    }
+                }
+                Some(op) if op.contains(temp) => return None, // `$20,X`
+                _ => {}
+            }
+        }
+        Some(uses)
+    };
+
+    // Whether the store at `start-1` is dead once its `dominated` uses are
+    // rewritten to immediates: no *other* reference to `temp` reaches, in
+    // straight-line order, before the temp is next plainly written or the
+    // stream ends. Any reference not in `dominated` (a read past a join, an
+    // indirect, a call that might read the pool) keeps the store. Conservative:
+    // it treats textual order as reachability, which only ever keeps a store.
+    let store_dead = |start: usize, temp: &str, dominated: &[usize]| -> bool {
+        for &idx in significant.iter().skip(start) {
+            let Line::Instruction {
+                mnemonic, operand, ..
+            } = &lines[idx]
+            else {
+                continue;
+            };
+            if mnemonic == "JSR" {
+                return false; // a callee may read the staging pool
+            }
+            match operand.as_deref() {
+                Some(op) if op == temp => {
+                    if PURE_WRITE.contains(&mnemonic.as_str()) {
+                        return true; // redefined before any un-rewritten read
+                    }
+                    if !dominated.contains(&idx) {
+                        return false; // a real read of the stored value survives
+                    }
+                }
+                Some(op) if op.contains(temp) => return false, // indirect/indexed
+                _ => {}
+            }
+        }
+        true
+    };
+
+    let mut delete: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut rewrite: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
+    // Immediate currently held in each register, cleared by any non-immediate
+    // write (and by a call). Lets a store to a temp be tagged with its value.
+    let (mut a, mut x, mut y): (Option<String>, Option<String>, Option<String>) =
+        (None, None, None);
+
+    for (sp, &idx) in significant.iter().enumerate() {
+        let Line::Instruction {
+            mnemonic, operand, ..
+        } = &lines[idx]
+        else {
+            // A label or directive is a control-flow join (or a segment break):
+            // what a register holds past it is not known from the linear scan.
+            a = None;
+            x = None;
+            y = None;
+            continue;
+        };
+        let m = mnemonic.as_str();
+        let op = operand.as_deref();
+
+        // A store of a known-immediate register into a temp byte is a candidate.
+        let staged = match (m, op) {
+            ("STA", Some(t)) if TEMPS.contains(&t) => a.clone().map(|v| (t, v)),
+            ("STY", Some(t)) if TEMPS.contains(&t) => y.clone().map(|v| (t, v)),
+            ("STX", Some(t)) if TEMPS.contains(&t) => x.clone().map(|v| (t, v)),
+            _ => None,
+        };
+        if let Some((temp, imm)) = staged
+            && let Some(uses) = dominated_uses(sp + 1, temp)
+            && !uses.is_empty()
+        {
+            if store_dead(sp + 1, temp, &uses) {
+                delete.insert(idx);
+            }
+            for u in uses {
+                rewrite.insert(u, imm.clone());
+            }
+        }
+
+        // Update the register-immediate state for the next line.
+        match (m, op) {
+            ("LDA", Some(v)) if v.starts_with('#') => a = Some(v.to_string()),
+            ("LDX", Some(v)) if v.starts_with('#') => x = Some(v.to_string()),
+            ("LDY", Some(v)) if v.starts_with('#') => y = Some(v.to_string()),
+            ("JSR", _) => {
+                a = None;
+                x = None;
+                y = None;
+            }
+            _ => {
+                if a_written(m, op) != 0 {
+                    a = None;
+                }
+                if matches!(m, "LDX" | "TAX" | "INX" | "DEX" | "PLX") {
+                    x = None;
+                }
+                if matches!(m, "LDY" | "TAY" | "INY" | "DEY" | "PLY") {
+                    y = None;
+                }
+            }
+        }
+    }
+
+    if delete.is_empty() && rewrite.is_empty() {
+        return lines.to_vec();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !delete.contains(i))
+        .map(|(i, l)| match (rewrite.get(&i), l) {
+            (
+                Some(imm),
+                Line::Instruction {
+                    mnemonic, comment, ..
+                },
+            ) => Line::Instruction {
+                mnemonic: mnemonic.clone(),
+                operand: Some(imm.clone()),
+                comment: comment.clone(),
+            },
+            _ => l.clone(),
+        })
+        .collect()
+}
+
+/// Fuse a 16-bit arithmetic/logic result with the store that consumes it,
+/// dropping the `PHA`/`TYA`/`TAY`/`PLA` shuffle whose only job was to hold the
+/// low byte in A across the high-byte computation:
+///
+/// ```text
+///     OP  lo            OP  lo
+///     PHA               STA D
+///     TYA        -->    TYA
+///     OP2 hi            OP2 hi
+///     TAY               STA E
+///     PLA
+///     STA D
+///     STY E
+/// ```
+///
+/// The low result is stored straight from A the moment it is produced; the high
+/// result is stored straight from A after the high-byte op. Eight instructions
+/// become five. `OP`/`OP2` are the 16-bit add/subtract/bitwise pair from
+/// `binary.rs` (`ADC`/`SBC`/`AND`/`ORA`/`EOR` on each half).
+///
+/// This changes what the sequence leaves behind — A ends holding the high byte,
+/// Y the caller's original high half, and the flags reflect the high-byte op
+/// rather than the low `PLA` — so it fires only when A, Y and the flags are all
+/// dead afterwards. The low store is hoisted ahead of the high-byte op, so it
+/// must not overwrite that op's memory operand, and neither store may be to a
+/// volatile location (its ordering against the device would move).
+fn as_inst(ln: &Line) -> Option<(&str, Option<&str>)> {
+    if let Line::Instruction {
+        mnemonic, operand, ..
+    } = ln
+    {
+        Some((mnemonic.as_str(), operand.as_deref()))
+    } else {
+        None
+    }
+}
+
+fn fuse_16bit_arith_store(lines: &[Line], volatile: &VolatileSymbols) -> Vec<Line> {
+    const ALU: [&str; 5] = ["ADC", "SBC", "AND", "ORA", "EOR"];
+
+    // A/Y liveness for this pass treats a bare `RTS`/`RTI`/`BRK` as *reading*
+    // both A and Y. `a_read`/`y_read` deliberately omit `RTS` — a value return
+    // normally loads the register right before the return, so the load keeps it
+    // live and the boolean-collapse pass wants the return itself to look dead.
+    // But the register cache can elide that load and return the byte straight
+    // from the store the pass is about to disturb (`x = x - 0; return x`), so
+    // here the return must be assumed to read the result. Over-conservative for
+    // a void return — no harm, only a fusion missed.
+    let returns_reg = |m: &str| u8::from(matches!(m, "RTS" | "RTI" | "BRK"));
+    let a_live = compute_liveness(lines, |m, o| a_read(m, o) | returns_reg(m), a_written, 1);
+    let y_live = compute_liveness(lines, |m, o| y_read(m, o) | returns_reg(m), y_written, 1);
+    let f_live = compute_flag_liveness(lines);
+
+    // A plain `$NN`/`$NNNN` operand as the byte it addresses; None for an
+    // immediate, an indexed/indirect form, or anything unparseable.
+    let addr_of = |op: Option<&str>| -> Option<u16> {
+        let hex = op?.strip_prefix('$')?;
+        match hex.len() {
+            2 => u8::from_str_radix(hex, 16).ok().map(u16::from),
+            4 => u16::from_str_radix(hex, 16).ok(),
+            _ => None,
+        }
+    };
+
+    let mut result = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let window = (i + 8 <= lines.len())
+            .then(|| {
+                (0..8)
+                    .map(|k| as_inst(&lines[i + k]))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
+
+        if let Some(w) = window {
+            let (m0, op0) = w[0];
+            let (m3, op3) = w[3];
+            let (m6, op6) = w[6];
+            let (m7, op7) = w[7];
+
+            let shape_ok = ALU.contains(&m0)
+                && w[1].0 == "PHA"
+                && w[2].0 == "TYA"
+                && ALU.contains(&m3)
+                && w[4].0 == "TAY"
+                && w[5].0 == "PLA"
+                && m6 == "STA"
+                && m7 == "STY";
+
+            // A, Y and the flags must all be dead after the final store.
+            let dead = a_live[i + 7] == 0 && y_live[i + 7] == 0 && f_live[i + 7] == 0;
+
+            // Hoisting `STA D` ahead of `OP2 hi` must not corrupt `hi`. Safe when
+            // `hi` is an immediate; otherwise both must be plain addresses that
+            // differ. An indexed/indirect `hi` (unparseable) is refused.
+            let no_alias = if op3.is_some_and(|h| h.starts_with('#')) {
+                true
+            } else if let (Some(hi), Some(d)) = (addr_of(op3), addr_of(op6)) {
+                hi != d
+            } else {
+                false
+            };
+
+            let stores_safe = !volatile.is_volatile_write(&op6.map(str::to_string))
+                && !volatile.is_volatile_write(&op7.map(str::to_string));
+
+            if shape_ok && dead && no_alias && stores_safe {
+                let mk = |m: &str, op: Option<&str>| Line::Instruction {
+                    mnemonic: m.to_string(),
+                    operand: op.map(str::to_string),
+                    comment: None,
+                };
+                result.push(mk(m0, op0)); // OP  lo   (A = low result)
+                result.push(mk("STA", op6)); // STA D    (store low straight away)
+                result.push(mk("TYA", None)); // TYA      (A = caller's high half)
+                result.push(mk(m3, op3)); // OP2 hi   (A = high result)
+                result.push(mk("STA", op7)); // STA E    (store high straight away)
+                i += 8;
+                continue;
+            }
+        }
+
+        result.push(lines[i].clone());
+        i += 1;
+    }
+    result
+}
+
 /// Collapse a materialized boolean that a condition immediately re-tests:
 ///
 /// ```text
@@ -833,7 +1157,11 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, true_label) == 2
             && uses(lines, end_label) == 2
             && live_out[w[9]] & CMP_FLAGS == 0
-            && a_live_out[w[9]] & CMP_FLAGS == 0
+            // A-liveness is a one-bit lattice, so a plain `== 0` says what is
+            // meant: the boolean this collapse removes must be dead in A after
+            // the branch. (Masking with `CMP_FLAGS` happened to work only
+            // because `FLAG_N` is bit 0.)
+            && a_live_out[w[9]] == 0
         {
             // `B1` taken means false, and falling past `B2` means false too, so
             // both land on the label the `JMP` used to target — which is where
@@ -928,7 +1256,7 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, true_label) == 3
             && uses(lines, end_label) == 2
             && live_out[w[8]] & CMP_FLAGS == 0
-            && a_live_out[w[8]] & CMP_FLAGS == 0
+            && a_live_out[w[8]] == 0
         {
             for b in [b1, b2] {
                 result.push(Line::Instruction {
@@ -1005,7 +1333,7 @@ fn collapse_boolean_compares(lines: &[Line]) -> Vec<Line> {
             && uses(lines, true_label) == 2
             && uses(lines, end_label) == 2
             && live_out[w[7]] & CMP_FLAGS == 0
-            && a_live_out[w[7]] & CMP_FLAGS == 0
+            && a_live_out[w[7]] == 0
         {
             result.push(Line::Instruction {
                 mnemonic: br.clone(),
@@ -1279,7 +1607,13 @@ fn flags_read(mnemonic: &str) -> u8 {
         "BMI" | "BPL" => FLAG_N,
         "BVC" | "BVS" => FLAG_V,
         "ADC" | "SBC" | "ROL" | "ROR" => FLAG_C,
-        "PHP" | "JSR" | "RTS" | "BRK" => FLAG_ALL,
+        // `PHP` pushes the flags and `BRK` records them; a call is treated as
+        // reading them because the callee's first instructions are not in view.
+        // `RTS` is deliberately absent: this ABI returns values in registers,
+        // never in a flag, so a function's final flags are dead — nothing after
+        // the return reads them. Leaving `RTS` here kept a live boolean's
+        // materialisation alive right up to a void function's return.
+        "PHP" | "JSR" | "BRK" => FLAG_ALL,
         _ => 0,
     }
 }
@@ -1293,7 +1627,17 @@ fn a_read(mnemonic: &str, operand: Option<&str>) -> u8 {
         // Accumulator addressing: `LSR` with no operand shifts A, `LSR $40`
         // shifts memory.
         "ASL" | "LSR" | "ROL" | "ROR" => u8::from(operand.is_none_or(|o| o.is_empty() || o == "A")),
-        "JSR" | "RTS" | "RTI" | "BRK" => 1,
+        // A call passes arguments in A, and `RTI`/`BRK` bound an interrupt frame
+        // whose A this pass will not reason about. `RTS` is deliberately absent:
+        // A is a return value only when the function returns one, and codegen
+        // then loads it into A immediately before the `RTS`, so that write —
+        // not the `RTS` — is what keeps it live. Treating a *void* function's
+        // `RTS` as reading A left the throwaway boolean of an `if`/`while`
+        // condition looking live all the way to the return, blocking its
+        // collapse. Only `compute_a_liveness` (the boolean-collapse guard) reads
+        // this, and that match never covers a `return`, so a value return is
+        // never dropped.
+        "JSR" | "RTI" | "BRK" => 1,
         _ => 0,
     }
 }
@@ -1313,6 +1657,32 @@ fn a_written(mnemonic: &str, operand: Option<&str>) -> u8 {
 /// Where the accumulator may still be read after each line executes.
 fn compute_a_liveness(lines: &[Line]) -> Vec<u8> {
     compute_liveness(lines, a_read, a_written, 1)
+}
+
+/// Whether an instruction reads the Y register. Conservative: *any* operand in
+/// `,Y`-indexed form reads Y whatever the mnemonic (`LDA $40,Y`, `STA ($20),Y`),
+/// and a call or interrupt boundary is assumed to read it. Missing a read would
+/// let a pass believe Y is dead when it is not, so the set errs wide.
+fn y_read(mnemonic: &str, operand: Option<&str>) -> u8 {
+    if operand.is_some_and(|o| o.to_ascii_uppercase().ends_with(",Y")) {
+        return 1;
+    }
+    match mnemonic {
+        "STY" | "TYA" | "CPY" | "PHY" | "INY" | "DEY" => 1,
+        // A call may take an argument in Y (the 16-bit A:Y convention), and
+        // `RTI`/`BRK` bound an interrupt frame this pass will not reason about.
+        "JSR" | "RTI" | "BRK" => 1,
+        _ => 0,
+    }
+}
+
+/// Whether an instruction writes the Y register. A `JSR` is treated as writing
+/// Y because a callee may clobber it, so liveness does not propagate past a call.
+fn y_written(mnemonic: &str, _operand: Option<&str>) -> u8 {
+    match mnemonic {
+        "LDY" | "TAY" | "PLY" | "INY" | "DEY" | "JSR" => 1,
+        _ => 0,
+    }
 }
 
 fn is_branch_mnemonic(m: &str) -> bool {
@@ -2709,5 +3079,78 @@ mod fold_literal_tests {
         let lines = parse_assembly("    CLC\n    ADC #$01\n    STA $40\n");
         let out = fold_inc_dec_accumulator(&lines, crate::codegen::TargetCpu::Nmos6502);
         assert!(lines_to_string(&out).contains("ADC #$01"));
+    }
+
+    #[test]
+    fn fuse_16bit_store_drops_the_shuffle_when_registers_are_dead() {
+        // The A:Y result is stored, then both A and Y are redefined before the
+        // return, so the PHA/TYA/TAY/PLA juggling is dead weight.
+        let lines = parse_assembly(
+            "    CLC\n    ADC $20\n    PHA\n    TYA\n    ADC $21\n    TAY\n    PLA\n    STA $44\n    STY $45\n    LDA #$00\n    LDY #$01\n    RTS\n",
+        );
+        let out = fuse_16bit_arith_store(&lines, &VolatileSymbols::default());
+        let text = lines_to_string(&out);
+        assert!(
+            !text.contains("PHA"),
+            "shuffle push should be gone:\n{text}"
+        );
+        assert!(
+            !text.contains("PLA"),
+            "shuffle pull should be gone:\n{text}"
+        );
+        // Low byte stored straight after its add, high byte after the second.
+        assert!(text.contains("STA $44"), "low store kept:\n{text}");
+        assert!(text.contains("STA $45"), "high store now from A:\n{text}");
+    }
+
+    #[test]
+    fn fuse_16bit_store_kept_when_the_low_byte_is_reused() {
+        // `STA $46` after the pair reads A (the low result), so the sequence
+        // must keep restoring it — fusing would leave the high byte in A.
+        let lines = parse_assembly(
+            "    CLC\n    ADC $20\n    PHA\n    TYA\n    ADC $21\n    TAY\n    PLA\n    STA $44\n    STY $45\n    STA $46\n    RTS\n",
+        );
+        let out = fuse_16bit_arith_store(&lines, &VolatileSymbols::default());
+        let text = lines_to_string(&out);
+        assert!(
+            text.contains("PHA"),
+            "shuffle must stay when A is live:\n{text}"
+        );
+        assert!(
+            text.contains("PLA"),
+            "shuffle must stay when A is live:\n{text}"
+        );
+    }
+
+    #[test]
+    fn fuse_16bit_store_kept_when_a_bare_return_carries_the_result() {
+        // `x = x - 0; return x` — the register cache returns the low byte
+        // straight from A after the store, with a bare RTS and no reload. The
+        // fusion would leave the high byte in A, so it must not fire. (Regression
+        // for a fuzzer-found miscompile, seed 6111.)
+        let lines = parse_assembly(
+            "    SEC\n    SBC $20\n    PHA\n    TYA\n    SBC $21\n    TAY\n    PLA\n    STA $44\n    STY $45\n    RTS\n",
+        );
+        let out = fuse_16bit_arith_store(&lines, &VolatileSymbols::default());
+        let text = lines_to_string(&out);
+        assert!(
+            text.contains("PHA"),
+            "a bare return may read A:Y — keep the shuffle:\n{text}"
+        );
+    }
+
+    #[test]
+    fn fuse_16bit_store_kept_when_the_low_store_aliases_the_high_operand() {
+        // The hoisted `STA $21` would clobber the high operand that `ADC $21`
+        // still needs. Refuse regardless of liveness.
+        let lines = parse_assembly(
+            "    CLC\n    ADC $20\n    PHA\n    TYA\n    ADC $21\n    TAY\n    PLA\n    STA $21\n    STY $45\n    LDA #$00\n    RTS\n",
+        );
+        let out = fuse_16bit_arith_store(&lines, &VolatileSymbols::default());
+        let text = lines_to_string(&out);
+        assert!(
+            text.contains("PHA"),
+            "must not reorder over the aliased store:\n{text}"
+        );
     }
 }

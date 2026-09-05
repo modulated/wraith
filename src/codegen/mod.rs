@@ -924,6 +924,117 @@ fn select_auto_inline(
     Ok(())
 }
 
+/// Narrow each interrupt handler's scratch save to the zero-page bytes its
+/// reachable code actually writes.
+///
+/// A handler saves shared scratch so a preempted main thread's in-flight values
+/// survive it, but it only needs to save an address it might *write*: one it
+/// never writes, it cannot corrupt. Codegen knows the exact addresses where
+/// sema's AST scan does not, so this emits each reachable function's body into a
+/// throwaway emitter, unions the zero-page writes, and records them as the save
+/// set (minus the frame span, which is saved separately).
+///
+/// It leaves the save at the full region (`scratch_addrs = None`) whenever the
+/// graph is opaque — an indirect call, inline `asm`, a 16-bit math routine, or a
+/// reachable function whose body cannot be scanned — because then the writes it
+/// can see are not the whole story. Runs after inlining is decided, so an inline
+/// callee's writes surface through the caller that expands it; inline functions
+/// are skipped here so their frame-less bodies are never emitted in isolation.
+fn narrow_interrupt_scratch(
+    ast: &SourceFile,
+    program: &mut ProgramInfo,
+    verbosity: CommentVerbosity,
+    target: TargetCpu,
+    layout: &crate::codegen::memory_layout::MemoryLayout,
+) {
+    use crate::sema::table::SymbolLocation;
+    use rustc_hash::FxHashSet as HashSet;
+
+    // Named locations (a `const addr` register is stored by name, and is
+    // `Absolute` even when its address is in zero page), so a store to one can
+    // be classed as zero-page or not.
+    let symbol_addrs: std::collections::HashMap<String, u16> = program
+        .resolved_symbols
+        .values()
+        .filter_map(|s| match s.location {
+            SymbolLocation::Absolute(a) => Some((s.name.clone(), a)),
+            SymbolLocation::ZeroPage(a) => Some((s.name.clone(), a as u16)),
+            _ => None,
+        })
+        .collect();
+
+    let handlers: Vec<String> = program
+        .interrupt_save_info
+        .iter()
+        .filter(|(_, si)| si.save_scratch && si.scratch_addrs.is_none())
+        .map(|(h, _)| h.clone())
+        .collect();
+
+    for handler in handlers {
+        let si = &program.interrupt_save_info[&handler];
+        let reachable = si.reachable.clone();
+        let frame_addrs: HashSet<u8> = si
+            .shared_frames
+            .iter()
+            .flat_map(|(base, len)| (0..*len).map(move |i| base.wrapping_add(i)))
+            .collect();
+
+        let mut written = [false; 256];
+        let mut opaque = false;
+        for fname in &reachable {
+            // An inline callee is expanded into a scanned caller, so its writes
+            // are already counted; emitting its frame-less body alone would not.
+            if program
+                .function_metadata
+                .get(fname)
+                .is_some_and(|m| m.is_inline)
+            {
+                continue;
+            }
+            let Some(func) = find_function(ast, program, fname) else {
+                opaque = true; // a name we cannot scan (e.g. a raw stdlib routine)
+                break;
+            };
+            let mut e = Emitter::new(verbosity);
+            e.target = target;
+            e.memory_layout = layout.clone();
+            e.symbol_addrs = symbol_addrs.clone();
+            e.set_current_function(fname.clone());
+            if stmt::generate_stmt(&func.body, &mut e, program, &mut StringCollector::new())
+                .is_err()
+            {
+                opaque = true; // the real pass will surface the same error
+                break;
+            }
+            // A call into a math routine or an indirect target writes scratch
+            // this scan never saw; inline `asm` and unresolved stores set the
+            // flag directly. Any of them, and the narrowing is unsafe.
+            if e.zp_write_opaque
+                || e.needs_mul16
+                || e.needs_div16
+                || e.needs_mod16
+                || e.needs_indirect_call
+            {
+                opaque = true;
+                break;
+            }
+            for (a, w) in e.zp_written.iter().enumerate() {
+                written[a] |= *w;
+            }
+        }
+
+        if opaque {
+            continue; // keep the conservative full-region save
+        }
+        let scratch: Vec<u8> = (0..=255u8)
+            .filter(|a| written[*a as usize] && !frame_addrs.contains(a))
+            .collect();
+        if let Some(si) = program.interrupt_save_info.get_mut(&handler) {
+            si.scratch_addrs = Some(scratch);
+        }
+    }
+}
+
 /// Turn every `InitByte::StrLow`/`StrHigh` in a `static`'s startup image into
 /// the `FnLow`/`FnHigh` label pair the emitters already know how to write.
 ///
@@ -966,7 +1077,10 @@ pub fn generate(
     if let Some(stack) = program.memory_config.get_section("STACK") {
         emitter.memory_layout.software_stack_base = stack.start;
     }
-    let mut section_alloc = SectionAllocator::default();
+    // Place sections from the same map sema resolved (`analyze_with_config` may
+    // have set a source-relative one), rather than re-reading the working
+    // directory's `wraith.toml` a second time and risking a different answer.
+    let mut section_alloc = SectionAllocator::new(program.memory_config.clone());
     let mut string_collector = StringCollector::new();
 
     // A `str` in a `static`'s startup image carries the literal's *content*
@@ -987,6 +1101,18 @@ pub fn generate(
         target,
         &emitter.memory_layout.clone(),
     )?;
+
+    // Narrow each interrupt handler's scratch save to the zero-page bytes its
+    // reachable code actually writes. Runs after inlining is decided (so an
+    // inline callee's writes are seen through its caller) and before placement,
+    // so the measuring and real passes emit the same, smaller, prologue.
+    narrow_interrupt_scratch(
+        ast,
+        program,
+        verbosity,
+        target,
+        &emitter.memory_layout.clone(),
+    );
 
     // Decide where every function goes before emitting anything. Doing this up
     // front is what lets `#[org]` reserve its range: the allocator can only

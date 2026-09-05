@@ -2517,3 +2517,276 @@ fn field_assignment_does_not_stale_register() {
         "q must read 0x34 after the u16 field store"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 16-bit constant operands fold into the immediate that reads them
+//
+// The 16-bit binary driver stages its right operand into $20/$21 and reads it
+// back; a constant bound or a zero-extended byte is a known immediate the
+// reader can take directly (`fold_staged_16bit_literal`). These pin the win
+// and, more importantly, that it stays correct through control flow.
+// ---------------------------------------------------------------------------
+
+/// `while i < 340` counts to exactly 340 — the bound folds into `CPY #$01` /
+/// `CMP #$54`, and the loop must still terminate at the right place.
+#[test]
+fn a_folded_sixteen_bit_bound_still_terminates_the_loop() {
+    let mut e = run("const OUT0: addr = 0x0900;\n\
+         const OUT1: addr = 0x0901;\n\
+         #[reset]\n\
+         fn main() {\n\
+         \x20   let i: u16 = 0;\n\
+         \x20   while i < 340 { i = i + 1; }\n\
+         \x20   OUT0 = i.low; OUT1 = i.high;\n\
+         \x20   loop {}\n\
+         }\n");
+    // 340 = $0154.
+    assert_eq!(e.mem(0x0900), 0x54, "low byte of the final count");
+    assert_eq!(e.mem(0x0901), 0x01, "high byte of the final count");
+}
+
+/// The staging is actually gone: the loop condition reads the bound as an
+/// immediate, not from the $20/$21 scratch pair.
+#[test]
+fn a_folded_sixteen_bit_compare_uses_immediates() {
+    let asm = crate::common::harness::compile_success(
+        "const OUT: addr = 0x0900;\n\
+         #[reset]\n\
+         fn main() { let i: u16 = 0; while i < 340 { i = i + 1; } OUT = i.low; loop {} }\n",
+    );
+    assert!(
+        asm.contains("CMP #$54"),
+        "low byte not folded to an immediate:\n{asm}"
+    );
+    assert!(
+        asm.contains("CPY #$01"),
+        "high byte not folded to an immediate:\n{asm}"
+    );
+    // The compare no longer stages the constant into the scratch pair.
+    assert!(
+        !asm.contains("CMP $20") && !asm.contains("CPY $21"),
+        "the 16-bit bound is still read from scratch:\n{asm}"
+    );
+}
+
+/// A zero-extended byte adds through `ADC #$00`, not a staged `#$00` in $21.
+/// The accumulate is the shape `base + (b as u16)` from array indexing.
+#[test]
+fn a_zero_extended_byte_adds_without_staging_the_high_zero() {
+    let asm = crate::common::harness::compile_success(
+        "const OUT: addr = 0x0900;\n\
+         const IN: addr = 0xD000;\n\
+         static BASE: u16 = 4000;\n\
+         #[reset]\n\
+         fn main() { let b: u8 = IN; let r: u16 = BASE + (b as u16); OUT = r.low; loop {} }\n",
+    );
+    assert!(
+        asm.contains("ADC #$00"),
+        "zero-extend high byte not folded:\n{asm}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16-bit `x = x ± 1` becomes INC/carry (or DEC/borrow), not the full
+// load / add-with-carry / store-both path. The value and its carry boundary
+// are checked at run time; the shape is pinned by a golden assertion.
+// ---------------------------------------------------------------------------
+
+/// A `u16` static incremented across the low-byte boundary carries into the
+/// high byte: $00FF + 1 = $0100. The static path (Absolute location).
+#[test]
+fn a_sixteen_bit_static_increment_carries_into_the_high_byte() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        static S: u16 = 255;
+        #[reset]
+        fn main() {
+            S = S + 1;
+            LO = S.low;
+            HI = S.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        256,
+        "255 + 1 must carry to 256, not wrap to 0"
+    );
+}
+
+/// A `u16` static decremented across the low-byte boundary borrows from the
+/// high byte: $0100 - 1 = $00FF.
+#[test]
+fn a_sixteen_bit_static_decrement_borrows_from_the_high_byte() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        static S: u16 = 256;
+        #[reset]
+        fn main() {
+            S = S - 1;
+            LO = S.low;
+            HI = S.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 255, "256 - 1 must borrow to 255");
+}
+
+/// The full wrap in both directions: $FFFF + 1 = $0000 and $0000 - 1 = $FFFF,
+/// on a local `u16` (a zero-page frame slot).
+#[test]
+fn a_sixteen_bit_local_increment_and_decrement_wrap_the_whole_word() {
+    let mut e = run(r#"
+        const LO0: addr = 0x0400;
+        const HI0: addr = 0x0401;
+        const LO1: addr = 0x0402;
+        const HI1: addr = 0x0403;
+        #[reset]
+        fn main() {
+            let up: u16 = 65535;
+            up = up + 1;
+            LO0 = up.low;
+            HI0 = up.high;
+
+            let down: u16 = 0;
+            down = down - 1;
+            LO1 = down.low;
+            HI1 = down.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0400), 0, "$FFFF + 1 wraps to 0");
+    assert_eq!(e.mem16(0x0402), 0xFFFF, "0 - 1 wraps to $FFFF");
+}
+
+/// A no-carry increment leaves the high byte untouched, and repeated ±1 sums
+/// as expected — guards against the branch being taken the wrong way.
+#[test]
+fn sixteen_bit_step_without_a_carry_touches_only_the_low_byte() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        static S: u16 = 0x1234;
+        #[reset]
+        fn main() {
+            S = S + 1;
+            S = S + 1;
+            S = S - 1;
+            LO = S.low;
+            HI = S.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0400),
+        0x1235,
+        "0x1234 +1 +1 -1 = 0x1235, high byte unchanged"
+    );
+}
+
+/// The emitted form for a `u16` static `+= 1`: an `INC` of the low byte, a
+/// branch, and an `INC` of the high byte — not a `LDA`/`ADC`/`STA` pair. The
+/// old path staged the constant `1` and both bytes through the accumulator.
+#[test]
+fn a_sixteen_bit_increment_emits_inc_then_a_carrying_inc() {
+    let asm = crate::common::harness::compile_success(
+        "static S: u16 = 0;\n\
+         #[reset]\n\
+         fn main() { S = S + 1; loop {} }\n",
+    );
+    // Two INCs and a BNE between them, and no add-with-carry of an immediate 1.
+    let incs = asm.matches("    INC ").count();
+    assert!(incs >= 2, "expected two INCs (low then high):\n{asm}");
+    assert!(asm.contains("    BNE "), "expected a carry branch:\n{asm}");
+    assert!(
+        !asm.contains("ADC #$01"),
+        "the constant 1 should not be staged through ADC:\n{asm}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A 16-bit arithmetic result stored to memory skips the PHA/TYA/TAY/PLA
+// shuffle when the accumulator, Y and the flags are all dead afterwards.
+// ---------------------------------------------------------------------------
+
+/// The fused add and subtract still compute the right 16-bit answers:
+/// 300 + 44 = 344 and 300 - 44 = 256, both crossing a byte boundary.
+#[test]
+fn a_fused_sixteen_bit_store_still_computes_the_sum_and_difference() {
+    let mut e = run(r#"
+        const S_LO: addr = 0x0500;
+        const S_HI: addr = 0x0501;
+        const T_LO: addr = 0x0502;
+        const T_HI: addr = 0x0503;
+        static S: u16 = 0;
+        static T: u16 = 0;
+        fn store_both(a: u16, b: u16) {
+            S = a + b;
+            T = a - b;
+        }
+        #[reset]
+        fn main() {
+            store_both(300, 44);
+            S_LO = S.low;
+            S_HI = S.high;
+            T_LO = T.low;
+            T_HI = T.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0500),
+        344,
+        "300 + 44 = 344 through the fused store"
+    );
+    assert_eq!(
+        e.mem16(0x0502),
+        256,
+        "300 - 44 = 256 through the fused store"
+    );
+}
+
+/// When the result is dead in the registers after the store, the shuffle is
+/// gone: no `PHA`/`PLA` survives around the 16-bit add.
+#[test]
+fn a_dead_sixteen_bit_store_drops_the_stack_shuffle() {
+    let asm = crate::common::harness::compile_success(
+        "static S: u16 = 0;\n\
+         fn set(a: u16, b: u16) { S = a + b; }\n\
+         #[reset]\n\
+         fn main() { set(300, 44); loop {} }\n",
+    );
+    assert!(
+        !asm.contains("PHA"),
+        "the low byte should not be pushed:\n{asm}"
+    );
+    assert!(
+        !asm.contains("PLA"),
+        "the low byte should not be pulled:\n{asm}"
+    );
+}
+
+/// The guard holds the other way: when the low byte is reused straight from A
+/// after the store (`LO = s.low` keeps A), the shuffle must stay — fusing it
+/// would leave the high byte in A and store that to `LO`.
+#[test]
+fn a_reused_low_byte_keeps_the_shuffle() {
+    let mut e = run(r#"
+        const LO: addr = 0x0400;
+        const HI: addr = 0x0401;
+        #[reset]
+        fn main() {
+            let x: u16 = 300;
+            let y: u16 = 44;
+            let s: u16 = x + y;
+            LO = s.low;
+            HI = s.high;
+            loop {}
+        }
+    "#);
+    // s.low reuses A, so the store must have preserved the low byte: 344 = $0158.
+    assert_eq!(e.mem(0x0400), 0x58, "low byte of 344");
+    assert_eq!(e.mem(0x0401), 0x01, "high byte of 344, not the low byte");
+}

@@ -192,6 +192,44 @@ pub(super) fn generate_call(
             param_types.len()
         )));
     }
+
+    // Direct path: when no argument contains a call, nothing between producing
+    // an argument and the `JSR` can disturb a parameter slot already written.
+    // A non-recursive callee's frame is coloured apart from the caller's live
+    // frame (the trivial fast path above rests on the same fact), and with no
+    // nested call there is no reuse of the fixed argument pool or of a frame to
+    // shelter against — so each argument goes straight into its slot through
+    // the one staging routine, and the pool round-trip and its byte-by-byte
+    // copy back into the frame are skipped entirely. An address-taken callee is
+    // excluded: it reads arguments from the indirect-staging block, not its
+    // frame, via a prologue copy.
+    if !args.is_empty()
+        && !is_address_taken
+        && !is_recursive_edge
+        && !args.iter().any(|a| super::binary::contains_call(&a.node))
+    {
+        emitter.invalidate_registers();
+        let mut byte_offset = 0u8;
+        for (i, arg) in args.iter().enumerate() {
+            let width = stage_argument(
+                arg,
+                &param_types[i],
+                param_base + byte_offset,
+                StagingSite::Direct {
+                    callee: &function.node,
+                    index: i,
+                },
+                emitter,
+                info,
+                string_collector,
+            )?;
+            byte_offset += width;
+        }
+        emitter.emit_inst("JSR", &function.node);
+        emitter.reg_state.invalidate_all();
+        return Ok(());
+    }
+
     let arg_sizes: Vec<u8> = param_types
         .iter()
         .take(args.len())

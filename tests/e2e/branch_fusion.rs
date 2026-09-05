@@ -172,3 +172,61 @@ fn overflow_survives_a_fused_comparison() {
     assert_eq!(e.mem(0x0900), 1, "the comparison still decided correctly");
     assert_eq!(e.mem(0x0901), 1, "and the overflow flag survived it");
 }
+
+/// The collapse fires inside a *standalone* function, not only when the loop is
+/// inlined into `main`. A void function ends in `RTS`, and the liveness that
+/// guards the collapse used to treat `RTS` as reading the flags and the
+/// accumulator — as if a caller took them as a return value. A value returns in
+/// a register, never in a flag, and a *void* function returns nothing at all, so
+/// the throwaway boolean of a condition looked live all the way to the return
+/// and the collapse was refused. The same loop inlined (one call site) collapsed
+/// while the standalone form (two call sites) did not — a difference of layout,
+/// not of meaning.
+#[test]
+fn a_condition_collapses_inside_a_standalone_function() {
+    let asm = crate::common::harness::compile_success(
+        "const OUT: addr = 0x0900;\n\
+         const COLS: u8 = 80;\n\
+         fn helper(v: u8) -> u8 { OUT = v; return v; }\n\
+         fn loop_in_fn(start: u8) {\n\
+         \x20   let c: u8 = start;\n\
+         \x20   while c < COLS { OUT = helper(c); c = c + 1; }\n\
+         }\n\
+         #[reset]\n\
+         fn main() { loop_in_fn(0); loop_in_fn(3); loop {} }\n",
+    );
+    let body = asm
+        .split("loop_in_fn:")
+        .nth(1)
+        .expect("loop_in_fn emitted standalone")
+        .split("\nmain:")
+        .next()
+        .unwrap();
+    // A collapsed condition branches on its own flags; a materialised one builds
+    // a 0/1 in A and re-tests it.
+    assert!(
+        !body.contains("LDA #$01"),
+        "the loop condition still materialises a boolean:\n{body}"
+    );
+    assert!(
+        !body.contains("CMP #$00"),
+        "the loop condition still re-tests a materialised boolean:\n{body}"
+    );
+}
+
+/// The behavioural half: the loop that now collapses still runs the right number
+/// of times. `count_below` returns how many steps `0, 1, 2, …` takes to reach
+/// its bound, computed by a standalone function whose `while` is the collapsed
+/// site.
+#[test]
+fn the_collapsed_standalone_loop_still_counts_correctly() {
+    let mut e = run("const OUT: addr = 0x0900;\n\
+         static N: u8 = 0;\n\
+         fn count_below(bound: u8) {\n\
+         \x20   let c: u8 = 0;\n\
+         \x20   while c < bound { N = N + 1; c = c + 1; }\n\
+         }\n\
+         #[reset]\n\
+         fn main() { count_below(9); count_below(4); OUT = N; loop {} }\n");
+    assert_eq!(e.mem(0x0900), 13, "9 + 4 iterations");
+}

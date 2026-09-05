@@ -203,8 +203,16 @@ fn a_handler_does_not_disturb_a_computation_it_interrupts() {
         "let t: u16 = (i as u16) + 1000; acc = acc + t + t + t;",
     ];
     let handlers = [
+        // A 16-bit multiply: opaque to the scratch-narrowing pass (mul16's
+        // working storage is not scanned), so it keeps the full save.
         "let x: u16 = 700; let y: u16 = 9; let p: u16 = x * y; COUNT = COUNT + p.low;",
+        // Touches no zero-page scratch at all: the narrowed save is empty.
         "COUNT = COUNT + 1;",
+        // A 16-bit *compare* stages operands through the same $20/$21 scratch
+        // `main`'s 16-bit arithmetic uses, but is not opaque — so the save is
+        // narrowed to exactly those bytes. If the narrowing dropped one main
+        // was mid-flight in, this is where it would surface.
+        "let a: u16 = 700; let b: u16 = 9; if a > b { COUNT = COUNT + 1; }",
     ];
 
     for body in bodies {

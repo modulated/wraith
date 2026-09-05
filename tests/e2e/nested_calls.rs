@@ -225,3 +225,64 @@ fn a_bit_test_on_a_call_result_in_a_later_argument() {
     );
     assert_eq!(got, vec![200, 1], "bit 3 of 8 is set, and 200 survives");
 }
+
+/// Arguments that are plain expressions — no call among them — go straight into
+/// the callee's frame, skipping the argument pool. Each must still land in its
+/// own slot; this passes three expressions of mixed width and reads every
+/// parameter back.
+#[test]
+fn expression_arguments_reach_their_slots_directly() {
+    let mut e = crate::common::exec::run(
+        "const P: addr = 0x0900;\n\
+         const Q0: addr = 0x0901;\n\
+         const Q1: addr = 0x0902;\n\
+         const R: addr = 0x0903;\n\
+         fn take(p: u8, q: u16, r: u8) { P = p; Q0 = q.low; Q1 = q.high; R = r; }\n\
+         #[reset]\n\
+         fn main() {\n\
+         \x20   let a: u8 = 5; let b: u16 = 1000; let c: u8 = 4;\n\
+         \x20   take(a + 1, b + 7, c * 3);\n\
+         \x20   take(a + 1, b + 7, c * 3);\n\
+         \x20   loop {}\n\
+         }",
+    );
+    assert_eq!(e.mem(0x0900), 6, "p = 5 + 1");
+    assert_eq!(
+        ((e.mem(0x0902) as u16) << 8) | e.mem(0x0901) as u16,
+        1007,
+        "q = 1000 + 7"
+    );
+    assert_eq!(e.mem(0x0903), 12, "r = 4 * 3");
+}
+
+/// The staging itself: a call whose arguments contain no call touches none of
+/// the `$F4`-`$FE` argument pool — the values are produced straight into the
+/// callee's frame. Two call sites keep `take` out of line so a real `JSR` with
+/// staging is emitted.
+#[test]
+fn a_call_with_expression_arguments_skips_the_pool() {
+    let asm = crate::common::harness::compile_success(
+        "const OUT: addr = 0x0900;\n\
+         fn take(p: u8, q: u8) -> u8 { OUT = p; return p + q; }\n\
+         #[reset]\n\
+         fn main() {\n\
+         \x20   let a: u8 = 5;\n\
+         \x20   let x: u8 = take(a + 1, a * 2);\n\
+         \x20   let y: u8 = take(a + 2, a * 3);\n\
+         \x20   OUT = x + y;\n\
+         \x20   loop {}\n\
+         }",
+    );
+    let main = asm.split("main:").nth(1).expect("main emitted");
+    let main = main.split("\n; Function").next().unwrap_or(main);
+    for pool in ["$F4", "$F5", "$F6", "$F7", "$F8"] {
+        assert!(
+            !main.contains(pool),
+            "an expression argument was staged through the pool `{pool}`:\n{main}"
+        );
+    }
+    assert!(
+        main.contains("JSR take"),
+        "the call was inlined away:\n{main}"
+    );
+}
