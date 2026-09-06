@@ -946,11 +946,15 @@ fn gen_expr(g: &mut Gen, ty: Ty, depth: u32, anchored: bool) -> E {
         if g.allow_fields && !g.allow_aggregates && g.base == ty && g.rng.below(100) < 35 {
             // Including its *array* field, indexed through the by-reference
             // parameter — `xp.a[i]`, which the compiler refused until the
-            // element address became a run-time computation.
-            if g.rng.below(3) == 0 {
-                return E::AField(gen_afield_index(g));
-            }
-            return E::Field(g.rng.below(SFIELDS as u64) as usize);
+            // element address became a run-time computation — and the scalar of
+            // the struct nested inside it, `xp.n.g{j}`, a two-level offset
+            // through the pointer where `main`'s `s.n.g{j}` is a two-level
+            // offset from a label.
+            return match g.rng.below(4) {
+                0 => E::AField(gen_afield_index(g)),
+                1 => E::NestedField(g.rng.below(NESTED as u64) as usize),
+                _ => E::Field(g.rng.below(SFIELDS as u64) as usize),
+            };
         }
         // A read through the pointer. Storage of its own type, so it anchors
         // an expression exactly as a variable does — and unlike a variable,
@@ -1531,9 +1535,13 @@ struct Prog {
     /// Which variant `main`'s enum local holds, or `None` when the program
     /// declares no enum.
     enum_init: Option<usize>,
-    /// The `u8` payload the constructed variant carries. Variants past the
-    /// first hold one; variant 0 is unit and ignores this.
-    enum_payload: u8,
+    /// The payload the constructed variant carries, at [`Self::enum_payload_ty`].
+    /// Variants past the first hold one; variant 0 is unit and ignores this.
+    enum_payload: i64,
+    /// Whether the payload variants carry the pair's *wide* type rather than a
+    /// `u8`. A two-byte payload is extracted into A:X and cast down, a different
+    /// register convention from the one-byte case.
+    enum_payload_wide: bool,
     /// Which of [`STRINGS`] `main` holds, or `None` when it holds none.
     str_init: Option<usize>,
     /// The `const` table's contents. Declared whenever `aggregates` is set, and
@@ -1588,6 +1596,15 @@ impl Prog {
     /// The function id of table entry `k`.
     fn candidate(&self, k: usize) -> usize {
         self.funcs.len() - self.vtable + k
+    }
+    /// The declared type of a payload variant's field: the pair's wide type when
+    /// the payload is two bytes, `u8` otherwise.
+    fn enum_payload_ty(&self) -> Ty {
+        if self.enum_payload_wide {
+            self.pair.wide
+        } else {
+            Ty::U8
+        }
     }
 }
 
@@ -2102,7 +2119,11 @@ fn gen_program(seed: u64) -> Prog {
     // generated.
     let enum_init: Option<usize> =
         (g.rng.below(100) < 50).then(|| g.rng.below(EVARIANTS as u64) as usize);
-    let enum_payload = g.rng.below(256) as u8;
+    // A payload variant carries the pair's wide type two programs in five, so the
+    // two-byte extraction (A:X, cast down) is exercised alongside the one-byte one.
+    let enum_payload_wide = enum_init.is_some_and(|k| k > 0) && g.rng.below(100) < 40;
+    let payload_ty = if enum_payload_wide { pair.wide } else { Ty::U8 };
+    let enum_payload = g.lit(payload_ty);
     g.allow_enum = enum_init.is_some();
     // And the string, independently again. `str` is its own spelling in the
     // type table — not `Named`, not a primitive — and is the kind two of the
@@ -2215,6 +2236,7 @@ fn gen_program(seed: u64) -> Prog {
         nested_init,
         enum_init,
         enum_payload,
+        enum_payload_wide,
         str_init,
         konst,
         vtable,
@@ -2293,6 +2315,7 @@ fn call_fn(
     slice: Option<(usize, usize)>,
     fields: &[i64],
     afield: &[i64],
+    nested: &[i64],
     tag: Option<usize>,
     strlen: Option<usize>,
     ty: Ty,
@@ -2320,9 +2343,11 @@ fn call_fn(
         // The array field travels with them: it is part of the same bytes, and
         // `xp.a[i]` reads it through the same pointer.
         afield: afield.to_vec(),
-        // A function never names the nested field — `s.n.g{j}` is `main` only,
-        // like the array and the table — so it stays empty here.
-        nested: Vec::new(),
+        // The nested struct's fields travel with the struct exactly as the
+        // array field does: they are part of the same bytes, read through the
+        // parameter as `xp.n.g{j}`. Nothing writes them there, so the values
+        // carry in unchanged — a copy, not an alias.
+        nested: nested.to_vec(),
         // The tag, when this function takes the enum. A unit enum's value is
         // its variant index, so nothing else has to travel.
         tag,
@@ -2448,6 +2473,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let sl = slice_arg.map(|k| st.slices[k]);
             let fl: &[i64] = if *struct_arg { &st.fields } else { &[] };
             let af: &[i64] = if *struct_arg { &st.afield } else { &[] };
+            let nf: &[i64] = if *struct_arg { &st.nested } else { &[] };
             let tg = if *enum_arg { st.tag } else { None };
             let sn = if *str_arg { st.strlen } else { None };
             narrow(
@@ -2459,6 +2485,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                     sl,
                     fl,
                     af,
+                    nf,
                     tg,
                     sn,
                     ty,
@@ -2483,6 +2510,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                     sl,
                     &st.fields,
                     &st.afield,
+                    &st.nested,
                     st.tag,
                     st.strlen,
                     ty,
@@ -2504,6 +2532,7 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
                     None,
                     &[],
                     &[],
+                    &[],
                     None,
                     None,
                     ty,
@@ -2519,14 +2548,38 @@ fn eval(e: &E, st: &St, ty: Ty) -> i64 {
             let callee = st.prog.candidate(k);
             let v = eval(arg, st, st.prog.funcs[callee].var_types[0]);
             narrow(
-                call_fn(st.prog, callee, 0, &[v], None, &[], &[], None, None, ty),
+                call_fn(
+                    st.prog,
+                    callee,
+                    0,
+                    &[v],
+                    None,
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    ty,
+                ),
                 ty,
             )
         }
         E::DevCall(arg) => {
             let v = eval(arg, st, st.prog.funcs[st.dev].var_types[0]);
             narrow(
-                call_fn(st.prog, st.dev, 0, &[v], None, &[], &[], None, None, ty),
+                call_fn(
+                    st.prog,
+                    st.dev,
+                    0,
+                    &[v],
+                    None,
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    ty,
+                ),
                 ty,
             )
         }
@@ -2765,7 +2818,9 @@ fn expected(p: &Prog) -> Vec<u32> {
             .collect(),
         tag: p.enum_init,
         epay: match p.enum_init {
-            Some(k) if k > 0 => Some(p.enum_payload as i64),
+            // Already at the payload's declared type, so a wide payload carries
+            // its full two-byte value and a `u8` one its byte.
+            Some(k) if k > 0 => Some(p.enum_payload),
             _ => None,
         },
         strlen: p.str_init.map(|k| STRINGS[k].len()),
@@ -3324,12 +3379,13 @@ fn render_program(p: &Prog, form: Form) -> String {
         }
     };
     let enum_decl = if p.enum_init.is_some() {
+        let pty = p.enum_payload_ty().name();
         let vs: Vec<String> = (0..EVARIANTS)
             .map(|i| {
                 if i == 0 {
                     format!("C{i}")
                 } else {
-                    format!("C{i}(u8)")
+                    format!("C{i}({pty})")
                 }
             })
             .collect();
@@ -3507,7 +3563,10 @@ static DEV: VT = VT {{ call: {} }};\n",
         if k == 0 {
             decls.push_str(&format!("    let e: C = C::C{k};\n"));
         } else {
-            decls.push_str(&format!("    let e: C = C::C{k}({});\n", p.enum_payload));
+            decls.push_str(&format!(
+                "    let e: C = C::C{k}({});\n",
+                lit(&p.enum_payload)
+            ));
         }
     }
     if let Some(k) = p.str_init {
@@ -4492,8 +4551,31 @@ fn the_generator_covers_what_it_claims() {
         ptr_field_targets: usize,
         ptr_elem_targets: usize,
         nested_reads: usize,
+        nested_param_reads: usize,
         enum_match_reads: usize,
+        enum_wide_payloads: usize,
         static_reads: usize,
+    }
+
+    /// Whether an expression names the nested struct field anywhere — used to
+    /// tell a read *through the by-reference parameter* (inside a function body)
+    /// from `main`'s own `s.n.g{j}`, which the shared `nested_reads` counter
+    /// cannot, since it does not carry scope.
+    fn expr_names_nested(e: &E) -> bool {
+        match e {
+            E::NestedField(_) => true,
+            E::Bin(l, _, r) => expr_names_nested(l) || expr_names_nested(r),
+            E::Cast(_, inner) | E::At(_, inner) => expr_names_nested(inner),
+            _ => false,
+        }
+    }
+    fn stmts_name_nested(stmts: &[S]) -> bool {
+        stmts.iter().any(|s| match s {
+            S::Assign(_, _, e) => expr_names_nested(e),
+            S::If(_, t, e) => stmts_name_nested(t) || e.as_deref().is_some_and(stmts_name_nested),
+            S::For(_, _, b) | S::While(_, b) => stmts_name_nested(b),
+            _ => false,
+        })
     }
 
     fn walk_e(e: &E, s: &mut Seen, narrow_half: Ty) {
@@ -4698,10 +4780,18 @@ fn the_generator_covers_what_it_claims() {
                 PtrTarget::Var(_) => {}
             }
         }
+        if p.enum_payload_wide {
+            seen.enum_wide_payloads += 1;
+        }
         for f in &p.funcs {
             walk_s(&f.body, &mut seen, p.pair.narrow);
             walk_e(&f.ret, &mut seen, p.pair.narrow);
             walk_e(&f.base, &mut seen, p.pair.narrow);
+            // A nested-field read reached through the by-reference parameter —
+            // `xp.n.g{j}` — lives only in a function body, never in `main`.
+            if stmts_name_nested(&f.body) || expr_names_nested(&f.ret) {
+                seen.nested_param_reads += 1;
+            }
         }
     }
 
@@ -4786,6 +4876,16 @@ fn the_generator_covers_what_it_claims() {
     );
     assert!(seen.enum_reads > 0, "never read an enum's tag");
     assert!(seen.enum_match_reads > 0, "never matched an enum payload");
+    assert!(
+        seen.enum_wide_payloads > 0,
+        "never carried a two-byte enum payload — the case extracted into A:X and cast down, \
+         a different register convention from the one-byte payload"
+    );
+    assert!(
+        seen.nested_param_reads > 0,
+        "never read the nested struct field through the by-reference parameter — `xp.n.g`, \
+         a two-level offset through a pointer rather than from a label"
+    );
     assert!(
         seen.str_args > 0,
         "never passed a `str` to a function — its own spelling in the type table, and the \
@@ -4930,6 +5030,7 @@ fn the_oracle_matches_the_documented_semantics() {
         nested_init: [0; NESTED],
         enum_init: None,
         enum_payload: 0,
+        enum_payload_wide: false,
         str_init: None,
         konst: [0; ALEN],
         vtable: 0,
@@ -5151,12 +5252,14 @@ mod coverage {
         ),
         (
             "Item::Enum",
-            "one enum per program, three variants: `C0` unit, `C1(u8)` and `C2(u8)` \
-             carrying a payload. The tag is read as `(e as T)` and carried across a call; \
-             the payload is read by a `match` in `main` — `match e { C0 => …, C1(x) => \
-             (x as T), … }` — which discriminates the tag and extracts the byte. A `u16` \
-             payload is not generated, so the value stays two bytes in A:X like the unit \
-             enum, and a payload matched through the by-reference parameter is not either",
+            "one enum per program, three variants: `C0` unit and two carrying a payload. \
+             The payload is a `u8` three programs in five and the pair's wide type (`u16` \
+             or `i16`) in the other two, so the two-byte payload extracted into A:X and \
+             cast down is exercised as well as the one-byte one. The tag is read as \
+             `(e as T)` and carried across a call; the payload is read by a `match` in \
+             `main` — `match e { C0 => …, C1(x) => (x as T), … }` — which discriminates the \
+             tag and extracts the value. A payload matched through the by-reference \
+             parameter is not generated",
         ),
         (
             "Literal::String",
@@ -5304,8 +5407,8 @@ mod coverage {
              `n: Inner` with two scalars of its own — reached through the struct's own name \
              in `main` and through the by-reference parameter inside the function that takes \
              it, `xp.a[i]` included, which indexes an array field through a pointer. The \
-             nested field is read as `s.n.g{j}` in `main` — a two-level offset — but not \
-             through the parameter",
+             nested field is read as a two-level offset both ways: `s.n.g{j}` from a label \
+             in `main`, and `xp.n.g{j}` through the pointer inside the function",
         ),
         (
             "Item::Static",

@@ -85,6 +85,7 @@ read against a current picture:
 | `atomic static` masks interrupts (`PHP;SEI;…;PLP`, save/restore) around each whole-variable read and each assignment of a two-byte value shared with a handler, so no torn read or lost update; a one-byte `atomic` warns and emits nothing; an aggregate is refused | `tests/e2e/atomic.rs` |
 | The fuzzer generates a mutable `static` in RAM — a store, a read-modify-write and the INC/DEC path against an *absolute* BSS address, the storage class the const table never reached | `docs/fuzz-coverage.md` |
 | The fuzzer dispatches an integer `match` on the base type — disjoint literal arms or a range arm with a wildcard — which caught a peephole dropping the `LDA` that sets N for a signed range's low-bound `BMI`, so a negative computed scrutinee wrongly passed `≥ 0` | `docs/fuzz-coverage.md`, `tests/e2e/match_ranges.rs` |
+| The fuzzer carries a two-byte enum payload (the pair's wide type, extracted into A:X and cast down) and reads the nested struct field through the by-reference parameter (`xp.n.g{j}`); both sound, and each guarded by a coverage assertion | `docs/fuzz-coverage.md` |
 
 ## What keeps going wrong
 
@@ -259,15 +260,6 @@ pool lives on this machine. Two shapes are outside it:
   column, which is a nested scheme rather than the flat one — and the flat rule
   ("every field is a scalar of one or two bytes") is what makes indexing a
   column cost no multiply. Refused with a message that says so.
-
-Two smaller things the work exposed:
-
-- A constant index into a column still goes through the runtime-index path on
-  the *write* side: `E[1].hp = v` emits `LDA #1 / TAY / STA col,Y` where
-  `STA col+1` would do. Correct, three bytes larger.
-- `enum` and `import` declarations still drop attributes silently, the way
-  `static` did before this change. Nothing valid can be written there yet, so
-  nothing is currently mis-accepted, but the same silent-drop is waiting.
 
 ### Const attributes (consider later)
 
@@ -637,11 +629,17 @@ and an oracle that is merely *probably* right is worse than no oracle:
 
   Since closed: enum payloads, indexing a string rather than measuring it, a
   struct nested inside a struct, a pointer to a struct field and an array
-  element, a pointer passed to a function (`bp(&v, x)`), and a pointer to a
-  pointer (`**pp`). What is left is narrow: a struct returned *through a
-  function pointer* in the generator (that one has an e2e test), a nested
-  field reached *through the by-reference parameter*, and a `u16` enum
-  payload — each recorded in the fuzzer's own caveats.
+  element, a pointer passed to a function (`bp(&v, x)`), a pointer to a
+  pointer (`**pp`), a nested field reached *through the by-reference parameter*
+  (`xp.n.g{j}`), and a two-byte enum payload (the pair's wide type, extracted
+  into A:X and cast down) — the last two each verified sound at 5000 seeds and
+  guarded by a coverage assertion. What is left is one case, and it is left on
+  purpose: a struct returned *through a function pointer* in the generator.
+  Its correctness is already pinned by `tests/e2e/aggregate_dispatch.rs`
+  (`a_struct_returned_through_a_function_pointer_binds` and siblings), and
+  reaching it through the differential generator would need a struct-typed
+  vtable signature, a struct-producing dispatch *statement*, and a second
+  struct in the oracle's scope — a large change for coverage that exists.
 - **Copying a run of bytes.** *Done.* `memcpy(&arr[d], &TBL[s], n)` is
   generated wherever the program's type is `u8`, which is what a whole-array
   assignment turned into once that statement was refused. It puts three things
