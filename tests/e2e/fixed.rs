@@ -364,15 +364,130 @@ fn multiply_overflow_wraps() {
     );
 }
 
-/// Divide is deferred.
+/// Divide: 3.0 / 2.0 = 1.5.
 #[test]
-fn divide_is_refused_for_now() {
+fn divide_fractional_result() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 3.0;
+            let b: q8.8 = 2.0;
+            let c: q8.8 = a / b;      // 1.5
+            let twice: q8.8 = c + c;  // 3.0
+            OUT = twice as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 3, "3.0 / 2.0 = 1.5, doubled is 3.0");
+}
+
+/// Divide of two whole numbers: 10.0 / 4.0 = 2.5.
+#[test]
+fn divide_whole_operands() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 10.0;
+            let b: q8.8 = 4.0;
+            let c: q8.8 = a / b;      // 2.5
+            let four: q8.8 = c + c + c + c;  // 10.0
+            OUT = four as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 10, "10.0 / 4.0 = 2.5, times four is 10.0");
+}
+
+/// Divide is the inverse of multiply for exact values: (a / b) * b == a.
+#[test]
+fn divide_then_multiply_round_trips() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 7.0;
+            let b: q8.8 = 2.0;
+            let q: q8.8 = a / b;   // 3.5
+            let back: q8.8 = q * b; // 7.0
+            OUT = back as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 7, "(7.0 / 2.0) * 2.0 = 7.0");
+}
+
+/// A negative dividend carries its sign through the quotient.
+#[test]
+fn divide_signed() {
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let z: q8.8 = 0.0;
+            let a: q8.8 = z - 6.0;   // -6.0
+            let b: q8.8 = 2.0;
+            let c: q8.8 = a / b;     // -3.0
+            let whole: i16 = c as i16;
+            LO = whole.low;
+            HI = whole.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0900), 0xFFFD, "-6.0 / 2.0 = -3.0");
+}
+
+/// A fractional quotient smaller than one: 1.0 / 4.0 = 0.25.
+#[test]
+fn divide_below_one() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 1.0;
+            let b: q8.8 = 4.0;
+            let c: q8.8 = a / b;             // 0.25
+            let whole: q8.8 = c + c + c + c; // 1.0
+            OUT = whole as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 1, "1.0 / 4.0 = 0.25, times four is 1.0");
+}
+
+/// Divide by zero yields the all-ones sentinel, as at every width and sign.
+#[test]
+fn divide_by_zero_is_the_sentinel() {
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 5.0;
+            let z: q8.8 = 0.0;
+            let b: q8.8 = z;        // runtime zero avoids the compile-time check
+            let c: q8.8 = a / b;
+            let raw: i16 = c as i16;   // arithmetic on the encoding
+            LO = c as u8;              // low byte of 0xFFFF encoding
+            HI = raw.high;
+            loop {}
+        }
+    "#);
+    // 0xFFFF encoding: as u8 = high byte 0xFF; as i16 = -1, high byte 0xFF.
+    assert_eq!(e.mem(0x0900), 0xFF, "sentinel integer part is 0xFF");
+}
+
+/// Modulo stays refused on fixed-point.
+#[test]
+fn modulo_is_refused() {
     assert_error_contains(
         r#"
         fn f() {
             let a: q8.8 = 3.0;
             let b: q8.8 = 2.0;
-            let c: q8.8 = a / b;
+            let c: q8.8 = a % b;
         }
         "#,
         "fixed-point",

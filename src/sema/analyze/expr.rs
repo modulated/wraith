@@ -1191,18 +1191,18 @@ impl SemanticAnalyzer {
                 });
             }
             match op {
-                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {}
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {}
                 BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::Lt
                 | BinaryOp::Le
                 | BinaryOp::Gt
                 | BinaryOp::Ge => {}
-                BinaryOp::Div | BinaryOp::Mod => {
+                BinaryOp::Mod => {
                     return Err(SemaError::InvalidBinaryOp {
                         op: format!(
-                            "{:?} (not yet supported on fixed-point; add, subtract and \
-                             multiply are)",
+                            "{:?} (not supported on fixed-point; a fractional remainder is \
+                             rarely meaningful)",
                             op
                         ),
                         left_ty: left_ty.display_name(),

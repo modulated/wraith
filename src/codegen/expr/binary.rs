@@ -613,7 +613,11 @@ pub(super) fn generate_binary(
             }
         }
         crate::ast::BinaryOp::Div => {
-            generate_divide(emitter, is_u16, is_signed)?;
+            if is_fixed {
+                generate_divide_q88(emitter)?;
+            } else {
+                generate_divide(emitter, is_u16, is_signed)?;
+            }
         }
         crate::ast::BinaryOp::Mod => {
             generate_modulo(emitter, is_u16, is_signed)?;
@@ -981,6 +985,34 @@ fn generate_multiply_q88(emitter: &mut Emitter) -> Result<(), CodegenError> {
     emitter.emit_inst("STA", "$DC");
 
     emitter.emit_inst("JSR", "mulq88");
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=result_low, Y=result_high (q8.8)");
+    }
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
+fn generate_divide_q88(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Fixed-point q8.8 divide via the stdlib divq88 routine: `(a << 8) / b`,
+    // truncated, with the sign and the divide-by-zero sentinel handled inside.
+    // Unlike multiply the operand order matters — the dividend (left) is `a` at
+    // $D9-$DA and the divisor (right) is `b` at $DB-$DC.
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib divq88 for q8.8 division");
+    }
+    emitter.needs_divq88 = true;
+
+    emitter.emit_inst("STA", "$D9"); // dividend low
+    emitter.emit_inst("STY", "$DA"); // dividend high
+
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // divisor low
+    emitter.emit_inst("STA", "$DB");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // divisor high
+    emitter.emit_inst("STA", "$DC");
+
+    emitter.emit_inst("JSR", "divq88");
 
     if emitter.is_verbose() {
         emitter.emit_comment("Returns: A=result_low, Y=result_high (q8.8)");

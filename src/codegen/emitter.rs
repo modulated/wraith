@@ -55,6 +55,8 @@ pub struct Emitter {
     pub needs_mod16: bool,
     /// Track if the q8.8 fixed-point multiply routine is needed
     pub needs_mulq88: bool,
+    /// Track if the q8.8 fixed-point divide routine is needed
+    pub needs_divq88: bool,
     /// Track if the indirect-call trampoline is needed (function pointers)
     pub needs_indirect_call: bool,
     /// Span of the statement currently being generated, so a zero-page pool
@@ -108,6 +110,7 @@ impl Emitter {
             needs_div16: false,
             needs_mod16: false,
             needs_mulq88: false,
+            needs_divq88: false,
             needs_indirect_call: false,
             blame_span: None,
             zp_written: [false; 256],

@@ -204,19 +204,20 @@ if pos < vel { }          // signed 16-bit compare
 ```
 
 Multiply is `(a·b) >> 8`: the full 32-bit product of the two encodings with the
-fraction shifted back out. It calls a small stdlib routine (`mulq88`, a signed
-widening shift-and-add). The result is **truncated** toward zero on the dropped
-low byte and **wraps** on overflow, like every other arithmetic result:
+fraction shifted back out (stdlib `mulq88`, a signed widening shift-and-add).
+Divide is `(a << 8) / b`: the dividend is widened to 24 bits so the quotient
+keeps its 8 fraction bits (stdlib `divq88`, a signed restoring division). Both
+**truncate** the dropped low bits and **wrap** on overflow, like every other
+arithmetic result; divide by zero is the all-ones sentinel, as at every width:
 
 ```rust,compile,fragment
-let a: q8.8 = 1.5;
+let a: q8.8 = 3.0;
 let b: q8.8 = 2.0;
-let area: q8.8 = a * b;   // 3.0
+let area: q8.8 = a * b;   // 6.0
+let half: q8.8 = a / b;   // 1.5
 ```
 
-Divide is **not yet supported** and is refused rather than miscompiled; it needs
-a widening `(a << 8) / b` the current divide cannot express. Bitwise operators do
-not apply to a scaled value.
+Modulo and the bitwise operators do not apply to a scaled value and are refused.
 
 **Conversions.** Both directions need an explicit `as`:
 - `<int> as q8.8` scales up (the integer becomes the whole part).
