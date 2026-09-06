@@ -66,6 +66,16 @@ count. Leading zeros are suppressed; zero still yields "0".
 -   `string_to_bcd(s: str) -> b16` - parse up to 4 ASCII digits into a BCD word
     (validate with `char.wr`'s `is_digit` first)
 
+**Plain binary ↔ string** (base 10 and base 16, for ordinary `u8`/`u16`). Same
+buffer convention as the BCD helpers. Hex is *fixed width* — leading zeros kept,
+the form an address or register dump wants; decimal suppresses leading zeros but
+zero still yields "0".
+
+-   `u8_to_hex(value: u8, dest: &u8) -> u16` - two uppercase hex digits (needs 3 bytes)
+-   `u16_to_hex(value: u16, dest: &u8) -> u16` - four uppercase hex digits (needs 5 bytes)
+-   `u16_to_string(value: u16, dest: &u8) -> u16` - decimal, 1-5 digits (needs 6 bytes)
+-   `hex_to_u16(s: str) -> u16` - parse ASCII hex; stops at the first non-hex character
+
 ### char.wr
 
 ASCII character classification and conversion. A string is an array of `char`,
@@ -81,12 +91,15 @@ call overhead.
 -   `is_alpha(c: char)` - an ASCII letter
 -   `is_alnum(c: char)` - a letter or digit
 -   `is_whitespace(c: char)` - space, tab, newline, or carriage return
+-   `is_hex_digit(c: char)` - '0'..='9', 'a'..='f', or 'A'..='F'
 
 **Conversion:**
 
 -   `to_upper(c: char) -> char` - uppercase a letter (non-letters unchanged)
 -   `to_lower(c: char) -> char` - lowercase a letter (non-letters unchanged)
 -   `digit_value(c: char) -> u8` - value of '0'..='9' (0-9); `0xFF` for non-digits
+-   `hex_value(c: char) -> u8` - value of a hex digit (0-15); `0xFF` for non-hex
+-   `to_hex_digit(n: u8) -> char` - the uppercase hex digit for a nibble 0-15
 
 ### math.wr
 

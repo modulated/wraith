@@ -963,3 +963,201 @@ fn string_to_bcd_round_trips_through_bcd16_to_string() {
         [b'2', b'0', b'4', b'8']
     );
 }
+
+// ---------------------------------------------------------------------------
+// std/string.wr — plain binary <-> string (hex and decimal)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u16_to_hex_is_fixed_width_uppercase() {
+    let mut e = run(r#"
+        import { u16_to_hex } from "std/string.wr";
+        const L: addr = 0x0500;
+        const B1: addr = 0x0501; const B2: addr = 0x0502;
+        const B3: addr = 0x0503; const B4: addr = 0x0504;
+        #[reset]
+        fn main() {
+            let buf: [u8; 5] = [0; 5];
+            let n: u16 = u16_to_hex(0x2A3F, &buf);
+            L = n.low;
+            B1 = buf[1]; B2 = buf[2]; B3 = buf[3]; B4 = buf[4];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 4, "four hex digits");
+    assert_eq!(
+        [e.mem(0x0501), e.mem(0x0502), e.mem(0x0503), e.mem(0x0504)],
+        [b'2', b'A', b'3', b'F']
+    );
+}
+
+#[test]
+fn u16_to_hex_keeps_leading_zeros() {
+    let mut e = run(r#"
+        import { u16_to_hex } from "std/string.wr";
+        const B1: addr = 0x0501; const B2: addr = 0x0502;
+        const B3: addr = 0x0503; const B4: addr = 0x0504;
+        #[reset]
+        fn main() {
+            let buf: [u8; 5] = [0; 5];
+            let n: u16 = u16_to_hex(0x002A, &buf);
+            B1 = buf[1]; B2 = buf[2]; B3 = buf[3]; B4 = buf[4];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        [e.mem(0x0501), e.mem(0x0502), e.mem(0x0503), e.mem(0x0504)],
+        [b'0', b'0', b'2', b'A'],
+        "leading zeros kept"
+    );
+}
+
+#[test]
+fn u8_to_hex_writes_two_digits() {
+    let mut e = run(r#"
+        import { u8_to_hex } from "std/string.wr";
+        const L: addr = 0x0500;
+        const B1: addr = 0x0501; const B2: addr = 0x0502;
+        #[reset]
+        fn main() {
+            let buf: [u8; 3] = [0; 3];
+            let n: u16 = u8_to_hex(0x0C, &buf);
+            L = n.low;
+            B1 = buf[1]; B2 = buf[2];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 2);
+    assert_eq!([e.mem(0x0501), e.mem(0x0502)], [b'0', b'C']);
+}
+
+#[test]
+fn u16_to_string_suppresses_leading_zeros() {
+    let mut e = run(r#"
+        import { u16_to_string } from "std/string.wr";
+        const L: addr = 0x0500;
+        const B1: addr = 0x0501; const B2: addr = 0x0502; const B3: addr = 0x0503;
+        #[reset]
+        fn main() {
+            let buf: [u8; 6] = [0; 6];
+            let n: u16 = u16_to_string(420, &buf);
+            L = n.low;
+            B1 = buf[1]; B2 = buf[2]; B3 = buf[3];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 3, "\"420\" is three digits");
+    assert_eq!(
+        [e.mem(0x0501), e.mem(0x0502), e.mem(0x0503)],
+        [b'4', b'2', b'0']
+    );
+}
+
+#[test]
+fn u16_to_string_zero_is_one_digit() {
+    let mut e = run(r#"
+        import { u16_to_string } from "std/string.wr";
+        const L: addr = 0x0500;
+        const B1: addr = 0x0501;
+        #[reset]
+        fn main() {
+            let buf: [u8; 6] = [0; 6];
+            let n: u16 = u16_to_string(0, &buf);
+            L = n.low;
+            B1 = buf[1];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 1, "zero is one digit");
+    assert_eq!(e.mem(0x0501), b'0');
+}
+
+#[test]
+fn u16_to_string_five_digit_max() {
+    let mut e = run(r#"
+        import { u16_to_string } from "std/string.wr";
+        const B1: addr = 0x0501; const B2: addr = 0x0502; const B3: addr = 0x0503;
+        const B4: addr = 0x0504; const B5: addr = 0x0505;
+        #[reset]
+        fn main() {
+            let buf: [u8; 6] = [0; 6];
+            let n: u16 = u16_to_string(65535, &buf);
+            B1 = buf[1]; B2 = buf[2]; B3 = buf[3]; B4 = buf[4]; B5 = buf[5];
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        [
+            e.mem(0x0501),
+            e.mem(0x0502),
+            e.mem(0x0503),
+            e.mem(0x0504),
+            e.mem(0x0505)
+        ],
+        [b'6', b'5', b'5', b'3', b'5']
+    );
+}
+
+#[test]
+fn hex_to_u16_parses_mixed_case() {
+    let mut e = run(r#"
+        import { hex_to_u16 } from "std/string.wr";
+        const LO: addr = 0x0500;
+        const HI: addr = 0x0501;
+        #[reset]
+        fn main() {
+            let v: u16 = hex_to_u16("1a2B");
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0500), 0x1A2B, "mixed-case hex parses");
+}
+
+#[test]
+fn hex_to_u16_stops_at_non_hex() {
+    let mut e = run(r#"
+        import { hex_to_u16 } from "std/string.wr";
+        const LO: addr = 0x0500;
+        const HI: addr = 0x0501;
+        #[reset]
+        fn main() {
+            let v: u16 = hex_to_u16("FF zzz");
+            LO = v.low;
+            HI = v.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem16(0x0500), 0x00FF, "parsing stops at the space");
+}
+
+// ---------------------------------------------------------------------------
+// std/char.wr — hex digit classification and conversion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn char_hex_value_and_to_hex_digit_round_trip() {
+    let mut e = run(r#"
+        import { hex_value, to_hex_digit, is_hex_digit } from "std/char.wr";
+        const V:  addr = 0x0500;   // hex_value('c')
+        const D:  addr = 0x0501;   // to_hex_digit(12)
+        const OK: addr = 0x0502;   // is_hex_digit('F')
+        const NO: addr = 0x0503;   // is_hex_digit('g')
+        const BAD: addr = 0x0504;  // hex_value('g') = 0xFF
+        #[reset]
+        fn main() {
+            V = hex_value('c');            // 12
+            D = to_hex_digit(12) as u8;    // 'C'
+            OK = is_hex_digit('F') as u8;  // 1
+            NO = is_hex_digit('g') as u8;  // 0
+            BAD = hex_value('g');          // 0xFF
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 12, "hex_value('c') = 12");
+    assert_eq!(e.mem(0x0501), b'C', "to_hex_digit(12) = 'C'");
+    assert_eq!(e.mem(0x0502), 1, "'F' is a hex digit");
+    assert_eq!(e.mem(0x0503), 0, "'g' is not a hex digit");
+    assert_eq!(e.mem(0x0504), 0xFF, "hex_value('g') = 0xFF sentinel");
+}
