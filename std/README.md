@@ -73,6 +73,7 @@ zero still yields "0".
 
 -   `u8_to_hex(value: u8, dest: &u8) -> u16` - two uppercase hex digits (needs 3 bytes)
 -   `u16_to_hex(value: u16, dest: &u8) -> u16` - four uppercase hex digits (needs 5 bytes)
+-   `u8_to_string(value: u8, dest: &u8) -> u16` - decimal, 1-3 digits (needs 4 bytes)
 -   `u16_to_string(value: u16, dest: &u8) -> u16` - decimal, 1-5 digits (needs 6 bytes)
 -   `hex_to_u16(s: str) -> u16` - parse ASCII hex; stops at the first non-hex character
 

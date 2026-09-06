@@ -1032,6 +1032,40 @@ fn u8_to_hex_writes_two_digits() {
 }
 
 #[test]
+fn u8_to_string_covers_one_two_and_three_digits() {
+    let mut e = run(r#"
+        import { u8_to_string } from "std/string.wr";
+        // 255 -> "255", 7 -> "7", 0 -> "0", each into its own buffer.
+        const A_LEN: addr = 0x0500;
+        const A0: addr = 0x0501; const A1: addr = 0x0502; const A2: addr = 0x0503;
+        const B_LEN: addr = 0x0510; const B0: addr = 0x0511;
+        const C_LEN: addr = 0x0520; const C0: addr = 0x0521;
+        #[reset]
+        fn main() {
+            let a: [u8; 4] = [0; 4];
+            let na: u16 = u8_to_string(255, &a);
+            A_LEN = na.low; A0 = a[1]; A1 = a[2]; A2 = a[3];
+            let b: [u8; 4] = [0; 4];
+            let nb: u16 = u8_to_string(7, &b);
+            B_LEN = nb.low; B0 = b[1];
+            let c: [u8; 4] = [0; 4];
+            let nc: u16 = u8_to_string(0, &c);
+            C_LEN = nc.low; C0 = c[1];
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0500), 3, "255 is three digits");
+    assert_eq!(
+        [e.mem(0x0501), e.mem(0x0502), e.mem(0x0503)],
+        [b'2', b'5', b'5']
+    );
+    assert_eq!(e.mem(0x0510), 1, "7 is one digit");
+    assert_eq!(e.mem(0x0511), b'7');
+    assert_eq!(e.mem(0x0520), 1, "0 is one digit");
+    assert_eq!(e.mem(0x0521), b'0');
+}
+
+#[test]
 fn u16_to_string_suppresses_leading_zeros() {
     let mut e = run(r#"
         import { u16_to_string } from "std/string.wr";
