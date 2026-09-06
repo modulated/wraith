@@ -585,6 +585,19 @@ fn apply_type_cast(
                     })
                 }
             }
+            PrimitiveType::Q8_8 => {
+                // A whole number to fixed-point: scale by the fraction, so
+                // `5 as q8.8` is `5 * 256` = `0x0500`, truncated to 16 bits.
+                if let Some(n) = value.as_integer() {
+                    let scaled = (n << PrimitiveType::Q8_8.frac_bits()) as i16;
+                    Ok(ConstValue::Integer(scaled as i64))
+                } else {
+                    Err(SemaError::Custom {
+                        message: "cannot cast to q8.8".to_string(),
+                        span,
+                    })
+                }
+            }
         },
         // A pointer is a 16-bit address, so `0xD012 as &u8` folds to the number
         // itself. This is how a fixed hardware location is named without an

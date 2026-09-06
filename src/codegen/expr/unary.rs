@@ -44,6 +44,7 @@ pub(super) fn generate_unary(
             crate::ast::PrimitiveType::U16
                 | crate::ast::PrimitiveType::I16
                 | crate::ast::PrimitiveType::B16
+                | crate::ast::PrimitiveType::Q8_8
         ))
     );
 

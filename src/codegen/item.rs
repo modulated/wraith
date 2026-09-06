@@ -20,6 +20,7 @@ fn format_type(ty: &Spanned<TypeExpr>) -> String {
             PrimitiveType::Char => "char".to_string(),
             PrimitiveType::B8 => "b8".to_string(),
             PrimitiveType::B16 => "b16".to_string(),
+            PrimitiveType::Q8_8 => "q8.8".to_string(),
             PrimitiveType::Addr => "addr".to_string(),
         },
         TypeExpr::Array { element, size } => {

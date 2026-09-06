@@ -462,6 +462,10 @@ impl SemanticAnalyzer {
                         PrimitiveType::I8 => (-128..=127).contains(val),
                         PrimitiveType::U16 | PrimitiveType::Addr => (0..=65535).contains(val),
                         PrimitiveType::I16 => (-32768..=32767).contains(val),
+                        // A bare integer is *not* adopted as fixed-point: its
+                        // codegen would store the raw value, not the scaled one,
+                        // so a whole number must say `3.0` or `3 as q8.8` — the
+                        // same explicitness the BCD types ask for.
                         _ => false,
                     };
                     if fits {
@@ -493,6 +497,44 @@ impl SemanticAnalyzer {
                         })
                     }
                 }
+            }
+            crate::ast::Literal::Fixed { .. } => {
+                // A fractional literal has no meaning without a fixed-point
+                // context: there is no default fixed type for it to fall back
+                // to, the way an integer literal defaults to u8.
+                let Some(Type::Primitive(expected)) = &self.expected_type else {
+                    return Err(SemaError::Custom {
+                        message: "a fractional literal needs a fixed-point type from context, \
+                                  e.g. `let x: q8.8 = 1.5;`"
+                            .to_string(),
+                        span,
+                    });
+                };
+                if !expected.is_fixed() {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "a fractional literal cannot have type `{}`; it needs a fixed-point \
+                             type such as `q8.8`",
+                            Type::Primitive(*expected).display_name()
+                        ),
+                        span,
+                    });
+                }
+                // Range-check the encoding so `let x: q8.8 = 200.0;` is caught
+                // here rather than wrapping silently.
+                let enc = crate::ast::Expr::Literal(lit.clone())
+                    .fixed_encoding(expected.frac_bits())
+                    .expect("a Fixed literal encodes");
+                if !(-32768..=32767).contains(&enc) {
+                    return Err(SemaError::Custom {
+                        message: format!(
+                            "fractional literal is out of range for `{}`",
+                            Type::Primitive(*expected).display_name()
+                        ),
+                        span,
+                    });
+                }
+                Ok(Type::Primitive(*expected))
             }
             crate::ast::Literal::Bool(_) => Ok(Type::Primitive(PrimitiveType::Bool)),
             crate::ast::Literal::Char(_) => Ok(Type::Primitive(PrimitiveType::Char)),
@@ -1123,6 +1165,53 @@ impl SemanticAnalyzer {
                 _ => {
                     return Err(SemaError::InvalidBinaryOp {
                         op: format!("{:?}", op),
+                        left_ty: left_ty.display_name(),
+                        right_ty: right_ty.display_name(),
+                        span,
+                    });
+                }
+            }
+        }
+
+        // Fixed-point validation. Add and subtract are plain two's-complement
+        // 16-bit arithmetic, and comparisons are signed 16-bit — both free. A
+        // multiply or divide needs the fraction shifted back in (a widening
+        // multiply, or a shift-then-divide) and is not built yet, so it is
+        // refused rather than silently emitting a plain 16-bit product. Bitwise
+        // ops have no meaning on a scaled value.
+        if let (Type::Primitive(left_prim), Type::Primitive(right_prim)) = (&left_ty, &right_ty)
+            && (left_prim.is_fixed() || right_prim.is_fixed())
+        {
+            if left_prim != right_prim {
+                return Err(SemaError::InvalidBinaryOp {
+                    op: format!("{:?}", op),
+                    left_ty: left_ty.display_name(),
+                    right_ty: right_ty.display_name(),
+                    span,
+                });
+            }
+            match op {
+                BinaryOp::Add | BinaryOp::Sub => {}
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {}
+                BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                    return Err(SemaError::InvalidBinaryOp {
+                        op: format!(
+                            "{:?} (not yet supported on fixed-point; add and subtract are)",
+                            op
+                        ),
+                        left_ty: left_ty.display_name(),
+                        right_ty: right_ty.display_name(),
+                        span,
+                    });
+                }
+                _ => {
+                    return Err(SemaError::InvalidBinaryOp {
+                        op: format!("{:?} (not allowed on fixed-point)", op),
                         left_ty: left_ty.display_name(),
                         right_ty: right_ty.display_name(),
                         span,

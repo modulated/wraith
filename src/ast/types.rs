@@ -22,6 +22,12 @@ pub enum PrimitiveType {
     B8,
     /// Binary Coded Decimal: 16-bit (0-9999, packed four digits)
     B16,
+    /// Signed 16-bit fixed-point with 8 fraction bits (Q8.8). The value is a
+    /// two's-complement `i16` scaled by 256, so `1.5` is stored as `0x0180`.
+    /// Add and subtract are plain 16-bit two's-complement arithmetic (cheaper
+    /// than BCD — no decimal mode); the fraction only matters for multiply,
+    /// divide, and conversion to and from the integer types.
+    Q8_8,
     /// Memory-mapped I/O address (stores u8 values)
     Addr,
 }
@@ -36,7 +42,7 @@ impl PrimitiveType {
             | PrimitiveType::Char
             | PrimitiveType::B8
             | PrimitiveType::Addr => 1,
-            PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 => 2,
+            PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 | PrimitiveType::Q8_8 => 2,
         }
     }
 
@@ -45,13 +51,30 @@ impl PrimitiveType {
         matches!(self, PrimitiveType::B8 | PrimitiveType::B16)
     }
 
+    /// Returns true if this is a fixed-point type.
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, PrimitiveType::Q8_8)
+    }
+
+    /// The number of fraction bits a fixed-point type carries, or 0 for a type
+    /// that is not fixed-point. `q8.8` has 8, so a value is scaled by `1 << 8`.
+    pub fn frac_bits(&self) -> u32 {
+        match self {
+            PrimitiveType::Q8_8 => 8,
+            _ => 0,
+        }
+    }
+
     /// Returns true if this is a signed integer type (i8 or i16).
     ///
     /// Only i8/i16 are signed; u8/u16/bool/BCD/addr are all unsigned. This is
     /// the primitive codegen consults to choose signed vs unsigned comparison,
     /// shift, and division sequences.
     pub fn is_signed(&self) -> bool {
-        matches!(self, PrimitiveType::I8 | PrimitiveType::I16)
+        matches!(
+            self,
+            PrimitiveType::I8 | PrimitiveType::I16 | PrimitiveType::Q8_8
+        )
     }
 }
 

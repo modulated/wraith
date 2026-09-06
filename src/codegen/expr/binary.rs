@@ -307,6 +307,7 @@ pub(super) fn generate_binary(
             Type::Primitive(crate::ast::PrimitiveType::U16)
                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                 | Type::Primitive(crate::ast::PrimitiveType::B16)
+                | Type::Primitive(crate::ast::PrimitiveType::Q8_8)
         )
     });
 

@@ -180,6 +180,7 @@ fn format_token(token: &Token) -> String {
     match token {
         Token::Ident(name) => format!("identifier '{}'", name),
         Token::Integer(n) => format!("integer {}", n),
+        Token::Fixed((m, s)) => format!("fixed-point literal {m}e-{s}"),
         Token::String(s) => format!("string \"{}\"", s),
         Token::CharLit(c) => format!("char '{}'", (*c as char).escape_default()),
         Token::Semi => "';'".to_string(),
@@ -269,6 +270,7 @@ fn format_token(token: &Token) -> String {
         Token::Str => "type 'str'".to_string(),
         Token::B8 => "type 'b8'".to_string(),
         Token::B16 => "type 'b16'".to_string(),
+        Token::Q8_8 => "type 'q8.8'".to_string(),
         Token::Comment => "comment".to_string(),
     }
 }

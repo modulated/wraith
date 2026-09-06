@@ -73,6 +73,7 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | Construct | Programs | Notes |
 |---|---:|---|
 | `Integer` | 400 | always inside the program's type; every operator has an operand mentioning a variable, so no subexpression is typed by its own literals |
+| `Fixed` | — | not generated: the fractional literal is a fixed-point value, covered by tests/e2e/fixed.rs |
 | `Bool` | — | not generated: `bool` as a value has its own widening rule, separate from control flow |
 | `Char` | — | not generated: no character arithmetic is generated |
 | `String` | 189 | one of four literals, in `main`'s declaration only. Read through `.len`, and now indexed — `(t[i] as T)` reads a byte from ROM, one past the pointer after the length prefix, for a constant and a run-time index both. Kept to its own statement in `main` rather than folded into an expression: the read stages the pointer through the four-byte high pool, and an arithmetic operand beside it exhausts it |
@@ -147,5 +148,6 @@ The variant lists are read from `src/ast/*.rs` at test time, so a construct adde
 | `Char` | — | not generated: no character arithmetic is generated |
 | `B8` | — | not generated: BCD is covered by tests/e2e/bcd.rs |
 | `B16` | — | not generated: BCD is covered by tests/e2e/bcd.rs |
+| `Q8_8` | — | not generated: fixed-point is covered by tests/e2e/fixed.rs; the oracle models integer wrapping, not a scaled fraction |
 | `Addr` | — | not generated: generated programs write their results through `const OUT: addr = …`, but the AST models that as `Item::Address` and keeps no type node for it |
 

@@ -60,6 +60,28 @@ pub(super) fn generate_literal(
             }
             Ok(())
         }
+        crate::ast::Literal::Fixed { .. } => {
+            // A fractional literal is a 16-bit fixed-point value: emit its
+            // scaled encoding the same way a 16-bit integer loads (low in A,
+            // high in Y). Only `q8.8` exists today, so the scale is 8 bits.
+            let enc = crate::ast::Expr::Literal(lit.clone())
+                .fixed_encoding(crate::ast::PrimitiveType::Q8_8.frac_bits())
+                .expect("a Fixed literal encodes");
+            let value = (enc as i16) as u16;
+            emitter.emit_inst("LDA", &format!("#${:02X}", value & 0xFF));
+            emitter.emit_inst("LDY", &format!("#${:02X}", (value >> 8) & 0xFF));
+            emitter
+                .reg_state
+                .set_a(crate::codegen::regstate::RegisterValue::Immediate(
+                    (value & 0xFF) as i64,
+                ));
+            emitter
+                .reg_state
+                .set_y(crate::codegen::regstate::RegisterValue::Immediate(
+                    ((value >> 8) & 0xFF) as i64,
+                ));
+            Ok(())
+        }
         crate::ast::Literal::Bool(val) => {
             let v = if *val { 1 } else { 0 };
             emitter.emit_lda_immediate(v);

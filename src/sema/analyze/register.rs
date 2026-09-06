@@ -350,7 +350,7 @@ impl SemanticAnalyzer {
             use crate::ast::PrimitiveType as P;
             let two_byte_scalar = matches!(
                 declared_ty,
-                Type::Primitive(P::U16 | P::I16 | P::B16)
+                Type::Primitive(P::U16 | P::I16 | P::B16 | P::Q8_8)
                     | Type::Pointer(_)
                     | Type::String
                     | Type::Function(_, _)

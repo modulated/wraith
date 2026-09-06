@@ -27,6 +27,7 @@ mod enums;
 mod error_diagnostics;
 mod example_drivers;
 mod execution;
+mod fixed;
 mod frames;
 mod functions;
 mod import_diagnostics;

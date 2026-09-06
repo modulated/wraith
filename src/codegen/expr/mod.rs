@@ -64,6 +64,7 @@ pub fn generate_expr(
                         crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::U16)
                             | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::I16)
                             | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::B16)
+                            | crate::sema::types::Type::Primitive(crate::ast::PrimitiveType::Q8_8)
                     )
                 });
 
@@ -484,6 +485,7 @@ fn generate_match_expr(
             crate::ast::PrimitiveType::U16
                 | crate::ast::PrimitiveType::I16
                 | crate::ast::PrimitiveType::B16
+                | crate::ast::PrimitiveType::Q8_8
         ))
     );
 
@@ -545,6 +547,7 @@ fn generate_match_expr(
             crate::ast::PrimitiveType::U16
                 | crate::ast::PrimitiveType::I16
                 | crate::ast::PrimitiveType::B16
+                | crate::ast::PrimitiveType::Q8_8
         ))
     );
     let scrutinee_is_signed = scrutinee_ty.is_some_and(|t| t.is_signed());
