@@ -133,6 +133,14 @@ pub(super) fn generate_type_cast(
     // this shape: code addresses use the A:Y scalar convention.)
     let source_is_pointer = matches!(source_type, Some(crate::sema::types::Type::Pointer(_)));
 
+    // A fixed-point source arrives in A:Y like any 16-bit scalar, but its bytes
+    // are a scaled value, so a cast to an integer is a shift (the integer part),
+    // not the pure retype a real u16/i16 source would be.
+    let source_is_fixed = matches!(
+        source_type,
+        Some(crate::sema::types::Type::Primitive(p)) if p.is_fixed()
+    );
+
     // Evaluate the source expression
     generate_expr(expr, emitter, info, string_collector)?;
 
@@ -152,6 +160,64 @@ pub(super) fn generate_type_cast(
     // Determine target type
     match &target_type.node {
         TypeExpr::Primitive(target_prim) => {
+            // Fixed-point conversions are shifts by the fraction width, not the
+            // widen/truncate the integer arms below do. Handle both directions
+            // here and return, so a q8.8 operand never reaches the integer logic
+            // that would treat its scaled bytes as a plain value.
+            if *target_prim == PrimitiveType::Q8_8 {
+                if source_is_fixed {
+                    emitter.emit_comment("Cast q8.8 to q8.8 (no change)");
+                    return Ok(());
+                }
+                // `<int> as q8.8`: scale up by the fraction — the integer's low
+                // byte becomes the high (integer) byte, the fraction is zero.
+                emitter.emit_comment("Cast to q8.8 (scale up by 8 fraction bits)");
+                emitter.emit_inst("TAY", "");
+                emitter.emit_inst("LDA", "#$00");
+                emitter.mark_a_unknown();
+                return Ok(());
+            }
+            if source_is_fixed {
+                // `q8.8 as <int>`: the integer part is an arithmetic shift right
+                // by the fraction — for `q8.8` that is exactly the high byte.
+                match target_prim {
+                    PrimitiveType::U8
+                    | PrimitiveType::I8
+                    | PrimitiveType::Char
+                    | PrimitiveType::B8 => {
+                        emitter.emit_comment("Cast q8.8 to 8-bit (integer part)");
+                        emitter.emit_inst("TYA", "");
+                    }
+                    PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::Addr => {
+                        emitter.emit_comment("Cast q8.8 to 16-bit (integer part, sign-extended)");
+                        emitter.emit_inst("TYA", "");
+                        emit_widen_a_into_y(emitter, true);
+                    }
+                    PrimitiveType::Bool => {
+                        // Non-zero test over both bytes.
+                        emitter.emit_comment("Cast q8.8 to bool (non-zero test)");
+                        let true_label = emitter.next_label("bt");
+                        let end_label = emitter.next_label("bx");
+                        emitter.emit_inst("STA", "$20");
+                        emitter.emit_inst("TYA", "");
+                        emitter.emit_inst("ORA", "$20");
+                        emitter.emit_inst("BNE", &true_label);
+                        emitter.emit_inst("LDA", "#$00");
+                        emitter.emit_inst("JMP", &end_label);
+                        emitter.emit_label(&true_label);
+                        emitter.emit_inst("LDA", "#$01");
+                        emitter.emit_label(&end_label);
+                    }
+                    PrimitiveType::B16 => {
+                        return Err(CodegenError::UnsupportedOperation(
+                            "cannot cast q8.8 to a BCD type; go through an integer".to_string(),
+                        ));
+                    }
+                    PrimitiveType::Q8_8 => unreachable!("handled above"),
+                }
+                emitter.mark_a_unknown();
+                return Ok(());
+            }
             match target_prim {
                 PrimitiveType::U16 | PrimitiveType::I16 => {
                     // `p as u16`: the bytes are already right, but the high one
@@ -280,6 +346,7 @@ pub(super) fn generate_type_cast(
                         emitter.emit_comment("Result: A=low_byte (high byte discarded)");
                     }
                 }
+                PrimitiveType::Q8_8 => unreachable!("q8.8 target handled above"),
             }
         }
         // `n as &T` — reinterpret an address as a pointer. Only the register

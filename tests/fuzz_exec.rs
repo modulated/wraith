@@ -5159,6 +5159,10 @@ mod coverage {
         ),
         ("Literal::Char", "no character arithmetic is generated"),
         (
+            "Literal::Fixed",
+            "the fractional literal is a fixed-point value, covered by tests/e2e/fixed.rs",
+        ),
+        (
             "Literal::ArrayGen",
             "not generated: a table whose entries are a function of the index is folded \
              before the program runs, so the oracle would be checking the constant \
@@ -5192,6 +5196,11 @@ mod coverage {
         ),
         ("PrimitiveType::B8", "BCD is covered by tests/e2e/bcd.rs"),
         ("PrimitiveType::B16", "BCD is covered by tests/e2e/bcd.rs"),
+        (
+            "PrimitiveType::Q8_8",
+            "fixed-point is covered by tests/e2e/fixed.rs; the oracle models integer wrapping, \
+             not a scaled fraction",
+        ),
         (
             "PrimitiveType::Addr",
             "generated programs write their results through `const OUT: addr = …`, but the AST \
@@ -5743,6 +5752,7 @@ mod coverage {
     fn w_literal(lit: &Literal, s: &mut Seen) {
         match lit {
             Literal::Integer(_) => note(s, "Literal", "Integer"),
+            Literal::Fixed { .. } => note(s, "Literal", "Fixed"),
             Literal::Bool(_) => note(s, "Literal", "Bool"),
             Literal::Char(_) => note(s, "Literal", "Char"),
             Literal::String(_) => note(s, "Literal", "String"),

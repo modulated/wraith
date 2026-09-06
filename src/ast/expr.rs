@@ -53,6 +53,11 @@ pub enum UnaryOp {
 pub enum Literal {
     /// Integer literal (value stored as i64 to handle all sizes)
     Integer(i64),
+    /// Decimal fraction literal (`1.5`, `0.25`), for the fixed-point types.
+    /// Stored as `mantissa / 10^scale` so it converts *exactly* to any Q format
+    /// at compile time — no binary float is ever involved. `1.5` is
+    /// `{ mantissa: 15, scale: 1 }`. Only meaningful in a fixed-point context.
+    Fixed { mantissa: i64, scale: u32 },
     /// Boolean literal
     Bool(bool),
     /// ASCII character literal: 'A' (stored as its ASCII byte, 0-127)
@@ -270,6 +275,30 @@ impl Expr {
     /// Create an integer literal expression
     pub fn int(value: i64) -> Self {
         Expr::Literal(Literal::Integer(value))
+    }
+
+    /// Create a fixed-point (decimal fraction) literal expression.
+    pub fn fixed(mantissa: i64, scale: u32) -> Self {
+        Expr::Literal(Literal::Fixed { mantissa, scale })
+    }
+
+    /// Encode a `Fixed` literal for a fixed-point format with `frac_bits`
+    /// fraction bits, rounding to nearest (ties away from zero). `1.5` at 8
+    /// fraction bits is `384` (`0x0180`). `None` unless this is a `Fixed`
+    /// literal. Computed in `i128` so no binary float ever rounds the value.
+    pub fn fixed_encoding(&self, frac_bits: u32) -> Option<i64> {
+        let Expr::Literal(Literal::Fixed { mantissa, scale }) = self else {
+            return None;
+        };
+        let num = (*mantissa as i128) << frac_bits;
+        let den = 10i128.pow(*scale);
+        let half = den / 2;
+        let enc = if num >= 0 {
+            (num + half) / den
+        } else {
+            (num - half) / den
+        };
+        Some(enc as i64)
     }
 
     /// Create a boolean literal expression

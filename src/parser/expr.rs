@@ -287,6 +287,10 @@ impl Parser<'_> {
                 self.advance();
                 Ok(Spanned::new(Expr::int(n), start))
             }
+            Some(Token::Fixed((mantissa, scale))) => {
+                self.advance();
+                Ok(Spanned::new(Expr::fixed(mantissa, scale), start))
+            }
             Some(Token::True) => {
                 self.advance();
                 Ok(Spanned::new(Expr::bool(true), start))
@@ -760,6 +764,13 @@ impl Parser<'_> {
                 self.advance();
                 Ok(Spanned::new(
                     TypeExpr::primitive(crate::ast::PrimitiveType::B16),
+                    start,
+                ))
+            }
+            Some(Token::Q8_8) => {
+                self.advance();
+                Ok(Spanned::new(
+                    TypeExpr::primitive(crate::ast::PrimitiveType::Q8_8),
                     start,
                 ))
             }

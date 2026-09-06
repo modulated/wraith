@@ -427,7 +427,12 @@ fn emit_stdlib_math_functions(
     emitter: &mut Emitter,
     section_alloc: &mut SectionAllocator,
 ) -> Result<(), CodegenError> {
-    if !emitter.needs_mul16 && !emitter.needs_div16 && !emitter.needs_mod16 {
+    if !emitter.needs_mul16
+        && !emitter.needs_div16
+        && !emitter.needs_mod16
+        && !emitter.needs_mulq88
+        && !emitter.needs_divq88
+    {
         return Ok(()); // Nothing to emit
     }
 
@@ -679,6 +684,221 @@ fn emit_stdlib_math_functions(
         emitter.emit_raw("    mod16_done:");
         emitter.emit_raw("    RTS");
         verify_raw_routine_fits("mod16", emitter.output_since(start), MOD16_BYTES)?;
+    }
+
+    if emitter.needs_mulq88 {
+        // Signed q8.8 multiply: (A * B) >> 8, truncated, low 16 bits kept.
+        // A and B are i16 encodings; the full 32-bit product's middle two bytes
+        // are the result, so the >>8 is a byte selection. Magnitudes are
+        // multiplied unsigned and the sign is reapplied at the end, as div16
+        // does. Scratch: $D0/$D1 multiplicand, $D2-$D5 32-bit product,
+        // $D6/$D7 multiplier, $D8 sign.
+        const MULQ88_BYTES: u16 = 129;
+        let org_addr = section_alloc
+            .allocate("CODE", MULQ88_BYTES)
+            .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
+        emitter.emit_org(org_addr);
+        emitter.emit_comment("Function: mulq88");
+        emitter.emit_comment("  Params: a: q8.8 in $D9-$DA, b: q8.8 in $DB-$DC");
+        emitter.emit_comment("  Returns: q8.8 in A/Y (low/high), (a*b)>>8 truncated");
+        emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
+        emitter.emit_label("mulq88");
+
+        // sign = sign(a) XOR sign(b), kept in bit 7 of $D8
+        emitter.emit_raw("    LDA $DA");
+        emitter.emit_raw("    EOR $DC");
+        emitter.emit_raw("    STA $D8");
+        // abs(a) -> $D0/$D1
+        emitter.emit_raw("    LDA $DA");
+        emitter.emit_raw("    BPL mulq88_apos");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $D9");
+        emitter.emit_raw("    STA $D0");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $DA");
+        emitter.emit_raw("    STA $D1");
+        emitter.emit_raw("    JMP mulq88_adone");
+        emitter.emit_raw("    mulq88_apos:");
+        emitter.emit_raw("    LDA $D9");
+        emitter.emit_raw("    STA $D0");
+        emitter.emit_raw("    LDA $DA");
+        emitter.emit_raw("    STA $D1");
+        emitter.emit_raw("    mulq88_adone:");
+        // abs(b) -> $D6/$D7 (the multiplier)
+        emitter.emit_raw("    LDA $DC");
+        emitter.emit_raw("    BPL mulq88_bpos");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $DB");
+        emitter.emit_raw("    STA $D6");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $DC");
+        emitter.emit_raw("    STA $D7");
+        emitter.emit_raw("    JMP mulq88_bdone");
+        emitter.emit_raw("    mulq88_bpos:");
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    STA $D6");
+        emitter.emit_raw("    LDA $DC");
+        emitter.emit_raw("    STA $D7");
+        emitter.emit_raw("    mulq88_bdone:");
+        // 32-bit product = 0
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    STA $D2");
+        emitter.emit_raw("    STA $D3");
+        emitter.emit_raw("    STA $D4");
+        emitter.emit_raw("    STA $D5");
+        emitter.emit_raw("    LDX #$10");
+        emitter.emit_raw("    mulq88_loop:");
+        // if multiplier bit 0 set, product.high (bytes 2,3) += multiplicand
+        emitter.emit_raw("    LDA $D6");
+        emitter.emit_raw("    LSR A");
+        emitter.emit_raw("    BCC mulq88_skip");
+        emitter.emit_raw("    CLC");
+        emitter.emit_raw("    LDA $D4");
+        emitter.emit_raw("    ADC $D0");
+        emitter.emit_raw("    STA $D4");
+        emitter.emit_raw("    LDA $D5");
+        emitter.emit_raw("    ADC $D1");
+        emitter.emit_raw("    STA $D5");
+        emitter.emit_raw("    mulq88_skip:");
+        // product >>= 1 (32-bit), then multiplier >>= 1
+        emitter.emit_raw("    LSR $D5");
+        emitter.emit_raw("    ROR $D4");
+        emitter.emit_raw("    ROR $D3");
+        emitter.emit_raw("    ROR $D2");
+        emitter.emit_raw("    LSR $D7");
+        emitter.emit_raw("    ROR $D6");
+        emitter.emit_raw("    DEX");
+        emitter.emit_raw("    BNE mulq88_loop");
+        // result encoding = product bytes 1:2 ($D3 low, $D4 high) = (product >> 8)
+        // reapply sign
+        emitter.emit_raw("    LDA $D8");
+        emitter.emit_raw("    BPL mulq88_pos");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $D3");
+        emitter.emit_raw("    STA $D3");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $D4");
+        emitter.emit_raw("    STA $D4");
+        emitter.emit_raw("    mulq88_pos:");
+        emitter.emit_raw("    LDA $D3");
+        emitter.emit_raw("    LDY $D4");
+        emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("mulq88", emitter.output_since(start), MULQ88_BYTES)?;
+    }
+
+    if emitter.needs_divq88 {
+        // Signed q8.8 divide: (a << 8) / b, keeping the fraction in the
+        // quotient. The dividend |a|<<8 is 24-bit, divided by the 16-bit |b| via
+        // restoring long division; the low 16 bits of the quotient are the
+        // result (wrapping). Divide-by-zero returns the all-ones sentinel like
+        // div16, before any sign handling. Scratch: $D0-$D2 dividend (24-bit,
+        // becomes the quotient in place), $D3/$D4 divisor, $D5/$D6 remainder,
+        // $D7 counter, $D8 sign.
+        const DIVQ88_BYTES: u16 = 137;
+        let org_addr = section_alloc
+            .allocate("CODE", DIVQ88_BYTES)
+            .map_err(CodegenError::SectionError)?;
+        let start = emitter.output_len();
+        emitter.emit_org(org_addr);
+        emitter.emit_comment("Function: divq88");
+        emitter.emit_comment("  Params: a: q8.8 in $D9-$DA, b: q8.8 in $DB-$DC");
+        emitter.emit_comment("  Returns: q8.8 in A/Y (low/high), (a<<8)/b truncated");
+        emitter.emit_comment(&format!("  Location: ${:04X}", org_addr));
+        emitter.emit_label("divq88");
+
+        // Divide by zero -> all-ones sentinel (0xFFFF), sign-independent.
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    ORA $DC");
+        emitter.emit_raw("    BNE divq88_nonzero");
+        emitter.emit_raw("    LDA #$FF");
+        emitter.emit_raw("    TAY");
+        emitter.emit_raw("    RTS");
+        emitter.emit_raw("    divq88_nonzero:");
+        // sign = sign(a) XOR sign(b), bit 7 of $D8
+        emitter.emit_raw("    LDA $DA");
+        emitter.emit_raw("    EOR $DC");
+        emitter.emit_raw("    STA $D8");
+        // dividend = |a| << 8: $D1/$D2 = |a|, $D0 = 0
+        emitter.emit_raw("    LDA $DA");
+        emitter.emit_raw("    BPL divq88_apos");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $D9");
+        emitter.emit_raw("    STA $D1");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $DA");
+        emitter.emit_raw("    STA $D2");
+        emitter.emit_raw("    JMP divq88_adone");
+        emitter.emit_raw("    divq88_apos:");
+        emitter.emit_raw("    LDA $D9");
+        emitter.emit_raw("    STA $D1");
+        emitter.emit_raw("    LDA $DA");
+        emitter.emit_raw("    STA $D2");
+        emitter.emit_raw("    divq88_adone:");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    STA $D0");
+        // divisor = |b| -> $D3/$D4
+        emitter.emit_raw("    LDA $DC");
+        emitter.emit_raw("    BPL divq88_bpos");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $DB");
+        emitter.emit_raw("    STA $D3");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $DC");
+        emitter.emit_raw("    STA $D4");
+        emitter.emit_raw("    JMP divq88_bdone");
+        emitter.emit_raw("    divq88_bpos:");
+        emitter.emit_raw("    LDA $DB");
+        emitter.emit_raw("    STA $D3");
+        emitter.emit_raw("    LDA $DC");
+        emitter.emit_raw("    STA $D4");
+        emitter.emit_raw("    divq88_bdone:");
+        // remainder = 0, counter = 24
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    STA $D5");
+        emitter.emit_raw("    STA $D6");
+        emitter.emit_raw("    LDX #$18");
+        emitter.emit_raw("    divq88_loop:");
+        // shift {remainder:dividend} left by 1 (40-bit)
+        emitter.emit_raw("    ASL $D0");
+        emitter.emit_raw("    ROL $D1");
+        emitter.emit_raw("    ROL $D2");
+        emitter.emit_raw("    ROL $D5");
+        emitter.emit_raw("    ROL $D6");
+        // if remainder >= divisor: remainder -= divisor; set quotient bit 0
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA $D5");
+        emitter.emit_raw("    SBC $D3");
+        emitter.emit_raw("    TAY");
+        emitter.emit_raw("    LDA $D6");
+        emitter.emit_raw("    SBC $D4");
+        emitter.emit_raw("    BCC divq88_nosub");
+        emitter.emit_raw("    STY $D5");
+        emitter.emit_raw("    STA $D6");
+        emitter.emit_raw("    INC $D0");
+        emitter.emit_raw("    divq88_nosub:");
+        emitter.emit_raw("    DEX");
+        emitter.emit_raw("    BNE divq88_loop");
+        // quotient low 16 = $D0/$D1; reapply sign
+        emitter.emit_raw("    LDA $D8");
+        emitter.emit_raw("    BPL divq88_pos");
+        emitter.emit_raw("    SEC");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $D0");
+        emitter.emit_raw("    STA $D0");
+        emitter.emit_raw("    LDA #$00");
+        emitter.emit_raw("    SBC $D1");
+        emitter.emit_raw("    STA $D1");
+        emitter.emit_raw("    divq88_pos:");
+        emitter.emit_raw("    LDA $D0");
+        emitter.emit_raw("    LDY $D1");
+        emitter.emit_raw("    RTS");
+        verify_raw_routine_fits("divq88", emitter.output_since(start), DIVQ88_BYTES)?;
     }
 
     Ok(())

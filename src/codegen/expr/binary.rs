@@ -307,12 +307,19 @@ pub(super) fn generate_binary(
             Type::Primitive(crate::ast::PrimitiveType::U16)
                 | Type::Primitive(crate::ast::PrimitiveType::I16)
                 | Type::Primitive(crate::ast::PrimitiveType::B16)
+                | Type::Primitive(crate::ast::PrimitiveType::Q8_8)
         )
     });
 
     // Whether the operands are signed (i8/i16). Comparisons, `>>`, and division
     // need signed-specific sequences; other ops are bit-identical either way.
     let is_signed = op_type.is_some_and(|ty| ty.is_signed());
+
+    // Fixed-point multiply is its own routine: the plain 16-bit multiply keeps
+    // the low 16 bits of the product, but q8.8 needs the *middle* two bytes
+    // (the product shifted right by the 8 fraction bits).
+    let is_fixed =
+        op_type.is_some_and(|ty| matches!(ty, Type::Primitive(crate::ast::PrimitiveType::Q8_8)));
 
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
@@ -599,10 +606,18 @@ pub(super) fn generate_binary(
             generate_shift_right(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Mul => {
-            generate_multiply(emitter, is_u16)?;
+            if is_fixed {
+                generate_multiply_q88(emitter)?;
+            } else {
+                generate_multiply(emitter, is_u16)?;
+            }
         }
         crate::ast::BinaryOp::Div => {
-            generate_divide(emitter, is_u16, is_signed)?;
+            if is_fixed {
+                generate_divide_q88(emitter)?;
+            } else {
+                generate_divide(emitter, is_u16, is_signed)?;
+            }
         }
         crate::ast::BinaryOp::Mod => {
             generate_modulo(emitter, is_u16, is_signed)?;
@@ -947,6 +962,62 @@ fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
         emitter.emit_comment("Returns: A=result_low, Y=result_high (u16)");
     }
 
+    Ok(())
+}
+
+fn generate_multiply_q88(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Fixed-point q8.8 multiply via the stdlib mulq88 routine, which computes
+    // `(a * b) >> 8` (truncated) with the sign handled inside. Operands arrive
+    // like every 16-bit binary op — left in A:Y, right in TEMP:TEMP+1 — and the
+    // routine takes them at $D9-$DC, exactly as mul16 does.
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib mulq88 for q8.8 multiplication");
+    }
+    emitter.needs_mulq88 = true;
+
+    emitter.emit_inst("STA", "$D9"); // left low
+    emitter.emit_inst("STY", "$DA"); // left high
+
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // right low
+    emitter.emit_inst("STA", "$DB");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // right high
+    emitter.emit_inst("STA", "$DC");
+
+    emitter.emit_inst("JSR", "mulq88");
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=result_low, Y=result_high (q8.8)");
+    }
+    emitter.mark_a_unknown();
+    Ok(())
+}
+
+fn generate_divide_q88(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Fixed-point q8.8 divide via the stdlib divq88 routine: `(a << 8) / b`,
+    // truncated, with the sign and the divide-by-zero sentinel handled inside.
+    // Unlike multiply the operand order matters — the dividend (left) is `a` at
+    // $D9-$DA and the divisor (right) is `b` at $DB-$DC.
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib divq88 for q8.8 division");
+    }
+    emitter.needs_divq88 = true;
+
+    emitter.emit_inst("STA", "$D9"); // dividend low
+    emitter.emit_inst("STY", "$DA"); // dividend high
+
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // divisor low
+    emitter.emit_inst("STA", "$DB");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // divisor high
+    emitter.emit_inst("STA", "$DC");
+
+    emitter.emit_inst("JSR", "divq88");
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=result_low, Y=result_high (q8.8)");
+    }
+    emitter.mark_a_unknown();
     Ok(())
 }
 

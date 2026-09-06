@@ -107,6 +107,7 @@ b8      // 8-bit binary coded decimal (0 to 99)
 u16     // 16-bit unsigned integer (0 to 65535)
 i16     // 16-bit signed integer (-32768 to 32767)
 b16     // 16-bit binary coded decimal (0 to 9999)
+q8.8    // 16-bit signed fixed-point (8 integer + 8 fraction bits)
 bool    // Boolean (represented as u8: 0 or 1)
 char    // ASCII character (an 8-bit value holding one ASCII codepoint, 0-127)
 ```
@@ -169,6 +170,66 @@ let display: u8 = score as u8;  // Get low byte for display
 - Comparison operators work correctly on BCD values
 - Multiplication and division require explicit loops or conversion to binary
 
+### Fixed-Point Type (`q8.8`)
+
+`q8.8` is a signed 16-bit fixed-point number: 8 integer bits and 8 fraction
+bits. The value is a two's-complement `i16` scaled by 256, so `1.5` is stored
+as `0x0180`. It covers the fractional quantities a 6502 program draws with —
+positions, velocities, angles — without a software float.
+
+**Range and resolution:**
+- Range: `-128.0` to `127.99609375`
+- Resolution: `1/256` ≈ `0.0039`
+
+**Literals.** A fractional literal (`1.5`, `0.25`, `3.75`) is a `q8.8` value in
+a fixed-point context. It is scaled exactly at compile time — no binary float is
+involved — and is out of range if its integer part does not fit. A *bare*
+integer is not adopted as fixed-point (its bytes would be the raw value, not the
+scaled one); write `3.0`, or cast with `3 as q8.8`.
+
+```rust,compile,fragment
+let pos: q8.8 = 1.5;      // 0x0180
+let vel: q8.8 = 0.25;     // 0x0040
+let two: q8.8 = 2.0;      // 0x0200
+```
+
+**Arithmetic.** Add and subtract are plain 16-bit two's-complement arithmetic —
+no decimal mode, cheaper than BCD — and comparisons are signed 16-bit:
+
+```rust,compile,fragment
+let pos: q8.8 = 0.0;
+let vel: q8.8 = 0.25;
+pos = pos + vel;          // one 16-bit add, no shift
+if pos < vel { }          // signed 16-bit compare
+```
+
+Multiply is `(a·b) >> 8`: the full 32-bit product of the two encodings with the
+fraction shifted back out (stdlib `mulq88`, a signed widening shift-and-add).
+Divide is `(a << 8) / b`: the dividend is widened to 24 bits so the quotient
+keeps its 8 fraction bits (stdlib `divq88`, a signed restoring division). Both
+**truncate** the dropped low bits and **wrap** on overflow, like every other
+arithmetic result; divide by zero is the all-ones sentinel, as at every width:
+
+```rust,compile,fragment
+let a: q8.8 = 3.0;
+let b: q8.8 = 2.0;
+let area: q8.8 = a * b;   // 6.0
+let half: q8.8 = a / b;   // 1.5
+```
+
+Modulo and the bitwise operators do not apply to a scaled value and are refused.
+
+**Conversions.** Both directions need an explicit `as`:
+- `<int> as q8.8` scales up (the integer becomes the whole part).
+- `q8.8 as <int>` takes the integer part — an arithmetic shift right by 8, so it
+  rounds toward negative infinity: `(-1.5) as i16` is `-2`.
+
+```rust,compile,fragment
+let n: u8 = 5;
+let f: q8.8 = n as q8.8;  // 5.0 = 0x0500
+let whole: u8 = f as u8;  // 5
+```
+
 ### Type Overflow Behavior
 
 **Compile-time Overflow:**
@@ -199,7 +260,7 @@ All types are naturally aligned to their size:
 | Type | Size | Alignment | Range |
 |------|------|-----------|-------|
 | `u8`, `i8`, `b8`, `bool`, `char` | 1 byte | 1 byte | See above |
-| `u16`, `i16`, `b16` | 2 bytes | 1 byte (6502 has no alignment requirements) | See above |
+| `u16`, `i16`, `b16`, `q8.8` | 2 bytes | 1 byte (6502 has no alignment requirements) | See above |
 | `addr` | 2 bytes | 1 byte | 0x0000-0xFFFF |
 
 **Memory Layout for Multi-byte Types:**

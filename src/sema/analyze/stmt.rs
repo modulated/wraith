@@ -311,7 +311,8 @@ impl SemanticAnalyzer {
             Type::Pointer(_) => 2,  // 16-bit address
             Type::Primitive(PrimitiveType::U16)
             | Type::Primitive(PrimitiveType::I16)
-            | Type::Primitive(PrimitiveType::B16) => 2,
+            | Type::Primitive(PrimitiveType::B16)
+            | Type::Primitive(PrimitiveType::Q8_8) => 2,
             Type::Named(type_name) => {
                 // Check if it's a struct (allocate full size) or enum (allocate pointer)
                 if let Some(struct_def) = self.type_registry.get_struct(type_name) {
@@ -720,7 +721,9 @@ impl SemanticAnalyzer {
         // BCD b16). Fail loudly rather than miscompile.
         if matches!(
             var_ty,
-            Type::Primitive(PrimitiveType::I16) | Type::Primitive(PrimitiveType::B16)
+            Type::Primitive(PrimitiveType::I16)
+                | Type::Primitive(PrimitiveType::B16)
+                | Type::Primitive(PrimitiveType::Q8_8)
         ) {
             return Err(SemaError::Custom {
                 message: format!(
@@ -981,6 +984,7 @@ impl SemanticAnalyzer {
             Type::Primitive(PrimitiveType::U16)
                 | Type::Primitive(PrimitiveType::I16)
                 | Type::Primitive(PrimitiveType::B16)
+                | Type::Primitive(PrimitiveType::Q8_8)
         ) {
             2
         } else {

@@ -470,7 +470,8 @@ pub(super) fn generate_call(
                     }
                     Type::Primitive(crate::ast::PrimitiveType::U16)
                     | Type::Primitive(crate::ast::PrimitiveType::I16)
-                    | Type::Primitive(crate::ast::PrimitiveType::B16) => {
+                    | Type::Primitive(crate::ast::PrimitiveType::B16)
+                    | Type::Primitive(crate::ast::PrimitiveType::Q8_8) => {
                         emitter.emit_comment(&format!(
                             "Returns: A=result_low, Y=result_high ({})",
                             ret_type.display_name()
@@ -564,9 +565,9 @@ impl ParamClass {
     fn of(ty: &Type, info: &ProgramInfo) -> Self {
         use crate::ast::PrimitiveType;
         match ty {
-            Type::Primitive(PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16) => {
-                Self::Word
-            }
+            Type::Primitive(
+                PrimitiveType::U16 | PrimitiveType::I16 | PrimitiveType::B16 | PrimitiveType::Q8_8,
+            ) => Self::Word,
             Type::Primitive(_) => Self::Byte,
             // A function pointer is two bytes, high in Y, like a `u16`.
             Type::Function(..) => Self::Word,

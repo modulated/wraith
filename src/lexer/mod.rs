@@ -100,6 +100,12 @@ pub enum Token {
     B8,
     #[token("b16")]
     B16,
+    /// Signed 16-bit fixed-point, 8 integer bits and 8 fraction bits (Q8.8).
+    /// A whole token — longer than the `q8` an identifier would match, so logos
+    /// prefers it — spelled bare like the BCD types, since 8.8 is the one split
+    /// the roadmap names.
+    #[token("q8.8")]
+    Q8_8,
 
     // === Arithmetic operators ===
     #[token("+")]
@@ -216,6 +222,14 @@ pub enum Token {
     #[regex(r"[0-9][0-9_]*", |lex| lex.slice().replace('_', "").parse::<i64>().ok())]
     Integer(i64),
 
+    /// A decimal fraction, for the fixed-point types: `1.5`, `0.25`, `3.75`.
+    /// Stored as `(mantissa, scale)` meaning `mantissa / 10^scale`, so the same
+    /// literal scales exactly to any Q format without a binary float ever
+    /// appearing. A digit is required on both sides of the dot, so a range
+    /// (`0..105`) and a field access never match this.
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*", |lex| parse_fixed(lex.slice()))]
+    Fixed((i64, u32)),
+
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();
         let content = &s[1..s.len()-1];
@@ -242,6 +256,18 @@ fn parse_hex(s: &str) -> Option<i64> {
 
 fn parse_binary(s: &str) -> Option<i64> {
     i64::from_str_radix(&s[2..].replace('_', ""), 2).ok()
+}
+
+/// A decimal fraction into `(mantissa, scale)`: the digits with the dot removed,
+/// and the count of fraction digits. `1.5` → `(15, 1)`, `3.75` → `(375, 2)`,
+/// `100.0` → `(1000, 1)`. The scaled integer, not a float, is what later
+/// converts exactly to a Q format.
+fn parse_fixed(s: &str) -> Option<(i64, u32)> {
+    let s = s.replace('_', "");
+    let (int_part, frac_part) = s.split_once('.')?;
+    let scale = frac_part.len() as u32;
+    let mantissa = format!("{int_part}{frac_part}").parse::<i64>().ok()?;
+    Some((mantissa, scale))
 }
 
 /// Process escape sequences in a string literal
