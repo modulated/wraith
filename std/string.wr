@@ -121,3 +121,127 @@ pub fn string_to_bcd(s: str) -> b16 {
     }
     return acc as b16;
 }
+
+// ============================================================================
+// Plain binary <-> string
+//
+// The base-10 and base-16 counterparts of the BCD helpers, for ordinary `u8`
+// and `u16` values. Same buffer convention: a `*_to_*` writes a length-prefixed
+// `[u8 len][ASCII]` block (a valid `str`) into a caller buffer and returns the
+// character count. Hex is *fixed width* (leading zeros kept), the form an
+// address or register dump wants; decimal suppresses leading zeros.
+// ============================================================================
+
+/// The uppercase ASCII hex digit for a nibble 0..=15.
+fn hex_nibble(n: u8) -> u8 {
+    if n < 10 {
+        return n + 48; // '0'
+    }
+    return n + 55; // 'A' is 65 = 10 + 55
+}
+
+/// Format a `u8` as exactly two uppercase hex digits into `dest`. Returns 2.
+/// `dest` needs 1 + 2 = 3 bytes. `0x2A` becomes "2A", `0x05` becomes "05".
+pub fn u8_to_hex(value: u8, dest: &u8) -> u16 {
+    dest[0] = 2; // length prefix
+    dest[1] = hex_nibble((value >> 4) & 0x0F);
+    dest[2] = hex_nibble(value & 0x0F);
+    return 2 as u16;
+}
+
+/// Format a `u16` as exactly four uppercase hex digits into `dest`, most
+/// significant first. Returns 4. `dest` needs 1 + 4 = 5 bytes. `0x002A`
+/// becomes "002A" — fixed width, the convention a hex dump wants.
+pub fn u16_to_hex(value: u16, dest: &u8) -> u16 {
+    dest[0] = 4; // length prefix
+    dest[1] = hex_nibble((value >> 12) as u8 & 0x0F);
+    dest[2] = hex_nibble((value >> 8) as u8 & 0x0F);
+    dest[3] = hex_nibble((value >> 4) as u8 & 0x0F);
+    dest[4] = hex_nibble(value as u8 & 0x0F);
+    return 4 as u16;
+}
+
+/// Format a `u8` as ASCII decimal into `dest`, most significant digit first,
+/// leading zeros suppressed — but a zero value still yields "0". Returns the
+/// digit count (1-3). `dest` needs 1 + 3 = 4 bytes. The narrower sibling of
+/// `u16_to_string`: it divides by 100 and 10 (8-bit) rather than paying for the
+/// 16-bit division a `u16` needs.
+pub fn u8_to_string(value: u8, dest: &u8) -> u16 {
+    let n: u8 = value;
+    let started: u8 = 0;
+    let count: u8 = 0;
+    let scale: u8 = 100;
+    while scale != 0 {
+        let d: u8 = n / scale;
+        n = n % scale;
+        if d != 0 {
+            started = 1;
+        }
+        if started != 0 {
+            dest[1 + count] = d + 48; // '0'
+            count = count + 1;
+        }
+        scale = scale / 10;
+    }
+    if started == 0 {
+        dest[1] = 48; // "0"
+        count = 1;
+    }
+    dest[0] = count;
+    return count as u16;
+}
+
+/// Format a `u16` as ASCII decimal into `dest`, most significant digit first,
+/// leading zeros suppressed — but a zero value still yields "0". Returns the
+/// digit count (1-5). `dest` needs 1 + 5 = 6 bytes. Division by the constant
+/// powers of ten is the compiler's problem, not the caller's.
+pub fn u16_to_string(value: u16, dest: &u8) -> u16 {
+    let n: u16 = value;
+    let started: u8 = 0;
+    let count: u8 = 0;
+    let scale: u16 = 10000;
+    while scale != 0 {
+        let d: u8 = (n / scale).low;
+        n = n % scale;
+        if d != 0 {
+            started = 1;
+        }
+        if started != 0 {
+            dest[1 + count] = d + 48; // '0'
+            count = count + 1;
+        }
+        scale = scale / 10;
+    }
+    if started == 0 {
+        dest[1] = 48; // "0"
+        count = 1;
+    }
+    dest[0] = count;
+    return count as u16;
+}
+
+/// Parse a string of ASCII hex digits into a `u16`. Parsing stops at the first
+/// non-hex character; an empty or all-non-hex string yields 0, and digits past
+/// the fourth overflow out the top. The base-16 companion of `string_to_bcd`.
+pub fn hex_to_u16(s: str) -> u16 {
+    let acc: u16 = 0 as u16;
+    let len: u8 = s.len as u8;
+    let i: u8 = 0;
+    while i < len {
+        let c: u8 = s[i] as u8;
+        let d: u8 = 0xFF;
+        if c >= 48 && c <= 57 {
+            d = c - 48; // '0'-'9'
+        } else if c >= 65 && c <= 70 {
+            d = c - 65 + 10; // 'A'-'F'
+        } else if c >= 97 && c <= 102 {
+            d = c - 97 + 10; // 'a'-'f'
+        }
+        if d == 0xFF {
+            break;
+        }
+        acc = (acc << 4) | (d as u16);
+        i = i + 1;
+    }
+    return acc;
+}

@@ -46,6 +46,12 @@ pub fn is_whitespace(c: char) -> bool {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+/// True if `c` is an ASCII hex digit: '0'..='9', 'a'..='f', or 'A'..='F'.
+#[inline]
+pub fn is_hex_digit(c: char) -> bool {
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 // ============================================================================
 // Conversion
 // ============================================================================
@@ -79,4 +85,32 @@ pub fn digit_value(c: char) -> u8 {
         return c as u8 - 48; // '0' is 0x30
     }
     return 0xFF;
+}
+
+/// Numeric value of a hex digit '0'..='9','a'..='f','A'..='F' (0..=15). Returns
+/// 0xFF for any non-hex character, so a caller can parse and validate at once —
+/// the base-16 sibling of `digit_value`.
+#[inline]
+pub fn hex_value(c: char) -> u8 {
+    if is_digit(c) {
+        return c as u8 - 48; // '0' is 0x30
+    }
+    if c >= 'a' && c <= 'f' {
+        return c as u8 - 97 + 10; // 'a' is 0x61
+    }
+    if c >= 'A' && c <= 'F' {
+        return c as u8 - 65 + 10; // 'A' is 0x41
+    }
+    return 0xFF;
+}
+
+/// The uppercase ASCII hex digit for a nibble: 0..=9 -> '0'..='9', 10..=15 ->
+/// 'A'..='F'. Only the low four bits are read, so any byte is safe to pass.
+#[inline]
+pub fn to_hex_digit(n: u8) -> char {
+    let d: u8 = n & 0x0F;
+    if d < 10 {
+        return (d + 48) as char; // '0'
+    }
+    return (d + 55) as char; // 'A' is 65 = 10 + 55
 }
