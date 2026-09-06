@@ -706,11 +706,12 @@ impl SemanticAnalyzer {
                                 crate::ast::PrimitiveType::U16
                                     | crate::ast::PrimitiveType::I16
                                     | crate::ast::PrimitiveType::B16
+                                    | crate::ast::PrimitiveType::Q8_8
                             )
                         )
                     });
                     if wide {
-                        needs.1 = true; // JSR mul16/div16/mod16 uses $D0-$DC
+                        needs.1 = true; // JSR mul16/div16/mod16/mulq88 uses $D0-$DC
                     }
                 }
                 self.scan_expr_for_scratch(left, needs);

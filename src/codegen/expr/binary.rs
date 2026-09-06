@@ -315,6 +315,12 @@ pub(super) fn generate_binary(
     // need signed-specific sequences; other ops are bit-identical either way.
     let is_signed = op_type.is_some_and(|ty| ty.is_signed());
 
+    // Fixed-point multiply is its own routine: the plain 16-bit multiply keeps
+    // the low 16 bits of the product, but q8.8 needs the *middle* two bytes
+    // (the product shifted right by the 8 fraction bits).
+    let is_fixed =
+        op_type.is_some_and(|ty| matches!(ty, Type::Primitive(crate::ast::PrimitiveType::Q8_8)));
+
     // === STRENGTH REDUCTION OPTIMIZATIONS ===
     // Transform expensive operations into cheaper equivalents
 
@@ -600,7 +606,11 @@ pub(super) fn generate_binary(
             generate_shift_right(emitter, is_u16, is_signed)?;
         }
         crate::ast::BinaryOp::Mul => {
-            generate_multiply(emitter, is_u16)?;
+            if is_fixed {
+                generate_multiply_q88(emitter)?;
+            } else {
+                generate_multiply(emitter, is_u16)?;
+            }
         }
         crate::ast::BinaryOp::Div => {
             generate_divide(emitter, is_u16, is_signed)?;
@@ -948,6 +958,34 @@ fn generate_multiply_u16(emitter: &mut Emitter) -> Result<(), CodegenError> {
         emitter.emit_comment("Returns: A=result_low, Y=result_high (u16)");
     }
 
+    Ok(())
+}
+
+fn generate_multiply_q88(emitter: &mut Emitter) -> Result<(), CodegenError> {
+    // Fixed-point q8.8 multiply via the stdlib mulq88 routine, which computes
+    // `(a * b) >> 8` (truncated) with the sign handled inside. Operands arrive
+    // like every 16-bit binary op — left in A:Y, right in TEMP:TEMP+1 — and the
+    // routine takes them at $D9-$DC, exactly as mul16 does.
+    if emitter.is_verbose() {
+        emitter.emit_comment("Call stdlib mulq88 for q8.8 multiplication");
+    }
+    emitter.needs_mulq88 = true;
+
+    emitter.emit_inst("STA", "$D9"); // left low
+    emitter.emit_inst("STY", "$DA"); // left high
+
+    let temp = emitter.memory_layout.temp_reg();
+    emitter.emit_inst("LDA", &format!("${:02X}", temp)); // right low
+    emitter.emit_inst("STA", "$DB");
+    emitter.emit_inst("LDA", &format!("${:02X}", temp + 1)); // right high
+    emitter.emit_inst("STA", "$DC");
+
+    emitter.emit_inst("JSR", "mulq88");
+
+    if emitter.is_verbose() {
+        emitter.emit_comment("Returns: A=result_low, Y=result_high (q8.8)");
+    }
+    emitter.mark_a_unknown();
     Ok(())
 }
 

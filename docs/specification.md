@@ -203,9 +203,20 @@ pos = pos + vel;          // one 16-bit add, no shift
 if pos < vel { }          // signed 16-bit compare
 ```
 
-Multiply and divide are **not yet supported** and are refused rather than
-silently emitting a plain 16-bit product; they need the fraction shifted back
-in (a future addition). Bitwise operators do not apply to a scaled value.
+Multiply is `(a·b) >> 8`: the full 32-bit product of the two encodings with the
+fraction shifted back out. It calls a small stdlib routine (`mulq88`, a signed
+widening shift-and-add). The result is **truncated** toward zero on the dropped
+low byte and **wraps** on overflow, like every other arithmetic result:
+
+```rust,compile,fragment
+let a: q8.8 = 1.5;
+let b: q8.8 = 2.0;
+let area: q8.8 = a * b;   // 3.0
+```
+
+Divide is **not yet supported** and is refused rather than miscompiled; it needs
+a widening `(a << 8) / b` the current divide cannot express. Bitwise operators do
+not apply to a scaled value.
 
 **Conversions.** Both directions need an explicit `as`:
 - `<int> as q8.8` scales up (the integer becomes the whole part).

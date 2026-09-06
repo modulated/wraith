@@ -86,7 +86,8 @@ read against a current picture:
 | The fuzzer generates a mutable `static` in RAM — a store, a read-modify-write and the INC/DEC path against an *absolute* BSS address, the storage class the const table never reached | `docs/fuzz-coverage.md` |
 | The fuzzer dispatches an integer `match` on the base type — disjoint literal arms or a range arm with a wildcard — which caught a peephole dropping the `LDA` that sets N for a signed range's low-bound `BMI`, so a negative computed scrutinee wrongly passed `≥ 0` | `docs/fuzz-coverage.md`, `tests/e2e/match_ranges.rs` |
 | The fuzzer carries a two-byte enum payload (the pair's wide type, extracted into A:X and cast down) and reads the nested struct field through the by-reference parameter (`xp.n.g{j}`); both sound, and each guarded by a coverage assertion | `docs/fuzz-coverage.md` |
-| `q8.8` signed fixed-point: fractional literals scaled exactly at compile time, add/subtract as plain 16-bit arithmetic, signed comparisons, and casts that scale up or take the integer part. Multiply/divide refused until the widening multiply exists | `tests/e2e/fixed.rs` |
+| `q8.8` signed fixed-point: fractional literals scaled exactly at compile time, add/subtract as plain 16-bit arithmetic, signed comparisons, and casts that scale up or take the integer part | `tests/e2e/fixed.rs` |
+| `q8.8` multiply — `(a·b) >> 8` via the `mulq88` stdlib routine (signed widening shift-and-add), truncated and wrapping; divide still refused | `tests/e2e/fixed.rs` |
 
 ## What keeps going wrong
 
@@ -234,17 +235,18 @@ above is the other half of the same survey being worked through.)
   write another), which no per-variable rule can make indivisible. Worth
   building when a program needs one; the `atomic` mechanism is the same guard.
 
-- **Fixed-point arithmetic.** *The type and its cheap half are done.* `q8.8` is
-  a signed 16-bit fixed-point number (8 integer, 8 fraction bits); a fractional
-  literal (`1.5`) scales exactly at compile time. Add and subtract are plain
-  16-bit two's-complement — no decimal mode, cheaper than BCD — and comparisons
-  are signed 16-bit; a cast scales up (`<int> as q8.8`) or takes the integer
-  part (`q8.8 as <int>`, an arithmetic shift). `tests/e2e/fixed.rs`. Still open:
-  **multiply and divide**, the "shifts folded in" — a fixed×fixed product needs
-  a widening 16×16→32 multiply and a shift back by the fraction, which the
-  current 16×16→16 multiply cannot express. Refused for now rather than emitting
-  a plain 16-bit product. A `uq8.8` unsigned sibling and other splits (`q4.12`,
-  `q4.4`) are unbuilt too, but signed `q8.8` is the case game math reaches for.
+- **Fixed-point arithmetic.** *Done but for divide.* `q8.8` is a signed 16-bit
+  fixed-point number (8 integer, 8 fraction bits); a fractional literal (`1.5`)
+  scales exactly at compile time. Add and subtract are plain 16-bit
+  two's-complement — no decimal mode, cheaper than BCD — comparisons are signed
+  16-bit, and a cast scales up (`<int> as q8.8`) or takes the integer part
+  (`q8.8 as <int>`, an arithmetic shift). **Multiply** is the widening product
+  with the fraction shifted back out — `(a·b) >> 8`, via the `mulq88` stdlib
+  routine (signed shift-and-add, 129 bytes), truncated and wrapping.
+  `tests/e2e/fixed.rs`. Still open: **divide**, which needs a widening
+  `(a << 8) / b` the current 16-bit divide cannot express; refused for now. A
+  `uq8.8` unsigned sibling and other splits (`q4.12`, `q4.4`) are unbuilt too,
+  but signed `q8.8` is the case game math reaches for.
 
 - **Carry chaining / wider integers.** `u32` addition is four `ADC`s and no
   `CLC` between them. The language stops at 16 bits, so wider arithmetic is

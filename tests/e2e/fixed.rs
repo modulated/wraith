@@ -222,26 +222,149 @@ fn add_uses_no_decimal_mode() {
     );
 }
 
-// ------------------------------------------------------------------
-// Rejections
-// ------------------------------------------------------------------
-
-/// Multiply is deferred, and refused rather than silently wrong.
+/// Multiply: 1.5 * 2.0 = 3.0.
 #[test]
-fn multiply_is_refused_for_now() {
-    assert_error_contains(
-        r#"
-        fn f() {
+fn multiply_whole_result() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
             let a: q8.8 = 1.5;
             let b: q8.8 = 2.0;
-            let c: q8.8 = a * b;
+            OUT = (a * b) as u8;
+            loop {}
         }
-        "#,
-        "fixed-point",
+    "#);
+    assert_eq!(e.mem(0x0900), 3, "1.5 * 2.0 = 3.0");
+}
+
+/// Multiply produces a fractional result: 0.5 * 0.5 = 0.25.
+#[test]
+fn multiply_fractional_result() {
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 0.5;
+            let b: q8.8 = 0.5;
+            let c: q8.8 = a * b;   // 0.25 = 0x0040
+            let raw: i16 = c as i16;
+            // 0.25 floors to 0 as an int, so check the encoding via + itself * 4
+            let four: q8.8 = c + c + c + c;  // 1.0
+            LO = four as u8;
+            HI = raw as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 1, "0.25 * 4 = 1.0");
+    assert_eq!(e.mem(0x0901), 0, "0.25 floors to 0");
+}
+
+/// A negative operand carries its sign through the product.
+#[test]
+fn multiply_signed() {
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 0.0;
+            let b: q8.8 = 1.5;
+            let neg: q8.8 = a - b;        // -1.5
+            let two: q8.8 = 2.0;
+            let r: q8.8 = neg * two;      // -3.0
+            let whole: i16 = r as i16;    // -3
+            LO = whole.low;
+            HI = whole.high;
+            loop {}
+        }
+    "#);
+    assert_eq!(
+        e.mem16(0x0900),
+        0xFFFD,
+        "-1.5 * 2.0 = -3.0, integer part -3"
     );
 }
 
-/// Divide is deferred too.
+/// Two negatives multiply to a positive.
+#[test]
+fn multiply_two_negatives() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let z: q8.8 = 0.0;
+            let a: q8.8 = z - 2.0;   // -2.0
+            let b: q8.8 = z - 1.5;   // -1.5
+            OUT = (a * b) as u8;     // 3.0
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 3, "-2.0 * -1.5 = 3.0");
+}
+
+/// Multiply is commutative — the routine handles either operand order.
+#[test]
+fn multiply_is_commutative() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 2.5;
+            let b: q8.8 = 3.0;
+            let ab: q8.8 = a * b;
+            let ba: q8.8 = b * a;
+            if ab == ba { OUT = 1; } else { OUT = 0; }
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 1, "a*b == b*a");
+}
+
+/// Multiplying by 1.0 is the identity.
+#[test]
+fn multiply_by_one_is_identity() {
+    let mut e = run(r#"
+        const OUT: addr = 0x0900;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 12.0;
+            let one: q8.8 = 1.0;
+            OUT = (a * one) as u8;
+            loop {}
+        }
+    "#);
+    assert_eq!(e.mem(0x0900), 12, "12.0 * 1.0 = 12.0");
+}
+
+/// Overflow past the q8.8 range wraps (truncate and wrap, as documented).
+#[test]
+fn multiply_overflow_wraps() {
+    let mut e = run(r#"
+        const LO: addr = 0x0900;
+        const HI: addr = 0x0901;
+        #[reset]
+        fn main() {
+            let a: q8.8 = 100.0;
+            let b: q8.8 = 2.0;
+            let r: q8.8 = a * b;   // 200.0 overflows signed q8.8 -> wraps
+            let raw: i16 = r as i16;
+            LO = raw.low;
+            HI = raw.high;
+            loop {}
+        }
+    "#);
+    // 200.0 = 0xC800 as a bit pattern; as a *signed* q8.8 that is negative.
+    // >>8 integer part = 0xC8 sign-extended = -56.
+    assert_eq!(
+        e.mem16(0x0900),
+        0xFFC8,
+        "200.0 wraps to -56.0 in signed q8.8"
+    );
+}
+
+/// Divide is deferred.
 #[test]
 fn divide_is_refused_for_now() {
     assert_error_contains(
